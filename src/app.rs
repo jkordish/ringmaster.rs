@@ -11,7 +11,7 @@ use crate::store::queries::{
     PatternMetric, PatternRelationWindow, PatternSummaryRecord, PersonalInfoRecord, RecordCounts,
     SyncRunStatus, SyncStateRecord, TimeSemantics,
 };
-use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
+use time::{Date, OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DataFamily {
@@ -2298,8 +2298,7 @@ fn event_bounds_for_day(event: &ContextEventRecord, day: &str) -> Option<(u16, u
         return Some((0, 24 * 60 - 1));
     }
 
-    let day_start = parse_timestamp(&format!("{day}T00:00:00Z"))?;
-    let day_end = parse_timestamp(&format!("{day}T23:59:59Z"))?;
+    let (day_start, day_end) = event_local_day_bounds(event, day)?;
     let start = parse_timestamp(&event.start_at).unwrap_or(day_start);
     let end = event
         .end_at
@@ -2317,6 +2316,28 @@ fn event_bounds_for_day(event: &ContextEventRecord, day: &str) -> Option<(u16, u
         minute_of_day(clipped_start),
         minute_of_day(clipped_end).max(minute_of_day(clipped_start)),
     ))
+}
+
+fn event_local_day_bounds(
+    event: &ContextEventRecord,
+    day: &str,
+) -> Option<(OffsetDateTime, OffsetDateTime)> {
+    let reference = parse_timestamp(&event.start_at)
+        .or_else(|| event.end_at.as_deref().and_then(parse_timestamp))?;
+    let local_day = Date::parse(
+        day,
+        &time::macros::format_description!("[year]-[month]-[day]"),
+    )
+    .ok()?;
+    let day_start = local_day
+        .with_hms(0, 0, 0)
+        .ok()?
+        .assume_offset(reference.offset());
+    let day_end = local_day
+        .with_hms(23, 59, 59)
+        .ok()?
+        .assume_offset(reference.offset());
+    Some((day_start, day_end))
 }
 
 fn event_starts_after_hour(event: &ContextEventRecord, hour: u8) -> bool {
@@ -3140,6 +3161,29 @@ mod tests {
         app.handle(Action::ToggleWorkoutFilter);
         assert!(app.model.timeline.events.is_empty());
         assert_eq!(app.model.timeline.selected_event_index, None);
+    }
+
+    #[test]
+    fn offset_timestamp_event_remains_visible_on_anchor_day() {
+        let event = ContextEventRecord {
+            context_event_id: "workout:late-offset".to_owned(),
+            family: ContextEventFamily::Workout,
+            source_id: "late-offset".to_owned(),
+            anchor_day: "2026-04-08".to_owned(),
+            start_at: "2026-04-08T23:30:00-07:00".to_owned(),
+            end_at: Some("2026-04-08T23:45:00-07:00".to_owned()),
+            time_semantics: TimeSemantics::Interval,
+            title: "Late workout".to_owned(),
+            subtype: Some("running".to_owned()),
+            notes: None,
+            intensity: Some("moderate".to_owned()),
+            metadata_json: "{}".to_owned(),
+            updated_at: "2026-04-09T07:00:00Z".to_owned(),
+        };
+
+        let bounds = super::event_bounds_for_day(&event, "2026-04-08")
+            .unwrap_or_else(|| panic!("event should remain visible on its local anchor day"));
+        assert_eq!(bounds, (23 * 60 + 30, 23 * 60 + 45));
     }
 
     #[test]

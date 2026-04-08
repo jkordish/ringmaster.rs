@@ -12,7 +12,7 @@ This repository now includes a context-aware, daily-drivable personal observabil
 - real loopback OAuth login with server-side code exchange, PKCE, and CSRF-safe state handling
 - persisted auth/session metadata in SQLite with token secrets stored through the OS keyring seam
 - real poll-first sync for personal info, daily summaries, heartrate, workouts, enhanced tags, and sessions into normalized tables plus raw payload cache
-- persisted derived read models for canonical context events and deterministic pattern summaries
+- persisted derived read models for canonical context events and deterministic pattern summaries, refreshed automatically after successful syncs
 - family-aware background refresh while the TUI is open, plus the same scheduler exposed as `sync watch`
 - explicit freshness and availability semantics for fresh, stale, missing scope, no data yet, never synced, auth failure, and source-delayed data
 - a restrained, deterministic explainability layer with selected-day summaries, evidence bullets, thin-data notes, and pattern summaries
@@ -45,7 +45,7 @@ Behavior notes:
 - `ringmaster demo` remains as a compatibility alias for `ringmaster tui --demo`.
 - `ringmaster doctor` resolves paths, initializes SQLite, applies migrations, and prints auth, capability, per-family freshness, refresh policy, record-count, and path diagnostics.
 - `ringmaster auth login` starts a loopback OAuth flow, validates state, exchanges the code server-side, and persists auth/session metadata locally.
-- `ringmaster sync once` refreshes auth when needed, imports all supported sync families, caches raw payloads, and upserts normalized SQLite rows.
+- `ringmaster sync once` refreshes auth when needed, imports all supported sync families, caches raw payloads, upserts normalized SQLite rows, and refreshes the derived context/pattern tables when the underlying persisted data changes.
 - `ringmaster sync once --dry-run --fixture-dir tests/fixtures/phase3` exercises the same normalization pipeline without live credentials or database writes. This is the bounded fixture-backed equivalent of a demo sync smoke path.
 - `ringmaster sync watch` runs the same family-aware scheduler used by the live TUI, but without the UI.
 - `ringmaster sync watch --demo --max-iterations 1` is the bounded scheduler smoke path for CI and local verification. It uses the checked-in fixtures by default and exits after one scheduler iteration.

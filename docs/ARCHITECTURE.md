@@ -232,6 +232,8 @@ Current live sync behavior:
 
 Each family is imported through idempotent upserts and family-specific reconcile windows. Missing scopes are captured explicitly so the product can show “missing capability” rather than pretending the family is simply empty.
 
+Successful non-dry-run syncs now also refresh the derived context-event and pattern-summary tables, so Explain, Timeline overlays, and Patterns stay current without requiring a separate manual rebuild step.
+
 ### `src/derive.rs`
 
 Responsibilities:
@@ -362,6 +364,7 @@ config
   -> ReqwestOuraClient or FixtureOuraClient
   -> sync::sync_once()
   -> raw payload cache + normalized upserts
+  -> derived rebuild when persisted daily/context rows changed
   -> store.sync_state().upsert(...)
 ```
 

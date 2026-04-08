@@ -212,6 +212,22 @@ pub const MIGRATIONS: &[Migration] = &[
         ALTER TABLE sessions ADD COLUMN score INTEGER;
         ALTER TABLE sessions ADD COLUMN title TEXT;
 
+        UPDATE workouts
+        SET
+            day = COALESCE(day, substr(started_at, 1, 10)),
+            title = COALESCE(NULLIF(title, ''), NULLIF(sport, ''), 'Workout')
+        WHERE day IS NULL
+            OR title IS NULL
+            OR title = '';
+
+        UPDATE sessions
+        SET
+            day = COALESCE(day, substr(started_at, 1, 10)),
+            title = COALESCE(NULLIF(title, ''), NULLIF(kind, ''), 'Session')
+        WHERE day IS NULL
+            OR title IS NULL
+            OR title = '';
+
         CREATE INDEX IF NOT EXISTS idx_workouts_day
             ON workouts(day);
         CREATE INDEX IF NOT EXISTS idx_workouts_day_started_at
@@ -338,9 +354,9 @@ fn now_rfc3339() -> Result<String> {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use rusqlite::Connection;
+    use rusqlite::{Connection, params};
 
-    use super::{current_version, run_migrations};
+    use super::{MIGRATIONS, current_version, run_migrations};
 
     #[test]
     fn applies_bootstrap_schema() {
@@ -351,5 +367,97 @@ mod tests {
 
         assert_eq!(report.current_version, current_version());
         assert_eq!(report.applied_versions, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn phase3_migration_backfills_existing_workout_and_session_rows() {
+        let mut connection = Connection::open_in_memory()
+            .unwrap_or_else(|error| panic!("in-memory db should open: {error}"));
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );",
+            )
+            .unwrap_or_else(|error| panic!("schema migrations table should exist: {error}"));
+
+        for migration in &MIGRATIONS[..4] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| panic!("phase-2 migration should apply: {error}"));
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+                    params![migration.version, migration.name, "2026-04-08T00:00:00Z"],
+                )
+                .unwrap_or_else(|error| panic!("migration marker should insert: {error}"));
+        }
+
+        connection
+            .execute(
+                "INSERT INTO workouts (
+                    workout_id,
+                    started_at,
+                    ended_at,
+                    sport,
+                    raw_cache_key,
+                    updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    "legacy-workout",
+                    "2026-04-07T23:30:00-07:00",
+                    "2026-04-08T00:15:00-07:00",
+                    "running",
+                    "cache-workout",
+                    "2026-04-08T00:00:00Z"
+                ],
+            )
+            .unwrap_or_else(|error| panic!("legacy workout should insert: {error}"));
+        connection
+            .execute(
+                "INSERT INTO sessions (
+                    session_id,
+                    started_at,
+                    ended_at,
+                    kind,
+                    raw_cache_key,
+                    updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    "legacy-session",
+                    "2026-04-08T06:30:00+02:00",
+                    "2026-04-08T06:50:00+02:00",
+                    "breathing",
+                    "cache-session",
+                    "2026-04-08T00:00:00Z"
+                ],
+            )
+            .unwrap_or_else(|error| panic!("legacy session should insert: {error}"));
+
+        let report = run_migrations(&mut connection)
+            .unwrap_or_else(|error| panic!("phase-3 migrations should succeed: {error}"));
+        assert_eq!(report.applied_versions, vec![5, 6]);
+
+        let (workout_day, workout_title): (String, String) = connection
+            .query_row(
+                "SELECT day, title FROM workouts WHERE workout_id = ?1",
+                params!["legacy-workout"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap_or_else(|error| panic!("backfilled workout should load: {error}"));
+        assert_eq!(workout_day, "2026-04-07");
+        assert_eq!(workout_title, "running");
+
+        let (session_day, session_title): (String, String) = connection
+            .query_row(
+                "SELECT day, title FROM sessions WHERE session_id = ?1",
+                params!["legacy-session"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap_or_else(|error| panic!("backfilled session should load: {error}"));
+        assert_eq!(session_day, "2026-04-08");
+        assert_eq!(session_title, "breathing");
     }
 }

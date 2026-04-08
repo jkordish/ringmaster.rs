@@ -55,7 +55,8 @@ Denied auth and partial scopes are preserved as explicit local state instead of 
    - sessions
 4. Caches raw payloads separately from normalized tables
 5. Performs idempotent upserts into SQLite
-6. Updates per-family sync watermarks, status, failure counts, backoff state, and last structured errors
+6. Rebuilds the derived context-event and pattern-summary tables when any daily or context-family data was updated
+7. Updates per-family sync watermarks, status, failure counts, backoff state, and last structured errors
 
 Fixture-backed bounded equivalent:
 
@@ -64,6 +65,7 @@ cargo run -- sync once --dry-run --fixture-dir tests/fixtures/phase3
 ```
 
 That command uses the same importer path without live credentials and without mutating SQLite.
+Because it is a dry-run path, it does not rebuild the derived SQLite tables.
 
 ### `sync watch`
 

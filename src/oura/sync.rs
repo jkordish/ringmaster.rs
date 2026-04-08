@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::config::Config;
+use crate::derive;
 use crate::error::{AuthError, OuraApiError, OuraProblem, Result, RingmasterError};
 use crate::oura::auth;
 use crate::oura::client::{FixtureOuraClient, OuraClient, ReqwestOuraClient};
@@ -210,6 +211,14 @@ pub async fn sync_selected(
         }
     }
 
+    if !options.dry_run && should_rebuild_derived_state(&slice_reports) {
+        let derive_report = derive::rebuild_store(store)?;
+        notes.push(format!(
+            "Derived context events and pattern summaries were rebuilt after sync (events={}, patterns={}).",
+            derive_report.context_event_count, derive_report.pattern_summary_count
+        ));
+    }
+
     let status = summarize_status(&slice_reports);
     if options.dry_run {
         notes.push("Dry-run mode fetched and normalized data without mutating SQLite.".to_owned());
@@ -226,6 +235,16 @@ pub async fn sync_selected(
         notes,
         capability_report,
         slice_reports,
+    })
+}
+
+fn should_rebuild_derived_state(slice_reports: &[SliceReport]) -> bool {
+    slice_reports.iter().any(|report| {
+        report.status == SyncRunStatus::Success
+            && matches!(
+                report.sync_key.as_str(),
+                DAILY_SYNC_KEY | WORKOUT_SYNC_KEY | ENHANCED_TAG_SYNC_KEY | SESSION_SYNC_KEY
+            )
     })
 }
 
@@ -1114,6 +1133,7 @@ mod tests {
         assert_eq!(counts.workouts, 3);
         assert_eq!(counts.enhanced_tags, 4);
         assert_eq!(counts.sessions, 3);
+        assert_eq!(counts.derived_context_events, 10);
     }
 
     #[tokio::test]
