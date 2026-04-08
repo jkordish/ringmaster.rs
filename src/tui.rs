@@ -126,11 +126,8 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &AppState) {
         ])
         .split(frame.area());
 
-    let header = Paragraph::new(app.model.title.clone()).block(
-        Block::default()
-            .title("ringmaster.rs")
-            .borders(Borders::ALL),
-    );
+    let header = Paragraph::new(app.model.title.clone())
+        .block(Block::default().title("ringmaster").borders(Borders::ALL));
     frame.render_widget(header, layout[0]);
 
     let tab_titles = Screen::ALL
@@ -685,7 +682,7 @@ mod tests {
         let output = render_snapshot(&app, 100, 32)
             .unwrap_or_else(|error| panic!("snapshot should render: {error}"));
 
-        assert!(output.contains("ringmaster.rs"));
+        assert!(output.contains("ringmaster"));
         assert!(output.contains("Selected day: 2026-04-08"));
         assert!(output.contains("Capabilities"));
         assert!(output.contains("What Changed"));

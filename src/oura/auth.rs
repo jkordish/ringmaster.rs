@@ -281,7 +281,7 @@ async fn login_with_secret_store(
         .url();
 
     println!(
-        "Open this URL in your browser to authorize ringmaster.rs:\n{}\n",
+        "Open this URL in your browser to authorize ringmaster:\n{}\n",
         authorization_url
     );
 
@@ -489,10 +489,10 @@ async fn callback_handler(
 
     let body = match query.error.as_deref() {
         Some("access_denied") => {
-            "ringmaster.rs authorization was denied. You can return to the terminal.".to_owned()
+            "ringmaster authorization was denied. You can return to the terminal.".to_owned()
         }
         Some(error) => format!(
-            "ringmaster.rs OAuth callback returned an error: {} ({})",
+            "ringmaster OAuth callback returned an error: {} ({})",
             error,
             query
                 .error_description
@@ -500,10 +500,9 @@ async fn callback_handler(
                 .unwrap_or("no description provided")
         ),
         None if query.code.is_some() => {
-            "ringmaster.rs captured the authorization code. You can return to the terminal."
-                .to_owned()
+            "ringmaster captured the authorization code. You can return to the terminal.".to_owned()
         }
-        None => "ringmaster.rs reached the callback path without an authorization code.".to_owned(),
+        None => "ringmaster reached the callback path without an authorization code.".to_owned(),
     };
 
     Html(body)

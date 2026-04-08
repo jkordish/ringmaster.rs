@@ -175,7 +175,7 @@ fn run_doctor(config: &Config) -> Result<Option<String>> {
 
     let report = format!(
         "\
-ringmaster.rs doctor
+ringmaster doctor
 
 app_name: {}
 config_dir: {}
@@ -342,7 +342,7 @@ async fn run_auth_login(config: &Config) -> Result<Option<String>> {
 
     let output = format!(
         "\
-ringmaster.rs auth login
+ringmaster auth login
 
 status: {:?}
 callback_url: {}
@@ -405,7 +405,7 @@ async fn run_sync_once(config: &Config, args: SyncOnceArgs) -> Result<Option<Str
 
     let output = format!(
         "\
-ringmaster.rs sync once
+ringmaster sync once
 
 status: {}
 started_at: {}
@@ -458,7 +458,7 @@ async fn run_sync_watch(config: &Config, args: SyncWatchArgs) -> Result<Option<S
 
     let output = format!(
         "\
-ringmaster.rs sync watch
+ringmaster sync watch
 
 iterations: {}
 dry_run: {}
@@ -496,7 +496,7 @@ async fn run_derive_rebuild(config: &Config, args: DeriveRebuildArgs) -> Result<
 
     let output = format!(
         "\
-ringmaster.rs derive rebuild
+ringmaster derive rebuild
 
 database_path: {}
 derived_context_events: {}

@@ -981,7 +981,7 @@ pub fn build_demo_state(config: &Config) -> AppState {
 
 fn build_live_model(snapshot: &LiveSnapshot, options: &LiveModelOptions) -> AppModel {
     AppModel {
-        title: "ringmaster.rs".to_owned(),
+        title: "ringmaster".to_owned(),
         dashboard: build_dashboard_model(
             snapshot,
             options.selected_day_index,
@@ -2628,7 +2628,7 @@ impl RefreshPolicySnapshot {
 impl AppModel {
     fn empty() -> Self {
         Self {
-            title: "ringmaster.rs".to_owned(),
+            title: "ringmaster".to_owned(),
             dashboard: DashboardModel {
                 selected_day_label: String::new(),
                 scores: Vec::new(),
