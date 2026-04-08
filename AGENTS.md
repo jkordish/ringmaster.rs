@@ -77,4 +77,3 @@ Run the narrowest relevant checks during development, then the full suite before
 - `cargo run -- doctor`
 
 When finishing a task, report exactly what changed, what was verified, and any remaining gaps.
-

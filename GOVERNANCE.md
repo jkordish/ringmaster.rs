@@ -135,4 +135,3 @@ If implementation pressure reveals the spec is wrong, stale, or too ambitious:
 1. stop pretending otherwise
 2. update the spec and plan
 3. continue from the corrected design
-

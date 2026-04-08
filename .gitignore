@@ -1,0 +1,15 @@
+# Rust
+/target/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Local app state
+.env
+.env.*
+*.db
+*.db-shm
+*.db-wal
+data/

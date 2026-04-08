@@ -65,4 +65,3 @@ docs/
 2. open Codex in the repo
 3. paste `docs/CODEX_START_PROMPT.md`
 4. let it build the real phase-0 / phase-1 foundation
-

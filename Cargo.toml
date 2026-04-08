@@ -1,0 +1,21 @@
+[package]
+name = "ringmaster"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Local-first Rust TUI observability app for Oura Cloud data"
+readme = "README.md"
+repository = "https://github.com/<your-org-or-user>/ringmaster.rs"
+rust-version = "1.85"
+
+[lib]
+name = "ringmaster"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ringmaster"
+path = "src/main.rs"
+
+[dependencies]
+
+[dev-dependencies]
