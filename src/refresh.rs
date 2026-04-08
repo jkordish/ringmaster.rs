@@ -117,6 +117,18 @@ pub async fn run_watch(config: &Config, options: WatchOptions) -> Result<WatchRe
     let store = Store::open(config)?;
     let fixture_dir = resolve_fixture_dir(config, &options);
     let dry_run = options.dry_run || options.demo;
+    if options.max_iterations == Some(0) {
+        return Ok(WatchReport {
+            iterations: 0,
+            dry_run,
+            demo: options.demo,
+            database_path: store.plan().db_path.display().to_string(),
+            last_report: None,
+            notes: vec![
+                "watch loop stopped before syncing because max_iterations was set to 0".to_owned(),
+            ],
+        });
+    }
     let mut simulated_sync_states = if dry_run {
         Some(store.sync_state().list()?)
     } else {
@@ -532,5 +544,33 @@ mod tests {
         assert_eq!(report.iterations, 1);
         assert!(report.dry_run);
         assert!(report.last_report.is_some());
+    }
+
+    #[tokio::test]
+    async fn zero_bounded_iterations_skip_sync_entirely() {
+        let config = test_config();
+        let report = run_watch(
+            &config,
+            WatchOptions {
+                dry_run: false,
+                demo: true,
+                fixture_dir: Some(PathBuf::from(
+                    "/home/ubuntu/ringmaster.rs/tests/fixtures/phase1",
+                )),
+                max_iterations: Some(0),
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("zero-iteration watch should succeed: {error}"));
+
+        assert_eq!(report.iterations, 0);
+        assert!(report.dry_run);
+        assert!(report.last_report.is_none());
+        assert_eq!(
+            report.notes,
+            vec![
+                "watch loop stopped before syncing because max_iterations was set to 0".to_owned()
+            ]
+        );
     }
 }
