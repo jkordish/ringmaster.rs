@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
@@ -33,6 +34,12 @@ pub struct WatchReport {
     pub database_path: String,
     pub last_report: Option<SyncReport>,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SyncInterruption<T> {
+    Completed(T),
+    Interrupted,
 }
 
 impl SyncFamily {
@@ -160,16 +167,26 @@ pub async fn run_watch(config: &Config, options: WatchOptions) -> Result<WatchRe
             continue;
         }
 
-        let report = sync_selected(
-            config,
-            &store,
-            SyncOptions {
-                dry_run,
-                fixture_dir: fixture_dir.clone(),
-                families,
-            },
+        let report = match await_sync_or_interrupt(
+            sync_selected(
+                config,
+                &store,
+                SyncOptions {
+                    dry_run,
+                    fixture_dir: fixture_dir.clone(),
+                    families,
+                },
+            ),
+            tokio::signal::ctrl_c(),
         )
-        .await?;
+        .await?
+        {
+            SyncInterruption::Completed(report) => report,
+            SyncInterruption::Interrupted => {
+                notes.push("watch loop interrupted by ctrl-c".to_owned());
+                break;
+            }
+        };
         if let Some(simulated_sync_states) = simulated_sync_states.as_mut() {
             advance_dry_run_sync_states(config, simulated_sync_states, &report);
         }
@@ -196,6 +213,23 @@ pub async fn run_watch(config: &Config, options: WatchOptions) -> Result<WatchRe
         last_report,
         notes,
     })
+}
+
+async fn await_sync_or_interrupt<T, SyncFuture, InterruptFuture>(
+    sync_future: SyncFuture,
+    interrupt_future: InterruptFuture,
+) -> Result<SyncInterruption<T>>
+where
+    SyncFuture: Future<Output = Result<T>>,
+    InterruptFuture: Future<Output = std::result::Result<(), std::io::Error>>,
+{
+    tokio::select! {
+        sync_result = sync_future => sync_result.map(SyncInterruption::Completed),
+        signal = interrupt_future => {
+            signal.map_err(|error| RingmasterError::Config(format!("failed to listen for ctrl-c: {error}")))?;
+            Ok(SyncInterruption::Interrupted)
+        }
+    }
 }
 
 fn resolve_fixture_dir(config: &Config, options: &WatchOptions) -> Option<PathBuf> {
@@ -572,5 +606,23 @@ mod tests {
                 "watch loop stopped before syncing because max_iterations was set to 0".to_owned()
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn interrupt_preempts_inflight_sync_future() {
+        let interrupted = super::await_sync_or_interrupt(
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                Ok::<_, crate::error::RingmasterError>(())
+            },
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                Ok::<_, std::io::Error>(())
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("interrupt should be handled: {error}"));
+
+        assert_eq!(interrupted, super::SyncInterruption::Interrupted);
     }
 }

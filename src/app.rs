@@ -255,16 +255,16 @@ impl AppState {
                 self.rebuild_live_model();
             }
             Action::OlderTimelineDay => {
-                if self.timeline_selected_day + 1 < self.timeline_day_count() {
-                    self.timeline_selected_day += 1;
+                if self.timeline_selected_day > 0 {
+                    self.timeline_selected_day -= 1;
                     self.timeline_selected_point = 0;
                     "Showing an older heartrate day.".clone_into(&mut self.status_line);
                     self.rebuild_live_model();
                 }
             }
             Action::NewerTimelineDay => {
-                if self.timeline_selected_day > 0 {
-                    self.timeline_selected_day -= 1;
+                if self.timeline_selected_day + 1 < self.timeline_day_count() {
+                    self.timeline_selected_day += 1;
                     self.timeline_selected_point = 0;
                     "Showing a newer heartrate day.".clone_into(&mut self.status_line);
                     self.rebuild_live_model();
@@ -360,7 +360,7 @@ impl AppState {
                         .iter()
                         .position(|day| day.day == selected_day)
                 })
-                .unwrap_or_else(|| snapshot.heartrate_days.len().saturating_sub(1));
+                .unwrap_or_else(|| newest_timeline_day_index(snapshot));
             self.timeline_selected_point = 0;
         }
 
@@ -479,7 +479,15 @@ pub fn build_live_state(
     auth_status: &AuthStatus,
 ) -> crate::error::Result<AppState> {
     let snapshot = load_live_snapshot(config, store, auth_status)?;
-    let model = build_live_model(&snapshot, 0, 0, 24, TrendWindowKind::Days7, false);
+    let timeline_selected_day = newest_timeline_day_index(&snapshot);
+    let model = build_live_model(
+        &snapshot,
+        timeline_selected_day,
+        0,
+        24,
+        TrendWindowKind::Days7,
+        false,
+    );
 
     Ok(AppState {
         mode: RunMode::Live,
@@ -490,7 +498,7 @@ pub fn build_live_state(
         should_quit: false,
         refresh_in_flight: false,
         live_snapshot: Some(snapshot),
-        timeline_selected_day: 0,
+        timeline_selected_day,
         timeline_selected_point: 0,
         timeline_window_hours: 24,
         trends_window: TrendWindowKind::Days7,
@@ -1061,6 +1069,10 @@ fn load_heartrate_days(store: &Store, limit: usize) -> crate::error::Result<Vec<
     Ok(heartrate_days)
 }
 
+fn newest_timeline_day_index(snapshot: &LiveSnapshot) -> usize {
+    snapshot.heartrate_days.len().saturating_sub(1)
+}
+
 fn load_heartrate_daily_averages(
     store: &Store,
     limit: usize,
@@ -1559,5 +1571,134 @@ impl RefreshPolicySnapshot {
             "personal={}s daily={}s heartrate={}s",
             self.personal_interval_secs, self.daily_interval_secs, self.heartrate_interval_secs
         )
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod tests {
+    use super::{
+        AppState, HeartRateDay, LiveSnapshot, RefreshPolicySnapshot, RunMode, Screen,
+        TrendWindowKind, build_live_model, newest_timeline_day_index,
+    };
+    use crate::action::Action;
+    use crate::oura::models::{AuthStatus, CapabilityReport};
+    use crate::store::queries::{HeartRatePoint, RecordCounts};
+
+    fn make_snapshot(days: &[&str]) -> LiveSnapshot {
+        let heartrate_days = days
+            .iter()
+            .enumerate()
+            .map(|(index, day)| HeartRateDay {
+                day: (*day).to_owned(),
+                points: vec![HeartRatePoint {
+                    recorded_at: format!("{day}T0{}:00:00Z", index + 6),
+                    bpm: 60 + index as u16,
+                    source_day: Some((*day).to_owned()),
+                }],
+            })
+            .collect();
+
+        LiveSnapshot {
+            captured_at: "2026-04-08T12:00:00Z".to_owned(),
+            refresh_policy: RefreshPolicySnapshot {
+                personal_interval_secs: 3600,
+                daily_interval_secs: 300,
+                heartrate_interval_secs: 60,
+                personal_stale_after_secs: 72 * 60 * 60,
+                daily_stale_after_secs: 12 * 60 * 60,
+                heartrate_stale_after_secs: 15 * 60,
+            },
+            auth_status: AuthStatus {
+                configured: true,
+                callback_url: "http://127.0.0.1:8788/callback".to_owned(),
+                requested_scopes: vec![
+                    "personal".to_owned(),
+                    "daily".to_owned(),
+                    "heartrate".to_owned(),
+                ],
+                granted_scopes: vec![
+                    "personal".to_owned(),
+                    "daily".to_owned(),
+                    "heartrate".to_owned(),
+                ],
+                missing_fields: Vec::new(),
+                capability_report: CapabilityReport::demo(),
+                auth_timeout_secs: 120,
+                secret_backend: "memory".to_owned(),
+                access_token_stored: true,
+                refresh_token_stored: true,
+                access_token_expires_at: None,
+                last_authenticated_at: None,
+                last_refresh_at: None,
+                account_id: None,
+                account_email: None,
+                last_error: None,
+            },
+            personal_info: None,
+            daily_history: Vec::new(),
+            heartrate_days,
+            heartrate_daily_averages: Vec::new(),
+            sync_states: Vec::new(),
+            record_counts: RecordCounts::default(),
+            schema_version: 4,
+            database_path: ":memory:".to_owned(),
+            config_path: "config.toml".to_owned(),
+        }
+    }
+
+    fn make_live_app(snapshot: LiveSnapshot) -> AppState {
+        let timeline_selected_day = newest_timeline_day_index(&snapshot);
+        let model = build_live_model(
+            &snapshot,
+            timeline_selected_day,
+            0,
+            24,
+            TrendWindowKind::Days7,
+            false,
+        );
+
+        AppState {
+            mode: RunMode::Live,
+            active_screen: Screen::Timeline,
+            model,
+            status_line: String::new(),
+            tick_count: 0,
+            should_quit: false,
+            refresh_in_flight: false,
+            live_snapshot: Some(snapshot),
+            timeline_selected_day,
+            timeline_selected_point: 0,
+            timeline_window_hours: 24,
+            trends_window: TrendWindowKind::Days7,
+        }
+    }
+
+    #[test]
+    fn live_timeline_defaults_to_newest_heartrate_day() {
+        let snapshot = make_snapshot(&["2026-04-06", "2026-04-07", "2026-04-08"]);
+        let app = make_live_app(snapshot);
+
+        assert_eq!(app.timeline_selected_day, 2);
+        assert_eq!(app.model.timeline.selected_day_index, 2);
+        assert_eq!(app.model.timeline.day_labels[2], "2026-04-08");
+    }
+
+    #[test]
+    fn older_and_newer_timeline_actions_follow_day_order() {
+        let snapshot = make_snapshot(&["2026-04-06", "2026-04-07", "2026-04-08"]);
+        let mut app = make_live_app(snapshot);
+
+        app.handle(Action::OlderTimelineDay);
+        assert_eq!(app.timeline_selected_day, 1);
+        assert_eq!(app.model.timeline.selected_day_index, 1);
+        assert_eq!(app.model.timeline.day_labels[1], "2026-04-07");
+        assert_eq!(app.status_line, "Showing an older heartrate day.");
+
+        app.handle(Action::NewerTimelineDay);
+        assert_eq!(app.timeline_selected_day, 2);
+        assert_eq!(app.model.timeline.selected_day_index, 2);
+        assert_eq!(app.model.timeline.day_labels[2], "2026-04-08");
+        assert_eq!(app.status_line, "Showing a newer heartrate day.");
     }
 }
