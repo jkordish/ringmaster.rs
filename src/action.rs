@@ -1,6 +1,6 @@
-use crate::app::Screen;
+use crate::app::{LiveSnapshot, Screen};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Tick,
     Quit,
@@ -8,4 +8,23 @@ pub enum Action {
     PreviousScreen,
     ShowScreen(Screen),
     RefreshRequested,
+    RefreshStarted {
+        families: Vec<String>,
+        manual: bool,
+    },
+    LiveSnapshotLoaded {
+        snapshot: Box<LiveSnapshot>,
+        summary: String,
+    },
+    RefreshFailed {
+        message: String,
+    },
+    OlderTimelineDay,
+    NewerTimelineDay,
+    PreviousTimelinePoint,
+    NextTimelinePoint,
+    TimelineZoomIn,
+    TimelineZoomOut,
+    PreviousTrendWindow,
+    NextTrendWindow,
 }

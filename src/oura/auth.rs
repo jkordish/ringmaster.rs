@@ -113,7 +113,7 @@ impl RuntimeSecretStore {
         Self
     }
 
-    fn entry(&self) -> std::result::Result<keyring::Entry, SecretStoreError> {
+    fn entry() -> std::result::Result<keyring::Entry, SecretStoreError> {
         keyring::Entry::new(SECRET_SERVICE_NAME, SECRET_USER_NAME).map_err(Into::into)
     }
 }
@@ -124,7 +124,7 @@ impl SecretStore for RuntimeSecretStore {
     }
 
     fn read_tokens(&self) -> std::result::Result<Option<StoredTokens>, SecretStoreError> {
-        let entry = self.entry()?;
+        let entry = Self::entry()?;
         let payload = match entry.get_password() {
             Ok(value) => value,
             Err(keyring::Error::NoEntry) => return Ok(None),
@@ -139,7 +139,7 @@ impl SecretStore for RuntimeSecretStore {
     }
 
     fn write_tokens(&self, tokens: &StoredTokens) -> std::result::Result<(), SecretStoreError> {
-        let entry = self.entry()?;
+        let entry = Self::entry()?;
         let payload = serde_json::to_string(tokens).map_err(|error| {
             SecretStoreError::BackendUnavailable(format!(
                 "failed to encode stored tokens for secure storage: {error}"
@@ -600,7 +600,7 @@ fn exchanged_token_set(
 fn persist_problem(store: &Store, problem: OuraProblem) -> Result<()> {
     let existing = store.auth().get(OURA_PROVIDER)?;
     let updated_at = now_rfc3339()?;
-    let record = existing.unwrap_or(AuthSessionRecord {
+    let record = existing.unwrap_or_else(|| AuthSessionRecord {
         provider: OURA_PROVIDER.to_owned(),
         account_id: None,
         account_email: None,
@@ -750,7 +750,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::config::{AppPaths, LoggingConfig, OuraConfig};
+    use crate::config::{AppPaths, LoggingConfig, OuraConfig, RefreshConfig};
 
     #[derive(Debug, Default)]
     struct MemorySecretStore {
@@ -809,6 +809,20 @@ mod tests {
                     "heartrate".to_owned(),
                 ],
                 auth_timeout_secs: 5,
+            },
+            refresh: RefreshConfig {
+                personal_interval_secs: 3_600,
+                daily_interval_secs: 300,
+                heartrate_interval_secs: 60,
+                personal_stale_after_secs: 72 * 60 * 60,
+                daily_stale_after_secs: 12 * 60 * 60,
+                heartrate_stale_after_secs: 15 * 60,
+                daily_history_days: 90,
+                daily_overlap_days: 2,
+                heartrate_history_days: 7,
+                heartrate_overlap_minutes: 60,
+                max_backoff_secs: 60 * 60,
+                demo_fixture_dir: None,
             },
         }
     }

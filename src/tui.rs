@@ -1,4 +1,5 @@
 use std::io::{self, IsTerminal, Stdout, stdout};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crossterm::{
@@ -13,13 +14,23 @@ use ratatui::{
     text::Line,
     widgets::{Block, Borders, Paragraph, Tabs},
 };
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::action::Action;
-use crate::app::{AppState, Screen};
+use crate::app::{AppState, RunMode, Screen, load_live_snapshot};
 use crate::components::{dashboard, ops, timeline, trends};
+use crate::config::Config;
 use crate::error::{Result, RingmasterError};
+use crate::oura::{auth, sync::SyncOptions, sync::SyncReport, sync::sync_selected};
+use crate::refresh::{SyncFamily, due_families, next_wake_duration};
+use crate::store::Store;
 
-pub async fn run(app: &mut AppState) -> Result<()> {
+enum WorkerCommand {
+    ManualRefresh,
+    Shutdown,
+}
+
+pub async fn run(config: &Config, app: &mut AppState) -> Result<()> {
     if !(stdout().is_terminal() && io::stdin().is_terminal()) {
         return Err(RingmasterError::Ui(
             "interactive TUI mode requires a terminal".to_owned(),
@@ -28,8 +39,17 @@ pub async fn run(app: &mut AppState) -> Result<()> {
 
     let mut session = TerminalSession::start()?;
     let tick_rate = Duration::from_millis(250);
+    let (worker_tx, mut worker_actions, worker_handle) = if app.mode == RunMode::Live {
+        let (command_tx, action_rx, handle) = spawn_refresh_worker(config.clone());
+        (Some(command_tx), Some(action_rx), Some(handle))
+    } else {
+        (None, None, None)
+    };
 
     loop {
+        if let Some(worker_actions) = worker_actions.as_mut() {
+            drain_worker_actions(worker_actions, app);
+        }
         session.draw(app)?;
 
         if app.should_quit {
@@ -41,12 +61,24 @@ pub async fn run(app: &mut AppState) -> Result<()> {
         {
             let event = event::read()
                 .map_err(|error| RingmasterError::io("reading terminal event", error))?;
-            if let Some(action) = map_event(event) {
+            if let Some(action) = map_event(app.active_screen, event) {
+                let request_manual_refresh =
+                    matches!(action, Action::RefreshRequested) && matches!(app.mode, RunMode::Live);
                 app.handle(action);
+                if request_manual_refresh {
+                    send_worker_command(&worker_tx, WorkerCommand::ManualRefresh);
+                }
             }
         } else {
             app.handle(Action::Tick);
         }
+    }
+
+    send_worker_command(&worker_tx, WorkerCommand::Shutdown);
+    if let Some(worker_handle) = worker_handle {
+        worker_handle
+            .join()
+            .map_err(|_| RingmasterError::Ui("refresh worker panicked".to_owned()))?;
     }
 
     Ok(())
@@ -116,7 +148,7 @@ fn draw_active_screen(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState
     }
 }
 
-fn map_event(event: Event) -> Option<Action> {
+fn map_event(active_screen: Screen, event: Event) -> Option<Action> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
             KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
@@ -127,6 +159,26 @@ fn map_event(event: Event) -> Option<Action> {
             KeyCode::Char('2') => Some(Action::ShowScreen(Screen::Timeline)),
             KeyCode::Char('3') => Some(Action::ShowScreen(Screen::Trends)),
             KeyCode::Char('4') => Some(Action::ShowScreen(Screen::Ops)),
+            KeyCode::Char('[') => match active_screen {
+                Screen::Timeline => Some(Action::OlderTimelineDay),
+                Screen::Trends => Some(Action::PreviousTrendWindow),
+                _ => None,
+            },
+            KeyCode::Char(']') => match active_screen {
+                Screen::Timeline => Some(Action::NewerTimelineDay),
+                Screen::Trends => Some(Action::NextTrendWindow),
+                _ => None,
+            },
+            KeyCode::Char(',') if active_screen == Screen::Timeline => {
+                Some(Action::PreviousTimelinePoint)
+            }
+            KeyCode::Char('.') if active_screen == Screen::Timeline => {
+                Some(Action::NextTimelinePoint)
+            }
+            KeyCode::Char('-') if active_screen == Screen::Timeline => {
+                Some(Action::TimelineZoomOut)
+            }
+            KeyCode::Char('=') if active_screen == Screen::Timeline => Some(Action::TimelineZoomIn),
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(Action::Quit)
             }
@@ -134,6 +186,166 @@ fn map_event(event: Event) -> Option<Action> {
         },
         _ => None,
     }
+}
+
+fn drain_worker_actions(worker_actions: &mut UnboundedReceiver<Action>, app: &mut AppState) {
+    while let Ok(action) = worker_actions.try_recv() {
+        app.handle(action);
+    }
+}
+
+fn send_worker_command(worker_tx: &Option<UnboundedSender<WorkerCommand>>, command: WorkerCommand) {
+    if let Some(worker_tx) = worker_tx {
+        let _ = worker_tx.send(command);
+    }
+}
+
+fn spawn_refresh_worker(
+    config: Config,
+) -> (
+    UnboundedSender<WorkerCommand>,
+    UnboundedReceiver<Action>,
+    JoinHandle<()>,
+) {
+    let (command_tx, mut command_rx) = unbounded_channel();
+    let (action_tx, action_rx) = unbounded_channel();
+    let worker = std::thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = action_tx.send(Action::RefreshFailed {
+                    message: format!("Background refresh could not start its runtime: {error}"),
+                });
+                return;
+            }
+        };
+
+        runtime.block_on(async move {
+            let store = match Store::open(&config) {
+                Ok(store) => store,
+                Err(error) => {
+                    let _ = action_tx.send(Action::RefreshFailed {
+                        message: format!(
+                            "Background refresh could not open the local store: {error}"
+                        ),
+                    });
+                    return;
+                }
+            };
+
+            loop {
+                let sync_states = match store.sync_state().list() {
+                    Ok(sync_states) => sync_states,
+                    Err(error) => {
+                        let _ = action_tx.send(Action::RefreshFailed {
+                            message: format!(
+                                "Background refresh could not load sync state: {error}"
+                            ),
+                        });
+                        return;
+                    }
+                };
+                let now = time::OffsetDateTime::now_utc();
+                let delay = next_wake_duration(&config, &sync_states, now)
+                    .unwrap_or_else(|_| Duration::from_secs(1));
+
+                let refresh_request = tokio::select! {
+                    command = command_rx.recv() => match command {
+                        Some(WorkerCommand::ManualRefresh) => Some((SyncFamily::ALL.to_vec(), true)),
+                        Some(WorkerCommand::Shutdown) | None => None,
+                    },
+                    _ = tokio::time::sleep(delay) => {
+                        match due_families(&config, &sync_states, time::OffsetDateTime::now_utc(), false) {
+                            Ok(families) if !families.is_empty() => Some((families, false)),
+                            Ok(_) => continue,
+                            Err(error) => {
+                                let _ = action_tx.send(Action::RefreshFailed {
+                                    message: format!("Background refresh scheduling failed: {error}"),
+                                });
+                                continue;
+                            }
+                        }
+                    }
+                };
+
+                let Some((families, manual)) = refresh_request else {
+                    return;
+                };
+                let family_labels = families
+                    .iter()
+                    .map(|family| family.label().to_owned())
+                    .collect::<Vec<_>>();
+                let _ = action_tx.send(Action::RefreshStarted {
+                    families: family_labels,
+                    manual,
+                });
+
+                match sync_selected(
+                    &config,
+                    &store,
+                    SyncOptions {
+                        dry_run: false,
+                        fixture_dir: None,
+                        families,
+                    },
+                )
+                .await
+                {
+                    Ok(report) => match refresh_snapshot_action(&config, &store, report, manual) {
+                        Ok(action) => {
+                            let _ = action_tx.send(action);
+                        }
+                        Err(error) => {
+                            let _ = action_tx.send(Action::RefreshFailed {
+                                message: format!(
+                                    "Background refresh completed but reloading the snapshot failed: {error}"
+                                ),
+                            });
+                        }
+                    },
+                    Err(error) => {
+                        let _ = action_tx.send(Action::RefreshFailed {
+                            message: format!("Background refresh failed: {error}"),
+                        });
+                    }
+                }
+            }
+        });
+    });
+
+    (command_tx, action_rx, worker)
+}
+
+fn refresh_snapshot_action(
+    config: &Config,
+    store: &Store,
+    report: SyncReport,
+    manual: bool,
+) -> Result<Action> {
+    let auth_status = auth::inspect_auth(config, store)?;
+    let snapshot = load_live_snapshot(config, store, &auth_status)?;
+    Ok(Action::LiveSnapshotLoaded {
+        snapshot: Box::new(snapshot),
+        summary: refresh_summary(&report, manual),
+    })
+}
+
+fn refresh_summary(report: &SyncReport, manual: bool) -> String {
+    let prefix = if manual {
+        "Manual refresh"
+    } else {
+        "Background refresh"
+    };
+    let family_statuses = report
+        .slice_reports
+        .iter()
+        .map(|slice| format!("{}={}", slice.sync_key, slice.status))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{prefix} finished: {family_statuses}.")
 }
 
 struct TerminalSession {
@@ -172,8 +384,11 @@ impl Drop for TerminalSession {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    use crate::action::Action;
     use crate::app::{Screen, build_demo_state, build_live_state};
-    use crate::config::{Config, LoggingConfig, OuraConfig};
+    use crate::config::{Config, LoggingConfig, OuraConfig, RefreshConfig};
     use crate::error::OuraProblem;
     use crate::oura::models::{AuthStatus, CapabilityReport};
     use crate::store::Store;
@@ -213,6 +428,20 @@ mod tests {
                     "heartrate".to_owned(),
                 ],
                 auth_timeout_secs: 120,
+            },
+            refresh: RefreshConfig {
+                personal_interval_secs: 3_600,
+                daily_interval_secs: 300,
+                heartrate_interval_secs: 60,
+                personal_stale_after_secs: 72 * 60 * 60,
+                daily_stale_after_secs: 12 * 60 * 60,
+                heartrate_stale_after_secs: 15 * 60,
+                daily_history_days: 90,
+                daily_overlap_days: 2,
+                heartrate_history_days: 7,
+                heartrate_overlap_minutes: 60,
+                max_backoff_secs: 60 * 60,
+                demo_fixture_dir: None,
             },
         }
     }
@@ -263,6 +492,8 @@ mod tests {
                     .map(|scope| (*scope).to_owned())
                     .collect(),
                 last_error,
+                failure_count: 0,
+                next_attempt_after: None,
             })
             .unwrap_or_else(|error| panic!("sync state should seed: {error}"));
     }
@@ -370,12 +601,8 @@ mod tests {
             .unwrap_or_else(|error| panic!("dashboard snapshot should render: {error}"));
 
         assert!(output.contains("Daily: waiting (missing scope)"));
-        assert!(
-            output.contains("Missing `daily` scope; dashboard summary rows remain unavailable.")
-        );
-        assert!(
-            output.contains("Missing scopes keep some features unavailable: daily, heartrate.")
-        );
+        assert!(output.contains("Heartrate: waiting (missing scope)"));
+        assert!(output.contains("sleep is still building a baseline."));
     }
 
     #[test]
@@ -400,9 +627,9 @@ mod tests {
         let output = render_snapshot(&app, 100, 32)
             .unwrap_or_else(|error| panic!("timeline snapshot should render: {error}"));
 
-        assert!(output.contains("Heartrate scope is missing"));
-        assert!(output.contains("No cached heartrate samples yet."));
-        assert!(output.contains("Workout overlays remain a pure presentation layer"));
+        assert!(output.contains("no heartrate days cached"));
+        assert!(output.contains("24h window | missing scope"));
+        assert!(output.contains("Source legend"));
     }
 
     #[test]
@@ -433,9 +660,13 @@ mod tests {
         let output = render_snapshot(&app, 100, 32)
             .unwrap_or_else(|error| panic!("trends snapshot should render: {error}"));
 
-        assert!(output.contains("Need cached daily rows before 7d baselines can be computed."));
-        assert!(output.contains("Imported 5 heartrate samples from fixture history."));
-        assert!(output.contains("Trend Sparkline"));
+        assert!(output.contains("Trend Window"));
+        assert!(output.contains("Sleep | -- | confidence: thin"));
+        assert!(
+            output.contains(
+                "Confidence is thin because only 0 to 0 prior daily points are available."
+            )
+        );
     }
 
     #[test]
@@ -490,8 +721,35 @@ mod tests {
         assert!(output.contains("Auth state: authenticated"));
         assert!(output.contains("Secret backend: keyring"));
         assert!(output.contains("Granted scopes: personal, daily, heartrate"));
-        assert!(output.contains("Database file: :memory:"));
-        assert!(output.contains("oura.heartrate=failed @ 2026-04-08T03:40:00Z"));
+        assert!(output.contains("Database path: :memory:"));
+        assert!(
+            output.contains(
+                "Heartrate: no data yet | scope granted | last sync 2026-04-08T03:41:00Z"
+            )
+        );
+        assert!(output.contains("Heartrate sync failed after a partial import."));
         assert!(output.contains("Warnings"));
+    }
+
+    #[test]
+    fn maps_contextual_keys_to_screen_actions() {
+        let press = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+
+        assert_eq!(
+            super::map_event(Screen::Timeline, press(KeyCode::Char('['))),
+            Some(Action::OlderTimelineDay)
+        );
+        assert_eq!(
+            super::map_event(Screen::Timeline, press(KeyCode::Char('.'))),
+            Some(Action::NextTimelinePoint)
+        );
+        assert_eq!(
+            super::map_event(Screen::Trends, press(KeyCode::Char(']'))),
+            Some(Action::NextTrendWindow)
+        );
+        assert_eq!(
+            super::map_event(Screen::Dashboard, press(KeyCode::Char('['))),
+            None
+        );
     }
 }

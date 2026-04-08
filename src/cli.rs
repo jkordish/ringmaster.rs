@@ -18,7 +18,7 @@ pub struct Cli {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum Command {
     /// Launch the live terminal UI.
-    Tui,
+    Tui(TuiArgs),
     /// Print paths, config, storage, and health information.
     Doctor,
     /// Launch deterministic demo mode.
@@ -45,16 +45,41 @@ pub enum AuthCommand {
 pub enum SyncCommand {
     /// Run one poll-first sync cycle.
     Once(SyncOnceArgs),
+    /// Run the poll-first scheduler without the TUI.
+    Watch(SyncWatchArgs),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct TuiArgs {
+    /// Launch the TUI with deterministic demo data.
+    #[arg(long)]
+    pub demo: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct SyncOnceArgs {
-    /// Fetch and normalize data without mutating SQLite.
+    /// Fetch and normalize data without mutating `SQLite`.
     #[arg(long)]
     pub dry_run: bool,
     /// Load Oura payloads from a fixture directory instead of the live API.
     #[arg(long)]
     pub fixture_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct SyncWatchArgs {
+    /// Fetch and normalize data without mutating `SQLite`.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Use deterministic fixture-backed sync behavior.
+    #[arg(long)]
+    pub demo: bool,
+    /// Load Oura payloads from a fixture directory instead of the live API.
+    #[arg(long)]
+    pub fixture_dir: Option<PathBuf>,
+    /// Stop after a bounded number of scheduler iterations.
+    #[arg(long)]
+    pub max_iterations: Option<u32>,
 }
 
 impl Cli {
@@ -79,7 +104,7 @@ impl Cli {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::{AuthCommand, Cli, Command, SyncCommand, SyncOnceArgs};
+    use super::{AuthCommand, Cli, Command, SyncCommand, SyncOnceArgs, SyncWatchArgs};
 
     #[test]
     fn parses_nested_subcommands() {
@@ -122,6 +147,34 @@ mod tests {
                 help.contains(command),
                 "help text should mention `{command}`"
             );
+        }
+    }
+
+    #[test]
+    fn parses_sync_watch_demo_args() {
+        let cli = Cli::parse_from([
+            "ringmaster",
+            "sync",
+            "watch",
+            "--demo",
+            "--max-iterations",
+            "1",
+        ])
+        .unwrap_or_else(|error| {
+            panic!("expected clap parsing to succeed in test: {error}");
+        });
+
+        match cli.command {
+            Some(Command::Sync {
+                command:
+                    SyncCommand::Watch(SyncWatchArgs {
+                        dry_run: false,
+                        demo: true,
+                        fixture_dir: None,
+                        max_iterations: Some(1),
+                    }),
+            }) => {}
+            other => panic!("unexpected command: {other:?}"),
         }
     }
 }

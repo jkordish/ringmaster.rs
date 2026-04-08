@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This file is the execution runbook for the current phase-1 foundation. It should only describe flows that work today.
+This file is the execution runbook for the current MVP. It should only describe flows that work today.
 
 ## Commands
 
@@ -10,11 +10,14 @@ Current commands:
 
 ```bash
 cargo run -- tui
+cargo run -- tui --demo
 cargo run -- demo
 cargo run -- doctor
 cargo run -- auth login
 cargo run -- sync once
 cargo run -- sync once --dry-run --fixture-dir tests/fixtures/phase1
+cargo run -- sync watch
+cargo run -- sync watch --demo --max-iterations 1
 ```
 
 ## Auth flow
@@ -31,13 +34,15 @@ cargo run -- sync once --dry-run --fixture-dir tests/fixtures/phase1
 
 Denied auth and partial scopes are preserved as explicit local state instead of being silently treated as success.
 
-## Sync flow
+## Sync flows
 
-`ringmaster sync once` is the real phase-1 vertical slice. It:
+### `sync once`
+
+`ringmaster sync once` is the one-shot importer. It:
 
 1. Inspects persisted auth/session state
 2. Refreshes tokens when needed through the auth layer
-3. Fetches the phase-1 slice:
+3. Fetches the current MVP slice:
    - personal info
    - daily sleep
    - daily readiness
@@ -45,21 +50,91 @@ Denied auth and partial scopes are preserved as explicit local state instead of 
    - heartrate
 4. Caches raw payloads separately from normalized tables
 5. Performs idempotent upserts into SQLite
-6. Updates per-slice sync watermarks, status, and last structured errors
+6. Updates per-family sync watermarks, status, failure counts, backoff state, and last structured errors
 
-## Fixture and dry-run behavior
+### `sync watch`
 
-- `cargo run -- sync once --dry-run --fixture-dir tests/fixtures/phase1`
-  runs the same parse/normalize pipeline without live credentials and without mutating SQLite
-- fixture mode intentionally uses a broad history window so the checked-in fixtures stay stable in CI over time
-- demo mode remains deterministic and is independent from live auth/sync
+`ringmaster sync watch` runs the reusable scheduler without the TUI. It:
 
-## UI expectations
+1. Reads persisted sync state
+2. Computes due families from the configured refresh policy and any persisted backoff
+3. Reuses the same `sync_selected(...)` engine as `sync once`
+4. Sleeps until the next due family, unless a bounded run is requested
+5. Exits cleanly after `--max-iterations N` when used in CI/debug workflows
 
-- Dashboard reads persisted daily rows and shows missing-capability or empty states honestly
-- Timeline and Trends stay explicit when heartrate scope or data is missing
-- Ops shows auth state, granted scopes, token metadata, last sync times/errors, database path, and config path
-- widgets remain pure renderers; they never trigger network or storage side effects
+The bounded demo smoke path is:
+
+```bash
+cargo run -- sync watch --demo --max-iterations 1
+```
+
+That command uses the checked-in fixtures by default, does not require live credentials, and is the preferred non-interactive scheduler smoke test.
+
+## TUI runtime
+
+`ringmaster tui` is the live product path. It:
+
+1. Opens the store and reads auth/session metadata
+2. Builds an initial `LiveSnapshot`
+3. Starts the Ratatui event loop
+4. Starts a dedicated background refresh worker on a separate thread
+5. Reuses the scheduler core plus `sync_selected(...)` inside that worker
+6. Rebuilds a fresh `LiveSnapshot` after each successful refresh
+7. Sends snapshot updates back into the reducer as actions
+
+Important boundary:
+
+- widgets never perform HTTP
+- widgets never refresh tokens
+- widgets never write to SQLite
+- the render path stays on persisted presentation models only
+
+Manual refresh:
+
+- press `r` in the live TUI to request an immediate refresh of all current families
+
+Timeline and trends navigation:
+
+- Timeline: `[` / `]` change day, `,` / `.` move the selected point, `-` / `=` change the time window
+- Trends: `[` / `]` change the selected trend window
+
+## Freshness and missing-data semantics
+
+Each data family resolves to an explicit state:
+
+- `fresh`
+- `stale`
+- `no data yet`
+- `never synced`
+- `missing scope`
+- `auth failure`
+- `source delayed`
+
+These are derived from persisted sync state, granted scopes, auth/session diagnostics, and the configured freshness policy. The app intentionally does not collapse them into a generic "error" label.
+
+Default responsive policy:
+
+- personal: refresh every `3600s`, stale after `72h`
+- daily: refresh every `300s`, stale after `12h`
+- heartrate: refresh every `60s`, stale after `15m`
+
+## Fixture and demo behavior
+
+- `cargo run -- sync once --dry-run --fixture-dir tests/fixtures/phase1` runs the same parse/normalize pipeline without live credentials and without mutating SQLite
+- `cargo run -- sync watch --demo --max-iterations 1` runs the same scheduler/import path in bounded fixture mode
+- `cargo run -- tui --demo` uses deterministic in-memory presentation data and skips live background refresh
+- `cargo run -- demo` is an alias for `cargo run -- tui --demo`
+
+## Doctor expectations
+
+`cargo run -- doctor` now reports:
+
+- resolved config/state/cache/database paths
+- auth/session state and token timing metadata
+- granted capabilities
+- per-family sync state including failure counts and next-attempt backoff
+- the active refresh policy
+- the default demo fixture directory
 
 ## Verification sequence
 
@@ -70,16 +145,17 @@ cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
 cargo run -- doctor
-cargo run -- sync once --dry-run --fixture-dir tests/fixtures/phase1
+cargo run -- sync watch --demo --max-iterations 1
 ```
 
 Additional smoke checks worth keeping in mind:
 
-- non-interactive `cargo run -- demo`
-- live UI screen tests via the Ratatui `TestBackend`
+- non-interactive `cargo run -- tui --demo`
+- `cargo run -- sync once --dry-run --fixture-dir tests/fixtures/phase1`
+- live screen assertions via the Ratatui `TestBackend`
 
 ## Notes for future passes
 
-- Do not treat config as the source of truth for granted scopes or token freshness.
 - Keep UI rendering pure; any new sync/auth work belongs outside `src/components/*`.
-- Extend the existing real slice before broadening the Oura surface.
+- Reuse the scheduler core instead of inventing separate watch/TUI/webhook refresh logic.
+- Webhook invalidation can plug into the current scheduler later, but webhook infrastructure is still intentionally deferred.

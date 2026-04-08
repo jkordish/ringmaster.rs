@@ -20,7 +20,7 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
         name: "bootstrap_schema",
-        sql: r#"
+        sql: r"
         CREATE TABLE IF NOT EXISTS app_metadata (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
@@ -132,12 +132,12 @@ pub const MIGRATIONS: &[Migration] = &[
 
         CREATE INDEX IF NOT EXISTS idx_enhanced_tags_day
             ON enhanced_tags(day);
-    "#,
+    ",
     },
     Migration {
         version: 2,
         name: "phase1_foundation",
-        sql: r#"
+        sql: r"
         CREATE TABLE IF NOT EXISTS auth_session (
             provider TEXT PRIMARY KEY,
             account_id TEXT,
@@ -171,15 +171,23 @@ pub const MIGRATIONS: &[Migration] = &[
 
         CREATE INDEX IF NOT EXISTS idx_sync_state_attempted_at
             ON sync_state(last_attempted_at DESC);
-        "#,
+        ",
     },
     Migration {
         version: 3,
         name: "phase1_sync_state_cleanup",
-        sql: r#"
+        sql: r"
         DELETE FROM sync_state
         WHERE sync_key NOT IN ('oura.personal', 'oura.daily', 'oura.heartrate');
-        "#,
+        ",
+    },
+    Migration {
+        version: 4,
+        name: "phase2_refresh_metadata",
+        sql: r"
+        ALTER TABLE sync_state ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE sync_state ADD COLUMN next_attempt_after TEXT;
+        ",
     },
 ];
 
@@ -260,6 +268,6 @@ mod tests {
             .unwrap_or_else(|error| panic!("migrations should succeed: {error}"));
 
         assert_eq!(report.current_version, current_version());
-        assert_eq!(report.applied_versions, vec![1, 2, 3]);
+        assert_eq!(report.applied_versions, vec![1, 2, 3, 4]);
     }
 }

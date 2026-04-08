@@ -7,6 +7,8 @@ description = "Local-first Rust TUI observability app for Oura Cloud data"
 readme = "README.md"
 repository = "https://github.com/jkordish/ringmaster.rs"
 rust-version = "1.88"
+keywords = ["oura", "ratatui", "tui", "terminal", "sqlite"]
+categories = ["command-line-utilities", "visualization"]
 
 [lib]
 name = "ringmaster"
