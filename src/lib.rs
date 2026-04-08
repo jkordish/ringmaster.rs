@@ -35,6 +35,7 @@ pub mod app;
 pub mod cli;
 pub mod components;
 pub mod config;
+pub mod derive;
 pub mod error;
 pub mod insights;
 pub mod oura;
@@ -46,7 +47,10 @@ use std::io::{IsTerminal, stdin, stdout};
 use std::sync::OnceLock;
 
 use app::{build_demo_state, build_live_state};
-use cli::{AuthCommand, Cli, Command, SyncCommand, SyncOnceArgs, SyncWatchArgs, TuiArgs};
+use cli::{
+    AuthCommand, Cli, Command, DeriveCommand, DeriveRebuildArgs, SyncCommand, SyncOnceArgs,
+    SyncWatchArgs, TuiArgs,
+};
 use config::Config;
 use error::{Result, RingmasterError};
 use refresh::{SyncFamily, WatchOptions};
@@ -89,6 +93,9 @@ pub async fn run_cli(cli: Cli) -> Result<Option<String>> {
         Command::Sync { command } => match command {
             SyncCommand::Once(args) => run_sync_once(&config, args).await,
             SyncCommand::Watch(args) => run_sync_watch(&config, args).await,
+        },
+        Command::Derive { command } => match command {
+            DeriveCommand::Rebuild(args) => run_derive_rebuild(&config, args).await,
         },
     }
 }
@@ -164,7 +171,7 @@ fn run_doctor(config: &Config) -> Result<Option<String>> {
         .demo_fixture_dir
         .as_ref()
         .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "tests/fixtures/phase1".to_owned());
+        .unwrap_or_else(|| "tests/fixtures/phase3".to_owned());
 
     let report = format!(
         "\
@@ -208,6 +215,8 @@ record_counts:
   tags: {}
   enhanced_tags: {}
   sessions: {}
+  derived_context_events: {}
+  derived_pattern_summaries: {}
   raw_payloads: {}
 ",
         config.app_name,
@@ -279,6 +288,8 @@ record_counts:
         store.views().record_counts()?.tags,
         store.views().record_counts()?.enhanced_tags,
         store.views().record_counts()?.sessions,
+        store.views().record_counts()?.derived_context_events,
+        store.views().record_counts()?.derived_pattern_summaries,
         store.views().record_counts()?.raw_payloads,
     );
 
@@ -458,6 +469,42 @@ notes:
 {}
 ",
         report.iterations, report.dry_run, report.demo, report.database_path, last_status, notes,
+    );
+
+    Ok(Some(output))
+}
+
+async fn run_derive_rebuild(config: &Config, args: DeriveRebuildArgs) -> Result<Option<String>> {
+    let report = derive::rebuild(
+        config,
+        derive::DeriveOptions {
+            demo: args.demo,
+            fixture_dir: args.fixture_dir,
+        },
+    )
+    .await?;
+    let notes = if report.notes.is_empty() {
+        "  - none".to_owned()
+    } else {
+        report
+            .notes
+            .iter()
+            .map(|note| format!("  - {note}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let output = format!(
+        "\
+ringmaster.rs derive rebuild
+
+database_path: {}
+derived_context_events: {}
+derived_pattern_summaries: {}
+notes:
+{}
+",
+        report.database_path, report.context_event_count, report.pattern_summary_count, notes,
     );
 
     Ok(Some(output))

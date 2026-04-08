@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::action::Action;
 use crate::config::Config;
 use crate::insights::{InsightConfidence, MetricInsight, MetricPoint, build_metric_insight};
@@ -5,8 +7,9 @@ use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
 use crate::refresh::SyncFamily;
 use crate::store::Store;
 use crate::store::queries::{
-    DailyOverviewRow, HeartRatePoint, PersonalInfoRecord, RecordCounts, SyncRunStatus,
-    SyncStateRecord,
+    ContextEventFamily, ContextEventRecord, DailyOverviewRow, EffectDirection, HeartRatePoint,
+    PatternMetric, PatternRelationWindow, PatternSummaryRecord, PersonalInfoRecord, RecordCounts,
+    SyncRunStatus, SyncStateRecord, TimeSemantics,
 };
 use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
@@ -15,6 +18,9 @@ pub enum DataFamily {
     Personal,
     Daily,
     Heartrate,
+    Workout,
+    EnhancedTag,
+    Session,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +51,8 @@ pub struct LiveSnapshot {
     pub daily_history: Vec<DailyOverviewRow>,
     pub heartrate_days: Vec<HeartRateDay>,
     pub heartrate_daily_averages: Vec<MetricPoint>,
+    pub context_events: Vec<ContextEventRecord>,
+    pub pattern_summaries: Vec<PatternSummaryRecord>,
     pub sync_states: Vec<SyncStateRecord>,
     pub record_counts: RecordCounts,
     pub schema_version: u32,
@@ -57,9 +65,15 @@ pub struct RefreshPolicySnapshot {
     pub personal_interval_secs: u64,
     pub daily_interval_secs: u64,
     pub heartrate_interval_secs: u64,
+    pub workout_interval_secs: u64,
+    pub enhanced_tag_interval_secs: u64,
+    pub session_interval_secs: u64,
     pub personal_stale_after_secs: u64,
     pub daily_stale_after_secs: u64,
     pub heartrate_stale_after_secs: u64,
+    pub workout_stale_after_secs: u64,
+    pub enhanced_tag_stale_after_secs: u64,
+    pub session_stale_after_secs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +93,8 @@ pub enum Screen {
     Dashboard,
     Timeline,
     Trends,
+    Explain,
+    Patterns,
     Ops,
 }
 
@@ -87,6 +103,21 @@ pub enum TrendWindowKind {
     Days7,
     Days30,
     Days90,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatternMetricFilter {
+    All,
+    Activity,
+    Readiness,
+    Sleep,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayFilterState {
+    pub workouts: bool,
+    pub tags: bool,
+    pub sessions: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -99,10 +130,13 @@ pub struct AppState {
     pub should_quit: bool,
     pub refresh_in_flight: bool,
     live_snapshot: Option<LiveSnapshot>,
-    timeline_selected_day: usize,
-    timeline_selected_point: usize,
+    selected_day_index: usize,
+    selected_timeline_point: usize,
     timeline_window_hours: u16,
     trends_window: TrendWindowKind,
+    selected_event_id: Option<String>,
+    overlay_filters: OverlayFilterState,
+    pattern_metric_filter: PatternMetricFilter,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -111,11 +145,14 @@ pub struct AppModel {
     pub dashboard: DashboardModel,
     pub timeline: TimelineModel,
     pub trends: TrendsModel,
+    pub explain: ExplainModel,
+    pub patterns: PatternsModel,
     pub ops: OpsModel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardModel {
+    pub selected_day_label: String,
     pub scores: Vec<ScoreCard>,
     pub freshness: String,
     pub capabilities: Vec<CapabilityView>,
@@ -126,14 +163,20 @@ pub struct DashboardModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelineModel {
     pub summary: String,
-    pub heart_rate: Vec<TimelinePoint>,
-    pub overlays: Vec<String>,
-    pub day_labels: Vec<String>,
     pub day_selector: String,
+    pub selected_day_label: String,
     pub selected_day_index: usize,
+    pub heart_rate: Vec<TimelinePoint>,
     pub selected_point_index: Option<usize>,
     pub window_hours: u16,
+    pub window_start_minute: u16,
+    pub window_end_minute: u16,
+    pub overlay_toggles: Vec<OverlayToggleView>,
+    pub overlay_groups: Vec<OverlayFamilyGroup>,
+    pub events: Vec<EventListItem>,
+    pub selected_event_index: Option<usize>,
     pub selected_detail: String,
+    pub event_detail_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +185,26 @@ pub struct TrendsModel {
     pub selected_window_index: usize,
     pub metrics: Vec<TrendMetricView>,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplainModel {
+    pub selected_day_label: String,
+    pub headline: String,
+    pub summary_lines: Vec<String>,
+    pub measurement_lines: Vec<String>,
+    pub evidence_lines: Vec<String>,
+    pub caveat_lines: Vec<String>,
+    pub context_lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatternsModel {
+    pub header: String,
+    pub filter_summary: String,
+    pub rows: Vec<PatternRowView>,
+    pub notes: Vec<String>,
+    pub empty_message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +240,40 @@ pub struct TimelinePoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayToggleView {
+    pub label: &'static str,
+    pub key_hint: &'static str,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayFamilyGroup {
+    pub family_label: &'static str,
+    pub glyph: char,
+    pub item_count: usize,
+    pub blocks: Vec<OverlayBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayBlock {
+    pub id: String,
+    pub start_minute: u16,
+    pub end_minute: u16,
+    pub title: String,
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventListItem {
+    pub id: String,
+    pub family_label: &'static str,
+    pub glyph: char,
+    pub headline: String,
+    pub detail: String,
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrendWindow {
     pub label: &'static str,
     pub summary: String,
@@ -192,6 +289,12 @@ pub struct TrendMetricView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatternRowView {
+    pub headline: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FamilyStatusView {
     pub label: &'static str,
     pub state_label: String,
@@ -204,6 +307,25 @@ pub struct FamilyStatusView {
 pub struct OpsItem {
     pub label: &'static str,
     pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VisibleTimeline {
+    points: Vec<TimelinePoint>,
+    window_start_minute: u16,
+    window_end_minute: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveModelOptions {
+    selected_day_index: usize,
+    selected_point_index: usize,
+    selected_event_id: Option<String>,
+    overlay_filters: OverlayFilterState,
+    window_hours: u16,
+    trends_window: TrendWindowKind,
+    pattern_metric_filter: PatternMetricFilter,
+    refresh_in_flight: bool,
 }
 
 impl AppState {
@@ -230,7 +352,7 @@ impl AppState {
             Action::RefreshRequested => {
                 self.status_line = match self.mode {
                     RunMode::Demo => {
-                        "Demo data is deterministic; refresh keeps the current snapshot.".to_owned()
+                        "Demo mode is deterministic; refresh keeps the current snapshot.".to_owned()
                     }
                     RunMode::Live => "Manual refresh requested.".to_owned(),
                 };
@@ -255,34 +377,62 @@ impl AppState {
                 self.status_line = message;
                 self.rebuild_live_model();
             }
-            Action::OlderTimelineDay => {
-                if self.timeline_selected_day > 0 {
-                    self.timeline_selected_day -= 1;
-                    self.timeline_selected_point = 0;
-                    "Showing an older heartrate day.".clone_into(&mut self.status_line);
+            Action::PreviousDay => {
+                if self.selected_day_index > 0 {
+                    self.selected_day_index -= 1;
+                    self.selected_timeline_point = 0;
+                    self.select_default_event_for_selected_day();
+                    self.align_point_to_selected_event();
+                    self.status_line = format!(
+                        "Showing {}.",
+                        self.selected_day_label()
+                            .unwrap_or_else(|| "an earlier day".to_owned())
+                    );
                     self.rebuild_live_model();
                 }
             }
-            Action::NewerTimelineDay => {
-                if self.timeline_selected_day + 1 < self.timeline_day_count() {
-                    self.timeline_selected_day += 1;
-                    self.timeline_selected_point = 0;
-                    "Showing a newer heartrate day.".clone_into(&mut self.status_line);
+            Action::NextDay => {
+                if self.selected_day_index + 1 < self.available_day_count() {
+                    self.selected_day_index += 1;
+                    self.selected_timeline_point = 0;
+                    self.select_default_event_for_selected_day();
+                    self.align_point_to_selected_event();
+                    self.status_line = format!(
+                        "Showing {}.",
+                        self.selected_day_label()
+                            .unwrap_or_else(|| "a later day".to_owned())
+                    );
                     self.rebuild_live_model();
                 }
             }
             Action::PreviousTimelinePoint => {
-                if self.timeline_selected_point > 0 {
-                    self.timeline_selected_point -= 1;
+                if self.selected_timeline_point > 0 {
+                    self.selected_timeline_point -= 1;
+                    self.select_nearest_event_for_current_point();
                     "Moved to an earlier heartrate point.".clone_into(&mut self.status_line);
                     self.rebuild_live_model();
                 }
             }
             Action::NextTimelinePoint => {
-                let max_index = self.visible_timeline_points().saturating_sub(1);
-                if self.timeline_selected_point < max_index {
-                    self.timeline_selected_point += 1;
+                let max_index = self.visible_timeline_point_count().saturating_sub(1);
+                if self.selected_timeline_point < max_index {
+                    self.selected_timeline_point += 1;
+                    self.select_nearest_event_for_current_point();
                     "Moved to a later heartrate point.".clone_into(&mut self.status_line);
+                    self.rebuild_live_model();
+                }
+            }
+            Action::PreviousEvent => {
+                if self.select_relative_event(-1) {
+                    self.align_point_to_selected_event();
+                    "Moved to an earlier context event.".clone_into(&mut self.status_line);
+                    self.rebuild_live_model();
+                }
+            }
+            Action::NextEvent => {
+                if self.select_relative_event(1) {
+                    self.align_point_to_selected_event();
+                    "Moved to a later context event.".clone_into(&mut self.status_line);
                     self.rebuild_live_model();
                 }
             }
@@ -292,6 +442,7 @@ impl AppState {
                     12 => 6,
                     _ => 6,
                 };
+                self.align_point_to_selected_event();
                 self.status_line =
                     format!("Timeline window set to {}h.", self.timeline_window_hours);
                 self.rebuild_live_model();
@@ -302,9 +453,49 @@ impl AppState {
                     12 => 24,
                     _ => 24,
                 };
+                self.align_point_to_selected_event();
                 self.status_line =
                     format!("Timeline window set to {}h.", self.timeline_window_hours);
                 self.rebuild_live_model();
+            }
+            Action::ToggleWorkoutFilter => {
+                self.overlay_filters.workouts = !self.overlay_filters.workouts;
+                self.normalize_event_selection();
+                self.rebuild_live_model();
+                self.status_line = format!(
+                    "Workout overlays {}.",
+                    if self.overlay_filters.workouts {
+                        "enabled"
+                    } else {
+                        "hidden"
+                    }
+                );
+            }
+            Action::ToggleTagFilter => {
+                self.overlay_filters.tags = !self.overlay_filters.tags;
+                self.normalize_event_selection();
+                self.rebuild_live_model();
+                self.status_line = format!(
+                    "Tag overlays {}.",
+                    if self.overlay_filters.tags {
+                        "enabled"
+                    } else {
+                        "hidden"
+                    }
+                );
+            }
+            Action::ToggleSessionFilter => {
+                self.overlay_filters.sessions = !self.overlay_filters.sessions;
+                self.normalize_event_selection();
+                self.rebuild_live_model();
+                self.status_line = format!(
+                    "Session overlays {}.",
+                    if self.overlay_filters.sessions {
+                        "enabled"
+                    } else {
+                        "hidden"
+                    }
+                );
             }
             Action::PreviousTrendWindow => {
                 self.trends_window = self.trends_window.previous();
@@ -318,15 +509,26 @@ impl AppState {
                     format!("Trend window changed to {}.", self.trends_window.label());
                 self.rebuild_live_model();
             }
+            Action::CyclePatternMetric => {
+                self.pattern_metric_filter = self.pattern_metric_filter.next();
+                self.status_line = format!(
+                    "Pattern metric filter: {}.",
+                    self.pattern_metric_filter.label()
+                );
+                self.rebuild_live_model();
+            }
         }
     }
 
     pub fn footer(&self) -> String {
         let spinner = ["·", "o", "O", "o"][(self.tick_count % 4) as usize];
         let screen_hint = match self.active_screen {
-            Screen::Timeline => "[ ] day | , . point | -/= zoom",
+            Screen::Dashboard => "[ ] day | 1-6 jump",
+            Screen::Timeline => "[ ] day | , . hr | j k event | -/= zoom | w/t/s filters",
             Screen::Trends => "[ ] window",
-            _ => "tab/shift-tab cycle | 1-4 jump",
+            Screen::Explain => "[ ] day | j k event | w/t/s filters",
+            Screen::Patterns => "w/t/s family | m metric",
+            Screen::Ops => "1-6 jump",
         };
         let refresh_hint = if self.refresh_in_flight {
             "refreshing"
@@ -345,24 +547,25 @@ impl AppState {
     }
 
     fn replace_live_snapshot(&mut self, snapshot: LiveSnapshot) {
-        let previous_day = self
-            .live_snapshot
-            .as_ref()
-            .and_then(|current| current.heartrate_days.get(self.timeline_selected_day))
-            .map(|day| day.day.clone());
+        let previous_day = self.selected_day_label();
+        let previous_event = self.selected_event_id.clone();
         self.live_snapshot = Some(snapshot);
 
         if let Some(snapshot) = &self.live_snapshot {
-            self.timeline_selected_day = previous_day
+            let day_labels = available_days(snapshot);
+            self.selected_day_index = previous_day
                 .as_deref()
-                .and_then(|selected_day| {
-                    snapshot
-                        .heartrate_days
-                        .iter()
-                        .position(|day| day.day == selected_day)
-                })
-                .unwrap_or_else(|| newest_timeline_day_index(snapshot));
-            self.timeline_selected_point = 0;
+                .and_then(|selected_day| day_labels.iter().position(|day| day == selected_day))
+                .unwrap_or_else(|| newest_day_index(snapshot));
+            self.selected_event_id = previous_event.filter(|event_id| {
+                snapshot
+                    .context_events
+                    .iter()
+                    .any(|event| &event.context_event_id == event_id)
+            });
+            self.selected_timeline_point = 0;
+            self.normalize_event_selection();
+            self.align_point_to_selected_event();
         }
 
         self.rebuild_live_model();
@@ -372,34 +575,193 @@ impl AppState {
         if let Some(snapshot) = &self.live_snapshot {
             self.model = build_live_model(
                 snapshot,
-                self.timeline_selected_day,
-                self.timeline_selected_point,
-                self.timeline_window_hours,
-                self.trends_window,
-                self.refresh_in_flight,
+                &LiveModelOptions {
+                    selected_day_index: self.selected_day_index,
+                    selected_point_index: self.selected_timeline_point,
+                    selected_event_id: self.selected_event_id.clone(),
+                    overlay_filters: self.overlay_filters.clone(),
+                    window_hours: self.timeline_window_hours,
+                    trends_window: self.trends_window,
+                    pattern_metric_filter: self.pattern_metric_filter,
+                    refresh_in_flight: self.refresh_in_flight,
+                },
             );
         }
     }
 
-    fn timeline_day_count(&self) -> usize {
+    fn available_day_count(&self) -> usize {
         self.live_snapshot
             .as_ref()
-            .map_or(0, |snapshot| snapshot.heartrate_days.len())
+            .map_or(0, |snapshot| available_days(snapshot).len())
     }
 
-    fn visible_timeline_points(&self) -> usize {
-        self.model.timeline.heart_rate.len()
+    fn selected_day_label(&self) -> Option<String> {
+        self.live_snapshot.as_ref().and_then(|snapshot| {
+            available_days(snapshot)
+                .get(self.selected_day_index)
+                .cloned()
+        })
+    }
+
+    fn visible_timeline_point_count(&self) -> usize {
+        self.live_snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                self.selected_day_label().and_then(|day| {
+                    selected_heartrate_day(snapshot, &day).map(|heartrate_day| {
+                        visible_timeline(heartrate_day, self.timeline_window_hours)
+                            .points
+                            .len()
+                    })
+                })
+            })
+            .unwrap_or(0)
+    }
+
+    fn normalize_event_selection(&mut self) {
+        let Some(snapshot) = &self.live_snapshot else {
+            self.selected_event_id = None;
+            return;
+        };
+        let Some(day) = self.selected_day_label() else {
+            self.selected_event_id = None;
+            return;
+        };
+        let events = filtered_events_for_day(snapshot, &day, &self.overlay_filters);
+        if events.is_empty() {
+            self.selected_event_id = None;
+            return;
+        }
+
+        if self.selected_event_id.as_ref().is_some_and(|event_id| {
+            events
+                .iter()
+                .any(|event| event.context_event_id == *event_id)
+        }) {
+            return;
+        }
+
+        if let Some(nearest_event) = nearest_event_for_point(
+            snapshot,
+            &day,
+            self.timeline_window_hours,
+            self.selected_timeline_point,
+            &events,
+        ) {
+            self.selected_event_id = Some(nearest_event.context_event_id.clone());
+            return;
+        }
+
+        self.selected_event_id = events.first().map(|event| event.context_event_id.clone());
+    }
+
+    fn select_default_event_for_selected_day(&mut self) {
+        self.selected_event_id = None;
+        self.normalize_event_selection();
+    }
+
+    fn select_nearest_event_for_current_point(&mut self) {
+        let Some(snapshot) = &self.live_snapshot else {
+            self.selected_event_id = None;
+            return;
+        };
+        let Some(day) = self.selected_day_label() else {
+            self.selected_event_id = None;
+            return;
+        };
+        let events = filtered_events_for_day(snapshot, &day, &self.overlay_filters);
+        self.selected_event_id = nearest_event_for_point(
+            snapshot,
+            &day,
+            self.timeline_window_hours,
+            self.selected_timeline_point,
+            &events,
+        )
+        .map(|event| event.context_event_id.clone());
+    }
+
+    fn align_point_to_selected_event(&mut self) {
+        let Some(snapshot) = &self.live_snapshot else {
+            return;
+        };
+        let Some(day) = self.selected_day_label() else {
+            return;
+        };
+        let Some(event_id) = self.selected_event_id.as_deref() else {
+            return;
+        };
+        let Some(event) = filtered_events_for_day(snapshot, &day, &self.overlay_filters)
+            .into_iter()
+            .find(|event| event.context_event_id == event_id)
+        else {
+            return;
+        };
+        let Some(heartrate_day) = selected_heartrate_day(snapshot, &day) else {
+            return;
+        };
+        let visible = visible_timeline(heartrate_day, self.timeline_window_hours);
+        if visible.points.is_empty() {
+            self.selected_timeline_point = 0;
+            return;
+        }
+        self.selected_timeline_point =
+            nearest_point_index_to_event(&visible.points, event).unwrap_or_default();
+    }
+
+    fn select_relative_event(&mut self, delta: isize) -> bool {
+        let Some(snapshot) = &self.live_snapshot else {
+            return false;
+        };
+        let Some(day) = self.selected_day_label() else {
+            return false;
+        };
+        let events = filtered_events_for_day(snapshot, &day, &self.overlay_filters);
+        if events.is_empty() {
+            self.selected_event_id = None;
+            return false;
+        }
+
+        let current_index = self
+            .selected_event_id
+            .as_ref()
+            .and_then(|event_id| {
+                events
+                    .iter()
+                    .position(|event| event.context_event_id == *event_id)
+            })
+            .unwrap_or_default();
+
+        let new_index = if delta.is_negative() {
+            current_index.saturating_sub(delta.unsigned_abs())
+        } else {
+            usize::min(
+                current_index.saturating_add(delta as usize),
+                events.len().saturating_sub(1),
+            )
+        };
+
+        self.selected_event_id = Some(events[new_index].context_event_id.clone());
+        true
     }
 }
 
 impl Screen {
-    pub const ALL: [Self; 4] = [Self::Dashboard, Self::Timeline, Self::Trends, Self::Ops];
+    pub const ALL: [Self; 6] = [
+        Self::Dashboard,
+        Self::Timeline,
+        Self::Trends,
+        Self::Explain,
+        Self::Patterns,
+        Self::Ops,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             Self::Dashboard => "Dashboard",
             Self::Timeline => "Timeline",
             Self::Trends => "Trends",
+            Self::Explain => "Explain",
+            Self::Patterns => "Patterns",
             Self::Ops => "Ops",
         }
     }
@@ -409,7 +771,9 @@ impl Screen {
             Self::Dashboard => 0,
             Self::Timeline => 1,
             Self::Trends => 2,
-            Self::Ops => 3,
+            Self::Explain => 3,
+            Self::Patterns => 4,
+            Self::Ops => 5,
         }
     }
 
@@ -417,7 +781,9 @@ impl Screen {
         match self {
             Self::Dashboard => Self::Timeline,
             Self::Timeline => Self::Trends,
-            Self::Trends => Self::Ops,
+            Self::Trends => Self::Explain,
+            Self::Explain => Self::Patterns,
+            Self::Patterns => Self::Ops,
             Self::Ops => Self::Dashboard,
         }
     }
@@ -427,7 +793,9 @@ impl Screen {
             Self::Dashboard => Self::Ops,
             Self::Timeline => Self::Dashboard,
             Self::Trends => Self::Timeline,
-            Self::Ops => Self::Trends,
+            Self::Explain => Self::Trends,
+            Self::Patterns => Self::Explain,
+            Self::Ops => Self::Patterns,
         }
     }
 }
@@ -474,36 +842,82 @@ impl TrendWindowKind {
     }
 }
 
+impl PatternMetricFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "all metrics",
+            Self::Activity => "activity",
+            Self::Readiness => "next-day readiness",
+            Self::Sleep => "same-night sleep",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::All => Self::Activity,
+            Self::Activity => Self::Readiness,
+            Self::Readiness => Self::Sleep,
+            Self::Sleep => Self::All,
+        }
+    }
+
+    fn metric(self) -> Option<PatternMetric> {
+        match self {
+            Self::All => None,
+            Self::Activity => Some(PatternMetric::ActivityScore),
+            Self::Readiness => Some(PatternMetric::ReadinessScore),
+            Self::Sleep => Some(PatternMetric::SleepScore),
+        }
+    }
+}
+
+impl OverlayFilterState {
+    pub const fn all() -> Self {
+        Self {
+            workouts: true,
+            tags: true,
+            sessions: true,
+        }
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "W:{} T:{} S:{}",
+            toggle_state(self.workouts),
+            toggle_state(self.tags),
+            toggle_state(self.sessions)
+        )
+    }
+}
+
 pub fn build_live_state(
     config: &Config,
     store: &Store,
     auth_status: &AuthStatus,
 ) -> crate::error::Result<AppState> {
     let snapshot = load_live_snapshot(config, store, auth_status)?;
-    let timeline_selected_day = newest_timeline_day_index(&snapshot);
-    let model = build_live_model(
-        &snapshot,
-        timeline_selected_day,
-        0,
-        24,
-        TrendWindowKind::Days7,
-        false,
-    );
-
-    Ok(AppState {
+    let selected_day_index = newest_day_index(&snapshot);
+    let mut app = AppState {
         mode: RunMode::Live,
         active_screen: Screen::Dashboard,
-        model,
+        model: AppModel::empty(),
         status_line: "Live mode is reading from the local store.".to_owned(),
         tick_count: 0,
         should_quit: false,
         refresh_in_flight: false,
         live_snapshot: Some(snapshot),
-        timeline_selected_day,
-        timeline_selected_point: 0,
+        selected_day_index,
+        selected_timeline_point: 0,
         timeline_window_hours: 24,
         trends_window: TrendWindowKind::Days7,
-    })
+        selected_event_id: None,
+        overlay_filters: OverlayFilterState::all(),
+        pattern_metric_filter: PatternMetricFilter::All,
+    };
+    app.select_default_event_for_selected_day();
+    app.align_point_to_selected_event();
+    app.rebuild_live_model();
+    Ok(app)
 }
 
 pub fn load_live_snapshot(
@@ -516,6 +930,10 @@ pub fn load_live_snapshot(
         .daily_history(usize::from(config.refresh.daily_history_days))?;
     let heartrate_days = load_heartrate_days(store, 14)?;
     let heartrate_daily_averages = load_heartrate_daily_averages(store, 90)?;
+    let context_events = store
+        .views()
+        .context_events_between_days("0000-01-01", "9999-12-31")?;
+    let pattern_summaries = store.views().pattern_summaries(None, None)?;
 
     Ok(LiveSnapshot {
         captured_at: now_rfc3339(),
@@ -525,6 +943,8 @@ pub fn load_live_snapshot(
         daily_history,
         heartrate_days,
         heartrate_daily_averages,
+        context_events,
+        pattern_summaries,
         sync_states: store.sync_state().list()?,
         record_counts: store.views().record_counts()?,
         schema_version: store.metadata().schema_version()?,
@@ -534,249 +954,107 @@ pub fn load_live_snapshot(
 }
 
 pub fn build_demo_state(config: &Config) -> AppState {
-    let capability_report = CapabilityReport::demo();
-
-    AppState {
+    let snapshot = demo_snapshot(config);
+    let selected_day_index = newest_day_index(&snapshot);
+    let mut app = AppState {
         mode: RunMode::Demo,
         active_screen: Screen::Dashboard,
-        model: AppModel {
-            title: "ringmaster.rs demo".to_owned(),
-            dashboard: DashboardModel {
-                scores: vec![
-                    ScoreCard {
-                        label: "Sleep",
-                        value: "86".to_owned(),
-                        badge: "fresh".to_owned(),
-                        subtitle: "7d baseline +2.0".to_owned(),
-                    },
-                    ScoreCard {
-                        label: "Readiness",
-                        value: "79".to_owned(),
-                        badge: "fresh".to_owned(),
-                        subtitle: "30d baseline -1.0".to_owned(),
-                    },
-                    ScoreCard {
-                        label: "Activity",
-                        value: "72".to_owned(),
-                        badge: "source delayed".to_owned(),
-                        subtitle: "30d baseline +4.0".to_owned(),
-                    },
-                ],
-                freshness: "Daily fresh | Heartrate fresh | Personal fresh".to_owned(),
-                capabilities: capability_views(&capability_report),
-                change_summary:
-                    "Today vs baseline: sleep is above normal, readiness is close to normal, and activity is waiting on Oura's daily closeout."
-                        .to_owned(),
-                highlights: vec![
-                    "Sleep started 42m later than your 30d norm.".to_owned(),
-                    "Average heartrate is 3 bpm above your recent range.".to_owned(),
-                    "Demo mode shows how stale and delayed states render without network access."
-                        .to_owned(),
-                ],
-            },
-            timeline: TimelineModel {
-                summary: "Demo heartrate timeline for 2026-04-08 | 24h window | fresh".to_owned(),
-                heart_rate: vec![
-                    timeline_point("06:00", "2026-04-08T06:00:00Z", 58, false),
-                    timeline_point("06:30", "2026-04-08T06:30:00Z", 57, false),
-                    timeline_point("07:00", "2026-04-08T07:00:00Z", 59, false),
-                    timeline_point("07:45", "2026-04-08T07:45:00Z", 66, true),
-                    timeline_point("08:15", "2026-04-08T08:15:00Z", 71, false),
-                    timeline_point("08:45", "2026-04-08T08:45:00Z", 76, false),
-                    timeline_point("09:15", "2026-04-08T09:15:00Z", 74, false),
-                ],
-                overlays: vec![
-                    "Days: 2026-04-07 | [2026-04-08]".to_owned(),
-                    "Selected point: 2026-04-08T09:15:00Z at 74 bpm.".to_owned(),
-                    "Source legend: current MVP stores bpm and timestamps, but not per-sample source labels.".to_owned(),
-                ],
-                day_labels: vec!["2026-04-07".to_owned(), "2026-04-08".to_owned()],
-                day_selector: "2026-04-07 | [2026-04-08]".to_owned(),
-                selected_day_index: 1,
-                selected_point_index: Some(6),
-                window_hours: 24,
-                selected_detail: "2026-04-08T09:15:00Z · 74 bpm".to_owned(),
-            },
-            trends: TrendsModel {
-                windows: vec![
-                    TrendWindow {
-                        label: "7d",
-                        summary: "Short view emphasizing daily swings and 7d baselines.".to_owned(),
-                    },
-                    TrendWindow {
-                        label: "30d",
-                        summary: "Monthly view stabilizing the baseline comparison.".to_owned(),
-                    },
-                    TrendWindow {
-                        label: "90d",
-                        summary: "Long view showing seasonality while still comparing against 30d baselines.".to_owned(),
-                    },
-                ],
-                selected_window_index: 0,
-                metrics: vec![
-                    TrendMetricView {
-                        label: "Sleep",
-                        current_value: "86".to_owned(),
-                        summary: "Above your 7d baseline by 2.0 points.".to_owned(),
-                        sparkline: vec![79, 81, 80, 83, 82, 84, 86],
-                        confidence: "confidence: medium".to_owned(),
-                    },
-                    TrendMetricView {
-                        label: "Readiness",
-                        current_value: "79".to_owned(),
-                        summary: "Close to your 7d baseline with a small day-over-day dip.".to_owned(),
-                        sparkline: vec![78, 79, 80, 81, 80, 79, 79],
-                        confidence: "confidence: medium".to_owned(),
-                    },
-                    TrendMetricView {
-                        label: "Activity",
-                        current_value: "72".to_owned(),
-                        summary: "Daily closeout is still pending, so today's activity is provisional."
-                            .to_owned(),
-                        sparkline: vec![65, 68, 70, 72, 74, 73, 72],
-                        confidence: "confidence: medium".to_owned(),
-                    },
-                    TrendMetricView {
-                        label: "Heartrate",
-                        current_value: "68.7".to_owned(),
-                        summary: "Average heartrate is slightly above your recent range.".to_owned(),
-                        sparkline: vec![64, 65, 65, 67, 68, 69, 69],
-                        confidence: "confidence: thin".to_owned(),
-                    },
-                ],
-                notes: vec![
-                    "Demo trends use deterministic values so screen tests can assert real layouts."
-                        .to_owned(),
-                    "Insight text stays descriptive and avoids causal claims.".to_owned(),
-                ],
-            },
-            ops: OpsModel {
-                mode_label: "Demo".to_owned(),
-                family_statuses: vec![
-                    FamilyStatusView {
-                        label: "Personal",
-                        state_label: "fresh".to_owned(),
-                        scope_label: "scope granted".to_owned(),
-                        last_sync: "2026-04-08T03:55:00Z".to_owned(),
-                        detail: "Profile data is current in the demo snapshot.".to_owned(),
-                    },
-                    FamilyStatusView {
-                        label: "Daily",
-                        state_label: "source delayed".to_owned(),
-                        scope_label: "scope granted".to_owned(),
-                        last_sync: "2026-04-08T03:58:00Z".to_owned(),
-                        detail: "Oura daily closeout can lag behind real time.".to_owned(),
-                    },
-                    FamilyStatusView {
-                        label: "Heartrate",
-                        state_label: "fresh".to_owned(),
-                        scope_label: "scope granted".to_owned(),
-                        last_sync: "2026-04-08T03:59:00Z".to_owned(),
-                        detail: "Intraday heartrate is ready for the timeline.".to_owned(),
-                    },
-                ],
-                items: vec![
-                    ops_item("Config file", config.paths.config_file.display().to_string()),
-                    ops_item("Database", config.paths.database_file.display().to_string()),
-                    ops_item("Callback URL", config.oura.callback_url()),
-                    ops_item("Refresh policy", "personal=3600s daily=300s heartrate=60s".to_owned()),
-                    ops_item("Capabilities", capability_report.available_labels().join(", ")),
-                ],
-                warnings: vec![
-                    "Demo mode bypasses live OAuth and background sync.".to_owned(),
-                    "Webhook invalidation remains intentionally deferred.".to_owned(),
-                ],
-            },
-        },
+        model: AppModel::empty(),
         status_line: "Demo mode ready.".to_owned(),
         tick_count: 0,
         should_quit: false,
         refresh_in_flight: false,
-        live_snapshot: None,
-        timeline_selected_day: 0,
-        timeline_selected_point: 0,
+        live_snapshot: Some(snapshot),
+        selected_day_index,
+        selected_timeline_point: 0,
         timeline_window_hours: 24,
         trends_window: TrendWindowKind::Days7,
-    }
+        selected_event_id: None,
+        overlay_filters: OverlayFilterState::all(),
+        pattern_metric_filter: PatternMetricFilter::All,
+    };
+    app.select_default_event_for_selected_day();
+    app.align_point_to_selected_event();
+    app.rebuild_live_model();
+    app
 }
 
-fn build_live_model(
-    snapshot: &LiveSnapshot,
-    selected_day_index: usize,
-    selected_point_index: usize,
-    window_hours: u16,
-    trends_window: TrendWindowKind,
-    refresh_in_flight: bool,
-) -> AppModel {
+fn build_live_model(snapshot: &LiveSnapshot, options: &LiveModelOptions) -> AppModel {
     AppModel {
         title: "ringmaster.rs".to_owned(),
-        dashboard: build_dashboard_model(snapshot, refresh_in_flight),
+        dashboard: build_dashboard_model(
+            snapshot,
+            options.selected_day_index,
+            options.refresh_in_flight,
+        ),
         timeline: build_timeline_model(
             snapshot,
-            selected_day_index,
-            selected_point_index,
-            window_hours,
+            options.selected_day_index,
+            options.selected_point_index,
+            options.selected_event_id.as_deref(),
+            &options.overlay_filters,
+            options.window_hours,
         ),
-        trends: build_trends_model(snapshot, trends_window),
-        ops: build_ops_model(snapshot, refresh_in_flight),
+        trends: build_trends_model(snapshot, options.trends_window),
+        explain: build_explain_model(
+            snapshot,
+            options.selected_day_index,
+            options.selected_event_id.as_deref(),
+            &options.overlay_filters,
+        ),
+        patterns: build_patterns_model(
+            snapshot,
+            &options.overlay_filters,
+            options.pattern_metric_filter,
+        ),
+        ops: build_ops_model(snapshot, options.refresh_in_flight),
     }
 }
 
-fn build_dashboard_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> DashboardModel {
-    let latest_daily = snapshot.daily_history.last();
-    let sleep_insight = build_metric_insight(
-        "sleep",
-        &metric_points_from_daily(&snapshot.daily_history, |row| {
-            row.sleep_score.map(f64::from)
-        }),
-    );
-    let readiness_insight = build_metric_insight(
-        "readiness",
-        &metric_points_from_daily(&snapshot.daily_history, |row| {
-            row.readiness_score.map(f64::from)
-        }),
-    );
-    let activity_insight = build_metric_insight(
-        "activity",
-        &metric_points_from_daily(&snapshot.daily_history, |row| {
-            row.activity_score.map(f64::from)
-        }),
-    );
+fn build_dashboard_model(
+    snapshot: &LiveSnapshot,
+    selected_day_index: usize,
+    refresh_in_flight: bool,
+) -> DashboardModel {
+    let selected_day = selected_day_label(snapshot, selected_day_index)
+        .unwrap_or_else(|| "no selected day".to_owned());
+    let selected_daily = selected_daily_row(snapshot, &selected_day);
+    let sleep_insight = build_day_metric_insight(snapshot, &selected_day, "sleep", |row| {
+        row.sleep_score.map(f64::from)
+    });
+    let readiness_insight = build_day_metric_insight(snapshot, &selected_day, "readiness", |row| {
+        row.readiness_score.map(f64::from)
+    });
+    let activity_insight = build_day_metric_insight(snapshot, &selected_day, "activity", |row| {
+        row.activity_score.map(f64::from)
+    });
     let heartrate_insight = build_metric_insight("heartrate", &snapshot.heartrate_daily_averages);
 
-    let daily_freshness = family_freshness(snapshot, DataFamily::Daily);
-    let heartrate_freshness = family_freshness(snapshot, DataFamily::Heartrate);
-    let personal_freshness = family_freshness(snapshot, DataFamily::Personal);
-
-    let scores = vec![
-        score_card(
-            "Sleep",
-            latest_daily.and_then(|row| row.sleep_score),
-            freshness_badge(&daily_freshness),
-            metric_subtitle(&sleep_insight),
-        ),
-        score_card(
-            "Readiness",
-            latest_daily.and_then(|row| row.readiness_score),
-            freshness_badge(&daily_freshness),
-            metric_subtitle(&readiness_insight),
-        ),
-        score_card(
-            "Activity",
-            latest_daily.and_then(|row| row.activity_score),
-            freshness_badge(&daily_freshness),
-            metric_subtitle(&activity_insight),
-        ),
-    ];
-
     let freshness = [
-        format!("Daily {}", freshness_badge(&daily_freshness)),
-        format!("Heartrate {}", freshness_badge(&heartrate_freshness)),
-        format!("Personal {}", freshness_badge(&personal_freshness)),
+        format!(
+            "Daily {}",
+            freshness_badge(&family_freshness(snapshot, DataFamily::Daily))
+        ),
+        format!(
+            "Heartrate {}",
+            freshness_badge(&family_freshness(snapshot, DataFamily::Heartrate))
+        ),
+        format!(
+            "Workouts {}",
+            freshness_badge(&family_freshness(snapshot, DataFamily::Workout))
+        ),
+        format!(
+            "Tags {}",
+            freshness_badge(&family_freshness(snapshot, DataFamily::EnhancedTag))
+        ),
+        format!(
+            "Sessions {}",
+            freshness_badge(&family_freshness(snapshot, DataFamily::Session))
+        ),
     ]
     .join(" | ");
 
-    let today_vs_baseline = [
+    let change_summary = [
         short_baseline_phrase("sleep", &sleep_insight),
         short_baseline_phrase("readiness", &readiness_insight),
         short_baseline_phrase("activity", &activity_insight),
@@ -784,28 +1062,54 @@ fn build_dashboard_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> Da
     .join(" ");
 
     let mut highlights = vec![
-        sleep_insight.summary,
-        readiness_insight.summary,
-        activity_insight.summary,
+        selected_day_baseline_sentence("Sleep", &selected_day, &sleep_insight),
+        selected_day_baseline_sentence("Readiness", &selected_day, &readiness_insight),
+        selected_day_baseline_sentence("Activity", &selected_day, &activity_insight),
     ];
+    highlights.extend(
+        top_context_events_for_day(snapshot, &selected_day)
+            .into_iter()
+            .take(2)
+            .map(|event| format!("{} {}.", event.family_label, event.headline)),
+    );
     if snapshot.heartrate_daily_averages.is_empty() {
-        highlights.push(heartrate_freshness.detail);
+        highlights.push(family_freshness(snapshot, DataFamily::Heartrate).detail);
     } else {
         highlights.push(heartrate_insight.summary);
     }
     if refresh_in_flight {
         highlights.insert(
             0,
-            "Background refresh is running; the screen stays on persisted data until the next snapshot lands."
+            "Background refresh is running; the dashboard stays on persisted data until the next snapshot lands."
                 .to_owned(),
         );
     }
 
     DashboardModel {
-        scores,
+        selected_day_label: selected_day,
+        scores: vec![
+            score_card(
+                "Sleep",
+                selected_daily.and_then(|row| row.sleep_score),
+                freshness_badge(&family_freshness(snapshot, DataFamily::Daily)),
+                metric_subtitle(&sleep_insight),
+            ),
+            score_card(
+                "Readiness",
+                selected_daily.and_then(|row| row.readiness_score),
+                freshness_badge(&family_freshness(snapshot, DataFamily::Daily)),
+                metric_subtitle(&readiness_insight),
+            ),
+            score_card(
+                "Activity",
+                selected_daily.and_then(|row| row.activity_score),
+                freshness_badge(&family_freshness(snapshot, DataFamily::Daily)),
+                metric_subtitle(&activity_insight),
+            ),
+        ],
         freshness,
         capabilities: capability_views(&snapshot.auth_status.capability_report),
-        change_summary: today_vs_baseline,
+        change_summary,
         highlights,
     }
 }
@@ -814,57 +1118,98 @@ fn build_timeline_model(
     snapshot: &LiveSnapshot,
     selected_day_index: usize,
     selected_point_index: usize,
+    selected_event_id: Option<&str>,
+    overlay_filters: &OverlayFilterState,
     window_hours: u16,
 ) -> TimelineModel {
     let freshness = family_freshness(snapshot, DataFamily::Heartrate);
-    let day_labels = snapshot
-        .heartrate_days
-        .iter()
-        .map(|day| day.day.clone())
-        .collect::<Vec<_>>();
+    let day_labels = available_days(snapshot);
     let clamped_day_index = if day_labels.is_empty() {
         0
     } else {
-        usize::min(selected_day_index, day_labels.len() - 1)
+        usize::min(selected_day_index, day_labels.len().saturating_sub(1))
     };
-    let selected_day = snapshot.heartrate_days.get(clamped_day_index);
-    let visible_points = selected_day
-        .map(|day| visible_timeline_points(day, window_hours))
-        .unwrap_or_default();
-    let selected_point_index = if visible_points.is_empty() {
+    let selected_day = day_labels
+        .get(clamped_day_index)
+        .cloned()
+        .unwrap_or_else(|| "no day selected".to_owned());
+    let visible = selected_heartrate_day(snapshot, &selected_day)
+        .map(|day| visible_timeline(day, window_hours))
+        .unwrap_or_else(|| VisibleTimeline {
+            points: Vec::new(),
+            window_start_minute: 0,
+            window_end_minute: 24 * 60 - 1,
+        });
+    let selected_point_index = if visible.points.is_empty() {
         None
     } else {
-        Some(usize::min(selected_point_index, visible_points.len() - 1))
+        Some(usize::min(
+            selected_point_index,
+            visible.points.len().saturating_sub(1),
+        ))
     };
-    let selected_detail = selected_point_index
-        .and_then(|index| visible_points.get(index))
-        .map(|point| format!("Selected: {} at {} bpm", point.recorded_at, point.bpm))
+    let events = filtered_events_for_day(snapshot, &selected_day, overlay_filters);
+    let selected_event_index = selected_event_id.and_then(|event_id| {
+        events
+            .iter()
+            .position(|event| event.context_event_id == event_id)
+    });
+    let selected_point_detail = selected_point_index
+        .and_then(|index| visible.points.get(index))
+        .map(|point| {
+            format!(
+                "Heartrate cursor: {} at {} bpm.",
+                point.recorded_at, point.bpm
+            )
+        })
         .unwrap_or_else(|| freshness.detail.clone());
-    let selected_day_label = selected_day
-        .map(|day| day.day.clone())
-        .unwrap_or_else(|| "no heartrate day selected".to_owned());
-    let summary = format!(
-        "Heartrate timeline for {} | {}h window | {}",
-        selected_day_label, window_hours, freshness.summary
-    );
-    let day_selector = format_day_selector(&day_labels, clamped_day_index);
-    let overlays = vec![
-        format!("Days: {day_selector}"),
-        selected_detail.clone(),
-        "Source legend: current MVP stores bpm and timestamps, but not per-sample source labels."
-            .to_owned(),
-    ];
+
+    let event_detail_lines = selected_event_index
+        .and_then(|index| events.get(index))
+        .map_or_else(
+            || {
+                vec![
+                    "No context event is selected for this day.".to_owned(),
+                    "Use j/k or move the heartrate cursor to inspect nearby events.".to_owned(),
+                ]
+            },
+            |event| explain_event_detail_lines(&selected_day, event),
+        );
 
     TimelineModel {
-        summary,
-        heart_rate: visible_points,
-        overlays,
-        day_labels,
-        day_selector,
+        summary: format!(
+            "Timeline for {} | heartrate {}",
+            selected_day,
+            freshness_badge(&freshness)
+        ),
+        day_selector: format!(
+            "{} | window={}h | filters {}",
+            format_day_selector(&day_labels, clamped_day_index),
+            window_hours,
+            overlay_filters.summary()
+        ),
+        selected_day_label: selected_day.clone(),
         selected_day_index: clamped_day_index,
+        heart_rate: visible.points,
         selected_point_index,
         window_hours,
-        selected_detail,
+        window_start_minute: visible.window_start_minute,
+        window_end_minute: visible.window_end_minute,
+        overlay_toggles: overlay_toggle_views(overlay_filters),
+        overlay_groups: build_overlay_groups(
+            &selected_day,
+            events.as_slice(),
+            selected_event_id,
+            visible.window_start_minute,
+            visible.window_end_minute,
+        ),
+        events: events
+            .iter()
+            .map(|event| event_list_item(&selected_day, event, selected_event_id))
+            .collect(),
+        selected_event_index,
+        selected_detail: selected_point_detail,
+        event_detail_lines,
     }
 }
 
@@ -885,24 +1230,23 @@ fn build_trends_model(snapshot: &LiveSnapshot, trends_window: TrendWindowKind) -
     let activity_insight = build_metric_insight("activity", &activity_points);
     let heartrate_insight = build_metric_insight("heartrate", &heartrate_points);
 
-    let windows = vec![
-        TrendWindow {
-            label: "7d",
-            summary: "Short view for day-to-day movement and 7d baselines.".to_owned(),
-        },
-        TrendWindow {
-            label: "30d",
-            summary: "Monthly view smoothing daily noise against 30d baselines.".to_owned(),
-        },
-        TrendWindow {
-            label: "90d",
-            summary: "Long view showing history while still comparing against recent baselines."
-                .to_owned(),
-        },
-    ];
-
     TrendsModel {
-        windows,
+        windows: vec![
+            TrendWindow {
+                label: "7d",
+                summary: "Short view for day-to-day movement and 7d baselines.".to_owned(),
+            },
+            TrendWindow {
+                label: "30d",
+                summary: "Monthly view smoothing daily noise against 30d baselines.".to_owned(),
+            },
+            TrendWindow {
+                label: "90d",
+                summary:
+                    "Long view showing history while still comparing against recent baselines."
+                        .to_owned(),
+            },
+        ],
         selected_window_index: trends_window.index(),
         metrics: vec![
             build_trend_metric("Sleep", &sleep_points, &sleep_insight, trends_window),
@@ -937,11 +1281,133 @@ fn build_trends_model(snapshot: &LiveSnapshot, trends_window: TrendWindowKind) -
     }
 }
 
+fn build_explain_model(
+    snapshot: &LiveSnapshot,
+    selected_day_index: usize,
+    selected_event_id: Option<&str>,
+    overlay_filters: &OverlayFilterState,
+) -> ExplainModel {
+    let selected_day = selected_day_label(snapshot, selected_day_index)
+        .unwrap_or_else(|| "no selected day".to_owned());
+    let sleep_insight = build_day_metric_insight(snapshot, &selected_day, "sleep", |row| {
+        row.sleep_score.map(f64::from)
+    });
+    let readiness_insight = build_day_metric_insight(snapshot, &selected_day, "readiness", |row| {
+        row.readiness_score.map(f64::from)
+    });
+    let activity_insight = build_day_metric_insight(snapshot, &selected_day, "activity", |row| {
+        row.activity_score.map(f64::from)
+    });
+    let selected_daily = selected_daily_row(snapshot, &selected_day);
+    let heartrate = selected_heartrate_day(snapshot, &selected_day);
+    let supporting_events =
+        supporting_events_for_explain(snapshot, &selected_day, overlay_filters, selected_event_id);
+
+    let mut caveat_lines = missing_scope_messages(&snapshot.auth_status.capability_report);
+    if insight_is_thin(&sleep_insight)
+        || insight_is_thin(&readiness_insight)
+        || insight_is_thin(&activity_insight)
+    {
+        caveat_lines.push("This day story is based on limited history.".to_owned());
+    }
+    if selected_daily.is_none() {
+        caveat_lines.push(format!(
+            "No daily closeout is available for {} yet.",
+            selected_day
+        ));
+    }
+    if heartrate.is_none() {
+        caveat_lines.push(format!(
+            "No heartrate samples were cached for {}.",
+            selected_day
+        ));
+    }
+    if supporting_events.is_empty() {
+        caveat_lines.push(
+            "No persisted workouts, enhanced tags, or sessions were recorded around this day."
+                .to_owned(),
+        );
+    }
+
+    ExplainModel {
+        selected_day_label: selected_day.clone(),
+        headline: format!("Day story for {}", selected_day),
+        summary_lines: vec![
+            selected_day_baseline_sentence("Sleep", &selected_day, &sleep_insight),
+            selected_day_baseline_sentence("Readiness", &selected_day, &readiness_insight),
+            selected_day_baseline_sentence("Activity", &selected_day, &activity_insight),
+        ],
+        measurement_lines: measurement_lines_for_day(selected_daily, heartrate),
+        evidence_lines: if supporting_events.is_empty() {
+            vec!["Evidence is limited for this day.".to_owned()]
+        } else {
+            supporting_events
+                .iter()
+                .map(|event| format!("{} {}.", event.family_label, event.headline))
+                .collect()
+        },
+        caveat_lines,
+        context_lines: if supporting_events.is_empty() {
+            vec!["Open Timeline after a sync to inspect raw context entries.".to_owned()]
+        } else {
+            let mut lines = supporting_events
+                .iter()
+                .map(|event| {
+                    if event.selected {
+                        format!("> {} ({})", event.headline, event.detail)
+                    } else {
+                        format!("  {} ({})", event.headline, event.detail)
+                    }
+                })
+                .collect::<Vec<_>>();
+            lines.push("Press 2 to open Timeline with the same selected event.".to_owned());
+            lines
+        },
+    }
+}
+
+fn build_patterns_model(
+    snapshot: &LiveSnapshot,
+    overlay_filters: &OverlayFilterState,
+    metric_filter: PatternMetricFilter,
+) -> PatternsModel {
+    let rows = snapshot
+        .pattern_summaries
+        .iter()
+        .filter(|summary| overlay_filter_matches(overlay_filters, summary.family))
+        .filter(|summary| {
+            metric_filter
+                .metric()
+                .is_none_or(|metric| summary.metric == metric)
+        })
+        .map(pattern_row_view)
+        .collect::<Vec<_>>();
+
+    PatternsModel {
+        header: "Patterns".to_owned(),
+        filter_summary: format!(
+            "Families {} | metric {}",
+            overlay_filters.summary(),
+            metric_filter.label()
+        ),
+        rows,
+        notes: vec![
+            "Patterns are descriptive associations, not causal claims.".to_owned(),
+            "Rows appear after at least 3 comparable days; same-night sleep refers to the following closeout day.".to_owned(),
+        ],
+        empty_message:
+            "Not enough data yet. Patterns appear after at least 3 comparable days.".to_owned(),
+    }
+}
+
 fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel {
     let family_statuses = [
         DataFamily::Personal,
         DataFamily::Daily,
         DataFamily::Heartrate,
+        DataFamily::Workout,
+        DataFamily::EnhancedTag,
+        DataFamily::Session,
     ]
     .into_iter()
     .map(|family| {
@@ -999,12 +1465,21 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
                 .to_owned(),
         );
     }
+    if snapshot.record_counts.derived_pattern_summaries == 0 {
+        warnings.push(
+            "Patterns are currently empty; run `cargo run -- derive rebuild --demo` or sync more history."
+                .to_owned(),
+        );
+    }
 
     OpsModel {
         mode_label: if refresh_in_flight {
             "Live (refreshing)".to_owned()
         } else {
-            "Live".to_owned()
+            match snapshot.database_path.as_str() {
+                ":memory:" => "Live (in-memory store)".to_owned(),
+                _ => "Live".to_owned(),
+            }
         },
         family_statuses,
         items: vec![
@@ -1044,12 +1519,17 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
             ops_item(
                 "Record counts",
                 format!(
-                    "profile={} daily={} heartrate={} raw={}",
+                    "profile={} daily={} heartrate={} workouts={} tags={} sessions={} derived={} patterns={} raw={}",
                     snapshot.record_counts.personal_info,
                     snapshot.record_counts.daily_sleep
                         + snapshot.record_counts.daily_readiness
                         + snapshot.record_counts.daily_activity,
                     snapshot.record_counts.heartrate_samples,
+                    snapshot.record_counts.workouts,
+                    snapshot.record_counts.tags + snapshot.record_counts.enhanced_tags,
+                    snapshot.record_counts.sessions,
+                    snapshot.record_counts.derived_context_events,
+                    snapshot.record_counts.derived_pattern_summaries,
                     snapshot.record_counts.raw_payloads,
                 ),
             ),
@@ -1072,8 +1552,12 @@ fn load_heartrate_days(store: &Store, limit: usize) -> crate::error::Result<Vec<
     Ok(heartrate_days)
 }
 
-fn newest_timeline_day_index(snapshot: &LiveSnapshot) -> usize {
-    snapshot.heartrate_days.len().saturating_sub(1)
+fn newest_day_index(snapshot: &LiveSnapshot) -> usize {
+    available_days(snapshot).len().saturating_sub(1)
+}
+
+fn selected_day_label(snapshot: &LiveSnapshot, selected_day_index: usize) -> Option<String> {
+    available_days(snapshot).get(selected_day_index).cloned()
 }
 
 fn load_heartrate_daily_averages(
@@ -1111,8 +1595,9 @@ fn family_freshness(snapshot: &LiveSnapshot, family: DataFamily) -> FreshnessSta
             kind: FreshnessKind::MissingScope,
             summary: "missing scope".to_owned(),
             detail: format!(
-                "{} scope is not granted, so the UI keeps this family unavailable.",
-                family.capability_kind().scope_name()
+                "{} scope was not granted, so {} stay unavailable.",
+                family.capability_kind().scope_name(),
+                family.label().to_lowercase()
             ),
         };
     }
@@ -1176,7 +1661,7 @@ fn family_freshness(snapshot: &LiveSnapshot, family: DataFamily) -> FreshnessSta
             family,
             kind: FreshnessKind::SourceDelayed,
             summary: "source delayed".to_owned(),
-            detail: "Daily closeout is still pending from Oura, so today is being compared against the latest fully available day.".to_owned(),
+            detail: "Daily closeout is still pending from Oura, so the app compares against the latest fully available day.".to_owned(),
         };
     }
 
@@ -1238,6 +1723,29 @@ where
         .collect()
 }
 
+fn build_day_metric_insight<F>(
+    snapshot: &LiveSnapshot,
+    selected_day: &str,
+    label: &'static str,
+    mut mapper: F,
+) -> MetricInsight
+where
+    F: FnMut(&DailyOverviewRow) -> Option<f64>,
+{
+    let history = snapshot
+        .daily_history
+        .iter()
+        .filter(|row| row.day.as_str() <= selected_day)
+        .filter_map(|row| {
+            mapper(row).map(|value| MetricPoint {
+                day: row.day.clone(),
+                value,
+            })
+        })
+        .collect::<Vec<_>>();
+    build_metric_insight(label, &history)
+}
+
 fn metric_subtitle(insight: &MetricInsight) -> String {
     if let Some(delta) = insight.baseline_7d.delta_from_today {
         format!("7d baseline {:+.1}", delta)
@@ -1262,6 +1770,42 @@ fn short_baseline_phrase(label: &str, insight: &MetricInsight) -> String {
     } else {
         format!("{label} is still building a baseline.")
     }
+}
+
+fn selected_day_baseline_sentence(
+    label: &str,
+    selected_day: &str,
+    insight: &MetricInsight,
+) -> String {
+    let Some(today) = insight.today.as_ref() else {
+        return format!("{label} has no daily closeout on {}.", selected_day);
+    };
+    if insight.baseline_30d.sample_count < 4 {
+        return format!(
+            "{} is {} on {}, but there is not enough history to compare it to your normal yet.",
+            label,
+            format_float(today.value),
+            selected_day
+        );
+    }
+
+    let baseline = insight.baseline_30d.mean.unwrap_or(today.value);
+    let delta = today.value - baseline;
+    let relation = if delta >= 1.0 {
+        "above"
+    } else if delta <= -1.0 {
+        "below"
+    } else {
+        "close to"
+    };
+
+    format!(
+        "{} is {} your 30-day baseline ({} vs {}).",
+        label,
+        relation,
+        format_float(today.value),
+        format_float(baseline)
+    )
 }
 
 fn build_trend_metric(
@@ -1325,19 +1869,20 @@ fn trend_notes(window: TrendWindowKind, insights: [&MetricInsight; 4]) -> Vec<St
     notes
 }
 
-fn visible_timeline_points(day: &HeartRateDay, window_hours: u16) -> Vec<TimelinePoint> {
+fn visible_timeline(day: &HeartRateDay, window_hours: u16) -> VisibleTimeline {
     let latest_minute = day
         .points
         .last()
         .map(|point| minutes_from_timestamp(&point.recorded_at))
         .unwrap_or(0);
-    let window_start = latest_minute.saturating_sub(window_hours.saturating_mul(60));
+    let window_end = latest_minute.max(window_hours.saturating_mul(60).saturating_sub(1));
+    let window_start = window_end.saturating_sub(window_hours.saturating_mul(60).saturating_sub(1));
     let mut visible = Vec::new();
     let mut previous_minute = None;
 
     for point in &day.points {
         let minute = minutes_from_timestamp(&point.recorded_at);
-        if minute < window_start {
+        if minute < window_start || minute > window_end {
             continue;
         }
 
@@ -1354,7 +1899,11 @@ fn visible_timeline_points(day: &HeartRateDay, window_hours: u16) -> Vec<Timelin
         previous_minute = Some(minute);
     }
 
-    visible
+    VisibleTimeline {
+        points: visible,
+        window_start_minute: window_start,
+        window_end_minute: window_end,
+    }
 }
 
 fn sync_state_for(sync_states: &[SyncStateRecord], family: DataFamily) -> Option<&SyncStateRecord> {
@@ -1371,6 +1920,11 @@ fn family_has_data(snapshot: &LiveSnapshot, family: DataFamily) -> bool {
             .heartrate_days
             .iter()
             .any(|day| !day.points.is_empty()),
+        DataFamily::Workout => snapshot.record_counts.workouts > 0,
+        DataFamily::EnhancedTag => {
+            snapshot.record_counts.tags + snapshot.record_counts.enhanced_tags > 0
+        }
+        DataFamily::Session => snapshot.record_counts.sessions > 0,
     }
 }
 
@@ -1405,6 +1959,444 @@ fn capability_views(report: &CapabilityReport) -> Vec<CapabilityView> {
         .collect()
 }
 
+fn selected_daily_row<'a>(snapshot: &'a LiveSnapshot, day: &str) -> Option<&'a DailyOverviewRow> {
+    snapshot.daily_history.iter().find(|row| row.day == day)
+}
+
+fn selected_heartrate_day<'a>(snapshot: &'a LiveSnapshot, day: &str) -> Option<&'a HeartRateDay> {
+    snapshot.heartrate_days.iter().find(|row| row.day == day)
+}
+
+fn filtered_events_for_day<'a>(
+    snapshot: &'a LiveSnapshot,
+    day: &str,
+    filters: &OverlayFilterState,
+) -> Vec<&'a ContextEventRecord> {
+    snapshot
+        .context_events
+        .iter()
+        .filter(|event| event_overlaps_day(event, day))
+        .filter(|event| overlay_filter_matches(filters, event.family))
+        .collect()
+}
+
+fn supporting_events_for_explain(
+    snapshot: &LiveSnapshot,
+    day: &str,
+    filters: &OverlayFilterState,
+    selected_event_id: Option<&str>,
+) -> Vec<EventListItem> {
+    let mut seen = BTreeSet::new();
+    let mut items = Vec::new();
+
+    for event in filtered_events_for_day(snapshot, day, filters) {
+        if seen.insert(event.context_event_id.clone()) {
+            items.push(event_list_item(day, event, selected_event_id));
+        }
+    }
+
+    if let Some(previous_day) = previous_daily_day(snapshot, day) {
+        for event in filtered_events_for_day(snapshot, &previous_day, filters) {
+            if (event.context_event_id == selected_event_id.unwrap_or_default()
+                || event_starts_after_hour(event, 18))
+                && seen.insert(event.context_event_id.clone())
+            {
+                items.push(event_list_item(&previous_day, event, selected_event_id));
+            }
+        }
+    }
+
+    items
+}
+
+fn previous_daily_day(snapshot: &LiveSnapshot, day: &str) -> Option<String> {
+    snapshot
+        .daily_history
+        .iter()
+        .filter(|row| row.day.as_str() < day)
+        .map(|row| row.day.clone())
+        .next_back()
+}
+
+fn top_context_events_for_day(snapshot: &LiveSnapshot, day: &str) -> Vec<EventListItem> {
+    filtered_events_for_day(snapshot, day, &OverlayFilterState::all())
+        .into_iter()
+        .map(|event| event_list_item(day, event, None))
+        .collect()
+}
+
+fn overlay_filter_matches(filters: &OverlayFilterState, family: ContextEventFamily) -> bool {
+    match family {
+        ContextEventFamily::Workout => filters.workouts,
+        ContextEventFamily::Tag | ContextEventFamily::EnhancedTag => filters.tags,
+        ContextEventFamily::Session => filters.sessions,
+    }
+}
+
+fn nearest_event_for_point<'a>(
+    snapshot: &'a LiveSnapshot,
+    day: &str,
+    window_hours: u16,
+    point_index: usize,
+    events: &[&'a ContextEventRecord],
+) -> Option<&'a ContextEventRecord> {
+    let visible_points = selected_heartrate_day(snapshot, day)
+        .map(|heartrate_day| visible_timeline(heartrate_day, window_hours).points)
+        .unwrap_or_default();
+    let point = visible_points.get(point_index)?;
+    events
+        .iter()
+        .min_by_key(|event| event_distance_seconds(event, &point.recorded_at))
+        .copied()
+}
+
+fn nearest_point_index_to_event(
+    points: &[TimelinePoint],
+    event: &ContextEventRecord,
+) -> Option<usize> {
+    points
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, point)| event_distance_seconds(event, &point.recorded_at))
+        .map(|(index, _)| index)
+}
+
+fn event_distance_seconds(event: &ContextEventRecord, timestamp: &str) -> i64 {
+    let target = parse_timestamp(timestamp).unwrap_or_else(OffsetDateTime::now_utc);
+    let start = parse_timestamp(&event.start_at).unwrap_or(target);
+    let end = event
+        .end_at
+        .as_deref()
+        .and_then(parse_timestamp)
+        .unwrap_or(start);
+
+    if target >= start && target <= end {
+        0
+    } else if target < start {
+        (start - target).whole_seconds().abs()
+    } else {
+        (target - end).whole_seconds().abs()
+    }
+}
+
+fn overlay_toggle_views(filters: &OverlayFilterState) -> Vec<OverlayToggleView> {
+    vec![
+        OverlayToggleView {
+            label: "Workouts",
+            key_hint: "w",
+            enabled: filters.workouts,
+        },
+        OverlayToggleView {
+            label: "Tags",
+            key_hint: "t",
+            enabled: filters.tags,
+        },
+        OverlayToggleView {
+            label: "Sessions",
+            key_hint: "s",
+            enabled: filters.sessions,
+        },
+    ]
+}
+
+fn build_overlay_groups(
+    day: &str,
+    events: &[&ContextEventRecord],
+    selected_event_id: Option<&str>,
+    window_start_minute: u16,
+    window_end_minute: u16,
+) -> Vec<OverlayFamilyGroup> {
+    let families = [
+        ContextEventFamily::Workout,
+        ContextEventFamily::EnhancedTag,
+        ContextEventFamily::Session,
+    ];
+
+    families
+        .into_iter()
+        .filter_map(|family| {
+            let blocks = events
+                .iter()
+                .filter(|event| {
+                    event.family == family
+                        || (family == ContextEventFamily::EnhancedTag
+                            && event.family == ContextEventFamily::Tag)
+                })
+                .filter_map(|event| {
+                    event_bounds_for_day(event, day).and_then(|(start_minute, end_minute)| {
+                        if end_minute < window_start_minute || start_minute > window_end_minute {
+                            return None;
+                        }
+
+                        Some(OverlayBlock {
+                            id: event.context_event_id.clone(),
+                            start_minute,
+                            end_minute,
+                            title: event.title.clone(),
+                            selected: selected_event_id
+                                .is_some_and(|event_id| event.context_event_id == event_id),
+                        })
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            if blocks.is_empty() {
+                None
+            } else {
+                Some(OverlayFamilyGroup {
+                    family_label: overlay_family_label(family),
+                    glyph: overlay_family_glyph(family),
+                    item_count: blocks.len(),
+                    blocks,
+                })
+            }
+        })
+        .collect()
+}
+
+fn event_list_item(
+    day: &str,
+    event: &ContextEventRecord,
+    selected_event_id: Option<&str>,
+) -> EventListItem {
+    EventListItem {
+        id: event.context_event_id.clone(),
+        family_label: overlay_family_label(event.family),
+        glyph: overlay_family_glyph(event.family),
+        headline: format!("{} {}", format_event_time(day, event), event.title),
+        detail: [
+            event.subtype.clone(),
+            event.intensity.clone(),
+            event.notes.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" | "),
+        selected: selected_event_id.is_some_and(|event_id| event.context_event_id == event_id),
+    }
+}
+
+fn pattern_row_view(summary: &PatternSummaryRecord) -> PatternRowView {
+    PatternRowView {
+        headline: format!(
+            "{}: {}",
+            overlay_family_label(summary.family),
+            prettify_key(&summary.normalized_key)
+        ),
+        detail: format!(
+            "{} {} {} ({}, n={}, confidence={})",
+            relation_phrase(summary.relation_window),
+            effect_direction_phrase(summary.effect_direction),
+            summary.metric.label().to_lowercase(),
+            signed_delta(summary.median_delta),
+            summary.sample_count,
+            data_sufficiency_label(summary.confidence),
+        ),
+    }
+}
+
+fn measurement_lines_for_day(
+    daily: Option<&DailyOverviewRow>,
+    heartrate_day: Option<&HeartRateDay>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(daily) = daily {
+        lines.push(format!(
+            "Sleep {} | Readiness {} | Activity {}",
+            score_text(daily.sleep_score),
+            score_text(daily.readiness_score),
+            score_text(daily.activity_score),
+        ));
+    } else {
+        lines.push("Daily closeout is not available for this day.".to_owned());
+    }
+
+    if let Some(heartrate_day) = heartrate_day {
+        if heartrate_day.points.is_empty() {
+            lines.push("Heartrate samples are missing for this day.".to_owned());
+        } else {
+            let mean = heartrate_day
+                .points
+                .iter()
+                .map(|point| f64::from(point.bpm))
+                .sum::<f64>()
+                / heartrate_day.points.len() as f64;
+            lines.push(format!(
+                "Heartrate mean {} bpm across {} samples.",
+                format_float(mean),
+                heartrate_day.points.len()
+            ));
+        }
+    } else {
+        lines.push("Heartrate samples are missing for this day.".to_owned());
+    }
+
+    lines
+}
+
+fn explain_event_detail_lines(day: &str, event: &ContextEventRecord) -> Vec<String> {
+    let mut lines = vec![
+        format!("{} {}", overlay_family_label(event.family), event.title),
+        format!("When: {}", format_event_time(day, event)),
+    ];
+    if let Some(subtype) = &event.subtype {
+        lines.push(format!("Type: {}", subtype));
+    }
+    if let Some(intensity) = &event.intensity {
+        lines.push(format!("Strength: {}", intensity));
+    }
+    if let Some(notes) = &event.notes {
+        lines.push(format!("Notes: {}", notes));
+    }
+    lines.push(format!("Source id: {}", event.source_id));
+    lines
+}
+
+fn missing_scope_messages(report: &CapabilityReport) -> Vec<String> {
+    [
+        CapabilityKind::Workout,
+        CapabilityKind::EnhancedTag,
+        CapabilityKind::Session,
+    ]
+    .into_iter()
+    .filter(|kind| !report.is_granted(*kind))
+    .map(|kind| {
+        format!(
+            "{} are unavailable because the `{}` scope was not granted.",
+            kind.label(),
+            kind.scope_name()
+        )
+    })
+    .collect()
+}
+
+fn insight_is_thin(insight: &MetricInsight) -> bool {
+    matches!(insight.confidence, InsightConfidence::Thin)
+}
+
+fn available_days(snapshot: &LiveSnapshot) -> Vec<String> {
+    let mut days = BTreeSet::new();
+    for row in &snapshot.daily_history {
+        days.insert(row.day.clone());
+    }
+    for day in &snapshot.heartrate_days {
+        days.insert(day.day.clone());
+    }
+    for event in &snapshot.context_events {
+        days.insert(event.anchor_day.clone());
+    }
+    days.into_iter().collect()
+}
+
+fn event_overlaps_day(event: &ContextEventRecord, day: &str) -> bool {
+    event.anchor_day == day || event_bounds_for_day(event, day).is_some()
+}
+
+fn event_bounds_for_day(event: &ContextEventRecord, day: &str) -> Option<(u16, u16)> {
+    if matches!(event.time_semantics, TimeSemantics::AllDay) {
+        return Some((0, 24 * 60 - 1));
+    }
+
+    let day_start = parse_timestamp(&format!("{day}T00:00:00Z"))?;
+    let day_end = parse_timestamp(&format!("{day}T23:59:59Z"))?;
+    let start = parse_timestamp(&event.start_at).unwrap_or(day_start);
+    let end = event
+        .end_at
+        .as_deref()
+        .and_then(parse_timestamp)
+        .unwrap_or(start);
+
+    if end < day_start || start > day_end {
+        return None;
+    }
+
+    let clipped_start = if start < day_start { day_start } else { start };
+    let clipped_end = if end > day_end { day_end } else { end };
+    Some((
+        minute_of_day(clipped_start),
+        minute_of_day(clipped_end).max(minute_of_day(clipped_start)),
+    ))
+}
+
+fn event_starts_after_hour(event: &ContextEventRecord, hour: u8) -> bool {
+    parse_timestamp(&event.start_at)
+        .map(|timestamp| timestamp.hour() >= hour)
+        .unwrap_or(false)
+}
+
+fn minute_of_day(value: OffsetDateTime) -> u16 {
+    let hour = u16::from(value.hour());
+    let minute = u16::from(value.minute());
+    hour.saturating_mul(60).saturating_add(minute)
+}
+
+fn format_event_time(day: &str, event: &ContextEventRecord) -> String {
+    match event.time_semantics {
+        TimeSemantics::AllDay => "all day".to_owned(),
+        TimeSemantics::Point => event_bounds_for_day(event, day).map_or_else(
+            || trim_timestamp(&event.start_at),
+            |(start, _)| format_minutes(start),
+        ),
+        TimeSemantics::Interval => event_bounds_for_day(event, day).map_or_else(
+            || trim_timestamp(&event.start_at),
+            |(start, end)| format!("{}-{}", format_minutes(start), format_minutes(end)),
+        ),
+    }
+}
+
+fn overlay_family_label(family: ContextEventFamily) -> &'static str {
+    match family {
+        ContextEventFamily::Workout => "Workout",
+        ContextEventFamily::Tag | ContextEventFamily::EnhancedTag => "Tag",
+        ContextEventFamily::Session => "Session",
+    }
+}
+
+fn overlay_family_glyph(family: ContextEventFamily) -> char {
+    match family {
+        ContextEventFamily::Workout => 'W',
+        ContextEventFamily::Tag | ContextEventFamily::EnhancedTag => 'T',
+        ContextEventFamily::Session => 'S',
+    }
+}
+
+fn relation_phrase(window: PatternRelationWindow) -> &'static str {
+    match window {
+        PatternRelationWindow::SameDayActivity => "after days with",
+        PatternRelationWindow::NextDayReadiness => "after days with",
+        PatternRelationWindow::SameNightSleep => "after days with",
+    }
+}
+
+fn effect_direction_phrase(direction: EffectDirection) -> &'static str {
+    match direction {
+        EffectDirection::Higher => "associated with higher",
+        EffectDirection::Lower => "associated with lower",
+        EffectDirection::Flat => "co-occurred with flat",
+    }
+}
+
+fn prettify_key(value: &str) -> String {
+    value.replace("::", " / ").replace('_', " ")
+}
+
+fn data_sufficiency_label(value: crate::store::queries::DataSufficiency) -> &'static str {
+    match value {
+        crate::store::queries::DataSufficiency::Thin => "thin",
+        crate::store::queries::DataSufficiency::Medium => "medium",
+        crate::store::queries::DataSufficiency::Strong => "strong",
+    }
+}
+
+fn signed_delta(value: f64) -> String {
+    format!("{value:+.1}")
+}
+
+fn toggle_state(enabled: bool) -> &'static str {
+    if enabled { "on" } else { "off" }
+}
+
 fn score_card(
     label: &'static str,
     value: Option<u8>,
@@ -1419,18 +2411,12 @@ fn score_card(
     }
 }
 
-fn timeline_point(label: &str, recorded_at: &str, bpm: u16, gap_before: bool) -> TimelinePoint {
-    TimelinePoint {
-        label: label.to_owned(),
-        recorded_at: recorded_at.to_owned(),
-        bpm,
-        minute_of_day: minutes_from_timestamp(recorded_at),
-        gap_before,
-    }
-}
-
 fn ops_item(label: &'static str, value: String) -> OpsItem {
     OpsItem { label, value }
+}
+
+fn score_text(value: Option<u8>) -> String {
+    value.map_or_else(|| "--".to_owned(), |score| score.to_string())
 }
 
 fn auth_state_label(auth_status: &AuthStatus) -> String {
@@ -1469,7 +2455,7 @@ fn freshness_badge(state: &FreshnessState) -> String {
 
 fn format_day_selector(day_labels: &[String], selected_index: usize) -> String {
     if day_labels.is_empty() {
-        return "no heartrate days cached".to_owned();
+        return "no cached days".to_owned();
     }
 
     day_labels
@@ -1492,6 +2478,12 @@ fn format_float(value: f64) -> String {
     } else {
         format!("{value:.1}")
     }
+}
+
+fn format_minutes(value: u16) -> String {
+    let hours = value / 60;
+    let minutes = value % 60;
+    format!("{hours:02}:{minutes:02}")
 }
 
 fn trim_timestamp(value: &str) -> String {
@@ -1541,6 +2533,9 @@ impl DataFamily {
             Self::Personal => "Personal",
             Self::Daily => "Daily",
             Self::Heartrate => "Heartrate",
+            Self::Workout => "Workouts",
+            Self::EnhancedTag => "Enhanced Tags",
+            Self::Session => "Sessions",
         }
     }
 
@@ -1549,6 +2544,9 @@ impl DataFamily {
             Self::Personal => SyncFamily::Personal.sync_key(),
             Self::Daily => SyncFamily::Daily.sync_key(),
             Self::Heartrate => SyncFamily::Heartrate.sync_key(),
+            Self::Workout => SyncFamily::Workout.sync_key(),
+            Self::EnhancedTag => SyncFamily::EnhancedTag.sync_key(),
+            Self::Session => SyncFamily::Session.sync_key(),
         }
     }
 
@@ -1557,6 +2555,9 @@ impl DataFamily {
             Self::Personal => CapabilityKind::Personal,
             Self::Daily => CapabilityKind::Daily,
             Self::Heartrate => CapabilityKind::Heartrate,
+            Self::Workout => CapabilityKind::Workout,
+            Self::EnhancedTag => CapabilityKind::EnhancedTag,
+            Self::Session => CapabilityKind::Session,
         }
     }
 }
@@ -1567,9 +2568,15 @@ impl RefreshPolicySnapshot {
             personal_interval_secs: config.refresh.personal_interval_secs,
             daily_interval_secs: config.refresh.daily_interval_secs,
             heartrate_interval_secs: config.refresh.heartrate_interval_secs,
+            workout_interval_secs: config.refresh.workout_interval_secs,
+            enhanced_tag_interval_secs: config.refresh.enhanced_tag_interval_secs,
+            session_interval_secs: config.refresh.session_interval_secs,
             personal_stale_after_secs: config.refresh.personal_stale_after_secs,
             daily_stale_after_secs: config.refresh.daily_stale_after_secs,
             heartrate_stale_after_secs: config.refresh.heartrate_stale_after_secs,
+            workout_stale_after_secs: config.refresh.workout_stale_after_secs,
+            enhanced_tag_stale_after_secs: config.refresh.enhanced_tag_stale_after_secs,
+            session_stale_after_secs: config.refresh.session_stale_after_secs,
         }
     }
 
@@ -1578,14 +2585,371 @@ impl RefreshPolicySnapshot {
             DataFamily::Personal => self.personal_stale_after_secs,
             DataFamily::Daily => self.daily_stale_after_secs,
             DataFamily::Heartrate => self.heartrate_stale_after_secs,
+            DataFamily::Workout => self.workout_stale_after_secs,
+            DataFamily::EnhancedTag => self.enhanced_tag_stale_after_secs,
+            DataFamily::Session => self.session_stale_after_secs,
         }
     }
 
     fn summary(&self) -> String {
         format!(
-            "personal={}s daily={}s heartrate={}s",
-            self.personal_interval_secs, self.daily_interval_secs, self.heartrate_interval_secs
+            "personal={}s daily={}s heartrate={}s workouts={}s tags={}s sessions={}s",
+            self.personal_interval_secs,
+            self.daily_interval_secs,
+            self.heartrate_interval_secs,
+            self.workout_interval_secs,
+            self.enhanced_tag_interval_secs,
+            self.session_interval_secs
         )
+    }
+}
+
+impl AppModel {
+    fn empty() -> Self {
+        Self {
+            title: "ringmaster.rs".to_owned(),
+            dashboard: DashboardModel {
+                selected_day_label: String::new(),
+                scores: Vec::new(),
+                freshness: String::new(),
+                capabilities: Vec::new(),
+                change_summary: String::new(),
+                highlights: Vec::new(),
+            },
+            timeline: TimelineModel {
+                summary: String::new(),
+                day_selector: String::new(),
+                selected_day_label: String::new(),
+                selected_day_index: 0,
+                heart_rate: Vec::new(),
+                selected_point_index: None,
+                window_hours: 24,
+                window_start_minute: 0,
+                window_end_minute: 24 * 60 - 1,
+                overlay_toggles: Vec::new(),
+                overlay_groups: Vec::new(),
+                events: Vec::new(),
+                selected_event_index: None,
+                selected_detail: String::new(),
+                event_detail_lines: Vec::new(),
+            },
+            trends: TrendsModel {
+                windows: Vec::new(),
+                selected_window_index: 0,
+                metrics: Vec::new(),
+                notes: Vec::new(),
+            },
+            explain: ExplainModel {
+                selected_day_label: String::new(),
+                headline: String::new(),
+                summary_lines: Vec::new(),
+                measurement_lines: Vec::new(),
+                evidence_lines: Vec::new(),
+                caveat_lines: Vec::new(),
+                context_lines: Vec::new(),
+            },
+            patterns: PatternsModel {
+                header: String::new(),
+                filter_summary: String::new(),
+                rows: Vec::new(),
+                notes: Vec::new(),
+                empty_message: String::new(),
+            },
+            ops: OpsModel {
+                mode_label: String::new(),
+                family_statuses: Vec::new(),
+                items: Vec::new(),
+                warnings: Vec::new(),
+            },
+        }
+    }
+}
+
+fn demo_snapshot(config: &Config) -> LiveSnapshot {
+    let capability_report = CapabilityReport::demo();
+    let auth_status = AuthStatus {
+        configured: true,
+        callback_url: config.oura.callback_url(),
+        requested_scopes: config.oura.requested_scopes.clone(),
+        granted_scopes: config.oura.requested_scopes.clone(),
+        missing_fields: Vec::new(),
+        capability_report,
+        auth_timeout_secs: config.oura.auth_timeout_secs,
+        secret_backend: "demo-memory".to_owned(),
+        access_token_stored: true,
+        refresh_token_stored: true,
+        access_token_expires_at: Some("2026-04-08T08:00:00Z".to_owned()),
+        last_authenticated_at: Some("2026-04-08T03:00:00Z".to_owned()),
+        last_refresh_at: Some("2026-04-08T03:30:00Z".to_owned()),
+        account_id: Some("demo-user".to_owned()),
+        account_email: Some("demo@example.com".to_owned()),
+        last_error: None,
+    };
+
+    let daily_history = vec![
+        DailyOverviewRow {
+            day: "2026-04-05".to_owned(),
+            sleep_score: Some(82),
+            readiness_score: Some(80),
+            activity_score: Some(72),
+            updated_at: "2026-04-05T10:00:00Z".to_owned(),
+        },
+        DailyOverviewRow {
+            day: "2026-04-06".to_owned(),
+            sleep_score: Some(84),
+            readiness_score: Some(81),
+            activity_score: Some(74),
+            updated_at: "2026-04-06T10:00:00Z".to_owned(),
+        },
+        DailyOverviewRow {
+            day: "2026-04-07".to_owned(),
+            sleep_score: Some(80),
+            readiness_score: Some(78),
+            activity_score: Some(75),
+            updated_at: "2026-04-07T10:00:00Z".to_owned(),
+        },
+        DailyOverviewRow {
+            day: "2026-04-08".to_owned(),
+            sleep_score: Some(76),
+            readiness_score: Some(74),
+            activity_score: Some(88),
+            updated_at: "2026-04-08T10:00:00Z".to_owned(),
+        },
+    ];
+    let heartrate_days = vec![
+        HeartRateDay {
+            day: "2026-04-07".to_owned(),
+            points: vec![
+                HeartRatePoint {
+                    recorded_at: "2026-04-07T18:30:00Z".to_owned(),
+                    bpm: 92,
+                    source_day: Some("2026-04-07".to_owned()),
+                },
+                HeartRatePoint {
+                    recorded_at: "2026-04-07T19:00:00Z".to_owned(),
+                    bpm: 118,
+                    source_day: Some("2026-04-07".to_owned()),
+                },
+                HeartRatePoint {
+                    recorded_at: "2026-04-07T19:30:00Z".to_owned(),
+                    bpm: 84,
+                    source_day: Some("2026-04-07".to_owned()),
+                },
+            ],
+        },
+        HeartRateDay {
+            day: "2026-04-08".to_owned(),
+            points: vec![
+                HeartRatePoint {
+                    recorded_at: "2026-04-08T06:00:00Z".to_owned(),
+                    bpm: 58,
+                    source_day: Some("2026-04-08".to_owned()),
+                },
+                HeartRatePoint {
+                    recorded_at: "2026-04-08T06:30:00Z".to_owned(),
+                    bpm: 57,
+                    source_day: Some("2026-04-08".to_owned()),
+                },
+                HeartRatePoint {
+                    recorded_at: "2026-04-08T07:00:00Z".to_owned(),
+                    bpm: 59,
+                    source_day: Some("2026-04-08".to_owned()),
+                },
+                HeartRatePoint {
+                    recorded_at: "2026-04-08T18:30:00Z".to_owned(),
+                    bpm: 96,
+                    source_day: Some("2026-04-08".to_owned()),
+                },
+                HeartRatePoint {
+                    recorded_at: "2026-04-08T19:00:00Z".to_owned(),
+                    bpm: 122,
+                    source_day: Some("2026-04-08".to_owned()),
+                },
+                HeartRatePoint {
+                    recorded_at: "2026-04-08T19:30:00Z".to_owned(),
+                    bpm: 88,
+                    source_day: Some("2026-04-08".to_owned()),
+                },
+            ],
+        },
+    ];
+    let heartrate_daily_averages = vec![
+        MetricPoint {
+            day: "2026-04-05".to_owned(),
+            value: 63.0,
+        },
+        MetricPoint {
+            day: "2026-04-06".to_owned(),
+            value: 64.0,
+        },
+        MetricPoint {
+            day: "2026-04-07".to_owned(),
+            value: 68.0,
+        },
+        MetricPoint {
+            day: "2026-04-08".to_owned(),
+            value: 72.0,
+        },
+    ];
+    let context_events = vec![
+        ContextEventRecord {
+            context_event_id: "workout:demo-run".to_owned(),
+            family: ContextEventFamily::Workout,
+            source_id: "demo-run".to_owned(),
+            anchor_day: "2026-04-08".to_owned(),
+            start_at: "2026-04-08T18:20:00Z".to_owned(),
+            end_at: Some("2026-04-08T19:05:00Z".to_owned()),
+            time_semantics: TimeSemantics::Interval,
+            title: "Evening run".to_owned(),
+            subtype: Some("running".to_owned()),
+            notes: Some("Moderate effort".to_owned()),
+            intensity: Some("moderate".to_owned()),
+            metadata_json: "{}".to_owned(),
+            updated_at: "2026-04-08T20:00:00Z".to_owned(),
+        },
+        ContextEventRecord {
+            context_event_id: "enhanced_tag:demo-caffeine".to_owned(),
+            family: ContextEventFamily::EnhancedTag,
+            source_id: "demo-caffeine".to_owned(),
+            anchor_day: "2026-04-08".to_owned(),
+            start_at: "2026-04-08T15:00:00Z".to_owned(),
+            end_at: None,
+            time_semantics: TimeSemantics::Point,
+            title: "Coffee".to_owned(),
+            subtype: Some("caffeine".to_owned()),
+            notes: Some("Later than usual".to_owned()),
+            intensity: Some("medium".to_owned()),
+            metadata_json: "{}".to_owned(),
+            updated_at: "2026-04-08T15:10:00Z".to_owned(),
+        },
+        ContextEventRecord {
+            context_event_id: "session:demo-breathwork".to_owned(),
+            family: ContextEventFamily::Session,
+            source_id: "demo-breathwork".to_owned(),
+            anchor_day: "2026-04-08".to_owned(),
+            start_at: "2026-04-08T21:15:00Z".to_owned(),
+            end_at: Some("2026-04-08T21:35:00Z".to_owned()),
+            time_semantics: TimeSemantics::Interval,
+            title: "Breathwork".to_owned(),
+            subtype: Some("guided".to_owned()),
+            notes: Some("Short guided session".to_owned()),
+            intensity: Some("light".to_owned()),
+            metadata_json: "{}".to_owned(),
+            updated_at: "2026-04-08T21:40:00Z".to_owned(),
+        },
+    ];
+    let pattern_summaries = vec![
+        PatternSummaryRecord {
+            summary_id: "pattern:run:readiness".to_owned(),
+            family: ContextEventFamily::Workout,
+            normalized_key: "running::moderate".to_owned(),
+            relation_window: PatternRelationWindow::NextDayReadiness,
+            metric: PatternMetric::ReadinessScore,
+            sample_count: 6,
+            median_delta: -4.0,
+            effect_direction: EffectDirection::Lower,
+            confidence: crate::store::queries::DataSufficiency::Medium,
+            metadata_json: "{}".to_owned(),
+            updated_at: "2026-04-08T22:00:00Z".to_owned(),
+        },
+        PatternSummaryRecord {
+            summary_id: "pattern:caffeine:sleep".to_owned(),
+            family: ContextEventFamily::EnhancedTag,
+            normalized_key: "caffeine".to_owned(),
+            relation_window: PatternRelationWindow::SameNightSleep,
+            metric: PatternMetric::SleepScore,
+            sample_count: 4,
+            median_delta: -3.0,
+            effect_direction: EffectDirection::Lower,
+            confidence: crate::store::queries::DataSufficiency::Thin,
+            metadata_json: "{}".to_owned(),
+            updated_at: "2026-04-08T22:00:00Z".to_owned(),
+        },
+    ];
+
+    LiveSnapshot {
+        captured_at: "2026-04-08T22:30:00Z".to_owned(),
+        refresh_policy: RefreshPolicySnapshot::from_config(config),
+        auth_status,
+        personal_info: Some(PersonalInfoRecord {
+            profile_id: "demo-user".to_owned(),
+            age: Some(34),
+            weight: Some(72.4),
+            height: Some(178.0),
+            biological_sex: Some("male".to_owned()),
+            email: Some("demo@example.com".to_owned()),
+            raw_cache_key: Some("demo".to_owned()),
+            updated_at: "2026-04-08T22:00:00Z".to_owned(),
+        }),
+        daily_history,
+        heartrate_days,
+        heartrate_daily_averages,
+        context_events,
+        pattern_summaries,
+        sync_states: vec![
+            demo_sync_state(
+                SyncFamily::Personal,
+                "Personal info is current.",
+                SyncRunStatus::Success,
+            ),
+            demo_sync_state(
+                SyncFamily::Daily,
+                "Daily closeout landed for the selected day.",
+                SyncRunStatus::Success,
+            ),
+            demo_sync_state(
+                SyncFamily::Heartrate,
+                "Heartrate samples are current.",
+                SyncRunStatus::Success,
+            ),
+            demo_sync_state(
+                SyncFamily::Workout,
+                "Workouts are current.",
+                SyncRunStatus::Success,
+            ),
+            demo_sync_state(
+                SyncFamily::EnhancedTag,
+                "Enhanced tags are current.",
+                SyncRunStatus::Success,
+            ),
+            demo_sync_state(
+                SyncFamily::Session,
+                "Sessions are current.",
+                SyncRunStatus::Success,
+            ),
+        ],
+        record_counts: RecordCounts {
+            raw_payloads: 12,
+            personal_info: 1,
+            daily_sleep: 4,
+            daily_readiness: 4,
+            daily_activity: 4,
+            heartrate_samples: 9,
+            workouts: 1,
+            tags: 0,
+            enhanced_tags: 1,
+            sessions: 1,
+            derived_context_events: 3,
+            derived_pattern_summaries: 2,
+        },
+        schema_version: 6,
+        database_path: config.paths.database_file.display().to_string(),
+        config_path: config.paths.config_file.display().to_string(),
+    }
+}
+
+fn demo_sync_state(family: SyncFamily, message: &str, status: SyncRunStatus) -> SyncStateRecord {
+    SyncStateRecord {
+        sync_key: family.sync_key().to_owned(),
+        status,
+        cursor: None,
+        last_attempted_at: "2026-04-08T22:00:00Z".to_owned(),
+        last_completed_at: Some("2026-04-08T22:01:00Z".to_owned()),
+        message: Some(message.to_owned()),
+        granted_scopes: vec![family.capability_kind().scope_name().to_owned()],
+        last_error: None,
+        failure_count: 0,
+        next_attempt_after: None,
     }
 }
 
@@ -1593,12 +2957,16 @@ impl RefreshPolicySnapshot {
 #[allow(clippy::panic)]
 mod tests {
     use super::{
-        AppState, HeartRateDay, LiveSnapshot, RefreshPolicySnapshot, RunMode, Screen,
-        TrendWindowKind, build_live_model, newest_timeline_day_index,
+        AppState, DataFamily, HeartRateDay, LiveModelOptions, LiveSnapshot, OverlayFilterState,
+        PatternMetricFilter, RefreshPolicySnapshot, RunMode, Screen, TrendWindowKind,
+        build_live_model, newest_day_index,
     };
     use crate::action::Action;
+    use crate::insights::MetricPoint;
     use crate::oura::models::{AuthStatus, CapabilityReport};
-    use crate::store::queries::{HeartRatePoint, RecordCounts};
+    use crate::store::queries::{
+        ContextEventFamily, ContextEventRecord, HeartRatePoint, RecordCounts, TimeSemantics,
+    };
 
     fn make_snapshot(days: &[&str]) -> LiveSnapshot {
         let heartrate_days = days
@@ -1620,9 +2988,15 @@ mod tests {
                 personal_interval_secs: 3600,
                 daily_interval_secs: 300,
                 heartrate_interval_secs: 60,
+                workout_interval_secs: 600,
+                enhanced_tag_interval_secs: 300,
+                session_interval_secs: 300,
                 personal_stale_after_secs: 72 * 60 * 60,
                 daily_stale_after_secs: 12 * 60 * 60,
                 heartrate_stale_after_secs: 15 * 60,
+                workout_stale_after_secs: 24 * 60 * 60,
+                enhanced_tag_stale_after_secs: 12 * 60 * 60,
+                session_stale_after_secs: 12 * 60 * 60,
             },
             auth_status: AuthStatus {
                 configured: true,
@@ -1631,11 +3005,17 @@ mod tests {
                     "personal".to_owned(),
                     "daily".to_owned(),
                     "heartrate".to_owned(),
+                    "workout".to_owned(),
+                    "enhanced_tag".to_owned(),
+                    "session".to_owned(),
                 ],
                 granted_scopes: vec![
                     "personal".to_owned(),
                     "daily".to_owned(),
                     "heartrate".to_owned(),
+                    "workout".to_owned(),
+                    "enhanced_tag".to_owned(),
+                    "session".to_owned(),
                 ],
                 missing_fields: Vec::new(),
                 capability_report: CapabilityReport::demo(),
@@ -1651,97 +3031,140 @@ mod tests {
                 last_error: None,
             },
             personal_info: None,
-            daily_history: Vec::new(),
+            daily_history: days
+                .iter()
+                .map(|day| crate::store::queries::DailyOverviewRow {
+                    day: (*day).to_owned(),
+                    sleep_score: Some(80),
+                    readiness_score: Some(80),
+                    activity_score: Some(70),
+                    updated_at: "2026-04-08T12:00:00Z".to_owned(),
+                })
+                .collect(),
             heartrate_days,
-            heartrate_daily_averages: Vec::new(),
+            heartrate_daily_averages: days
+                .iter()
+                .map(|day| MetricPoint {
+                    day: (*day).to_owned(),
+                    value: 65.0,
+                })
+                .collect(),
+            context_events: vec![ContextEventRecord {
+                context_event_id: "workout:test".to_owned(),
+                family: ContextEventFamily::Workout,
+                source_id: "test".to_owned(),
+                anchor_day: "2026-04-08".to_owned(),
+                start_at: "2026-04-08T06:00:00Z".to_owned(),
+                end_at: Some("2026-04-08T06:30:00Z".to_owned()),
+                time_semantics: TimeSemantics::Interval,
+                title: "Workout".to_owned(),
+                subtype: Some("running".to_owned()),
+                notes: None,
+                intensity: Some("moderate".to_owned()),
+                metadata_json: "{}".to_owned(),
+                updated_at: "2026-04-08T06:40:00Z".to_owned(),
+            }],
+            pattern_summaries: Vec::new(),
             sync_states: Vec::new(),
-            record_counts: RecordCounts::default(),
-            schema_version: 4,
+            record_counts: RecordCounts {
+                workouts: 1,
+                ..RecordCounts::default()
+            },
+            schema_version: 6,
             database_path: ":memory:".to_owned(),
             config_path: "config.toml".to_owned(),
         }
     }
 
     fn make_live_app(snapshot: LiveSnapshot) -> AppState {
-        let timeline_selected_day = newest_timeline_day_index(&snapshot);
-        let model = build_live_model(
-            &snapshot,
-            timeline_selected_day,
-            0,
-            24,
-            TrendWindowKind::Days7,
-            false,
-        );
-
-        AppState {
+        let selected_day_index = newest_day_index(&snapshot);
+        let mut app = AppState {
             mode: RunMode::Live,
             active_screen: Screen::Timeline,
-            model,
+            model: super::AppModel::empty(),
             status_line: String::new(),
             tick_count: 0,
             should_quit: false,
             refresh_in_flight: false,
             live_snapshot: Some(snapshot),
-            timeline_selected_day,
-            timeline_selected_point: 0,
+            selected_day_index,
+            selected_timeline_point: 0,
             timeline_window_hours: 24,
             trends_window: TrendWindowKind::Days7,
-        }
+            selected_event_id: None,
+            overlay_filters: OverlayFilterState::all(),
+            pattern_metric_filter: PatternMetricFilter::All,
+        };
+        app.select_default_event_for_selected_day();
+        app.rebuild_live_model();
+        app
     }
 
     #[test]
-    fn live_timeline_defaults_to_newest_heartrate_day() {
+    fn live_selection_defaults_to_newest_available_day() {
         let snapshot = make_snapshot(&["2026-04-06", "2026-04-07", "2026-04-08"]);
         let app = make_live_app(snapshot);
 
-        assert_eq!(app.timeline_selected_day, 2);
-        assert_eq!(app.model.timeline.selected_day_index, 2);
-        assert_eq!(app.model.timeline.day_labels[2], "2026-04-08");
+        assert_eq!(app.selected_day_index, 2);
+        assert_eq!(app.model.timeline.selected_day_label, "2026-04-08");
     }
 
     #[test]
-    fn older_and_newer_timeline_actions_follow_day_order() {
+    fn day_actions_update_shared_selected_day() {
         let snapshot = make_snapshot(&["2026-04-06", "2026-04-07", "2026-04-08"]);
         let mut app = make_live_app(snapshot);
 
-        app.handle(Action::OlderTimelineDay);
-        assert_eq!(app.timeline_selected_day, 1);
-        assert_eq!(app.model.timeline.selected_day_index, 1);
-        assert_eq!(app.model.timeline.day_labels[1], "2026-04-07");
-        assert_eq!(app.status_line, "Showing an older heartrate day.");
+        app.handle(Action::PreviousDay);
+        assert_eq!(app.model.timeline.selected_day_label, "2026-04-07");
+        assert_eq!(app.model.dashboard.selected_day_label, "2026-04-07");
+        assert_eq!(app.model.explain.selected_day_label, "2026-04-07");
 
-        app.handle(Action::NewerTimelineDay);
-        assert_eq!(app.timeline_selected_day, 2);
-        assert_eq!(app.model.timeline.selected_day_index, 2);
-        assert_eq!(app.model.timeline.day_labels[2], "2026-04-08");
-        assert_eq!(app.status_line, "Showing a newer heartrate day.");
+        app.handle(Action::NextDay);
+        assert_eq!(app.model.timeline.selected_day_label, "2026-04-08");
     }
 
     #[test]
-    fn latest_day_delay_check_uses_reference_day_value() {
-        let mut snapshot = make_snapshot(&["2026-04-06"]);
-        snapshot.daily_history = vec![crate::store::queries::DailyOverviewRow {
-            day: "2026-04-08".to_owned(),
-            sleep_score: None,
-            readiness_score: None,
-            activity_score: None,
-            updated_at: "2026-04-08T12:00:00Z".to_owned(),
-        }];
-        assert!(!super::latest_day_is_before_reference_day(
-            &snapshot,
-            "2026-04-08".to_owned()
-        ));
+    fn timeline_cursor_keeps_context_event_selected() {
+        let snapshot = make_snapshot(&["2026-04-08"]);
+        let mut app = make_live_app(snapshot);
 
-        snapshot.daily_history = vec![crate::store::queries::DailyOverviewRow {
-            day: "2026-04-07".to_owned(),
-            sleep_score: None,
-            readiness_score: None,
-            activity_score: None,
-            updated_at: "2026-04-08T12:00:00Z".to_owned(),
-        }];
-        assert!(super::latest_day_is_before_reference_day(
+        app.handle(Action::NextTimelinePoint);
+        assert_eq!(app.model.timeline.selected_event_index, Some(0));
+    }
+
+    #[test]
+    fn tag_filter_hides_non_matching_events() {
+        let snapshot = make_snapshot(&["2026-04-08"]);
+        let mut app = make_live_app(snapshot);
+
+        app.handle(Action::ToggleWorkoutFilter);
+        assert!(app.model.timeline.events.is_empty());
+        assert_eq!(app.model.timeline.selected_event_index, None);
+    }
+
+    #[test]
+    fn freshness_knows_context_families() {
+        let snapshot = make_snapshot(&["2026-04-08"]);
+        let freshness = super::family_freshness(&snapshot, DataFamily::Workout);
+        assert_eq!(freshness.summary, "never synced");
+    }
+
+    #[test]
+    fn build_live_model_exposes_patterns_screen() {
+        let snapshot = make_snapshot(&["2026-04-08"]);
+        let model = build_live_model(
             &snapshot,
-            "2026-04-08".to_owned()
-        ));
+            &LiveModelOptions {
+                selected_day_index: 0,
+                selected_point_index: 0,
+                selected_event_id: None,
+                overlay_filters: OverlayFilterState::all(),
+                window_hours: 24,
+                trends_window: TrendWindowKind::Days7,
+                pattern_metric_filter: PatternMetricFilter::All,
+                refresh_in_flight: false,
+            },
+        );
+        assert!(model.patterns.empty_message.contains("Not enough data yet"));
     }
 }

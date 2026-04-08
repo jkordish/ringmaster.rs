@@ -189,6 +189,88 @@ pub const MIGRATIONS: &[Migration] = &[
         ALTER TABLE sync_state ADD COLUMN next_attempt_after TEXT;
         ",
     },
+    Migration {
+        version: 5,
+        name: "phase3_context_family_expansion",
+        sql: r"
+        ALTER TABLE workouts ADD COLUMN day TEXT;
+        ALTER TABLE workouts ADD COLUMN timezone TEXT;
+        ALTER TABLE workouts ADD COLUMN activity TEXT;
+        ALTER TABLE workouts ADD COLUMN intensity TEXT;
+        ALTER TABLE workouts ADD COLUMN title TEXT;
+        ALTER TABLE workouts ADD COLUMN notes TEXT;
+        ALTER TABLE workouts ADD COLUMN source TEXT;
+
+        ALTER TABLE enhanced_tags ADD COLUMN started_at TEXT;
+        ALTER TABLE enhanced_tags ADD COLUMN ended_at TEXT;
+        ALTER TABLE enhanced_tags ADD COLUMN subtype TEXT;
+        ALTER TABLE enhanced_tags ADD COLUMN comment TEXT;
+        ALTER TABLE enhanced_tags ADD COLUMN intensity TEXT;
+
+        ALTER TABLE sessions ADD COLUMN day TEXT;
+        ALTER TABLE sessions ADD COLUMN state TEXT;
+        ALTER TABLE sessions ADD COLUMN score INTEGER;
+        ALTER TABLE sessions ADD COLUMN title TEXT;
+
+        CREATE INDEX IF NOT EXISTS idx_workouts_day
+            ON workouts(day);
+        CREATE INDEX IF NOT EXISTS idx_workouts_day_started_at
+            ON workouts(day, started_at);
+        CREATE INDEX IF NOT EXISTS idx_enhanced_tags_day_started_at
+            ON enhanced_tags(day, started_at);
+        CREATE INDEX IF NOT EXISTS idx_sessions_day
+            ON sessions(day);
+        CREATE INDEX IF NOT EXISTS idx_sessions_day_started_at
+            ON sessions(day, started_at);
+        ",
+    },
+    Migration {
+        version: 6,
+        name: "phase3_derived_context_and_patterns",
+        sql: r"
+        CREATE TABLE IF NOT EXISTS derived_context_events (
+            context_event_id TEXT PRIMARY KEY,
+            family TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            anchor_day TEXT NOT NULL,
+            start_at TEXT NOT NULL,
+            end_at TEXT,
+            time_semantics TEXT NOT NULL,
+            title TEXT NOT NULL,
+            subtype TEXT,
+            notes TEXT,
+            intensity TEXT,
+            metadata_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS derived_pattern_summaries (
+            summary_id TEXT PRIMARY KEY,
+            family TEXT NOT NULL,
+            normalized_key TEXT NOT NULL,
+            relation_window TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            sample_count INTEGER NOT NULL,
+            median_delta REAL NOT NULL,
+            effect_direction TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_derived_context_events_day_family_start
+            ON derived_context_events(anchor_day, family, start_at);
+        CREATE INDEX IF NOT EXISTS idx_derived_context_events_family_subtype_day
+            ON derived_context_events(family, subtype, anchor_day);
+        CREATE INDEX IF NOT EXISTS idx_derived_context_events_start_end
+            ON derived_context_events(start_at, end_at);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_derived_pattern_unique
+            ON derived_pattern_summaries(family, normalized_key, relation_window, metric);
+        CREATE INDEX IF NOT EXISTS idx_derived_pattern_metric_confidence
+            ON derived_pattern_summaries(metric, confidence, sample_count);
+        ",
+    },
 ];
 
 pub fn run_migrations(connection: &mut rusqlite::Connection) -> Result<MigrationReport> {
@@ -268,6 +350,6 @@ mod tests {
             .unwrap_or_else(|error| panic!("migrations should succeed: {error}"));
 
         assert_eq!(report.current_version, current_version());
-        assert_eq!(report.applied_versions, vec![1, 2, 3, 4]);
+        assert_eq!(report.applied_versions, vec![1, 2, 3, 4, 5, 6]);
     }
 }

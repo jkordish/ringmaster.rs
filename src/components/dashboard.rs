@@ -11,11 +11,16 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &DashboardModel) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(3),
             Constraint::Length(5),
             Constraint::Length(7),
             Constraint::Min(8),
         ])
         .split(area);
+
+    let header = Paragraph::new(format!("Selected day: {}", model.selected_day_label))
+        .block(Block::default().title("Dashboard").borders(Borders::ALL));
+    frame.render_widget(header, layout[0]);
 
     let score_columns = Layout::default()
         .direction(Direction::Horizontal)
@@ -24,7 +29,7 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &DashboardModel) {
             Constraint::Percentage(34),
             Constraint::Percentage(33),
         ])
-        .split(layout[0]);
+        .split(layout[1]);
 
     for (index, card) in model.scores.iter().enumerate() {
         let text = format!("{}\n{}\n{}", card.value, card.badge, card.subtitle);
@@ -37,7 +42,7 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &DashboardModel) {
     let middle = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .split(layout[1]);
+        .split(layout[2]);
 
     let freshness = Paragraph::new(model.freshness.clone())
         .block(Block::default().title("Freshness").borders(Borders::ALL));
@@ -68,5 +73,5 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &DashboardModel) {
 
     let detail_list =
         List::new(details).block(Block::default().title("What Changed").borders(Borders::ALL));
-    frame.render_widget(detail_list, layout[2]);
+    frame.render_widget(detail_list, layout[3]);
 }

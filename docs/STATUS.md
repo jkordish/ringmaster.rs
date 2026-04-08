@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This file is the current truth for the repository during the phase-2 MVP live-dashboard-and-refresh pass. It records what now works, what drift was removed, and what remains intentionally deferred.
+This file is the current truth for the repository during the phase-3 context-overlays-and-explainability pass. It records what now works, what drift was removed, and what remains intentionally deferred.
 
 ## Baseline audit at start of this pass
 
@@ -12,7 +12,7 @@ Verified on `2026-04-08` before implementation:
 - `cargo clippy --all-targets --all-features -- -D warnings` passed
 - `cargo test --all` passed
 - `cargo run -- doctor` passed
-- `cargo run -- sync once --dry-run --fixture-dir tests/fixtures/phase1` passed
+- `cargo run -- sync watch --demo --max-iterations 1` passed
 
 Repository strengths at baseline:
 
@@ -21,37 +21,63 @@ Repository strengths at baseline:
 - SQLite-backed typed store/query seams
 - honest live empty/error states
 - local-first poll architecture
+- background refresh already reused the same scheduler core as `sync watch`
 
 Repository gaps at baseline:
 
-- the live TUI still felt like a foundation rather than a product
-- no long-running refresh scheduler
-- `r` in the live TUI was not performing a real refresh
-- freshness and capability semantics were still too shallow for daily use
-- trends and "what changed" were still closer to placeholders than a genuine insight layer
+- context-family placeholders existed, but the product still centered on metrics alone
+- Timeline overlays were placeholder text rather than a real read model
+- there was no selected-day story screen
+- no deterministic pattern surfacing for workouts, tags, or sessions
+- no rebuild command for derived overlays and analytics
 
 ## Current implemented truth
 
 The repository now includes:
 
-- a useful Dashboard backed by persisted daily rows, freshness badges, capability badges, and derived baseline summaries
-- a Timeline screen with date selection, intraday heartrate charting, gap-aware rendering, selected-point details, and a source legend
-- a Trends screen with 7d / 30d / 90d windows, daily metric sparklines, baseline-aware summaries, and thin-history confidence notes
-- an Ops screen that makes trust explicit: auth state, granted scopes, token metadata, per-family freshness, paths, and active refresh policy
-- a reusable scheduler in `src/refresh.rs`
-- live background refresh while the TUI is open, without putting sync/auth/store writes on the render path
-- `sync watch`, which reuses the same scheduler and sync engine as the live TUI
-- durable sync-state backoff fields in SQLite (`failure_count`, `next_attempt_after`)
-- deterministic insight helpers for 7d / 30d baselines, day-over-day deltas, and deviation scoring
-- fixture-backed scheduler coverage and Ratatui screen coverage for key empty/stale/missing-scope states
+- real sync, persistence, and fixture coverage for `workouts`, `enhanced_tags`, and `sessions`
+- family-aware scheduler coverage and freshness semantics for all six supported families
+- persisted `derived_context_events` and `derived_pattern_summaries` tables
+- a deterministic `derive rebuild` command with `--demo` and `--fixture-dir` support
+- a shared selected-day concept across Dashboard, Timeline, and Explain
+- a shared selected-event concept across Timeline and Explain
+- a Timeline screen with gap-aware heartrate rendering, real overlay lanes, family toggles, selected-event details, and a selected-day event list
+- an Explain screen with selected-day summary lines, measurement context, evidence bullets, context entries, and explicit caveats
+- a Patterns screen with descriptive association rows, sample counts, magnitude, and sufficiency buckets
+- clear missing-scope and insufficient-history messaging instead of silent emptiness
+- deterministic wording rules that avoid causal claims and medical framing
+
+## Supported data families
+
+Live sync and persistence currently cover:
+
+- `personal`
+- `daily`
+- `heartrate`
+- `workout`
+- `enhanced_tag`
+- `session`
+
+Legacy `tags` remain part of the canonical context-event read model when present in SQLite, but the product is intentionally centered on `enhanced_tag`.
+
+## Explainability and analytics truth
+
+Explain and Patterns are intentionally restrained:
+
+- Explain summarizes what was measured, what context events occurred, and what evidence exists around the selected day
+- Patterns surface descriptive associations only after a minimum sample threshold
+- the UI always shows `n`
+- thin history is called out explicitly
+- wording uses “associated with”, “co-occurred with”, and “after days with”
+- the product intentionally avoids causal claims, medical advice, and significance theater
 
 ## Milestone tracker
 
-- [x] Milestone 1: add the phase-2 plan, migration v4, richer store queries, explicit freshness/availability domain types, and a deterministic insight engine
-- [x] Milestone 2: refactor sync into family-selective execution and add the reusable scheduler, `sync watch`, refresh config, and expanded doctor output
-- [x] Milestone 3: wire background refresh and snapshot reload into the TUI and productize Dashboard, Timeline, Trends, and Ops
-- [x] Milestone 4: add MVP-focused tests and align user-facing docs with the implemented behavior
-- [x] Milestone 5: run final verification and repair any failures before closeout
+- [x] Milestone 1: add the phase-3 plan, schema/config/scheduler foundations, and real sync/store coverage for `workouts`, `enhanced_tags`, and `sessions`
+- [x] Milestone 2: add persisted derivation for canonical context events and pattern summaries plus the `derive rebuild` CLI path
+- [x] Milestone 3: unify selected-day and selected-event state across the TUI, upgrade Timeline with overlays and drill-down, and add Explain + Patterns screens
+- [x] Milestone 4: add meaningful migration/sync/derivation/analytics/UI tests and align docs with the implemented behavior
+- [x] Milestone 5: run the final verification sweep and repair any failures before closeout
 
 ## Verification completed in this pass
 
@@ -61,11 +87,28 @@ Verified on `2026-04-08` after implementation:
 - `cargo clippy --all-targets --all-features -- -D warnings` passed
 - `cargo test --all` passed
 - `cargo run -- doctor` passed
+- `cargo run -- sync once --dry-run --fixture-dir tests/fixtures/phase3` passed
+- `cargo run -- derive rebuild --demo` passed
+- `cargo run -- demo` passed
 - `cargo run -- sync watch --demo --max-iterations 1` passed
+
+## Tests now in place
+
+The phase-3 pass now includes meaningful coverage for:
+
+- migration application and record-count expectations
+- fixture-backed sync for workouts, enhanced tags, and sessions
+- canonical context-event derivation and persisted analytics rebuilds
+- selected-day and selected-event app-state behavior
+- timeline family filters and event selection
+- Explain rendering
+- Patterns insufficient-data rendering
+- non-interactive TUI smoke rendering
 
 ## Known intentional deferrals
 
 - webhook receiver and webhook subscription lifecycle
-- broader Oura data surface outside the current personal/daily/heartrate MVP slice
+- broader Oura data surface outside the current personal/daily/heartrate/context-family slice
+- exports, sharing, and reporting flows
 - packaging, installers, and release automation
-- richer cross-family correlation and narrative interpretation layers
+- generalized machine learning or medical interpretation
