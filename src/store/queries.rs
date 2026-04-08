@@ -27,6 +27,8 @@ pub struct SyncStateRecord {
     pub message: Option<String>,
     pub granted_scopes: Vec<String>,
     pub last_error: Option<OuraProblem>,
+    pub failure_count: u32,
+    pub next_attempt_after: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,7 +198,7 @@ impl<'connection> MetadataStore<'connection> {
                 |row| row.get::<_, u32>(0),
             )
             .optional()?
-            .unwrap_or(migrations::current_version());
+            .unwrap_or_else(migrations::current_version);
 
         Ok(version)
     }
@@ -238,8 +240,10 @@ impl<'connection> SyncStateStore<'connection> {
                 last_completed_at,
                 message,
                 granted_scopes,
-                last_error_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                last_error_json,
+                failure_count,
+                next_attempt_after
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ON CONFLICT(sync_key) DO UPDATE SET
                 status = excluded.status,
                 cursor = excluded.cursor,
@@ -247,7 +251,9 @@ impl<'connection> SyncStateStore<'connection> {
                 last_completed_at = excluded.last_completed_at,
                 message = excluded.message,
                 granted_scopes = excluded.granted_scopes,
-                last_error_json = excluded.last_error_json",
+                last_error_json = excluded.last_error_json,
+                failure_count = excluded.failure_count,
+                next_attempt_after = excluded.next_attempt_after",
             params![
                 record.sync_key,
                 record.status.as_str(),
@@ -257,6 +263,8 @@ impl<'connection> SyncStateStore<'connection> {
                 record.message,
                 join_scopes(&record.granted_scopes),
                 encode_problem(&record.last_error)?,
+                i64::from(record.failure_count),
+                record.next_attempt_after,
             ],
         )?;
 
@@ -274,7 +282,9 @@ impl<'connection> SyncStateStore<'connection> {
                     last_completed_at,
                     message,
                     granted_scopes,
-                    last_error_json
+                    last_error_json,
+                    failure_count,
+                    next_attempt_after
                  FROM sync_state
                  ORDER BY last_attempted_at DESC
                  LIMIT 1",
@@ -295,7 +305,9 @@ impl<'connection> SyncStateStore<'connection> {
                 last_completed_at,
                 message,
                 granted_scopes,
-                last_error_json
+                last_error_json,
+                failure_count,
+                next_attempt_after
              FROM sync_state
              ORDER BY sync_key ASC",
         )?;
@@ -306,6 +318,29 @@ impl<'connection> SyncStateStore<'connection> {
         }
 
         Ok(records)
+    }
+
+    pub fn get(&self, sync_key: &str) -> Result<Option<SyncStateRecord>> {
+        self.connection
+            .query_row(
+                "SELECT
+                    sync_key,
+                    status,
+                    cursor,
+                    last_attempted_at,
+                    last_completed_at,
+                    message,
+                    granted_scopes,
+                    last_error_json,
+                    failure_count,
+                    next_attempt_after
+                 FROM sync_state
+                 WHERE sync_key = ?1",
+                params![sync_key],
+                read_sync_state_row,
+            )
+            .optional()
+            .map_err(Into::into)
     }
 }
 
@@ -577,7 +612,7 @@ impl<'connection> ViewStore<'connection> {
         let row = self
             .connection
             .query_row(
-                r#"
+                r"
                 WITH latest_day AS (
                     SELECT MAX(day) AS day FROM (
                         SELECT day FROM daily_sleep
@@ -598,7 +633,7 @@ impl<'connection> ViewStore<'connection> {
                         (SELECT updated_at FROM daily_activity WHERE day = latest_day.day)
                     )
                 FROM latest_day
-                "#,
+                ",
                 [],
                 |row| {
                     let day = row.get::<_, Option<String>>(0)?;
@@ -617,6 +652,54 @@ impl<'connection> ViewStore<'connection> {
             .optional()?;
 
         Ok(row.flatten())
+    }
+
+    pub fn daily_history(&self, limit: usize) -> Result<Vec<DailyOverviewRow>> {
+        let bounded_limit = usize::min(limit, 366);
+        let mut statement = self.connection.prepare(
+            r"
+            WITH days AS (
+                SELECT day FROM daily_sleep
+                UNION
+                SELECT day FROM daily_readiness
+                UNION
+                SELECT day FROM daily_activity
+            )
+            SELECT
+                days.day,
+                daily_sleep.sleep_score,
+                daily_readiness.readiness_score,
+                daily_activity.activity_score,
+                MAX(
+                    COALESCE(daily_sleep.updated_at, ''),
+                    COALESCE(daily_readiness.updated_at, ''),
+                    COALESCE(daily_activity.updated_at, '')
+                )
+            FROM days
+            LEFT JOIN daily_sleep ON daily_sleep.day = days.day
+            LEFT JOIN daily_readiness ON daily_readiness.day = days.day
+            LEFT JOIN daily_activity ON daily_activity.day = days.day
+            ORDER BY days.day DESC
+            LIMIT ?1
+            ",
+        )?;
+        let rows = statement.query_map(params![bounded_limit as i64], |row| {
+            Ok(DailyOverviewRow {
+                day: row.get(0)?,
+                sleep_score: parse_optional_score(row.get::<_, Option<i64>>(1)?),
+                readiness_score: parse_optional_score(row.get::<_, Option<i64>>(2)?),
+                activity_score: parse_optional_score(row.get::<_, Option<i64>>(3)?),
+                updated_at: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+            })
+        })?;
+
+        let mut history = Vec::new();
+        for row in rows {
+            history.push(row?);
+        }
+        history.reverse();
+
+        Ok(history)
     }
 
     pub fn latest_personal_info(&self) -> Result<Option<PersonalInfoRecord>> {
@@ -686,6 +769,47 @@ impl<'connection> ViewStore<'connection> {
         Ok(points)
     }
 
+    pub fn heartrate_for_day(&self, day: &str) -> Result<Vec<HeartRatePoint>> {
+        let mut statement = self.connection.prepare(
+            "SELECT recorded_at, bpm, source_day
+             FROM heartrate_samples
+             WHERE source_day = ?1
+             ORDER BY recorded_at ASC",
+        )?;
+        let rows = statement.query_map(params![day], read_heartrate_row)?;
+
+        let mut points = Vec::new();
+        for row in rows {
+            points.push(row?);
+        }
+
+        Ok(points)
+    }
+
+    pub fn available_heartrate_days(&self, limit: usize) -> Result<Vec<String>> {
+        let bounded_limit = usize::min(limit, 366);
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT source_day
+             FROM heartrate_samples
+             WHERE source_day IS NOT NULL
+             ORDER BY source_day DESC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map(params![bounded_limit as i64], |row| {
+            row.get::<_, Option<String>>(0)
+        })?;
+
+        let mut days = Vec::new();
+        for row in rows {
+            if let Some(day) = row? {
+                days.push(day);
+            }
+        }
+        days.reverse();
+
+        Ok(days)
+    }
+
     pub fn record_counts(&self) -> Result<RecordCounts> {
         Ok(RecordCounts {
             raw_payloads: row_count(self.connection, "raw_payload_cache")?,
@@ -712,6 +836,8 @@ fn read_sync_state_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncStateRec
         message: row.get(5)?,
         granted_scopes: split_scopes(&row.get::<_, String>(6)?),
         last_error: decode_problem(row.get(7)?).map_err(json_to_sql_error)?,
+        failure_count: parse_u32(row.get::<_, i64>(8)?, 8)?,
+        next_attempt_after: row.get(9)?,
     })
 }
 
@@ -730,6 +856,33 @@ fn parse_optional_u16(value: Option<i64>) -> rusqlite::Result<Option<u16>> {
         }),
         None => Ok(None),
     }
+}
+
+fn parse_u32(value: i64, column: usize) -> rusqlite::Result<u32> {
+    u32::try_from(value).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Integer,
+            Box::new(std::fmt::Error),
+        )
+    })
+}
+
+fn read_heartrate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HeartRatePoint> {
+    let bpm = row.get::<_, i64>(1)?;
+    let bpm = u16::try_from(bpm).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Integer,
+            Box::new(std::fmt::Error),
+        )
+    })?;
+
+    Ok(HeartRatePoint {
+        recorded_at: row.get(0)?,
+        bpm,
+        source_day: row.get(2)?,
+    })
 }
 
 fn row_count(connection: &Connection, table: &str) -> Result<u64> {
@@ -780,4 +933,155 @@ fn now_rfc3339() -> Result<String> {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .map_err(|error| RingmasterError::Config(format!("formatting timestamp failed: {error}")))
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod tests {
+    use crate::error::OuraProblem;
+    use crate::store::Store;
+    use crate::store::queries::{
+        DailyActivityRecord, DailyReadinessRecord, DailySleepRecord, HeartrateSampleRecord,
+        SyncRunStatus, SyncStateRecord,
+    };
+
+    fn seed_daily_history(store: &Store) {
+        for (day, sleep, readiness, activity) in [
+            ("2026-04-06", 81, 74, 69),
+            ("2026-04-07", 82, 75, 71),
+            ("2026-04-08", 84, 78, 73),
+        ] {
+            store
+                .imports()
+                .upsert_daily_sleep(&DailySleepRecord {
+                    day: day.to_owned(),
+                    sleep_score: Some(sleep),
+                    raw_cache_key: None,
+                    updated_at: format!("{day}T06:00:00Z"),
+                })
+                .unwrap_or_else(|error| panic!("sleep row should seed: {error}"));
+            store
+                .imports()
+                .upsert_daily_readiness(&DailyReadinessRecord {
+                    day: day.to_owned(),
+                    readiness_score: Some(readiness),
+                    temperature_deviation: None,
+                    temperature_trend_deviation: None,
+                    raw_cache_key: None,
+                    updated_at: format!("{day}T06:05:00Z"),
+                })
+                .unwrap_or_else(|error| panic!("readiness row should seed: {error}"));
+            store
+                .imports()
+                .upsert_daily_activity(&DailyActivityRecord {
+                    day: day.to_owned(),
+                    activity_score: Some(activity),
+                    active_calories: 400,
+                    steps: 8_000,
+                    total_calories: 2_300,
+                    raw_cache_key: None,
+                    updated_at: format!("{day}T06:10:00Z"),
+                })
+                .unwrap_or_else(|error| panic!("activity row should seed: {error}"));
+        }
+    }
+
+    #[test]
+    fn sync_state_round_trips_backoff_metadata() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+
+        store
+            .sync_state()
+            .upsert(&SyncStateRecord {
+                sync_key: "oura.daily".to_owned(),
+                status: SyncRunStatus::Failed,
+                cursor: Some("2026-04-08".to_owned()),
+                last_attempted_at: "2026-04-08T06:00:00Z".to_owned(),
+                last_completed_at: Some("2026-04-08T06:00:05Z".to_owned()),
+                message: Some("rate limited".to_owned()),
+                granted_scopes: vec!["daily".to_owned()],
+                last_error: Some(OuraProblem::new(
+                    Some(429),
+                    "rate limited",
+                    Some("retry later".to_owned()),
+                )),
+                failure_count: 3,
+                next_attempt_after: Some("2026-04-08T06:05:00Z".to_owned()),
+            })
+            .unwrap_or_else(|error| panic!("sync state should persist: {error}"));
+
+        let record = store
+            .sync_state()
+            .get("oura.daily")
+            .unwrap_or_else(|error| panic!("sync state should read: {error}"))
+            .unwrap_or_else(|| panic!("sync state should exist"));
+
+        assert_eq!(record.failure_count, 3);
+        assert_eq!(
+            record.next_attempt_after.as_deref(),
+            Some("2026-04-08T06:05:00Z")
+        );
+        assert_eq!(record.status, SyncRunStatus::Failed);
+    }
+
+    #[test]
+    fn daily_history_returns_oldest_to_newest_rows() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        seed_daily_history(&store);
+
+        let history = store
+            .views()
+            .daily_history(30)
+            .unwrap_or_else(|error| panic!("daily history should load: {error}"));
+
+        assert_eq!(history.len(), 3);
+        assert_eq!(
+            history.first().map(|row| row.day.as_str()),
+            Some("2026-04-06")
+        );
+        assert_eq!(
+            history.last().map(|row| row.day.as_str()),
+            Some("2026-04-08")
+        );
+        assert_eq!(history[2].sleep_score, Some(84));
+    }
+
+    #[test]
+    fn heartrate_queries_return_per_day_points_and_day_list() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+
+        for (timestamp, bpm, day) in [
+            ("2026-04-07T08:00:00Z", 58, "2026-04-07"),
+            ("2026-04-07T08:05:00Z", 60, "2026-04-07"),
+            ("2026-04-08T09:00:00Z", 64, "2026-04-08"),
+        ] {
+            store
+                .imports()
+                .upsert_heartrate_sample(&HeartrateSampleRecord {
+                    recorded_at: timestamp.to_owned(),
+                    bpm,
+                    source_day: Some(day.to_owned()),
+                    raw_cache_key: None,
+                    updated_at: timestamp.to_owned(),
+                })
+                .unwrap_or_else(|error| panic!("heartrate sample should seed: {error}"));
+        }
+
+        let days = store
+            .views()
+            .available_heartrate_days(10)
+            .unwrap_or_else(|error| panic!("heartrate days should load: {error}"));
+        let points = store
+            .views()
+            .heartrate_for_day("2026-04-07")
+            .unwrap_or_else(|error| panic!("heartrate day should load: {error}"));
+
+        assert_eq!(days, vec!["2026-04-07".to_owned(), "2026-04-08".to_owned()]);
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].bpm, 58);
+        assert_eq!(points[1].bpm, 60);
+    }
 }

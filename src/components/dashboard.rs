@@ -12,8 +12,8 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &DashboardModel) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(5),
-            Constraint::Length(4),
-            Constraint::Min(7),
+            Constraint::Length(7),
+            Constraint::Min(8),
         ])
         .split(area);
 
@@ -27,12 +27,21 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &DashboardModel) {
         .split(layout[0]);
 
     for (index, card) in model.scores.iter().enumerate() {
-        let text = format!("{}\n{}\n{}", card.label, card.value, card.subtitle);
+        let text = format!("{}\n{}\n{}", card.value, card.badge, card.subtitle);
         let paragraph = Paragraph::new(text)
             .alignment(Alignment::Center)
             .block(Block::default().title(card.label).borders(Borders::ALL));
         frame.render_widget(paragraph, score_columns[index]);
     }
+
+    let middle = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .split(layout[1]);
+
+    let freshness = Paragraph::new(model.freshness.clone())
+        .block(Block::default().title("Freshness").borders(Borders::ALL));
+    frame.render_widget(freshness, middle[0]);
 
     let capability_lines = model
         .capabilities
@@ -50,12 +59,9 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &DashboardModel) {
         })
         .collect::<Vec<_>>();
 
-    let capability_list = List::new(capability_lines).block(
-        Block::default()
-            .title(format!("Capabilities | {}", model.freshness))
-            .borders(Borders::ALL),
-    );
-    frame.render_widget(capability_list, layout[1]);
+    let capability_list = List::new(capability_lines)
+        .block(Block::default().title("Capabilities").borders(Borders::ALL));
+    frame.render_widget(capability_list, middle[1]);
 
     let mut details = vec![ListItem::new(model.change_summary.clone())];
     details.extend(model.highlights.iter().cloned().map(ListItem::new));

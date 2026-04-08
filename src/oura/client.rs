@@ -321,7 +321,7 @@ impl OuraClient for ReqwestOuraClient {
 impl FixtureOuraClient {
     pub fn new(config: &Config, fixture_dir: impl Into<PathBuf>) -> Result<Self> {
         let fixture_dir = fixture_dir.into();
-        let granted_scopes = available_fixture_scopes(&fixture_dir)?;
+        let granted_scopes = available_fixture_scopes(&fixture_dir);
         Ok(Self {
             fixture_dir,
             capability_report: CapabilityReport::from_scopes(
@@ -568,7 +568,7 @@ impl SerializeableDocument for HeartRateDocument {
     }
 }
 
-fn available_fixture_scopes(fixture_dir: &Path) -> Result<Vec<String>> {
+fn available_fixture_scopes(fixture_dir: &Path) -> Vec<String> {
     let mut scopes = Vec::new();
     if fixture_dir.join("personal_info.json").is_file() {
         scopes.push(CapabilityKind::Personal.scope_name().to_owned());
@@ -585,7 +585,7 @@ fn available_fixture_scopes(fixture_dir: &Path) -> Result<Vec<String>> {
         scopes.push(CapabilityKind::Heartrate.scope_name().to_owned());
     }
 
-    Ok(scopes)
+    scopes
 }
 
 fn parse_api_problem(status: StatusCode, payload: &str) -> OuraProblem {

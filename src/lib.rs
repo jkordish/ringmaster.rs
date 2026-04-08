@@ -1,6 +1,34 @@
 #![forbid(unsafe_code)]
-#![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo, clippy::perf)]
-#![allow(clippy::module_name_repetitions)]
+#![warn(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo,
+    clippy::perf
+)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::derive_partial_eq_without_eq,
+    clippy::future_not_send,
+    clippy::ignored_unit_patterns,
+    clippy::map_unwrap_or,
+    clippy::match_same_arms,
+    clippy::missing_const_for_fn,
+    clippy::missing_errors_doc,
+    clippy::module_name_repetitions,
+    clippy::multiple_crate_versions,
+    clippy::must_use_candidate,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args,
+    clippy::unused_async
+)]
 
 pub mod action;
 pub mod app;
@@ -8,7 +36,9 @@ pub mod cli;
 pub mod components;
 pub mod config;
 pub mod error;
+pub mod insights;
 pub mod oura;
+pub mod refresh;
 pub mod store;
 pub mod tui;
 
@@ -16,9 +46,10 @@ use std::io::{IsTerminal, stdin, stdout};
 use std::sync::OnceLock;
 
 use app::{build_demo_state, build_live_state};
-use cli::{AuthCommand, Cli, Command, SyncCommand, SyncOnceArgs};
+use cli::{AuthCommand, Cli, Command, SyncCommand, SyncOnceArgs, SyncWatchArgs, TuiArgs};
 use config::Config;
 use error::{Result, RingmasterError};
+use refresh::{SyncFamily, WatchOptions};
 use store::Store;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -51,12 +82,13 @@ pub async fn run_cli(cli: Cli) -> Result<Option<String>> {
     match command {
         Command::Doctor => run_doctor(&config),
         Command::Demo => run_demo(&config).await,
-        Command::Tui => run_tui(&config).await,
+        Command::Tui(args) => run_tui(&config, args).await,
         Command::Auth {
             command: AuthCommand::Login,
         } => run_auth_login(&config).await,
         Command::Sync { command } => match command {
             SyncCommand::Once(args) => run_sync_once(&config, args).await,
+            SyncCommand::Watch(args) => run_sync_watch(&config, args).await,
         },
     }
 }
@@ -96,14 +128,43 @@ fn run_doctor(config: &Config) -> Result<Option<String>> {
                     .as_ref()
                     .map(|problem| format!(" | error={problem}"))
                     .unwrap_or_default();
+                let backoff = sync
+                    .next_attempt_after
+                    .as_deref()
+                    .map(|value| format!(" | next_attempt_after={value}"))
+                    .unwrap_or_default();
                 format!(
-                    "  - {}: {} at {}{}",
-                    sync.sync_key, sync.status, sync.last_attempted_at, error
+                    "  - {}: {} at {} | failures={}{}{}",
+                    sync.sync_key,
+                    sync.status,
+                    sync.last_attempted_at,
+                    sync.failure_count,
+                    backoff,
+                    error
                 )
             })
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let refresh_lines = SyncFamily::ALL
+        .into_iter()
+        .map(|family| {
+            format!(
+                "  - {}: interval={}s stale_after={}s scope={}",
+                family.label(),
+                family.interval_secs(&config.refresh),
+                family.stale_after_secs(&config.refresh),
+                family.capability_kind().scope_name()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let demo_fixture_dir = config
+        .refresh
+        .demo_fixture_dir
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "tests/fixtures/phase1".to_owned());
 
     let report = format!(
         "\
@@ -132,6 +193,9 @@ account_email: {}
 missing_auth_fields: {}
 capabilities:
 {}
+refresh_policy:
+{}
+demo_fixture_dir: {}
 sync_slices:
 {}
 record_counts:
@@ -203,6 +267,8 @@ record_counts:
             auth_status.missing_fields.join(", ")
         },
         capability_lines,
+        refresh_lines,
+        demo_fixture_dir,
         sync_lines,
         store.views().record_counts()?.personal_info,
         store.views().record_counts()?.daily_sleep,
@@ -220,29 +286,32 @@ record_counts:
 }
 
 async fn run_demo(config: &Config) -> Result<Option<String>> {
-    let mut app = build_demo_state(config);
-
-    if interactive_terminal_available() {
-        info!("running demo in interactive terminal mode");
-        tui::run(&mut app).await?;
-        Ok(None)
-    } else {
-        warn!("demo ran without a tty; rendering a deterministic snapshot instead");
-        tui::render_snapshot(&app, 100, 32).map(Some)
-    }
+    run_tui(config, TuiArgs { demo: true }).await
 }
 
-async fn run_tui(config: &Config) -> Result<Option<String>> {
-    let store = Store::open(config)?;
-    let auth_status = oura::auth::inspect_auth(config, &store)?;
-    let mut app = build_live_state(config, &store, &auth_status)?;
+async fn run_tui(config: &Config, args: TuiArgs) -> Result<Option<String>> {
+    let mut app = if args.demo {
+        build_demo_state(config)
+    } else {
+        let store = Store::open(config)?;
+        let auth_status = oura::auth::inspect_auth(config, &store)?;
+        build_live_state(config, &store, &auth_status)?
+    };
 
     if interactive_terminal_available() {
-        info!("running live TUI");
-        tui::run(&mut app).await?;
+        if args.demo {
+            info!("running demo TUI");
+        } else {
+            info!("running live TUI");
+        }
+        tui::run(config, &mut app).await?;
         Ok(None)
     } else {
-        warn!("tui ran without a tty; rendering a live snapshot instead");
+        if args.demo {
+            warn!("demo TUI ran without a tty; rendering a deterministic snapshot instead");
+        } else {
+            warn!("tui ran without a tty; rendering a live snapshot instead");
+        }
         tui::render_snapshot(&app, 100, 32).map(Some)
     }
 }
@@ -297,6 +366,7 @@ async fn run_sync_once(config: &Config, args: SyncOnceArgs) -> Result<Option<Str
         oura::sync::SyncOptions {
             dry_run: args.dry_run,
             fixture_dir: args.fixture_dir,
+            families: SyncFamily::ALL.to_vec(),
         },
     )
     .await?;
@@ -343,6 +413,51 @@ notes:
         report.capability_report.available_labels().join(", "),
         slices,
         notes,
+    );
+
+    Ok(Some(output))
+}
+
+async fn run_sync_watch(config: &Config, args: SyncWatchArgs) -> Result<Option<String>> {
+    let report = refresh::run_watch(
+        config,
+        WatchOptions {
+            dry_run: args.dry_run,
+            demo: args.demo,
+            fixture_dir: args.fixture_dir,
+            max_iterations: args.max_iterations,
+        },
+    )
+    .await?;
+    let last_status = report
+        .last_report
+        .as_ref()
+        .map(|sync_report| sync_report.status.to_string())
+        .unwrap_or_else(|| "not-run".to_owned());
+    let notes = if report.notes.is_empty() {
+        "  - none".to_owned()
+    } else {
+        report
+            .notes
+            .iter()
+            .map(|note| format!("  - {note}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let output = format!(
+        "\
+ringmaster.rs sync watch
+
+iterations: {}
+dry_run: {}
+demo: {}
+database_path: {}
+last_status: {}
+notes:
+{}
+",
+        report.iterations, report.dry_run, report.demo, report.database_path, last_status, notes,
     );
 
     Ok(Some(output))

@@ -15,6 +15,7 @@ pub struct Config {
     pub paths: AppPaths,
     pub logging: LoggingConfig,
     pub oura: OuraConfig,
+    pub refresh: RefreshConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -46,10 +47,27 @@ pub struct OuraConfig {
     pub auth_timeout_secs: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct RefreshConfig {
+    pub personal_interval_secs: u64,
+    pub daily_interval_secs: u64,
+    pub heartrate_interval_secs: u64,
+    pub personal_stale_after_secs: u64,
+    pub daily_stale_after_secs: u64,
+    pub heartrate_stale_after_secs: u64,
+    pub daily_history_days: u16,
+    pub daily_overlap_days: u16,
+    pub heartrate_history_days: u16,
+    pub heartrate_overlap_minutes: u16,
+    pub max_backoff_secs: u64,
+    pub demo_fixture_dir: Option<PathBuf>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct FileConfig {
     logging: Option<FileLoggingConfig>,
     oura: Option<FileOuraConfig>,
+    refresh: Option<FileRefreshConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -67,6 +85,22 @@ struct FileOuraConfig {
     callback_path: Option<String>,
     requested_scopes: Option<Vec<String>>,
     auth_timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FileRefreshConfig {
+    personal_interval_secs: Option<u64>,
+    daily_interval_secs: Option<u64>,
+    heartrate_interval_secs: Option<u64>,
+    personal_stale_after_secs: Option<u64>,
+    daily_stale_after_secs: Option<u64>,
+    heartrate_stale_after_secs: Option<u64>,
+    daily_history_days: Option<u16>,
+    daily_overlap_days: Option<u16>,
+    heartrate_history_days: Option<u16>,
+    heartrate_overlap_minutes: Option<u16>,
+    max_backoff_secs: Option<u64>,
+    demo_fixture_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -107,9 +141,9 @@ impl Config {
             })
             .unwrap_or_else(|| "/callback".to_owned());
 
-        Ok(Self {
+        let config = Self {
             app_name: APP_NAME,
-            paths: paths.clone(),
+            paths,
             logging: LoggingConfig {
                 filter: logging_filter,
             },
@@ -166,7 +200,84 @@ impl Config {
                     })
                     .unwrap_or(120),
             },
-        })
+            refresh: RefreshConfig {
+                personal_interval_secs: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.personal_interval_secs)
+                    .unwrap_or(3_600),
+                daily_interval_secs: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.daily_interval_secs)
+                    .unwrap_or(300),
+                heartrate_interval_secs: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.heartrate_interval_secs)
+                    .unwrap_or(60),
+                personal_stale_after_secs: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.personal_stale_after_secs)
+                    .unwrap_or(72 * 60 * 60),
+                daily_stale_after_secs: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.daily_stale_after_secs)
+                    .unwrap_or(12 * 60 * 60),
+                heartrate_stale_after_secs: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.heartrate_stale_after_secs)
+                    .unwrap_or(15 * 60),
+                daily_history_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.daily_history_days)
+                    .unwrap_or(90),
+                daily_overlap_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.daily_overlap_days)
+                    .unwrap_or(2),
+                heartrate_history_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.heartrate_history_days)
+                    .unwrap_or(7),
+                heartrate_overlap_minutes: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.heartrate_overlap_minutes)
+                    .unwrap_or(60),
+                max_backoff_secs: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.max_backoff_secs)
+                    .unwrap_or(60 * 60),
+                demo_fixture_dir: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.demo_fixture_dir.clone()),
+            },
+        };
+
+        config.refresh.validate()?;
+
+        Ok(config)
+    }
+}
+
+impl RefreshConfig {
+    fn validate(&self) -> Result<()> {
+        if self.daily_history_days == 0 {
+            return Err(RingmasterError::Config(
+                "refresh.daily_history_days must be at least 1".to_owned(),
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -317,7 +428,7 @@ fn is_empty_path(path: &Path) -> bool {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{AppPaths, OuraConfig, default_requested_scopes};
+    use super::{AppPaths, Config, OuraConfig, RefreshConfig, default_requested_scopes};
 
     #[test]
     fn builds_xdg_paths_from_roots() {
@@ -356,5 +467,45 @@ mod tests {
         };
 
         assert_eq!(config.missing_fields(), vec!["client_id", "client_secret"]);
+    }
+
+    #[test]
+    fn loads_responsive_refresh_defaults() {
+        let config = Config::load().unwrap_or_else(|error| {
+            panic!("config load should succeed with repo defaults: {error}");
+        });
+
+        assert_eq!(config.refresh.heartrate_interval_secs, 60);
+        assert_eq!(config.refresh.daily_interval_secs, 300);
+        assert_eq!(config.refresh.personal_interval_secs, 3_600);
+    }
+
+    #[test]
+    fn rejects_zero_daily_history_days() {
+        let refresh = RefreshConfig {
+            personal_interval_secs: 3_600,
+            daily_interval_secs: 300,
+            heartrate_interval_secs: 60,
+            personal_stale_after_secs: 72 * 60 * 60,
+            daily_stale_after_secs: 12 * 60 * 60,
+            heartrate_stale_after_secs: 15 * 60,
+            daily_history_days: 0,
+            daily_overlap_days: 2,
+            heartrate_history_days: 7,
+            heartrate_overlap_minutes: 60,
+            max_backoff_secs: 60 * 60,
+            demo_fixture_dir: None,
+        };
+
+        let error = refresh
+            .validate()
+            .err()
+            .unwrap_or_else(|| panic!("zero daily history days should be rejected"));
+
+        assert!(
+            error
+                .to_string()
+                .contains("refresh.daily_history_days must be at least 1")
+        );
     }
 }
