@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo, clippy::perf)]
 #![allow(clippy::module_name_repetitions)]
 
 pub mod action;
