@@ -711,6 +711,7 @@ stopped_at: {}
 }
 
 async fn run_webhook_replay(config: &Config, args: WebhookReplayArgs) -> Result<Option<String>> {
+    let replay_uses_fixture = args.fixture.is_some();
     let store = Store::open(config)?;
     let mut report = webhook::receiver::replay(
         config,
@@ -728,26 +729,33 @@ async fn run_webhook_replay(config: &Config, args: WebhookReplayArgs) -> Result<
         .iter()
         .any(|entry| entry.invalidation_id.is_some())
     {
-        if let Some(fixture_dir) = replay_processing_fixture_dir {
-            let processing_report = refresh::process_pending_invalidations_once(
-                config,
-                &store,
-                false,
-                Some(fixture_dir.clone()),
-            )
-            .await?;
-            if let Some(sync_report) = processing_report.sync_report {
-                report.notes.push(format!(
-                    "Processed {} invalidation(s) via fixture-backed sync from {} (status={}).",
-                    processing_report.claimed_invalidations,
-                    fixture_dir.display(),
-                    sync_report.status
-                ));
-                report.notes.extend(processing_report.notes);
+        if replay_uses_fixture {
+            if let Some(fixture_dir) = replay_processing_fixture_dir {
+                let processing_report = refresh::process_pending_invalidations_once(
+                    config,
+                    &store,
+                    false,
+                    Some(fixture_dir.clone()),
+                )
+                .await?;
+                if let Some(sync_report) = processing_report.sync_report {
+                    report.notes.push(format!(
+                        "Processed {} invalidation(s) via fixture-backed sync from {} (status={}).",
+                        processing_report.claimed_invalidations,
+                        fixture_dir.display(),
+                        sync_report.status
+                    ));
+                    report.notes.extend(processing_report.notes);
+                }
+            } else {
+                report.notes.push(
+                    "Skipped bounded invalidation processing because no local fixture directory was available."
+                        .to_owned(),
+                );
             }
         } else {
             report.notes.push(
-                "Skipped bounded invalidation processing because no local fixture directory was available."
+                "Stored-delivery replay re-enqueued invalidations without auto-running a fixture-backed sync."
                     .to_owned(),
             );
         }
@@ -1078,7 +1086,8 @@ fn interactive_terminal_available() -> bool {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::run_doctor;
+    use super::{run_doctor, run_webhook_replay};
+    use crate::cli::WebhookReplayArgs;
     use crate::config::{
         AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
     };
@@ -1278,5 +1287,62 @@ mod tests {
         assert!(report.contains("webhook_runtime_mode: full hybrid"));
         assert!(report.contains("webhook_queue_depth: 1"));
         assert!(report.contains("webhook_remote_healthy: 1"));
+    }
+
+    #[tokio::test]
+    async fn stored_delivery_replay_does_not_run_fixture_backed_processing() {
+        let (_tempdir, config) = test_config(Some("https://example.test"), Some("verify-token"));
+        let store = Store::open(&config)
+            .unwrap_or_else(|error| panic!("store should open for replay test: {error}"));
+        let received_at = now_rfc3339()
+            .unwrap_or_else(|error| panic!("timestamp should format for replay test: {error}"));
+        let delivery_id = match store
+            .webhook()
+            .insert_accepted_delivery(&AcceptedWebhookDeliveryInput {
+                delivery_fingerprint: "stored-replay".to_owned(),
+                received_at: received_at.clone(),
+                signature_timestamp: Some(received_at),
+                data_type: Some("daily_sleep".to_owned()),
+                event_type: Some(WebhookEventType::Create),
+                object_id: Some("sleep_fixture_002".to_owned()),
+                payload_json: "{\"data_type\":\"daily_sleep\",\"event_type\":\"create\",\"object_id\":\"sleep_fixture_002\"}".to_owned(),
+                headers_json: "{}".to_owned(),
+                query_json: "{}".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("accepted delivery should seed replay test: {error}"))
+        {
+            crate::store::webhook_store::AcceptedWebhookDeliveryResult::Inserted(record)
+            | crate::store::webhook_store::AcceptedWebhookDeliveryResult::Duplicate(record) => {
+                record.delivery_id
+            }
+        };
+
+        let output = run_webhook_replay(
+            &config,
+            WebhookReplayArgs {
+                fixture: None,
+                delivery_id: Some(delivery_id),
+                recent: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("stored replay should succeed: {error}"))
+        .unwrap_or_else(|| panic!("stored replay should render output"));
+
+        let counts = store.views().record_counts().unwrap_or_else(|error| {
+            panic!("record counts should load after stored replay: {error}")
+        });
+        let pending = store
+            .webhook()
+            .list_pending_invalidations()
+            .unwrap_or_else(|error| {
+                panic!("pending invalidations should load after stored replay: {error}")
+            });
+
+        assert_eq!(counts.daily_sleep, 0);
+        assert_eq!(pending.len(), 1);
+        assert!(output.contains(
+            "Stored-delivery replay re-enqueued invalidations without auto-running a fixture-backed sync."
+        ));
     }
 }

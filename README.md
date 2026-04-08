@@ -54,7 +54,7 @@ Behavior notes:
 - `ringmaster sync once` refreshes auth when needed, imports all supported sync families, caches raw payloads, upserts normalized SQLite rows, and refreshes the derived context/pattern tables over a bounded recent window when the underlying persisted data changes.
 - `ringmaster sync watch` is the long-running invalidation consumer and scheduler. It processes queued webhook invalidations first, then preserves periodic fallback reconciliation.
 - `ringmaster webhook serve` is the dedicated HTTP receiver. It verifies Oura webhook requests, records accepted and rejected deliveries, enqueues invalidations, and responds after durable enqueue instead of after sync work.
-- `ringmaster webhook replay --fixture tests/fixtures/webhooks/sample.json` is the canonical local debugging path for receiver and queue behavior. It replays a stored HTTP envelope through the same verification, enqueue, and bounded processing path.
+- `ringmaster webhook replay --fixture tests/fixtures/webhooks/sample.json` is the canonical local debugging path for receiver and queue behavior. Fixture replay runs the same verification, enqueue, and bounded processing path offline. Stored-delivery replay re-enqueues invalidations without auto-running a fixture-backed sync into a live store.
 - `ringmaster webhook subscriptions list` inspects desired and remote subscription state.
 - `ringmaster webhook subscriptions sync --dry-run` prints the convergence plan without mutating remote state. Add `--prune` only when you explicitly want out-of-spec remote subscriptions removed.
 

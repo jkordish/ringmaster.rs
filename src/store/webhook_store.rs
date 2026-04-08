@@ -506,10 +506,20 @@ impl<'connection> WebhookStore<'connection> {
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, NULL, NULL, 0, NULL, NULL)
             ON CONFLICT(queue_key) DO UPDATE SET
                 delivery_id = excluded.delivery_id,
+                first_queued_at = CASE
+                    WHEN webhook_invalidations.completed_at IS NULL
+                    THEN webhook_invalidations.first_queued_at
+                    ELSE excluded.first_queued_at
+                END,
                 last_queued_at = excluded.last_queued_at,
                 available_at = excluded.available_at,
                 leased_at = NULL,
                 lease_owner = NULL,
+                attempt_count = CASE
+                    WHEN webhook_invalidations.completed_at IS NULL
+                    THEN webhook_invalidations.attempt_count
+                    ELSE 0
+                END,
                 last_error = NULL,
                 completed_at = NULL",
             params![
@@ -1102,6 +1112,81 @@ mod tests {
             .list_pending_invalidations()
             .unwrap_or_else(|error| panic!("pending invalidations should load: {error}"));
         assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn reactivating_completed_invalidation_resets_retry_state() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let webhook = store.webhook();
+        let delivery_id = match webhook
+            .insert_accepted_delivery(&AcceptedWebhookDeliveryInput {
+                delivery_fingerprint: "queue-reactivate".to_owned(),
+                received_at: "2026-04-08T00:00:00Z".to_owned(),
+                signature_timestamp: Some("2026-04-08T00:00:00Z".to_owned()),
+                data_type: Some("daily_sleep".to_owned()),
+                event_type: Some(WebhookEventType::Create),
+                object_id: Some("sleep_1".to_owned()),
+                payload_json: "{}".to_owned(),
+                headers_json: "{}".to_owned(),
+                query_json: "{}".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("accepted delivery should insert: {error}"))
+        {
+            AcceptedWebhookDeliveryResult::Inserted(record)
+            | AcceptedWebhookDeliveryResult::Duplicate(record) => record.delivery_id,
+        };
+        let queued = webhook
+            .enqueue_invalidation(&InvalidationInput {
+                queue_key: "daily_sleep:create:sleep_1".to_owned(),
+                data_type: "daily_sleep".to_owned(),
+                event_type: WebhookEventType::Create,
+                object_id: Some("sleep_1".to_owned()),
+                delivery_id,
+                queued_at: "2026-04-08T00:00:00Z".to_owned(),
+                available_at: "2026-04-08T00:00:00Z".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("invalidation should insert: {error}"));
+        let failed_attempt = webhook
+            .start_processing_attempt(queued.invalidation_id, "2026-04-08T00:01:00Z")
+            .unwrap_or_else(|error| panic!("attempt should start: {error}"));
+        let failed = webhook
+            .complete_processing_attempt_failure(
+                queued.invalidation_id,
+                failed_attempt.attempt_id,
+                "2026-04-08T00:02:00Z",
+                "2026-04-08T00:03:00Z",
+                "temporary failure",
+            )
+            .unwrap_or_else(|error| panic!("attempt should fail: {error}"));
+        let success_attempt = webhook
+            .start_processing_attempt(failed.invalidation_id, "2026-04-08T00:04:00Z")
+            .unwrap_or_else(|error| panic!("second attempt should start: {error}"));
+        webhook
+            .complete_processing_attempt_success(
+                failed.invalidation_id,
+                success_attempt.attempt_id,
+                "2026-04-08T00:05:00Z",
+                Some("processed"),
+            )
+            .unwrap_or_else(|error| panic!("attempt should complete successfully: {error}"));
+
+        let reactivated = webhook
+            .enqueue_invalidation(&InvalidationInput {
+                queue_key: "daily_sleep:create:sleep_1".to_owned(),
+                data_type: "daily_sleep".to_owned(),
+                event_type: WebhookEventType::Create,
+                object_id: Some("sleep_1".to_owned()),
+                delivery_id,
+                queued_at: "2026-04-08T01:00:00Z".to_owned(),
+                available_at: "2026-04-08T01:00:00Z".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("completed invalidation should reactivate: {error}"));
+
+        assert_eq!(reactivated.attempt_count, 0);
+        assert_eq!(reactivated.first_queued_at, "2026-04-08T01:00:00Z");
+        assert!(reactivated.completed_at.is_none());
+        assert!(reactivated.last_error.is_none());
     }
 
     #[test]

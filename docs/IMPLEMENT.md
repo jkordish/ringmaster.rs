@@ -186,6 +186,7 @@ Pruning is never implicit. Unexpected remote subscriptions are only deleted when
 - a recent range of accepted deliveries
 
 Fixture replay accepts stored request envelopes with method, query, headers, and body so the same verification code path can run offline.
+Stored-delivery replay intentionally stops after re-enqueueing invalidations; it does not auto-run a fixture-backed sync into a live database.
 
 Canonical smoke path:
 

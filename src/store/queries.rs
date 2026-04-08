@@ -780,6 +780,12 @@ impl<'connection> ImportStore<'connection> {
         Ok(())
     }
 
+    pub fn delete_daily_sleep(&self, day: &str) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM daily_sleep WHERE day = ?1", params![day])?;
+        Ok(())
+    }
+
     pub fn upsert_daily_readiness(&self, record: &DailyReadinessRecord) -> Result<()> {
         self.connection.execute(
             "INSERT INTO daily_readiness (
@@ -806,6 +812,12 @@ impl<'connection> ImportStore<'connection> {
             ],
         )?;
 
+        Ok(())
+    }
+
+    pub fn delete_daily_readiness(&self, day: &str) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM daily_readiness WHERE day = ?1", params![day])?;
         Ok(())
     }
 
@@ -838,6 +850,12 @@ impl<'connection> ImportStore<'connection> {
             ],
         )?;
 
+        Ok(())
+    }
+
+    pub fn delete_daily_activity(&self, day: &str) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM daily_activity WHERE day = ?1", params![day])?;
         Ok(())
     }
 

@@ -240,6 +240,23 @@ pub async fn run_watch(config: &Config, options: WatchOptions) -> Result<WatchRe
                 ));
                 break;
             }
+            if dry_run {
+                let sync_states = if let Some(sync_states) = simulated_sync_states.as_ref() {
+                    sync_states.clone()
+                } else {
+                    store.sync_state().list()?
+                };
+                let sleep_for =
+                    next_wake_duration(config, &sync_states, OffsetDateTime::now_utc())?;
+                tokio::select! {
+                    _ = tokio::time::sleep(sleep_for) => {}
+                    signal = tokio::signal::ctrl_c() => {
+                        signal.map_err(|error| RingmasterError::Config(format!("failed to listen for ctrl-c: {error}")))?;
+                        notes.push("watch loop interrupted by ctrl-c".to_owned());
+                        break;
+                    }
+                }
+            }
             continue;
         }
         notes.extend(invalidation_report.notes);
@@ -526,6 +543,36 @@ fn settle_processed_invalidations(
             .slice_reports
             .iter()
             .find(|slice| slice.sync_key == family.sync_key());
+        let delete_applied = apply_delete_side_effect(store, &invalidation.record)?;
+        deleted_rows += u32::from(delete_applied);
+
+        if delete_applied && invalidation.record.event_type == WebhookEventType::Delete {
+            let detail = slice.map_or_else(
+                || "applied webhook delete side-effect without a matching sync slice".to_owned(),
+                |slice| {
+                    if slice.status == crate::store::queries::SyncRunStatus::Success {
+                        slice.message.clone()
+                    } else {
+                        format!(
+                            "applied webhook delete side-effect while sync status was {}",
+                            slice.status.as_str()
+                        )
+                    }
+                },
+            );
+            store.webhook().complete_processing_attempt_success(
+                invalidation.record.invalidation_id,
+                invalidation.attempt_id.ok_or_else(|| {
+                    RingmasterError::Config(
+                        "missing webhook processing attempt for claimed invalidation".to_owned(),
+                    )
+                })?,
+                &now_rfc3339()?,
+                Some(&detail),
+            )?;
+            continue;
+        }
+
         let Some(slice) = slice else {
             let next_available_at =
                 compute_invalidation_retry_at(config, family, &invalidation.record)?;
@@ -549,7 +596,6 @@ fn settle_processed_invalidations(
         };
 
         if slice.status == crate::store::queries::SyncRunStatus::Success {
-            deleted_rows += u32::from(apply_delete_side_effect(store, &invalidation.record)?);
             store.webhook().complete_processing_attempt_success(
                 invalidation.record.invalidation_id,
                 invalidation.attempt_id.ok_or_else(|| {
@@ -608,6 +654,18 @@ fn apply_delete_side_effect(store: &Store, invalidation: &InvalidationRecord) ->
     };
 
     match invalidation.data_type.as_str() {
+        "daily_sleep" => {
+            store.imports().delete_daily_sleep(object_id)?;
+            Ok(true)
+        }
+        "daily_readiness" => {
+            store.imports().delete_daily_readiness(object_id)?;
+            Ok(true)
+        }
+        "daily_activity" => {
+            store.imports().delete_daily_activity(object_id)?;
+            Ok(true)
+        }
         "workout" => {
             store.imports().delete_workout(object_id)?;
             Ok(true)
@@ -908,7 +966,9 @@ mod tests {
     use crate::oura::sync::{SliceReport, SyncReport};
     use crate::refresh::run_watch;
     use crate::store::Store;
-    use crate::store::queries::{SyncRunStatus, SyncStateRecord};
+    use crate::store::queries::{DailySleepRecord, SyncRunStatus, SyncStateRecord};
+    use crate::store::webhook_store::{AcceptedWebhookDeliveryInput, InvalidationInput};
+    use crate::webhook::WebhookEventType;
     use crate::webhook::default_desired_subscriptions;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1366,6 +1426,73 @@ mod tests {
                 .list_pending_invalidations()
                 .unwrap_or_else(|error| panic!("queue should read: {error}"))
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidation_delete_side_effect_removes_deleted_daily_sleep() {
+        let config = test_config();
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        store
+            .imports()
+            .upsert_daily_sleep(&DailySleepRecord {
+                day: "2026-04-08".to_owned(),
+                sleep_score: Some(88),
+                raw_cache_key: Some("raw_daily_sleep".to_owned()),
+                updated_at: "2026-04-08T00:00:00Z".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("daily sleep row should seed: {error}"));
+
+        let queued_at = crate::store::webhook_store::now_rfc3339()
+            .unwrap_or_else(|error| panic!("timestamp should render: {error}"));
+        let delivery_id = match store
+            .webhook()
+            .insert_accepted_delivery(&AcceptedWebhookDeliveryInput {
+                delivery_fingerprint: "daily_sleep:delete:2026-04-08".to_owned(),
+                received_at: queued_at.clone(),
+                signature_timestamp: Some(queued_at.clone()),
+                data_type: Some("daily_sleep".to_owned()),
+                event_type: Some(WebhookEventType::Delete),
+                object_id: Some("2026-04-08".to_owned()),
+                payload_json: "{}".to_owned(),
+                headers_json: "{}".to_owned(),
+                query_json: "{}".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("daily delete delivery should insert: {error}"))
+        {
+            crate::store::webhook_store::AcceptedWebhookDeliveryResult::Inserted(record)
+            | crate::store::webhook_store::AcceptedWebhookDeliveryResult::Duplicate(record) => {
+                record.delivery_id
+            }
+        };
+        store
+            .webhook()
+            .enqueue_invalidation(&InvalidationInput {
+                queue_key: "daily_sleep:delete:2026-04-08".to_owned(),
+                data_type: "daily_sleep".to_owned(),
+                event_type: WebhookEventType::Delete,
+                object_id: Some("2026-04-08".to_owned()),
+                delivery_id,
+                queued_at: queued_at.clone(),
+                available_at: queued_at,
+            })
+            .unwrap_or_else(|error| panic!("daily delete invalidation should queue: {error}"));
+
+        let report = super::process_pending_invalidations_once(&config, &store, false, None)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("daily delete invalidation processing should succeed: {error}")
+            });
+
+        assert_eq!(report.claimed_invalidations, 1);
+        assert_eq!(
+            store
+                .views()
+                .record_counts()
+                .unwrap_or_else(|error| panic!("counts should read: {error}"))
+                .daily_sleep,
+            0
         );
     }
 }
