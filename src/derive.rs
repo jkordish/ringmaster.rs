@@ -1,11 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 use time::{Date, Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
-use crate::config::{AppPaths, Config};
+use crate::config::{AppPaths, Config, RefreshConfig};
 use crate::error::{AuthError, Result, RingmasterError};
 use crate::oura::models::TagRecord;
 use crate::oura::sync::{SyncOptions, sync_once};
@@ -49,6 +48,18 @@ struct DailyMetricRow {
     activity: Option<f64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeriveBounds {
+    start_day: String,
+    end_day: String,
+    note: Option<String>,
+}
+
+#[derive(Debug)]
+struct TempRootGuard {
+    path: PathBuf,
+}
+
 pub async fn rebuild(config: &Config, options: DeriveOptions) -> Result<DeriveReport> {
     if options.demo || options.fixture_dir.is_some() {
         let fixture_dir = options
@@ -56,13 +67,13 @@ pub async fn rebuild(config: &Config, options: DeriveOptions) -> Result<DeriveRe
             .clone()
             .or_else(|| config.refresh.demo_fixture_dir.clone())
             .unwrap_or_else(|| PathBuf::from("tests/fixtures/phase3"));
-        let temp_root = temp_root("derive");
+        let temp_root = TempRootGuard::new("derive");
         let mut temp_config = config.clone();
         temp_config.paths = AppPaths::from_roots(
             config.paths.home_dir.clone(),
-            temp_root.join("config"),
-            temp_root.join("state"),
-            temp_root.join("cache"),
+            temp_root.path().join("config"),
+            temp_root.path().join("state"),
+            temp_root.path().join("cache"),
         )?;
 
         let store = Store::open(&temp_config)?;
@@ -93,19 +104,33 @@ pub async fn rebuild(config: &Config, options: DeriveOptions) -> Result<DeriveRe
 }
 
 pub fn rebuild_store(store: &Store) -> Result<DeriveReport> {
-    let daily_history = store.views().daily_history_all()?;
+    rebuild_store_with_bounds(store, DeriveBounds::full_history())
+}
+
+pub fn rebuild_recent_store(store: &Store, config: &Config) -> Result<DeriveReport> {
+    let latest_source_day = store.views().latest_source_day()?;
+    rebuild_store_with_bounds(
+        store,
+        DeriveBounds::bounded_refresh(&config.refresh, latest_source_day.as_deref()),
+    )
+}
+
+fn rebuild_store_with_bounds(store: &Store, bounds: DeriveBounds) -> Result<DeriveReport> {
+    let daily_history = store
+        .views()
+        .daily_history_between_days(&bounds.start_day, &bounds.end_day)?;
     let workouts = store
         .views()
-        .workouts_between_days("0000-01-01", "9999-12-31")?;
+        .workouts_between_days(&bounds.start_day, &bounds.end_day)?;
     let tags = store
         .views()
-        .tags_between_days("0000-01-01", "9999-12-31")?;
+        .tags_between_days(&bounds.start_day, &bounds.end_day)?;
     let enhanced_tags = store
         .views()
-        .enhanced_tags_between_days("0000-01-01", "9999-12-31")?;
+        .enhanced_tags_between_days(&bounds.start_day, &bounds.end_day)?;
     let sessions = store
         .views()
-        .sessions_between_days("0000-01-01", "9999-12-31")?;
+        .sessions_between_days(&bounds.start_day, &bounds.end_day)?;
 
     let context_events = build_context_events(&workouts, &tags, &enhanced_tags, &sessions)?;
     let pattern_summaries = build_pattern_summaries(&daily_history, &context_events)?;
@@ -116,11 +141,15 @@ pub fn rebuild_store(store: &Store) -> Result<DeriveReport> {
         .replace_pattern_summaries(&pattern_summaries)?;
 
     let counts = store.views().record_counts()?;
+    let mut notes = derivation_notes(&counts);
+    if let Some(note) = bounds.note {
+        notes.insert(0, note);
+    }
     Ok(DeriveReport {
         database_path: store.plan().db_path.display().to_string(),
         context_event_count: context_events.len(),
         pattern_summary_count: pattern_summaries.len(),
-        notes: derivation_notes(&counts),
+        notes,
     })
 }
 
@@ -561,12 +590,73 @@ fn derivation_notes(counts: &RecordCounts) -> Vec<String> {
     ]
 }
 
-fn temp_root(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("ringmaster-{label}-{}-{nanos}", std::process::id()))
+impl DeriveBounds {
+    fn full_history() -> Self {
+        Self {
+            start_day: "0000-01-01".to_owned(),
+            end_day: "9999-12-31".to_owned(),
+            note: None,
+        }
+    }
+
+    fn bounded_refresh(refresh: &RefreshConfig, anchor_day: Option<&str>) -> Self {
+        let recent_window_days = usize::from(
+            refresh
+                .daily_history_days
+                .max(refresh.workout_history_days)
+                .max(refresh.enhanced_tag_history_days)
+                .max(refresh.session_history_days),
+        )
+        .saturating_add(BASELINE_WINDOW_DAYS)
+        .saturating_add(1);
+        let anchor_date = anchor_day
+            .and_then(|day| {
+                Date::parse(
+                    day,
+                    &time::macros::format_description!("[year]-[month]-[day]"),
+                )
+                .ok()
+            })
+            .unwrap_or_else(|| OffsetDateTime::now_utc().date());
+        let start_day =
+            (anchor_date - Duration::days(recent_window_days.saturating_sub(1) as i64)).to_string();
+        let end_day = (anchor_date + Duration::days(1)).to_string();
+
+        Self {
+            start_day: start_day.clone(),
+            end_day: end_day.clone(),
+            note: Some(format!(
+                "Auto rebuild refreshed a bounded recent window ({start_day}..{end_day}) so sync stays responsive as history grows."
+            )),
+        }
+    }
+}
+
+impl TempRootGuard {
+    fn new(label: &str) -> Self {
+        let timestamp = OffsetDateTime::now_utc()
+            .format(&time::macros::format_description!(
+                "[year][month][day][hour][minute][second][subsecond digits:6]"
+            ))
+            .unwrap_or_else(|_| "temp".to_owned());
+        let path = std::env::temp_dir().join(format!(
+            "ringmaster-{label}-{}-{timestamp}",
+            std::process::id()
+        ));
+        Self { path }
+    }
+
+    fn path(&self) -> &PathBuf {
+        &self.path
+    }
+}
+
+impl Drop for TempRootGuard {
+    fn drop(&mut self) {
+        if self.path.exists() {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 }
 
 fn now_rfc3339() -> Result<String> {
@@ -578,13 +668,17 @@ fn now_rfc3339() -> Result<String> {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::{build_context_events, build_pattern_summaries, rebuild_store};
+    use super::{
+        DeriveBounds, TempRootGuard, build_context_events, build_pattern_summaries, rebuild_store,
+    };
+    use crate::config::RefreshConfig;
     use crate::store::Store;
     use crate::store::queries::{
         ContextEventFamily, DailyActivityRecord, DailyReadinessRecord, DailySleepRecord,
         DataSufficiency, EnhancedTagRecord, ImportStore, PatternMetric, PatternRelationWindow,
         SessionRecord, WorkoutRecord,
     };
+    use time::Date;
 
     fn populate_history(store: &Store) {
         let imports = store.imports();
@@ -908,6 +1002,78 @@ mod tests {
                 .unwrap_or_else(|error| panic!("counts should load: {error}"))
                 .derived_context_events,
             report.context_event_count as u64
+        );
+    }
+
+    #[test]
+    fn bounded_refresh_extends_window_for_baseline_history() {
+        let refresh = RefreshConfig {
+            personal_interval_secs: 3_600,
+            daily_interval_secs: 300,
+            heartrate_interval_secs: 60,
+            workout_interval_secs: 600,
+            enhanced_tag_interval_secs: 300,
+            session_interval_secs: 300,
+            personal_stale_after_secs: 72 * 60 * 60,
+            daily_stale_after_secs: 12 * 60 * 60,
+            heartrate_stale_after_secs: 15 * 60,
+            workout_stale_after_secs: 24 * 60 * 60,
+            enhanced_tag_stale_after_secs: 12 * 60 * 60,
+            session_stale_after_secs: 12 * 60 * 60,
+            daily_history_days: 14,
+            daily_overlap_days: 2,
+            heartrate_history_days: 7,
+            heartrate_overlap_minutes: 60,
+            workout_history_days: 90,
+            workout_overlap_days: 2,
+            enhanced_tag_history_days: 45,
+            enhanced_tag_overlap_days: 2,
+            session_history_days: 30,
+            session_overlap_days: 2,
+            max_backoff_secs: 60 * 60,
+            demo_fixture_dir: None,
+        };
+
+        let bounds = DeriveBounds::bounded_refresh(&refresh, Some("2026-04-08"));
+        let start = Date::parse(
+            &bounds.start_day,
+            &time::macros::format_description!("[year]-[month]-[day]"),
+        )
+        .unwrap_or_else(|error| panic!("start day should parse: {error}"));
+        let end = Date::parse(
+            &bounds.end_day,
+            &time::macros::format_description!("[year]-[month]-[day]"),
+        )
+        .unwrap_or_else(|error| panic!("end day should parse: {error}"));
+
+        assert!(end > start);
+        assert!(
+            (end - start).whole_days() >= 90 + 30,
+            "window should include history plus baseline"
+        );
+        assert!(
+            bounds
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("bounded recent window"))
+        );
+    }
+
+    #[test]
+    fn temp_root_guard_cleans_up_when_dropped() {
+        let path = {
+            let guard = TempRootGuard::new("test");
+            let path = guard.path().clone();
+            std::fs::create_dir_all(&path)
+                .unwrap_or_else(|error| panic!("temp directory should create: {error}"));
+            std::fs::write(path.join("sentinel.txt"), "ok")
+                .unwrap_or_else(|error| panic!("sentinel should write: {error}"));
+            path
+        };
+
+        assert!(
+            !path.exists(),
+            "temp root should be removed when the guard drops"
         );
     }
 }

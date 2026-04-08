@@ -55,7 +55,7 @@ Denied auth and partial scopes are preserved as explicit local state instead of 
    - sessions
 4. Caches raw payloads separately from normalized tables
 5. Performs idempotent upserts into SQLite
-6. Rebuilds the derived context-event and pattern-summary tables when any daily or context-family data was updated
+6. Rebuilds the derived context-event and pattern-summary tables over a bounded recent window when any daily or context-family data was updated
 7. Updates per-family sync watermarks, status, failure counts, backoff state, and last structured errors
 
 Fixture-backed bounded equivalent:
@@ -97,6 +97,8 @@ That command uses the checked-in fixtures by default, does not require live cred
 4. Rebuilds persisted pattern summaries
 5. Replaces the derived tables through typed store APIs
 6. Prints the number of rebuilt context events and pattern summaries
+
+This is the explicit full-history recompute path. The auto-refresh that runs after normal syncs uses a bounded recent window so repeated background refreshes stay responsive as the local database grows.
 
 Demo rebuild path:
 

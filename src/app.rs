@@ -1467,7 +1467,7 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
     }
     if snapshot.record_counts.derived_pattern_summaries == 0 {
         warnings.push(
-            "Patterns are currently empty; run `cargo run -- derive rebuild --demo` or sync more history."
+            "Patterns are currently empty; run `cargo run -- derive rebuild` or sync more history."
                 .to_owned(),
         );
     }
@@ -2295,7 +2295,7 @@ fn event_overlaps_day(event: &ContextEventRecord, day: &str) -> bool {
 
 fn event_bounds_for_day(event: &ContextEventRecord, day: &str) -> Option<(u16, u16)> {
     if matches!(event.time_semantics, TimeSemantics::AllDay) {
-        return Some((0, 24 * 60 - 1));
+        return (event.anchor_day == day).then_some((0, 24 * 60 - 1));
     }
 
     let (day_start, day_end) = event_local_day_bounds(event, day)?;
@@ -3184,6 +3184,31 @@ mod tests {
         let bounds = super::event_bounds_for_day(&event, "2026-04-08")
             .unwrap_or_else(|| panic!("event should remain visible on its local anchor day"));
         assert_eq!(bounds, (23 * 60 + 30, 23 * 60 + 45));
+    }
+
+    #[test]
+    fn all_day_events_do_not_leak_into_other_days() {
+        let event = ContextEventRecord {
+            context_event_id: "enhanced_tag:all-day".to_owned(),
+            family: ContextEventFamily::EnhancedTag,
+            source_id: "all-day".to_owned(),
+            anchor_day: "2026-04-08".to_owned(),
+            start_at: "2026-04-08T00:00:00Z".to_owned(),
+            end_at: Some("2026-04-08T23:59:59Z".to_owned()),
+            time_semantics: TimeSemantics::AllDay,
+            title: "Travel".to_owned(),
+            subtype: Some("travel".to_owned()),
+            notes: None,
+            intensity: None,
+            metadata_json: "{}".to_owned(),
+            updated_at: "2026-04-08T00:00:00Z".to_owned(),
+        };
+
+        assert_eq!(
+            super::event_bounds_for_day(&event, "2026-04-08"),
+            Some((0, 24 * 60 - 1))
+        );
+        assert_eq!(super::event_bounds_for_day(&event, "2026-04-07"), None);
     }
 
     #[test]

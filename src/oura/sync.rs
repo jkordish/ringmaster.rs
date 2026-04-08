@@ -212,11 +212,12 @@ pub async fn sync_selected(
     }
 
     if !options.dry_run && should_rebuild_derived_state(&slice_reports) {
-        let derive_report = derive::rebuild_store(store)?;
+        let derive_report = derive::rebuild_recent_store(store, config)?;
         notes.push(format!(
             "Derived context events and pattern summaries were rebuilt after sync (events={}, patterns={}).",
             derive_report.context_event_count, derive_report.pattern_summary_count
         ));
+        notes.extend(derive_report.notes);
     }
 
     let status = summarize_status(&slice_reports);

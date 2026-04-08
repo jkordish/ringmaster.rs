@@ -38,7 +38,7 @@ The repository now includes:
 - real sync, persistence, and fixture coverage for `workouts`, `enhanced_tags`, and `sessions`
 - family-aware scheduler coverage and freshness semantics for all six supported families
 - persisted `derived_context_events` and `derived_pattern_summaries` tables
-- automatic derived-table refresh after successful non-dry-run syncs
+- automatic bounded recent-window derived-table refresh after successful non-dry-run syncs
 - a deterministic `derive rebuild` command with `--demo` and `--fixture-dir` support
 - a shared selected-day concept across Dashboard, Timeline, and Explain
 - a shared selected-event concept across Timeline and Explain

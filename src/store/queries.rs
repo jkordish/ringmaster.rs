@@ -993,82 +993,114 @@ impl<'connection> DerivedStore<'connection> {
 
     pub fn replace_context_events(&self, records: &[ContextEventRecord]) -> Result<()> {
         self.connection
-            .execute("DELETE FROM derived_context_events", [])?;
-        let mut statement = self.connection.prepare(
-            "INSERT INTO derived_context_events (
-                context_event_id,
-                family,
-                source_id,
-                anchor_day,
-                start_at,
-                end_at,
-                time_semantics,
-                title,
-                subtype,
-                notes,
-                intensity,
-                metadata_json,
-                updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-        )?;
+            .execute_batch("BEGIN IMMEDIATE TRANSACTION")?;
 
-        for record in records {
-            statement.execute(params![
-                record.context_event_id,
-                record.family.as_str(),
-                record.source_id,
-                record.anchor_day,
-                record.start_at,
-                record.end_at,
-                record.time_semantics.as_str(),
-                record.title,
-                record.subtype,
-                record.notes,
-                record.intensity,
-                record.metadata_json,
-                record.updated_at,
-            ])?;
+        let result = (|| -> Result<()> {
+            self.connection
+                .execute("DELETE FROM derived_context_events", [])?;
+            let mut statement = self.connection.prepare(
+                "INSERT INTO derived_context_events (
+                    context_event_id,
+                    family,
+                    source_id,
+                    anchor_day,
+                    start_at,
+                    end_at,
+                    time_semantics,
+                    title,
+                    subtype,
+                    notes,
+                    intensity,
+                    metadata_json,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            )?;
+
+            for record in records {
+                statement.execute(params![
+                    record.context_event_id,
+                    record.family.as_str(),
+                    record.source_id,
+                    record.anchor_day,
+                    record.start_at,
+                    record.end_at,
+                    record.time_semantics.as_str(),
+                    record.title,
+                    record.subtype,
+                    record.notes,
+                    record.intensity,
+                    record.metadata_json,
+                    record.updated_at,
+                ])?;
+            }
+
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                self.connection.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
         }
-
-        Ok(())
     }
 
     pub fn replace_pattern_summaries(&self, records: &[PatternSummaryRecord]) -> Result<()> {
         self.connection
-            .execute("DELETE FROM derived_pattern_summaries", [])?;
-        let mut statement = self.connection.prepare(
-            "INSERT INTO derived_pattern_summaries (
-                summary_id,
-                family,
-                normalized_key,
-                relation_window,
-                metric,
-                sample_count,
-                median_delta,
-                effect_direction,
-                confidence,
-                metadata_json,
-                updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        )?;
+            .execute_batch("BEGIN IMMEDIATE TRANSACTION")?;
 
-        for record in records {
-            statement.execute(params![
-                record.summary_id,
-                record.family.as_str(),
-                record.normalized_key,
-                record.relation_window.as_str(),
-                record.metric.as_str(),
-                i64::from(record.sample_count),
-                record.median_delta,
-                record.effect_direction.as_str(),
-                record.confidence.as_str(),
-                record.metadata_json,
-                record.updated_at,
-            ])?;
+        let result = (|| -> Result<()> {
+            self.connection
+                .execute("DELETE FROM derived_pattern_summaries", [])?;
+            let mut statement = self.connection.prepare(
+                "INSERT INTO derived_pattern_summaries (
+                    summary_id,
+                    family,
+                    normalized_key,
+                    relation_window,
+                    metric,
+                    sample_count,
+                    median_delta,
+                    effect_direction,
+                    confidence,
+                    metadata_json,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            )?;
+
+            for record in records {
+                statement.execute(params![
+                    record.summary_id,
+                    record.family.as_str(),
+                    record.normalized_key,
+                    record.relation_window.as_str(),
+                    record.metric.as_str(),
+                    i64::from(record.sample_count),
+                    record.median_delta,
+                    record.effect_direction.as_str(),
+                    record.confidence.as_str(),
+                    record.metadata_json,
+                    record.updated_at,
+                ])?;
+            }
+
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                self.connection.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
         }
-
-        Ok(())
     }
 }
 
@@ -1212,6 +1244,78 @@ impl<'connection> ViewStore<'connection> {
         }
 
         Ok(history)
+    }
+
+    pub fn daily_history_between_days(
+        &self,
+        start_day: &str,
+        end_day: &str,
+    ) -> Result<Vec<DailyOverviewRow>> {
+        let mut statement = self.connection.prepare(
+            "WITH days AS (
+                SELECT day FROM daily_sleep
+                UNION
+                SELECT day FROM daily_readiness
+                UNION
+                SELECT day FROM daily_activity
+            )
+            SELECT
+                days.day,
+                daily_sleep.sleep_score,
+                daily_readiness.readiness_score,
+                daily_activity.activity_score,
+                MAX(
+                    COALESCE(daily_sleep.updated_at, ''),
+                    COALESCE(daily_readiness.updated_at, ''),
+                    COALESCE(daily_activity.updated_at, '')
+                )
+            FROM days
+            LEFT JOIN daily_sleep ON daily_sleep.day = days.day
+            LEFT JOIN daily_readiness ON daily_readiness.day = days.day
+            LEFT JOIN daily_activity ON daily_activity.day = days.day
+            WHERE days.day >= ?1 AND days.day <= ?2
+            ORDER BY days.day ASC",
+        )?;
+        let rows = statement.query_map(params![start_day, end_day], |row| {
+            Ok(DailyOverviewRow {
+                day: row.get(0)?,
+                sleep_score: parse_optional_score(row.get::<_, Option<i64>>(1)?),
+                readiness_score: parse_optional_score(row.get::<_, Option<i64>>(2)?),
+                activity_score: parse_optional_score(row.get::<_, Option<i64>>(3)?),
+                updated_at: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+            })
+        })?;
+
+        let mut history = Vec::new();
+        for row in rows {
+            history.push(row?);
+        }
+
+        Ok(history)
+    }
+
+    pub fn latest_source_day(&self) -> Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT MAX(day) FROM (
+                    SELECT day FROM daily_sleep
+                    UNION ALL
+                    SELECT day FROM daily_readiness
+                    UNION ALL
+                    SELECT day FROM daily_activity
+                    UNION ALL
+                    SELECT day FROM workouts
+                    UNION ALL
+                    SELECT day FROM tags
+                    UNION ALL
+                    SELECT day FROM enhanced_tags
+                    UNION ALL
+                    SELECT day FROM sessions
+                )",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .map_err(Into::into)
     }
 
     pub fn latest_personal_info(&self) -> Result<Option<PersonalInfoRecord>> {
@@ -1463,8 +1567,11 @@ impl<'connection> ViewStore<'connection> {
                 updated_at
              FROM derived_context_events
              WHERE anchor_day = ?1
-                OR (start_at <= ?3 AND COALESCE(end_at, start_at) >= ?2)
-             ORDER BY start_at ASC, context_event_id ASC",
+                OR (
+                    strftime('%s', start_at) <= strftime('%s', ?3)
+                    AND strftime('%s', COALESCE(end_at, start_at)) >= strftime('%s', ?2)
+                )
+             ORDER BY strftime('%s', start_at) ASC, context_event_id ASC",
         )?;
         let rows = statement.query_map(params![day, day_start, day_end], read_context_event_row)?;
         let mut records = Vec::new();
@@ -1802,8 +1909,8 @@ mod tests {
     use crate::error::OuraProblem;
     use crate::store::Store;
     use crate::store::queries::{
-        DailyActivityRecord, DailyReadinessRecord, DailySleepRecord, HeartrateSampleRecord,
-        SyncRunStatus, SyncStateRecord,
+        ContextEventFamily, ContextEventRecord, DailyActivityRecord, DailyReadinessRecord,
+        DailySleepRecord, HeartrateSampleRecord, SyncRunStatus, SyncStateRecord, TimeSemantics,
     };
 
     fn seed_daily_history(store: &Store) {
@@ -1944,5 +2051,53 @@ mod tests {
         assert_eq!(points.len(), 2);
         assert_eq!(points[0].bpm, 58);
         assert_eq!(points[1].bpm, 60);
+    }
+
+    #[test]
+    fn latest_source_day_tracks_newest_persisted_family_day() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        seed_daily_history(&store);
+
+        assert_eq!(
+            store
+                .views()
+                .latest_source_day()
+                .unwrap_or_else(|error| panic!("latest day should load: {error}"))
+                .as_deref(),
+            Some("2026-04-08")
+        );
+    }
+
+    #[test]
+    fn context_events_for_day_respects_offset_timestamps() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        store
+            .derived()
+            .replace_context_events(&[ContextEventRecord {
+                context_event_id: "workout:late-offset".to_owned(),
+                family: ContextEventFamily::Workout,
+                source_id: "late-offset".to_owned(),
+                anchor_day: "2026-04-08".to_owned(),
+                start_at: "2026-04-08T23:30:00-07:00".to_owned(),
+                end_at: Some("2026-04-08T23:45:00-07:00".to_owned()),
+                time_semantics: TimeSemantics::Interval,
+                title: "Late workout".to_owned(),
+                subtype: Some("running".to_owned()),
+                notes: None,
+                intensity: Some("moderate".to_owned()),
+                metadata_json: "{}".to_owned(),
+                updated_at: "2026-04-09T07:00:00Z".to_owned(),
+            }])
+            .unwrap_or_else(|error| panic!("context event should seed: {error}"));
+
+        let events = store
+            .views()
+            .context_events_for_day("2026-04-08")
+            .unwrap_or_else(|error| panic!("context events should load: {error}"));
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].context_event_id, "workout:late-offset");
     }
 }
