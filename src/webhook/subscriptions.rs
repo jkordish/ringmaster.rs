@@ -282,7 +282,9 @@ pub fn build_sync_plan(
                 existing: canonical.clone(),
                 desired: desired_entry.clone(),
             });
-        } else if expires_within(&canonical.expiration_time, now, renewal_lead)? {
+        }
+
+        if expires_within(&canonical.expiration_time, now, renewal_lead)? {
             renew.push(canonical.clone());
         }
 
@@ -833,6 +835,31 @@ mod tests {
         assert_eq!(plan.update[0].existing.id, "sub-1");
         assert_eq!(plan.renew[0].id, "sub-2");
         assert_eq!(plan.prune[0].id, "sub-3");
+    }
+
+    #[test]
+    fn builds_plan_that_updates_and_renews_same_subscription_when_needed() {
+        let desired = vec![DesiredWebhookSubscriptionTarget {
+            data_type: "daily_sleep".to_owned(),
+            event_type: WebhookEventType::Create,
+            callback_url: "https://example.test/webhooks/oura".to_owned(),
+            verification_token: "token".to_owned(),
+        }];
+        let remote = vec![RemoteWebhookSubscription {
+            id: "sub-1".to_owned(),
+            callback_url: "https://other.test/webhooks/oura".to_owned(),
+            event_type: WebhookEventType::Create,
+            data_type: "daily_sleep".to_owned(),
+            expiration_time: "2000-01-01T00:00:00Z".to_owned(),
+        }];
+
+        let plan = build_sync_plan(&desired, &remote, 60, false)
+            .unwrap_or_else(|error| panic!("plan should build: {error}"));
+
+        assert_eq!(plan.update.len(), 1);
+        assert_eq!(plan.renew.len(), 1);
+        assert_eq!(plan.update[0].existing.id, "sub-1");
+        assert_eq!(plan.renew[0].id, "sub-1");
     }
 
     #[tokio::test]

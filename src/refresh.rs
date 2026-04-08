@@ -209,18 +209,12 @@ pub async fn run_watch(config: &Config, options: WatchOptions) -> Result<WatchRe
             Some("watch loop idle".to_owned()),
         )?;
 
-        let invalidation_report = match await_sync_or_interrupt(
-            process_pending_invalidations_once(config, &store, dry_run, fixture_dir.clone()),
-            tokio::signal::ctrl_c(),
-        )
-        .await?
-        {
-            SyncInterruption::Completed(report) => report,
-            SyncInterruption::Interrupted => {
-                notes.push("watch loop interrupted by ctrl-c".to_owned());
-                break;
-            }
-        };
+        let (invalidation_report, interrupted_during_invalidation) =
+            await_non_cancelable_sync_or_interrupt(
+                process_pending_invalidations_once(config, &store, dry_run, fixture_dir.clone()),
+                tokio::signal::ctrl_c(),
+            )
+            .await?;
         if let Some(report) = invalidation_report.sync_report.clone() {
             if let Some(simulated_sync_states) = simulated_sync_states.as_mut() {
                 advance_dry_run_sync_states(
@@ -262,9 +256,23 @@ pub async fn run_watch(config: &Config, options: WatchOptions) -> Result<WatchRe
                     }
                 }
             }
+            if interrupted_during_invalidation {
+                notes.push(
+                    "watch loop observed ctrl-c after finishing in-flight invalidation processing"
+                        .to_owned(),
+                );
+                break;
+            }
             continue;
         }
         notes.extend(invalidation_report.notes);
+        if interrupted_during_invalidation {
+            notes.push(
+                "watch loop observed ctrl-c after finishing in-flight invalidation processing"
+                    .to_owned(),
+            );
+            break;
+        }
 
         let sync_states = if let Some(sync_states) = simulated_sync_states.as_ref() {
             sync_states.clone()
@@ -493,6 +501,31 @@ where
         signal = interrupt_future => {
             signal.map_err(|error| RingmasterError::Config(format!("failed to listen for ctrl-c: {error}")))?;
             Ok(SyncInterruption::Interrupted)
+        }
+    }
+}
+
+async fn await_non_cancelable_sync_or_interrupt<T, SyncFuture, InterruptFuture>(
+    sync_future: SyncFuture,
+    interrupt_future: InterruptFuture,
+) -> Result<(T, bool)>
+where
+    SyncFuture: Future<Output = Result<T>>,
+    InterruptFuture: Future<Output = std::result::Result<(), std::io::Error>>,
+{
+    tokio::pin!(sync_future);
+    tokio::pin!(interrupt_future);
+    let mut interrupted = false;
+
+    loop {
+        tokio::select! {
+            sync_result = &mut sync_future => {
+                return sync_result.map(|result| (result, interrupted));
+            }
+            signal = &mut interrupt_future, if !interrupted => {
+                signal.map_err(|error| RingmasterError::Config(format!("failed to listen for ctrl-c: {error}")))?;
+                interrupted = true;
+            }
         }
     }
 }
@@ -1336,6 +1369,25 @@ mod tests {
         .unwrap_or_else(|error| panic!("interrupt should be handled: {error}"));
 
         assert_eq!(interrupted, super::SyncInterruption::Interrupted);
+    }
+
+    #[tokio::test]
+    async fn non_cancelable_interrupt_waits_for_sync_completion() {
+        let (completed, interrupted) = super::await_non_cancelable_sync_or_interrupt(
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                Ok::<_, crate::error::RingmasterError>("settled")
+            },
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                Ok::<_, std::io::Error>(())
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("interrupt should wait for completion: {error}"));
+
+        assert_eq!(completed, "settled");
+        assert!(interrupted);
     }
 
     #[tokio::test]

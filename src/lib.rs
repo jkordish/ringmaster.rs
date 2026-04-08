@@ -200,7 +200,7 @@ fn run_doctor(config: &Config) -> Result<Option<String>> {
         .webhook
         .remote_subscriptions
         .iter()
-        .filter(|record| doctor_remote_subscription_healthy(&snapshot, &record.expiration_time))
+        .filter(|record| doctor_remote_subscription_healthy(&snapshot, record))
         .count();
     let webhook_renewals_due = snapshot
         .webhook
@@ -496,8 +496,14 @@ fn doctor_heartbeat_healthy(snapshot: &app::LiveSnapshot, last_seen_at: &str) ->
     age <= max_age
 }
 
-fn doctor_remote_subscription_healthy(snapshot: &app::LiveSnapshot, expiration_time: &str) -> bool {
-    let Some(expiration_time) = doctor_parse_timestamp(expiration_time) else {
+fn doctor_remote_subscription_healthy(
+    snapshot: &app::LiveSnapshot,
+    record: &crate::store::webhook_store::RemoteWebhookSubscriptionRecord,
+) -> bool {
+    if record.drift_status != "matched" {
+        return false;
+    }
+    let Some(expiration_time) = doctor_parse_timestamp(&record.expiration_time) else {
         return false;
     };
     let now = doctor_parse_timestamp(&snapshot.captured_at).unwrap_or_else(OffsetDateTime::now_utc);
@@ -1330,6 +1336,54 @@ mod tests {
 
         assert!(report.contains("webhook_watch_heartbeat: stopped | mode=stopped"));
         assert!(report.contains("webhook_runtime_mode: scheduler only"));
+    }
+
+    #[test]
+    fn doctor_excludes_drifted_remote_subscriptions_from_healthy_total() {
+        let (_tempdir, config) = test_config(Some("https://example.test"), Some("verify-token"));
+        let store = Store::open(&config).unwrap_or_else(|error| {
+            panic!("store should open for drifted subscription doctor test: {error}")
+        });
+        let received_at = now_rfc3339().unwrap_or_else(|error| {
+            panic!("timestamp should format for drifted subscription doctor test: {error}")
+        });
+
+        store
+            .webhook()
+            .replace_remote_subscriptions(&[
+                RemoteWebhookSubscriptionRecord {
+                    subscription_id: "sub-matched".to_owned(),
+                    callback_url: "https://example.test/webhooks/oura".to_owned(),
+                    event_type: WebhookEventType::Update,
+                    data_type: "daily_sleep".to_owned(),
+                    expiration_time: future_rfc3339(14),
+                    drift_status: "matched".to_owned(),
+                    last_seen_at: received_at.clone(),
+                    created_at: received_at.clone(),
+                    updated_at: received_at.clone(),
+                },
+                RemoteWebhookSubscriptionRecord {
+                    subscription_id: "sub-diverged".to_owned(),
+                    callback_url: "https://other.test/webhooks/oura".to_owned(),
+                    event_type: WebhookEventType::Update,
+                    data_type: "workout".to_owned(),
+                    expiration_time: future_rfc3339(14),
+                    drift_status: "diverged".to_owned(),
+                    last_seen_at: received_at.clone(),
+                    created_at: received_at.clone(),
+                    updated_at: received_at,
+                },
+            ])
+            .unwrap_or_else(|error| panic!("remote subscriptions should seed: {error}"));
+
+        let report = run_doctor(&config)
+            .unwrap_or_else(|error| {
+                panic!("doctor should run with drifted remote subscriptions: {error}")
+            })
+            .unwrap_or_else(|| panic!("doctor should return output"));
+
+        assert!(report.contains("webhook_remote_subscriptions: 2"));
+        assert!(report.contains("webhook_remote_healthy: 1"));
     }
 
     #[tokio::test]
