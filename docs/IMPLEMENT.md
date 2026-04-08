@@ -98,7 +98,7 @@ Successful sync slices now persist why they ran:
 
 - `manual_sync`
 - `periodic_reconcile`
-- `webhook_invalidation`
+- `webhook`
 
 This provenance is used by the app, Ops, and `doctor` so freshness can be explained instead of guessed.
 

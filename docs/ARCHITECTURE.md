@@ -239,13 +239,13 @@ Current schema families:
 - `tags`
 - `enhanced_tags`
 - `sessions`
-- `desired_webhook_subscriptions`
-- `webhook_subscriptions`
+- `webhook_desired_subscriptions`
+- `webhook_remote_subscriptions`
 - `webhook_deliveries`
-- `webhook_rejections`
+- `webhook_delivery_rejections`
 - `webhook_invalidations`
 - `webhook_processing_attempts`
-- `runtime_heartbeats`
+- `webhook_runtime_heartbeats`
 - `derived_context_events`
 - `derived_pattern_summaries`
 

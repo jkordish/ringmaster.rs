@@ -229,7 +229,7 @@ pub async fn replay(
     if let Some(path) = options.fixture {
         let fixture = load_fixture(&path)?;
         let security = fixture_security(config, &fixture)?;
-        let request = fixture_into_request(fixture)?;
+        let request = fixture_into_request(fixture, Some(security.signature_secret.as_str()))?;
         let response = process_inbound_request(&security, store, request)?;
         return Ok(WebhookReplayReport {
             entries: vec![entry_from_receiver_response(path.display().to_string(), response)],
@@ -477,11 +477,24 @@ fn handle_signed_delivery(
         );
     }
 
-    let payload: DeliveryPayload = serde_json::from_str(&request.body).map_err(|error| {
-        RingmasterError::Config(format!(
-            "webhook payload decode failed after signature verification: {error}"
-        ))
-    })?;
+    let payload: DeliveryPayload = match serde_json::from_str(&request.body) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return reject_request(
+                store,
+                RejectionContext {
+                    request: &request,
+                    received_at,
+                    reason_code: "invalid_payload_json",
+                    detail: format!(
+                        "webhook payload decode failed after signature verification: {error}"
+                    ),
+                    signature_timestamp: Some(signature_timestamp),
+                    status: StatusCode::BAD_REQUEST,
+                },
+            );
+        }
+    };
     let event_type = payload
         .event_type
         .as_deref()
@@ -505,15 +518,21 @@ fn handle_signed_delivery(
         AcceptedWebhookDeliveryResult::Inserted(record) => (record, false),
         AcceptedWebhookDeliveryResult::Duplicate(record) => (record, true),
     };
-    let invalidation = enqueue_delivery_invalidation(
-        store,
-        delivery.delivery_id,
-        delivery.received_at.clone(),
-        delivery.data_type.clone(),
-        delivery.event_type,
-        delivery.object_id.clone(),
-    )?;
-    let detail = if invalidation.is_none() {
+    let invalidation = if duplicate {
+        None
+    } else {
+        enqueue_delivery_invalidation(
+            store,
+            delivery.delivery_id,
+            delivery.received_at.clone(),
+            delivery.data_type.clone(),
+            delivery.event_type,
+            delivery.object_id.clone(),
+        )?
+    };
+    let detail = if duplicate {
+        Some("duplicate delivery already persisted; skipped invalidation enqueue".to_owned())
+    } else if invalidation.is_none() {
         Some(ACCEPTED_NO_INVALIDATION.to_owned())
     } else {
         None
@@ -741,7 +760,10 @@ fn fixture_security(config: &Config, fixture: &ReplayFixture) -> Result<Receiver
     })
 }
 
-fn fixture_into_request(fixture: ReplayFixture) -> Result<InboundWebhookRequest> {
+fn fixture_into_request(
+    fixture: ReplayFixture,
+    computed_signature_secret: Option<&str>,
+) -> Result<InboundWebhookRequest> {
     let body = match (fixture.body, fixture.body_json) {
         (Some(body), None) => body,
         (None, Some(body_json)) => serde_json::to_string(&body_json)?,
@@ -768,12 +790,16 @@ fn fixture_into_request(fixture: ReplayFixture) -> Result<InboundWebhookRequest>
         .get("x-oura-signature")
         .is_some_and(|value| value == FIXTURE_COMPUTED_SIGNATURE)
     {
-        let signature_secret = fixture.signature_secret.as_deref().ok_or_else(|| {
-            RingmasterError::Config(
-                "webhook replay fixtures using computed signatures must include signature_secret"
-                    .to_owned(),
-            )
-        })?;
+        let signature_secret = fixture
+            .signature_secret
+            .as_deref()
+            .or(computed_signature_secret)
+            .ok_or_else(|| {
+                RingmasterError::Config(
+                    "webhook replay fixtures using computed signatures must include signature_secret or a configured Oura client secret"
+                        .to_owned(),
+                )
+            })?;
         let timestamp = headers.get("x-oura-timestamp").cloned().ok_or_else(|| {
             RingmasterError::Config(
                 "webhook replay fixtures using computed signatures must include x-oura-timestamp"
@@ -1071,6 +1097,146 @@ mod tests {
                 .unwrap_or_else(|error| panic!("recent deliveries should load: {error}"))[0]
                 .delivery_fingerprint
         );
+        assert_eq!(
+            store
+                .webhook()
+                .list_pending_invalidations()
+                .unwrap_or_else(|error| panic!("pending invalidations should load: {error}"))
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_json_after_signature_verification() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let timestamp = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_else(|error| panic!("timestamp should format: {error}"));
+        let body = "{not-json";
+        let response = process_inbound_request(
+            &security_config(),
+            &store,
+            InboundWebhookRequest {
+                method: "POST".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::from([
+                    (
+                        "x-oura-signature".to_owned(),
+                        sign(&timestamp, body, "fixture-secret"),
+                    ),
+                    ("x-oura-timestamp".to_owned(), timestamp),
+                ]),
+                body: body.to_owned(),
+            },
+        )
+        .unwrap_or_else(|error| panic!("invalid payload should produce a rejection: {error}"));
+
+        match response.outcome {
+            ReceiverOutcome::Rejected { reason_code } => {
+                assert_eq!(reason_code, "invalid_payload_json");
+            }
+            other => panic!("unexpected receiver outcome: {other:?}"),
+        }
+        let rejection = store
+            .webhook()
+            .latest_rejected_delivery()
+            .unwrap_or_else(|error| panic!("latest rejection should load: {error}"))
+            .unwrap_or_else(|| panic!("a rejected delivery should be recorded"));
+        assert_eq!(rejection.reason_code, "invalid_payload_json");
+    }
+
+    #[test]
+    fn duplicate_signed_delivery_does_not_requeue_completed_invalidation() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let timestamp = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_else(|error| panic!("timestamp should format: {error}"));
+        let body = r#"{"data_type":"daily_sleep","event_type":"create","object_id":"sleep_123"}"#;
+        let headers = BTreeMap::from([
+            (
+                "x-oura-signature".to_owned(),
+                sign(&timestamp, body, "fixture-secret"),
+            ),
+            ("x-oura-timestamp".to_owned(), timestamp.clone()),
+        ]);
+
+        let first = process_inbound_request(
+            &security_config(),
+            &store,
+            InboundWebhookRequest {
+                method: "POST".to_owned(),
+                query: BTreeMap::new(),
+                headers: headers.clone(),
+                body: body.to_owned(),
+            },
+        )
+        .unwrap_or_else(|error| panic!("first delivery should succeed: {error}"));
+        let invalidation_id = match first.outcome {
+            ReceiverOutcome::Accepted {
+                invalidation_id: Some(invalidation_id),
+                ..
+            } => invalidation_id,
+            other => panic!("unexpected first outcome: {other:?}"),
+        };
+        let attempt = store
+            .webhook()
+            .start_processing_attempt(invalidation_id, "2026-04-08T00:01:00Z")
+            .unwrap_or_else(|error| panic!("attempt should start: {error}"));
+        store
+            .webhook()
+            .complete_processing_attempt_success(
+                invalidation_id,
+                attempt.attempt_id,
+                "2026-04-08T00:02:00Z",
+                Some("processed"),
+            )
+            .unwrap_or_else(|error| panic!("attempt should complete: {error}"));
+        assert!(
+            store
+                .webhook()
+                .list_pending_invalidations()
+                .unwrap_or_else(|error| panic!("pending invalidations should load: {error}"))
+                .is_empty()
+        );
+
+        let duplicate = process_inbound_request(
+            &security_config(),
+            &store,
+            InboundWebhookRequest {
+                method: "POST".to_owned(),
+                query: BTreeMap::new(),
+                headers,
+                body: body.to_owned(),
+            },
+        )
+        .unwrap_or_else(|error| panic!("duplicate delivery should succeed: {error}"));
+
+        match duplicate.outcome {
+            ReceiverOutcome::Accepted {
+                duplicate,
+                invalidation_id,
+                detail,
+                ..
+            } => {
+                assert!(duplicate);
+                assert!(invalidation_id.is_none());
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("duplicate delivery already persisted; skipped invalidation enqueue")
+                );
+            }
+            other => panic!("unexpected duplicate outcome: {other:?}"),
+        }
+        assert!(
+            store
+                .webhook()
+                .list_pending_invalidations()
+                .unwrap_or_else(|error| panic!("pending invalidations should load: {error}"))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1084,30 +1250,33 @@ mod tests {
             signature_secret: Some("fixture-secret".to_owned()),
         };
 
-        let request = fixture_into_request(fixture)
+        let request = fixture_into_request(fixture, None)
             .unwrap_or_else(|error| panic!("fixture should convert: {error}"));
         assert_eq!(request.body, r#"{"hello":"world"}"#);
     }
 
     #[test]
     fn fixture_placeholders_materialize_timestamp_and_signature() {
-        let request = fixture_into_request(ReplayFixture {
-            method: "POST".to_owned(),
-            query: BTreeMap::new(),
-            headers: BTreeMap::from([
-                (
-                    "x-oura-signature".to_owned(),
-                    "{{computed_hmac_sha256}}".to_owned(),
+        let request = fixture_into_request(
+            ReplayFixture {
+                method: "POST".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::from([
+                    (
+                        "x-oura-signature".to_owned(),
+                        "{{computed_hmac_sha256}}".to_owned(),
+                    ),
+                    ("x-oura-timestamp".to_owned(), "{{now_rfc3339}}".to_owned()),
+                ]),
+                body: Some(
+                    r#"{"data_type":"daily_sleep","event_type":"create","object_id":"sleep_123"}"#
+                        .to_owned(),
                 ),
-                ("x-oura-timestamp".to_owned(), "{{now_rfc3339}}".to_owned()),
-            ]),
-            body: Some(
-                r#"{"data_type":"daily_sleep","event_type":"create","object_id":"sleep_123"}"#
-                    .to_owned(),
-            ),
-            body_json: None,
-            signature_secret: Some("fixture-secret".to_owned()),
-        })
+                body_json: None,
+                signature_secret: Some("fixture-secret".to_owned()),
+            },
+            None,
+        )
         .unwrap_or_else(|error| panic!("fixture should materialize: {error}"));
 
         assert_ne!(
@@ -1117,6 +1286,39 @@ mod tests {
                 .unwrap_or_else(|| panic!("timestamp header should exist")),
             "{{now_rfc3339}}"
         );
+        assert_ne!(
+            request
+                .headers
+                .get("x-oura-signature")
+                .unwrap_or_else(|| panic!("signature header should exist")),
+            "{{computed_hmac_sha256}}"
+        );
+    }
+
+    #[test]
+    fn fixture_placeholders_use_config_secret_when_fixture_secret_is_absent() {
+        let request = fixture_into_request(
+            ReplayFixture {
+                method: "POST".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::from([
+                    (
+                        "x-oura-signature".to_owned(),
+                        "{{computed_hmac_sha256}}".to_owned(),
+                    ),
+                    ("x-oura-timestamp".to_owned(), "{{now_rfc3339}}".to_owned()),
+                ]),
+                body: Some(
+                    r#"{"data_type":"daily_sleep","event_type":"create","object_id":"sleep_123"}"#
+                        .to_owned(),
+                ),
+                body_json: None,
+                signature_secret: None,
+            },
+            Some("fixture-secret"),
+        )
+        .unwrap_or_else(|error| panic!("fixture should materialize with config secret: {error}"));
+
         assert_ne!(
             request
                 .headers
@@ -1154,6 +1356,44 @@ mod tests {
         .unwrap_or_else(|error| panic!("fixture write should succeed: {error}"));
 
         let config = Config::load().unwrap_or_else(|error| panic!("config should load: {error}"));
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let report = replay(
+            &config,
+            &store,
+            WebhookReplayOptions {
+                fixture: Some(fixture_dir.path().join("sample.json")),
+                delivery_id: None,
+                recent: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("fixture replay should succeed: {error}"));
+
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].status, "accepted");
+    }
+
+    #[tokio::test]
+    async fn replay_fixture_uses_config_signature_secret_when_fixture_omits_it() {
+        let fixture_dir =
+            tempdir().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        std::fs::write(
+            fixture_dir.path().join("sample.json"),
+            r#"{
+  "method": "POST",
+  "headers": {
+    "x-oura-signature": "{{computed_hmac_sha256}}",
+    "x-oura-timestamp": "{{now_rfc3339}}"
+  },
+  "body": "{\"data_type\":\"daily_sleep\",\"event_type\":\"create\",\"object_id\":\"sleep_123\"}"
+}"#,
+        )
+        .unwrap_or_else(|error| panic!("fixture write should succeed: {error}"));
+
+        let mut config =
+            Config::load().unwrap_or_else(|error| panic!("config should load: {error}"));
+        config.oura.client_secret = Some("fixture-secret".to_owned());
         let store =
             Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
         let report = replay(

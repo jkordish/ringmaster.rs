@@ -11,11 +11,14 @@ use crate::oura::models::CapabilityKind;
 use crate::oura::sync::{SliceReport, SyncOptions, SyncReport, sync_selected};
 use crate::store::Store;
 use crate::store::queries::SyncStateRecord;
-use crate::store::webhook_store::{InvalidationRecord, RuntimeHeartbeatRecord, now_rfc3339};
+use crate::store::webhook_store::{
+    InvalidationRecord, RuntimeHeartbeatRecord, format_rfc3339_utc, now_rfc3339,
+};
 use crate::webhook::WebhookEventType;
 use crate::webhook::sync_family_for_data_type;
 
 const WATCH_COMPONENT: &str = "sync.watch";
+const MIN_INVALIDATION_LEASE_SECS: i64 = 5 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SyncFamily {
@@ -345,13 +348,8 @@ pub async fn process_pending_invalidations_once(
     fixture_dir: Option<PathBuf>,
 ) -> Result<InvalidationRunReport> {
     let now = now_rfc3339()?;
-    let lease_until = (OffsetDateTime::now_utc() + Duration::seconds(30))
-        .format(&Rfc3339)
-        .map_err(|error| {
-            RingmasterError::Config(format!(
-                "failed to format webhook invalidation lease timestamp: {error}"
-            ))
-        })?;
+    let lease_until =
+        format_rfc3339_utc(OffsetDateTime::now_utc() + invalidation_lease_duration(config)?)?;
     let claimed = if dry_run {
         preview_due_invalidations(store, &now)?
             .into_iter()
@@ -508,12 +506,22 @@ fn resolve_fixture_dir(config: &Config, options: &WatchOptions) -> Option<PathBu
 }
 
 fn preview_due_invalidations(store: &Store, now: &str) -> Result<Vec<InvalidationRecord>> {
-    Ok(store
+    let now = parse_timestamp(now)?;
+    let invalidations = store
         .webhook()
         .list_pending_invalidations()?
         .into_iter()
-        .filter(|record| record.available_at.as_str() <= now)
-        .collect::<Vec<_>>())
+        .map(|record| {
+            let available_at = parse_timestamp(&record.available_at)?;
+            Ok((record, available_at))
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(_, available_at)| *available_at <= now)
+        .map(|(record, _)| record)
+        .collect::<Vec<_>>();
+
+    Ok(invalidations)
 }
 
 fn settle_processed_invalidations(
@@ -840,6 +848,18 @@ fn parse_timestamp(value: &str) -> Result<OffsetDateTime> {
     OffsetDateTime::parse(value, &Rfc3339).map_err(|error| {
         RingmasterError::Config(format!("invalid persisted timestamp `{value}`: {error}"))
     })
+}
+
+fn invalidation_lease_duration(config: &Config) -> Result<Duration> {
+    let heartbeat_window = config.webhook.heartbeat_secs.saturating_mul(20);
+    let lease_secs = heartbeat_window.max(MIN_INVALIDATION_LEASE_SECS as u64);
+    let lease_secs = i64::try_from(lease_secs).map_err(|error| {
+        RingmasterError::Config(format!(
+            "webhook invalidation lease duration exceeded supported range: {error}"
+        ))
+    })?;
+
+    Ok(Duration::seconds(lease_secs))
 }
 
 fn advance_dry_run_sync_states(

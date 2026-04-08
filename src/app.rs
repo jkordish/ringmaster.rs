@@ -1880,7 +1880,7 @@ fn family_delivery_summary(snapshot: &LiveSnapshot) -> String {
                 |record| trim_timestamp(&record.received_at),
             )
         } else {
-            "scheduled only".to_owned()
+            "webhook unsupported".to_owned()
         };
         format!("{}={detail}", family.label())
     })
@@ -3038,7 +3038,7 @@ fn freshness_label(kind: FreshnessKind) -> String {
         FreshnessKind::FreshPeriodic => "fresh via periodic".to_owned(),
         FreshnessKind::StaleNoRecentDelivery => "stale: no recent delivery".to_owned(),
         FreshnessKind::StaleSyncFailed => "stale: sync failed".to_owned(),
-        FreshnessKind::StaleUnsupportedWebhook => "stale: scheduled only".to_owned(),
+        FreshnessKind::StaleUnsupportedWebhook => "stale: webhook unsupported".to_owned(),
         FreshnessKind::StaleReceiverDown => "stale: receiver down".to_owned(),
         FreshnessKind::StaleSubscriptionMissing => "stale: subscription missing".to_owned(),
         FreshnessKind::StaleCapabilityMissing => "stale: capability missing".to_owned(),

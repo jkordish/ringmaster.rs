@@ -1,5 +1,6 @@
 use rusqlite::{Connection, OptionalExtension, params};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::macros::format_description;
+use time::{OffsetDateTime, UtcOffset};
 
 use crate::error::{Result, RingmasterError};
 use crate::webhook::WebhookEventType;
@@ -134,6 +135,9 @@ pub struct RuntimeHeartbeatRecord {
 pub struct WebhookStore<'connection> {
     connection: &'connection Connection,
 }
+
+const SORTABLE_UTC_TIMESTAMP: &[time::format_description::FormatItem<'_>] =
+    format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:9]Z");
 
 impl<'connection> WebhookStore<'connection> {
     pub fn new(connection: &'connection Connection) -> Self {
@@ -577,7 +581,7 @@ impl<'connection> WebhookStore<'connection> {
                 completed_at
              FROM webhook_invalidations
              WHERE completed_at IS NULL
-             ORDER BY available_at ASC, invalidation_id ASC",
+             ORDER BY julianday(available_at) ASC, invalidation_id ASC",
         )?;
         let rows = statement.query_map([], read_invalidation_row)?;
         let mut records = Vec::new();
@@ -617,9 +621,9 @@ impl<'connection> WebhookStore<'connection> {
                     last_error,
                     completed_at
                  FROM webhook_invalidations
-                 WHERE available_at <= ?1
+                 WHERE julianday(available_at) <= julianday(?1)
                    AND completed_at IS NULL
-                 ORDER BY available_at ASC, invalidation_id ASC
+                 ORDER BY julianday(available_at) ASC, invalidation_id ASC
                  LIMIT ?2",
             )?;
             let rows = statement.query_map(
@@ -973,8 +977,13 @@ fn read_invalidation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Invalidati
 }
 
 pub fn now_rfc3339() -> Result<String> {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
+    format_rfc3339_utc(OffsetDateTime::now_utc())
+}
+
+pub fn format_rfc3339_utc(timestamp: OffsetDateTime) -> Result<String> {
+    timestamp
+        .to_offset(UtcOffset::UTC)
+        .format(SORTABLE_UTC_TIMESTAMP)
         .map_err(|error| RingmasterError::Config(format!("formatting timestamp failed: {error}")))
 }
 
@@ -983,10 +992,12 @@ pub fn now_rfc3339() -> Result<String> {
 mod tests {
     use super::{
         AcceptedWebhookDeliveryInput, AcceptedWebhookDeliveryResult,
-        DesiredWebhookSubscriptionRecord, InvalidationInput, RuntimeHeartbeatRecord, now_rfc3339,
+        DesiredWebhookSubscriptionRecord, InvalidationInput, RuntimeHeartbeatRecord,
+        format_rfc3339_utc, now_rfc3339,
     };
     use crate::store::db::Store;
     use crate::webhook::WebhookEventType;
+    use time::OffsetDateTime;
 
     #[test]
     fn replaces_desired_subscriptions() {
@@ -1211,5 +1222,79 @@ mod tests {
             .unwrap_or_else(|error| panic!("heartbeats should load: {error}"));
         assert_eq!(heartbeats.len(), 1);
         assert_eq!(heartbeats[0].component, "receiver");
+    }
+
+    #[test]
+    fn now_rfc3339_uses_fixed_width_subseconds() {
+        let timestamp =
+            now_rfc3339().unwrap_or_else(|error| panic!("timestamp should render: {error}"));
+
+        let (_, fractional) = timestamp
+            .split_once('.')
+            .unwrap_or_else(|| panic!("timestamp should include fractional seconds"));
+        assert_eq!(fractional.len(), 10);
+        assert!(fractional.ends_with('Z'));
+    }
+
+    #[test]
+    fn claim_available_invalidations_handles_mixed_timestamp_precision() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let webhook = store.webhook();
+        let delivery_id = match webhook
+            .insert_accepted_delivery(&AcceptedWebhookDeliveryInput {
+                delivery_fingerprint: "queue-mixed-precision".to_owned(),
+                received_at: "2026-04-08T00:00:00Z".to_owned(),
+                signature_timestamp: Some("2026-04-08T00:00:00Z".to_owned()),
+                data_type: Some("daily_sleep".to_owned()),
+                event_type: Some(WebhookEventType::Create),
+                object_id: Some("sleep_1".to_owned()),
+                payload_json: "{}".to_owned(),
+                headers_json: "{}".to_owned(),
+                query_json: "{}".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("accepted delivery should insert: {error}"))
+        {
+            AcceptedWebhookDeliveryResult::Inserted(record)
+            | AcceptedWebhookDeliveryResult::Duplicate(record) => record.delivery_id,
+        };
+        webhook
+            .enqueue_invalidation(&InvalidationInput {
+                queue_key: "daily_sleep:create:sleep_1".to_owned(),
+                data_type: "daily_sleep".to_owned(),
+                event_type: WebhookEventType::Create,
+                object_id: Some("sleep_1".to_owned()),
+                delivery_id,
+                queued_at: "2026-04-08T00:00:00Z".to_owned(),
+                available_at: "2026-04-08T00:00:00Z".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("first invalidation should queue: {error}"));
+        webhook
+            .enqueue_invalidation(&InvalidationInput {
+                queue_key: "daily_sleep:update:sleep_1".to_owned(),
+                data_type: "daily_sleep".to_owned(),
+                event_type: WebhookEventType::Update,
+                object_id: Some("sleep_1".to_owned()),
+                delivery_id,
+                queued_at: "2026-04-08T00:00:00.100000000Z".to_owned(),
+                available_at: "2026-04-08T00:00:00.100000000Z".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("second invalidation should queue: {error}"));
+
+        let claimed_at = format_rfc3339_utc(
+            OffsetDateTime::parse(
+                "2026-04-08T00:00:00.050000000Z",
+                &time::format_description::well_known::Rfc3339,
+            )
+            .unwrap_or_else(|error| panic!("claimed_at should parse: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("claimed_at should format: {error}"));
+        let lease_until = "2026-04-08T00:05:00.000000000Z".to_owned();
+        let claimed = webhook
+            .claim_available_invalidations("watch-test", &claimed_at, &lease_until, 8)
+            .unwrap_or_else(|error| panic!("claim should succeed: {error}"));
+
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].event_type, WebhookEventType::Create);
     }
 }
