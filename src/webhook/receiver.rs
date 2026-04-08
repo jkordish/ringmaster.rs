@@ -1238,14 +1238,14 @@ mod tests {
         };
         let attempt = store
             .webhook()
-            .start_processing_attempt(invalidation_id, "2026-04-08T00:01:00Z")
+            .start_processing_attempt(invalidation_id, &timestamp)
             .unwrap_or_else(|error| panic!("attempt should start: {error}"));
         store
             .webhook()
             .complete_processing_attempt_success(
                 invalidation_id,
                 attempt.attempt_id,
-                "2026-04-08T00:02:00Z",
+                &timestamp,
                 Some("processed"),
             )
             .unwrap_or_else(|error| panic!("attempt should complete: {error}"));

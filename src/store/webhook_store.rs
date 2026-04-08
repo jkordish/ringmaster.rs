@@ -516,9 +516,22 @@ impl<'connection> WebhookStore<'connection> {
                     ELSE excluded.first_queued_at
                 END,
                 last_queued_at = excluded.last_queued_at,
-                available_at = excluded.available_at,
-                leased_at = NULL,
-                lease_owner = NULL,
+                available_at = CASE
+                    WHEN webhook_invalidations.completed_at IS NULL
+                        AND webhook_invalidations.lease_owner IS NOT NULL
+                    THEN webhook_invalidations.available_at
+                    ELSE excluded.available_at
+                END,
+                leased_at = CASE
+                    WHEN webhook_invalidations.completed_at IS NULL
+                    THEN webhook_invalidations.leased_at
+                    ELSE NULL
+                END,
+                lease_owner = CASE
+                    WHEN webhook_invalidations.completed_at IS NULL
+                    THEN webhook_invalidations.lease_owner
+                    ELSE NULL
+                END,
                 attempt_count = CASE
                     WHEN webhook_invalidations.completed_at IS NULL
                     THEN webhook_invalidations.attempt_count
@@ -717,6 +730,13 @@ impl<'connection> WebhookStore<'connection> {
             .execute_batch("BEGIN IMMEDIATE TRANSACTION")?;
 
         let result = (|| -> Result<()> {
+            let attempt_started_at: String = self.connection.query_row(
+                "SELECT started_at
+                 FROM webhook_processing_attempts
+                 WHERE attempt_id = ?1",
+                params![attempt_id],
+                |row| row.get(0),
+            )?;
             self.connection.execute(
                 "UPDATE webhook_processing_attempts
                  SET finished_at = ?1,
@@ -727,12 +747,21 @@ impl<'connection> WebhookStore<'connection> {
             )?;
             self.connection.execute(
                 "UPDATE webhook_invalidations
-                 SET completed_at = ?1,
+                 SET completed_at = CASE
+                        WHEN julianday(last_queued_at) <= julianday(?3)
+                        THEN ?1
+                        ELSE NULL
+                     END,
+                     available_at = CASE
+                        WHEN julianday(last_queued_at) <= julianday(?3)
+                        THEN available_at
+                        ELSE last_queued_at
+                     END,
                      leased_at = NULL,
                      lease_owner = NULL,
                      last_error = NULL
                  WHERE invalidation_id = ?2",
-                params![finished_at, invalidation_id],
+                params![finished_at, invalidation_id, attempt_started_at],
             )?;
             Ok(())
         })();
@@ -1198,6 +1227,108 @@ mod tests {
         assert_eq!(reactivated.first_queued_at, "2026-04-08T01:00:00Z");
         assert!(reactivated.completed_at.is_none());
         assert!(reactivated.last_error.is_none());
+    }
+
+    #[test]
+    fn requeue_during_active_lease_stays_pending_for_follow_up_processing() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let webhook = store.webhook();
+        let first_delivery_id = match webhook
+            .insert_accepted_delivery(&AcceptedWebhookDeliveryInput {
+                delivery_fingerprint: "queue-inflight-first".to_owned(),
+                received_at: "2026-04-08T00:00:00Z".to_owned(),
+                signature_timestamp: Some("2026-04-08T00:00:00Z".to_owned()),
+                data_type: Some("daily_sleep".to_owned()),
+                event_type: Some(WebhookEventType::Update),
+                object_id: Some("sleep_1".to_owned()),
+                payload_json: "{}".to_owned(),
+                headers_json: "{}".to_owned(),
+                query_json: "{}".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("first accepted delivery should insert: {error}"))
+        {
+            AcceptedWebhookDeliveryResult::Inserted(record)
+            | AcceptedWebhookDeliveryResult::Duplicate(record) => record.delivery_id,
+        };
+        let second_delivery_id = match webhook
+            .insert_accepted_delivery(&AcceptedWebhookDeliveryInput {
+                delivery_fingerprint: "queue-inflight-second".to_owned(),
+                received_at: "2026-04-08T00:01:30Z".to_owned(),
+                signature_timestamp: Some("2026-04-08T00:01:30Z".to_owned()),
+                data_type: Some("daily_sleep".to_owned()),
+                event_type: Some(WebhookEventType::Update),
+                object_id: Some("sleep_1".to_owned()),
+                payload_json: "{}".to_owned(),
+                headers_json: "{}".to_owned(),
+                query_json: "{}".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("second accepted delivery should insert: {error}"))
+        {
+            AcceptedWebhookDeliveryResult::Inserted(record)
+            | AcceptedWebhookDeliveryResult::Duplicate(record) => record.delivery_id,
+        };
+
+        let queued = webhook
+            .enqueue_invalidation(&InvalidationInput {
+                queue_key: "daily_sleep:update:sleep_1".to_owned(),
+                data_type: "daily_sleep".to_owned(),
+                event_type: WebhookEventType::Update,
+                object_id: Some("sleep_1".to_owned()),
+                delivery_id: first_delivery_id,
+                queued_at: "2026-04-08T00:00:00Z".to_owned(),
+                available_at: "2026-04-08T00:00:00Z".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("invalidation should insert: {error}"));
+        let claimed = webhook
+            .claim_available_invalidations(
+                "watch-test",
+                "2026-04-08T00:01:00Z",
+                "2026-04-08T00:06:00Z",
+                8,
+            )
+            .unwrap_or_else(|error| panic!("invalidation should claim: {error}"));
+        assert_eq!(claimed.len(), 1);
+        let attempt = webhook
+            .start_processing_attempt(queued.invalidation_id, "2026-04-08T00:01:05Z")
+            .unwrap_or_else(|error| panic!("attempt should start: {error}"));
+
+        let requeued = webhook
+            .enqueue_invalidation(&InvalidationInput {
+                queue_key: "daily_sleep:update:sleep_1".to_owned(),
+                data_type: "daily_sleep".to_owned(),
+                event_type: WebhookEventType::Update,
+                object_id: Some("sleep_1".to_owned()),
+                delivery_id: second_delivery_id,
+                queued_at: "2026-04-08T00:01:30Z".to_owned(),
+                available_at: "2026-04-08T00:01:30Z".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("in-flight invalidation should requeue: {error}"));
+        assert_eq!(requeued.delivery_id, second_delivery_id);
+        assert_eq!(requeued.leased_at.as_deref(), Some("2026-04-08T00:01:00Z"));
+        assert_eq!(requeued.lease_owner.as_deref(), Some("watch-test"));
+        assert_eq!(requeued.available_at, "2026-04-08T00:06:00Z");
+
+        webhook
+            .complete_processing_attempt_success(
+                queued.invalidation_id,
+                attempt.attempt_id,
+                "2026-04-08T00:02:00Z",
+                Some("processed"),
+            )
+            .unwrap_or_else(|error| panic!("attempt should complete successfully: {error}"));
+
+        let pending = webhook
+            .list_pending_invalidations()
+            .unwrap_or_else(|error| panic!("pending invalidations should load: {error}"));
+        assert_eq!(pending.len(), 1);
+        let pending = &pending[0];
+        assert_eq!(pending.delivery_id, second_delivery_id);
+        assert_eq!(pending.last_queued_at, "2026-04-08T00:01:30Z");
+        assert_eq!(pending.available_at, "2026-04-08T00:01:30Z");
+        assert!(pending.leased_at.is_none());
+        assert!(pending.lease_owner.is_none());
+        assert!(pending.completed_at.is_none());
     }
 
     #[test]

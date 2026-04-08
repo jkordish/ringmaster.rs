@@ -47,7 +47,7 @@ webhook subscriptions list / sync
 webhook replay
   -> fixture or stored-delivery envelope loading
   -> same receive/verify/enqueue path
-  -> bounded invalidation-processing pass
+  -> bounded invalidation-processing preview for fixtures, re-enqueue only for stored deliveries
 
 tui / tui --demo
   -> app state builder

@@ -1700,14 +1700,20 @@ fn heartbeat_is_healthy(snapshot: &LiveSnapshot, record: &RuntimeHeartbeatRecord
     age <= max_age
 }
 
+fn heartbeat_is_active(snapshot: &LiveSnapshot, record: &RuntimeHeartbeatRecord) -> bool {
+    record.mode != "stopped" && heartbeat_is_healthy(snapshot, record)
+}
+
 fn receiver_healthy(snapshot: &LiveSnapshot) -> bool {
     heartbeat_for(snapshot, "webhook.receiver")
-        .is_some_and(|record| heartbeat_is_healthy(snapshot, record))
+        .is_some_and(|record| heartbeat_is_active(snapshot, record))
 }
 
 fn format_heartbeat_status(snapshot: &LiveSnapshot, record: &RuntimeHeartbeatRecord) -> String {
-    let health = if heartbeat_is_healthy(snapshot, record) {
+    let health = if heartbeat_is_active(snapshot, record) {
         "healthy"
+    } else if record.mode == "stopped" {
+        "stopped"
     } else {
         "stale"
     };
@@ -1723,9 +1729,9 @@ fn format_heartbeat_status(snapshot: &LiveSnapshot, record: &RuntimeHeartbeatRec
 
 fn ops_runtime_mode(snapshot: &LiveSnapshot) -> String {
     let receiver = heartbeat_for(snapshot, "webhook.receiver")
-        .is_some_and(|record| heartbeat_is_healthy(snapshot, record));
+        .is_some_and(|record| heartbeat_is_active(snapshot, record));
     let watcher = heartbeat_for(snapshot, "sync.watch")
-        .is_some_and(|record| heartbeat_is_healthy(snapshot, record));
+        .is_some_and(|record| heartbeat_is_active(snapshot, record));
 
     match (receiver, watcher) {
         (true, true) => "full hybrid".to_owned(),
@@ -1740,8 +1746,10 @@ fn receiver_status_line(snapshot: &LiveSnapshot) -> Option<String> {
     }
 
     heartbeat_for(snapshot, "webhook.receiver").map(|record| {
-        if heartbeat_is_healthy(snapshot, record) {
+        if heartbeat_is_active(snapshot, record) {
             "healthy".to_owned()
+        } else if record.mode == "stopped" {
+            format!("stopped ({})", record.last_seen_at)
         } else {
             format!("stale heartbeat ({})", record.last_seen_at)
         }
@@ -1783,7 +1791,8 @@ fn recent_health_incidents(snapshot: &LiveSnapshot) -> Vec<String> {
 
     for component in ["webhook.receiver", "sync.watch"] {
         if let Some(record) = heartbeat_for(snapshot, component)
-            && !heartbeat_is_healthy(snapshot, record)
+            && !heartbeat_is_active(snapshot, record)
+            && record.mode != "stopped"
         {
             incidents.push(format!(
                 "{} heartbeat is stale (last seen {})",

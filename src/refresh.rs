@@ -179,7 +179,7 @@ pub async fn run_watch(config: &Config, options: WatchOptions) -> Result<WatchRe
         Some("watch loop starting".to_owned()),
     )?;
     if options.max_iterations == Some(0) {
-        return Ok(WatchReport {
+        let report = WatchReport {
             iterations: 0,
             dry_run,
             demo: options.demo,
@@ -188,7 +188,9 @@ pub async fn run_watch(config: &Config, options: WatchOptions) -> Result<WatchRe
             notes: vec![
                 "watch loop stopped before syncing because max_iterations was set to 0".to_owned(),
             ],
-        });
+        };
+        write_stopped_watch_heartbeat(&store, config, &report)?;
+        return Ok(report);
     }
     let mut simulated_sync_states = if dry_run {
         Some(store.sync_state().list()?)
@@ -331,14 +333,16 @@ pub async fn run_watch(config: &Config, options: WatchOptions) -> Result<WatchRe
         }
     }
 
-    Ok(WatchReport {
+    let report = WatchReport {
         iterations,
         dry_run,
         demo: options.demo,
         database_path: store.plan().db_path.display().to_string(),
         last_report,
         notes,
-    })
+    };
+    write_stopped_watch_heartbeat(&store, config, &report)?;
+    Ok(report)
 }
 
 pub async fn process_pending_invalidations_once(
@@ -797,6 +801,20 @@ fn upsert_watch_heartbeat(
             detail,
             last_seen_at: now_rfc3339()?,
         })
+}
+
+fn write_stopped_watch_heartbeat(
+    store: &Store,
+    config: &Config,
+    report: &WatchReport,
+) -> Result<()> {
+    let detail = report.notes.last().cloned().unwrap_or_else(|| {
+        format!(
+            "watch loop stopped after {} iteration(s)",
+            report.iterations
+        )
+    });
+    upsert_watch_heartbeat(store, config, "stopped", Some(detail))
 }
 
 fn family_is_due(
@@ -1265,6 +1283,15 @@ mod tests {
         assert_eq!(report.iterations, 1);
         assert!(report.dry_run);
         assert!(report.last_report.is_some());
+        let heartbeat = Store::open(&config)
+            .unwrap_or_else(|error| panic!("store should reopen after watch: {error}"))
+            .webhook()
+            .list_runtime_heartbeats()
+            .unwrap_or_else(|error| panic!("heartbeats should load after watch: {error}"))
+            .into_iter()
+            .find(|record| record.component == "sync.watch")
+            .unwrap_or_else(|| panic!("sync.watch heartbeat should exist after bounded run"));
+        assert_eq!(heartbeat.mode, "stopped");
     }
 
     #[tokio::test]

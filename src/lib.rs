@@ -423,8 +423,10 @@ fn doctor_receiver_status(snapshot: &app::LiveSnapshot) -> String {
         return "missing heartbeat".to_owned();
     };
 
-    if doctor_heartbeat_healthy(snapshot, &record.last_seen_at) {
+    if doctor_heartbeat_active(snapshot, record) {
         "healthy".to_owned()
+    } else if record.mode == "stopped" {
+        format!("stopped ({})", record.last_seen_at)
     } else {
         format!("stale heartbeat ({})", record.last_seen_at)
     }
@@ -436,13 +438,13 @@ fn doctor_runtime_mode(snapshot: &app::LiveSnapshot) -> &'static str {
         .runtime_heartbeats
         .iter()
         .find(|record| record.component == "webhook.receiver")
-        .is_some_and(|record| doctor_heartbeat_healthy(snapshot, &record.last_seen_at));
+        .is_some_and(|record| doctor_heartbeat_active(snapshot, record));
     let watcher = snapshot
         .webhook
         .runtime_heartbeats
         .iter()
         .find(|record| record.component == "sync.watch")
-        .is_some_and(|record| doctor_heartbeat_healthy(snapshot, &record.last_seen_at));
+        .is_some_and(|record| doctor_heartbeat_active(snapshot, record));
 
     match (receiver, watcher) {
         (true, true) => "full hybrid",
@@ -460,8 +462,10 @@ fn doctor_heartbeat_status(snapshot: &app::LiveSnapshot, component: &str) -> Str
         .map_or_else(
             || "missing".to_owned(),
             |record| {
-                let health = if doctor_heartbeat_healthy(snapshot, &record.last_seen_at) {
+                let health = if doctor_heartbeat_active(snapshot, record) {
                     "healthy"
+                } else if record.mode == "stopped" {
+                    "stopped"
                 } else {
                     "stale"
                 };
@@ -471,6 +475,13 @@ fn doctor_heartbeat_status(snapshot: &app::LiveSnapshot, component: &str) -> Str
                 )
             },
         )
+}
+
+fn doctor_heartbeat_active(
+    snapshot: &app::LiveSnapshot,
+    record: &crate::store::webhook_store::RuntimeHeartbeatRecord,
+) -> bool {
+    record.mode != "stopped" && doctor_heartbeat_healthy(snapshot, &record.last_seen_at)
 }
 
 fn doctor_heartbeat_healthy(snapshot: &app::LiveSnapshot, last_seen_at: &str) -> bool {
@@ -734,13 +745,13 @@ async fn run_webhook_replay(config: &Config, args: WebhookReplayArgs) -> Result<
                 let processing_report = refresh::process_pending_invalidations_once(
                     config,
                     &store,
-                    false,
+                    true,
                     Some(fixture_dir.clone()),
                 )
                 .await?;
                 if let Some(sync_report) = processing_report.sync_report {
                     report.notes.push(format!(
-                        "Processed {} invalidation(s) via fixture-backed sync from {} (status={}).",
+                        "Previewed {} invalidation(s) via fixture-backed sync from {} without writing to the local store (status={}).",
                         processing_report.claimed_invalidations,
                         fixture_dir.display(),
                         sync_report.status
@@ -1289,6 +1300,38 @@ mod tests {
         assert!(report.contains("webhook_remote_healthy: 1"));
     }
 
+    #[test]
+    fn doctor_treats_stopped_watch_heartbeat_as_inactive() {
+        let (_tempdir, config) = test_config(Some("https://example.test"), Some("verify-token"));
+        let store = Store::open(&config).unwrap_or_else(|error| {
+            panic!("store should open for stopped heartbeat test: {error}")
+        });
+        let received_at = now_rfc3339().unwrap_or_else(|error| {
+            panic!("timestamp should format for stopped heartbeat test: {error}")
+        });
+
+        store
+            .webhook()
+            .upsert_runtime_heartbeat(&RuntimeHeartbeatRecord {
+                component: "sync.watch".to_owned(),
+                mode: "stopped".to_owned(),
+                bind_address: None,
+                public_base_url: Some("https://example.test".to_owned()),
+                detail: Some("watch loop stopped after 1 bounded iteration(s)".to_owned()),
+                last_seen_at: received_at,
+            })
+            .unwrap_or_else(|error| panic!("stopped heartbeat should seed: {error}"));
+
+        let report = run_doctor(&config)
+            .unwrap_or_else(|error| {
+                panic!("doctor should run with stopped watch heartbeat: {error}")
+            })
+            .unwrap_or_else(|| panic!("doctor should return output"));
+
+        assert!(report.contains("webhook_watch_heartbeat: stopped | mode=stopped"));
+        assert!(report.contains("webhook_runtime_mode: scheduler only"));
+    }
+
     #[tokio::test]
     async fn stored_delivery_replay_does_not_run_fixture_backed_processing() {
         let (_tempdir, config) = test_config(Some("https://example.test"), Some("verify-token"));
@@ -1343,6 +1386,45 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert!(output.contains(
             "Stored-delivery replay re-enqueued invalidations without auto-running a fixture-backed sync."
+        ));
+    }
+
+    #[tokio::test]
+    async fn fixture_replay_previews_processing_without_writing_demo_rows() {
+        let (_tempdir, config) = test_config(Some("https://example.test"), Some("verify-token"));
+        let store = Store::open(&config)
+            .unwrap_or_else(|error| panic!("store should open for fixture replay test: {error}"));
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/webhooks/sample.json");
+
+        let output = run_webhook_replay(
+            &config,
+            WebhookReplayArgs {
+                fixture: Some(fixture),
+                delivery_id: None,
+                recent: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("fixture replay should succeed: {error}"))
+        .unwrap_or_else(|| panic!("fixture replay should render output"));
+
+        let counts = store.views().record_counts().unwrap_or_else(|error| {
+            panic!("record counts should load after fixture replay: {error}")
+        });
+        let pending = store
+            .webhook()
+            .list_pending_invalidations()
+            .unwrap_or_else(|error| {
+                panic!("pending invalidations should load after fixture replay: {error}")
+            });
+
+        assert_eq!(counts.daily_sleep, 0);
+        assert_eq!(counts.daily_readiness, 0);
+        assert_eq!(counts.daily_activity, 0);
+        assert_eq!(pending.len(), 1);
+        assert!(output.contains(
+            "Previewed 1 invalidation(s) via fixture-backed sync from tests/fixtures/phase3 without writing to the local store"
         ));
     }
 }
