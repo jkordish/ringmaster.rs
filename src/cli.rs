@@ -33,6 +33,11 @@ pub enum Command {
         #[command(subcommand)]
         command: SyncCommand,
     },
+    /// Derived read-model and analytics commands.
+    Derive {
+        #[command(subcommand)]
+        command: DeriveCommand,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
@@ -47,6 +52,12 @@ pub enum SyncCommand {
     Once(SyncOnceArgs),
     /// Run the poll-first scheduler without the TUI.
     Watch(SyncWatchArgs),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum DeriveCommand {
+    /// Rebuild derived context events and pattern summaries from persisted data.
+    Rebuild(DeriveRebuildArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
@@ -82,6 +93,16 @@ pub struct SyncWatchArgs {
     pub max_iterations: Option<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct DeriveRebuildArgs {
+    /// Seed a temporary demo store from fixture data before rebuilding derived state.
+    #[arg(long)]
+    pub demo: bool,
+    /// Load Oura payloads from a fixture directory when seeding demo derivation.
+    #[arg(long)]
+    pub fixture_dir: Option<PathBuf>,
+}
+
 impl Cli {
     pub fn parse_from<I, T>(args: I) -> Result<Self>
     where
@@ -104,7 +125,10 @@ impl Cli {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::{AuthCommand, Cli, Command, SyncCommand, SyncOnceArgs, SyncWatchArgs};
+    use super::{
+        AuthCommand, Cli, Command, DeriveCommand, DeriveRebuildArgs, SyncCommand, SyncOnceArgs,
+        SyncWatchArgs,
+    };
 
     #[test]
     fn parses_nested_subcommands() {
@@ -142,7 +166,7 @@ mod tests {
     fn help_text_mentions_required_commands() {
         let help = Cli::help_text();
 
-        for command in ["tui", "doctor", "auth", "sync", "demo"] {
+        for command in ["tui", "doctor", "auth", "sync", "derive", "demo"] {
             assert!(
                 help.contains(command),
                 "help text should mention `{command}`"
@@ -172,6 +196,26 @@ mod tests {
                         demo: true,
                         fixture_dir: None,
                         max_iterations: Some(1),
+                    }),
+            }) => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_derive_rebuild_demo_args() {
+        let cli = Cli::parse_from(["ringmaster", "derive", "rebuild", "--demo"]).unwrap_or_else(
+            |error| {
+                panic!("expected clap parsing to succeed in test: {error}");
+            },
+        );
+
+        match cli.command {
+            Some(Command::Derive {
+                command:
+                    DeriveCommand::Rebuild(DeriveRebuildArgs {
+                        demo: true,
+                        fixture_dir: None,
                     }),
             }) => {}
             other => panic!("unexpected command: {other:?}"),

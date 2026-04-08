@@ -4,6 +4,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::error::{OuraProblem, Result, RingmasterError};
+use crate::oura::models::{TagRecord, TagSource};
 use crate::store::migrations;
 
 pub const OURA_PROVIDER: &str = "oura";
@@ -95,6 +96,126 @@ pub struct HeartrateSampleRecord {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkoutRecord {
+    pub workout_id: String,
+    pub day: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub timezone: Option<String>,
+    pub sport: Option<String>,
+    pub activity: Option<String>,
+    pub intensity: Option<String>,
+    pub title: String,
+    pub notes: Option<String>,
+    pub source: Option<String>,
+    pub raw_cache_key: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnhancedTagRecord {
+    pub enhanced_tag_id: String,
+    pub day: String,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub label: String,
+    pub subtype: Option<String>,
+    pub comment: Option<String>,
+    pub intensity: Option<String>,
+    pub raw_cache_key: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRecord {
+    pub session_id: String,
+    pub day: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub kind: Option<String>,
+    pub state: Option<String>,
+    pub score: Option<i64>,
+    pub title: String,
+    pub raw_cache_key: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ContextEventFamily {
+    Workout,
+    Tag,
+    EnhancedTag,
+    Session,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TimeSemantics {
+    Interval,
+    Point,
+    AllDay,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextEventRecord {
+    pub context_event_id: String,
+    pub family: ContextEventFamily,
+    pub source_id: String,
+    pub anchor_day: String,
+    pub start_at: String,
+    pub end_at: Option<String>,
+    pub time_semantics: TimeSemantics,
+    pub title: String,
+    pub subtype: Option<String>,
+    pub notes: Option<String>,
+    pub intensity: Option<String>,
+    pub metadata_json: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PatternMetric {
+    ActivityScore,
+    ReadinessScore,
+    SleepScore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PatternRelationWindow {
+    SameDayActivity,
+    NextDayReadiness,
+    SameNightSleep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum DataSufficiency {
+    Thin,
+    Medium,
+    Strong,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EffectDirection {
+    Higher,
+    Lower,
+    Flat,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PatternSummaryRecord {
+    pub summary_id: String,
+    pub family: ContextEventFamily,
+    pub normalized_key: String,
+    pub relation_window: PatternRelationWindow,
+    pub metric: PatternMetric,
+    pub sample_count: u32,
+    pub median_delta: f64,
+    pub effect_direction: EffectDirection,
+    pub confidence: DataSufficiency,
+    pub metadata_json: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawPayloadRecord {
     pub cache_key: String,
@@ -117,6 +238,8 @@ pub struct RecordCounts {
     pub tags: u64,
     pub enhanced_tags: u64,
     pub sessions: u64,
+    pub derived_context_events: u64,
+    pub derived_pattern_summaries: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,6 +274,10 @@ pub struct ImportStore<'connection> {
     connection: &'connection Connection,
 }
 
+pub struct DerivedStore<'connection> {
+    connection: &'connection Connection,
+}
+
 pub struct ViewStore<'connection> {
     connection: &'connection Connection,
 }
@@ -180,6 +307,130 @@ impl SyncRunStatus {
             "success" => Self::Success,
             "failed" => Self::Failed,
             _ => Self::Failed,
+        }
+    }
+}
+
+impl ContextEventFamily {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Workout => "workout",
+            Self::Tag => "tag",
+            Self::EnhancedTag => "enhanced_tag",
+            Self::Session => "session",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "workout" => Some(Self::Workout),
+            "tag" => Some(Self::Tag),
+            "enhanced_tag" => Some(Self::EnhancedTag),
+            "session" => Some(Self::Session),
+            _ => None,
+        }
+    }
+}
+
+impl TimeSemantics {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Interval => "interval",
+            Self::Point => "point",
+            Self::AllDay => "all_day",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "interval" => Some(Self::Interval),
+            "point" => Some(Self::Point),
+            "all_day" => Some(Self::AllDay),
+            _ => None,
+        }
+    }
+}
+
+impl PatternMetric {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ActivityScore => "activity_score",
+            Self::ReadinessScore => "next_day_readiness",
+            Self::SleepScore => "same_night_sleep",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ActivityScore => "Activity",
+            Self::ReadinessScore => "Next-day readiness",
+            Self::SleepScore => "Same-night sleep",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "activity_score" => Some(Self::ActivityScore),
+            "next_day_readiness" => Some(Self::ReadinessScore),
+            "same_night_sleep" => Some(Self::SleepScore),
+            _ => None,
+        }
+    }
+}
+
+impl PatternRelationWindow {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SameDayActivity => "same_day_activity",
+            Self::NextDayReadiness => "next_day_readiness",
+            Self::SameNightSleep => "same_night_sleep",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "same_day_activity" => Some(Self::SameDayActivity),
+            "next_day_readiness" => Some(Self::NextDayReadiness),
+            "same_night_sleep" => Some(Self::SameNightSleep),
+            _ => None,
+        }
+    }
+}
+
+impl DataSufficiency {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Thin => "thin",
+            Self::Medium => "medium",
+            Self::Strong => "strong",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "thin" => Some(Self::Thin),
+            "medium" => Some(Self::Medium),
+            "strong" => Some(Self::Strong),
+            _ => None,
+        }
+    }
+}
+
+impl EffectDirection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Higher => "higher",
+            Self::Lower => "lower",
+            Self::Flat => "flat",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "higher" => Some(Self::Higher),
+            "lower" => Some(Self::Lower),
+            "flat" => Some(Self::Flat),
+            _ => None,
         }
     }
 }
@@ -601,6 +852,256 @@ impl<'connection> ImportStore<'connection> {
 
         Ok(())
     }
+
+    pub fn upsert_workout(&self, record: &WorkoutRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO workouts (
+                workout_id,
+                day,
+                started_at,
+                ended_at,
+                timezone,
+                sport,
+                activity,
+                intensity,
+                title,
+                notes,
+                source,
+                raw_cache_key,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            ON CONFLICT(workout_id) DO UPDATE SET
+                day = excluded.day,
+                started_at = excluded.started_at,
+                ended_at = excluded.ended_at,
+                timezone = excluded.timezone,
+                sport = excluded.sport,
+                activity = excluded.activity,
+                intensity = excluded.intensity,
+                title = excluded.title,
+                notes = excluded.notes,
+                source = excluded.source,
+                raw_cache_key = excluded.raw_cache_key,
+                updated_at = excluded.updated_at",
+            params![
+                record.workout_id,
+                record.day,
+                record.started_at,
+                record.ended_at,
+                record.timezone,
+                record.sport,
+                record.activity,
+                record.intensity,
+                record.title,
+                record.notes,
+                record.source,
+                record.raw_cache_key,
+                record.updated_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn upsert_enhanced_tag(&self, record: &EnhancedTagRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO enhanced_tags (
+                enhanced_tag_id,
+                day,
+                started_at,
+                ended_at,
+                label,
+                subtype,
+                comment,
+                intensity,
+                raw_cache_key,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(enhanced_tag_id) DO UPDATE SET
+                day = excluded.day,
+                started_at = excluded.started_at,
+                ended_at = excluded.ended_at,
+                label = excluded.label,
+                subtype = excluded.subtype,
+                comment = excluded.comment,
+                intensity = excluded.intensity,
+                raw_cache_key = excluded.raw_cache_key,
+                updated_at = excluded.updated_at",
+            params![
+                record.enhanced_tag_id,
+                record.day,
+                record.started_at,
+                record.ended_at,
+                record.label,
+                record.subtype,
+                record.comment,
+                record.intensity,
+                record.raw_cache_key,
+                record.updated_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn upsert_session(&self, record: &SessionRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO sessions (
+                session_id,
+                day,
+                started_at,
+                ended_at,
+                kind,
+                state,
+                score,
+                title,
+                raw_cache_key,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(session_id) DO UPDATE SET
+                day = excluded.day,
+                started_at = excluded.started_at,
+                ended_at = excluded.ended_at,
+                kind = excluded.kind,
+                state = excluded.state,
+                score = excluded.score,
+                title = excluded.title,
+                raw_cache_key = excluded.raw_cache_key,
+                updated_at = excluded.updated_at",
+            params![
+                record.session_id,
+                record.day,
+                record.started_at,
+                record.ended_at,
+                record.kind,
+                record.state,
+                record.score,
+                record.title,
+                record.raw_cache_key,
+                record.updated_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+}
+
+impl<'connection> DerivedStore<'connection> {
+    pub fn new(connection: &'connection Connection) -> Self {
+        Self { connection }
+    }
+
+    pub fn replace_context_events(&self, records: &[ContextEventRecord]) -> Result<()> {
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE TRANSACTION")?;
+
+        let result = (|| -> Result<()> {
+            self.connection
+                .execute("DELETE FROM derived_context_events", [])?;
+            let mut statement = self.connection.prepare(
+                "INSERT INTO derived_context_events (
+                    context_event_id,
+                    family,
+                    source_id,
+                    anchor_day,
+                    start_at,
+                    end_at,
+                    time_semantics,
+                    title,
+                    subtype,
+                    notes,
+                    intensity,
+                    metadata_json,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            )?;
+
+            for record in records {
+                statement.execute(params![
+                    record.context_event_id,
+                    record.family.as_str(),
+                    record.source_id,
+                    record.anchor_day,
+                    record.start_at,
+                    record.end_at,
+                    record.time_semantics.as_str(),
+                    record.title,
+                    record.subtype,
+                    record.notes,
+                    record.intensity,
+                    record.metadata_json,
+                    record.updated_at,
+                ])?;
+            }
+
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                self.connection.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn replace_pattern_summaries(&self, records: &[PatternSummaryRecord]) -> Result<()> {
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE TRANSACTION")?;
+
+        let result = (|| -> Result<()> {
+            self.connection
+                .execute("DELETE FROM derived_pattern_summaries", [])?;
+            let mut statement = self.connection.prepare(
+                "INSERT INTO derived_pattern_summaries (
+                    summary_id,
+                    family,
+                    normalized_key,
+                    relation_window,
+                    metric,
+                    sample_count,
+                    median_delta,
+                    effect_direction,
+                    confidence,
+                    metadata_json,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            )?;
+
+            for record in records {
+                statement.execute(params![
+                    record.summary_id,
+                    record.family.as_str(),
+                    record.normalized_key,
+                    record.relation_window.as_str(),
+                    record.metric.as_str(),
+                    i64::from(record.sample_count),
+                    record.median_delta,
+                    record.effect_direction.as_str(),
+                    record.confidence.as_str(),
+                    record.metadata_json,
+                    record.updated_at,
+                ])?;
+            }
+
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                self.connection.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
 }
 
 impl<'connection> ViewStore<'connection> {
@@ -700,6 +1201,121 @@ impl<'connection> ViewStore<'connection> {
         history.reverse();
 
         Ok(history)
+    }
+
+    pub fn daily_history_all(&self) -> Result<Vec<DailyOverviewRow>> {
+        let mut statement = self.connection.prepare(
+            "WITH days AS (
+                SELECT day FROM daily_sleep
+                UNION
+                SELECT day FROM daily_readiness
+                UNION
+                SELECT day FROM daily_activity
+            )
+            SELECT
+                days.day,
+                daily_sleep.sleep_score,
+                daily_readiness.readiness_score,
+                daily_activity.activity_score,
+                MAX(
+                    COALESCE(daily_sleep.updated_at, ''),
+                    COALESCE(daily_readiness.updated_at, ''),
+                    COALESCE(daily_activity.updated_at, '')
+                )
+            FROM days
+            LEFT JOIN daily_sleep ON daily_sleep.day = days.day
+            LEFT JOIN daily_readiness ON daily_readiness.day = days.day
+            LEFT JOIN daily_activity ON daily_activity.day = days.day
+            ORDER BY days.day ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(DailyOverviewRow {
+                day: row.get(0)?,
+                sleep_score: parse_optional_score(row.get::<_, Option<i64>>(1)?),
+                readiness_score: parse_optional_score(row.get::<_, Option<i64>>(2)?),
+                activity_score: parse_optional_score(row.get::<_, Option<i64>>(3)?),
+                updated_at: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+            })
+        })?;
+
+        let mut history = Vec::new();
+        for row in rows {
+            history.push(row?);
+        }
+
+        Ok(history)
+    }
+
+    pub fn daily_history_between_days(
+        &self,
+        start_day: &str,
+        end_day: &str,
+    ) -> Result<Vec<DailyOverviewRow>> {
+        let mut statement = self.connection.prepare(
+            "WITH days AS (
+                SELECT day FROM daily_sleep
+                UNION
+                SELECT day FROM daily_readiness
+                UNION
+                SELECT day FROM daily_activity
+            )
+            SELECT
+                days.day,
+                daily_sleep.sleep_score,
+                daily_readiness.readiness_score,
+                daily_activity.activity_score,
+                MAX(
+                    COALESCE(daily_sleep.updated_at, ''),
+                    COALESCE(daily_readiness.updated_at, ''),
+                    COALESCE(daily_activity.updated_at, '')
+                )
+            FROM days
+            LEFT JOIN daily_sleep ON daily_sleep.day = days.day
+            LEFT JOIN daily_readiness ON daily_readiness.day = days.day
+            LEFT JOIN daily_activity ON daily_activity.day = days.day
+            WHERE days.day >= ?1 AND days.day <= ?2
+            ORDER BY days.day ASC",
+        )?;
+        let rows = statement.query_map(params![start_day, end_day], |row| {
+            Ok(DailyOverviewRow {
+                day: row.get(0)?,
+                sleep_score: parse_optional_score(row.get::<_, Option<i64>>(1)?),
+                readiness_score: parse_optional_score(row.get::<_, Option<i64>>(2)?),
+                activity_score: parse_optional_score(row.get::<_, Option<i64>>(3)?),
+                updated_at: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+            })
+        })?;
+
+        let mut history = Vec::new();
+        for row in rows {
+            history.push(row?);
+        }
+
+        Ok(history)
+    }
+
+    pub fn latest_source_day(&self) -> Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT MAX(day) FROM (
+                    SELECT day FROM daily_sleep
+                    UNION ALL
+                    SELECT day FROM daily_readiness
+                    UNION ALL
+                    SELECT day FROM daily_activity
+                    UNION ALL
+                    SELECT day FROM workouts
+                    UNION ALL
+                    SELECT day FROM tags
+                    UNION ALL
+                    SELECT day FROM enhanced_tags
+                    UNION ALL
+                    SELECT day FROM sessions
+                )",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .map_err(Into::into)
     }
 
     pub fn latest_personal_info(&self) -> Result<Option<PersonalInfoRecord>> {
@@ -810,6 +1426,236 @@ impl<'connection> ViewStore<'connection> {
         Ok(days)
     }
 
+    pub fn workouts_between_days(
+        &self,
+        start_day: &str,
+        end_day: &str,
+    ) -> Result<Vec<WorkoutRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                workout_id,
+                day,
+                started_at,
+                ended_at,
+                timezone,
+                sport,
+                activity,
+                intensity,
+                title,
+                notes,
+                source,
+                raw_cache_key,
+                updated_at
+             FROM workouts
+             WHERE day >= ?1 AND day <= ?2
+             ORDER BY day ASC, started_at ASC",
+        )?;
+        let rows = statement.query_map(params![start_day, end_day], read_workout_row)?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
+    pub fn tags_between_days(&self, start_day: &str, end_day: &str) -> Result<Vec<TagRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                tag_id,
+                day,
+                label,
+                raw_cache_key,
+                updated_at
+             FROM tags
+             WHERE day >= ?1 AND day <= ?2
+             ORDER BY day ASC, tag_id ASC",
+        )?;
+        let rows = statement.query_map(params![start_day, end_day], |row| {
+            Ok(TagRecord {
+                tag_id: row.get(0)?,
+                day: row.get(1)?,
+                label: row.get(2)?,
+                source: TagSource::Basic,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
+    pub fn enhanced_tags_between_days(
+        &self,
+        start_day: &str,
+        end_day: &str,
+    ) -> Result<Vec<EnhancedTagRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                enhanced_tag_id,
+                day,
+                started_at,
+                ended_at,
+                label,
+                subtype,
+                comment,
+                intensity,
+                raw_cache_key,
+                updated_at
+             FROM enhanced_tags
+             WHERE day >= ?1 AND day <= ?2
+             ORDER BY day ASC, COALESCE(started_at, day) ASC, enhanced_tag_id ASC",
+        )?;
+        let rows = statement.query_map(params![start_day, end_day], read_enhanced_tag_row)?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
+    pub fn sessions_between_days(
+        &self,
+        start_day: &str,
+        end_day: &str,
+    ) -> Result<Vec<SessionRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                session_id,
+                day,
+                started_at,
+                ended_at,
+                kind,
+                state,
+                score,
+                title,
+                raw_cache_key,
+                updated_at
+             FROM sessions
+             WHERE day >= ?1 AND day <= ?2
+             ORDER BY day ASC, started_at ASC",
+        )?;
+        let rows = statement.query_map(params![start_day, end_day], read_session_row)?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
+    pub fn context_events_for_day(&self, day: &str) -> Result<Vec<ContextEventRecord>> {
+        let day_start = format!("{day}T00:00:00Z");
+        let day_end = format!("{day}T23:59:59Z");
+        let mut statement = self.connection.prepare(
+            "SELECT
+                context_event_id,
+                family,
+                source_id,
+                anchor_day,
+                start_at,
+                end_at,
+                time_semantics,
+                title,
+                subtype,
+                notes,
+                intensity,
+                metadata_json,
+                updated_at
+             FROM derived_context_events
+             WHERE anchor_day = ?1
+                OR (
+                    strftime('%s', start_at) <= strftime('%s', ?3)
+                    AND strftime('%s', COALESCE(end_at, start_at)) >= strftime('%s', ?2)
+                )
+             ORDER BY strftime('%s', start_at) ASC, context_event_id ASC",
+        )?;
+        let rows = statement.query_map(params![day, day_start, day_end], read_context_event_row)?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
+    pub fn context_events_between_days(
+        &self,
+        start_day: &str,
+        end_day: &str,
+    ) -> Result<Vec<ContextEventRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                context_event_id,
+                family,
+                source_id,
+                anchor_day,
+                start_at,
+                end_at,
+                time_semantics,
+                title,
+                subtype,
+                notes,
+                intensity,
+                metadata_json,
+                updated_at
+             FROM derived_context_events
+             WHERE anchor_day >= ?1 AND anchor_day <= ?2
+             ORDER BY anchor_day ASC, start_at ASC, context_event_id ASC",
+        )?;
+        let rows = statement.query_map(params![start_day, end_day], read_context_event_row)?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
+    pub fn pattern_summaries(
+        &self,
+        family: Option<ContextEventFamily>,
+        metric: Option<PatternMetric>,
+    ) -> Result<Vec<PatternSummaryRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                summary_id,
+                family,
+                normalized_key,
+                relation_window,
+                metric,
+                sample_count,
+                median_delta,
+                effect_direction,
+                confidence,
+                metadata_json,
+                updated_at
+             FROM derived_pattern_summaries
+             WHERE (?1 IS NULL OR family = ?1)
+               AND (?2 IS NULL OR metric = ?2)
+             ORDER BY
+                CASE confidence WHEN 'strong' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END DESC,
+                sample_count DESC,
+                ABS(median_delta) DESC,
+                normalized_key ASC",
+        )?;
+        let family_filter = family.map(ContextEventFamily::as_str);
+        let metric_filter = metric.map(PatternMetric::as_str);
+        let rows = statement.query_map(
+            params![family_filter, metric_filter],
+            read_pattern_summary_row,
+        )?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
     pub fn record_counts(&self) -> Result<RecordCounts> {
         Ok(RecordCounts {
             raw_payloads: row_count(self.connection, "raw_payload_cache")?,
@@ -822,6 +1668,8 @@ impl<'connection> ViewStore<'connection> {
             tags: row_count(self.connection, "tags")?,
             enhanced_tags: row_count(self.connection, "enhanced_tags")?,
             sessions: row_count(self.connection, "sessions")?,
+            derived_context_events: row_count(self.connection, "derived_context_events")?,
+            derived_pattern_summaries: row_count(self.connection, "derived_pattern_summaries")?,
         })
     }
 }
@@ -885,6 +1733,126 @@ fn read_heartrate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HeartRatePoin
     })
 }
 
+fn read_workout_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkoutRecord> {
+    Ok(WorkoutRecord {
+        workout_id: row.get(0)?,
+        day: row.get(1)?,
+        started_at: row.get(2)?,
+        ended_at: row.get(3)?,
+        timezone: row.get(4)?,
+        sport: row.get(5)?,
+        activity: row.get(6)?,
+        intensity: row.get(7)?,
+        title: row.get(8)?,
+        notes: row.get(9)?,
+        source: row.get(10)?,
+        raw_cache_key: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
+}
+
+fn read_enhanced_tag_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EnhancedTagRecord> {
+    Ok(EnhancedTagRecord {
+        enhanced_tag_id: row.get(0)?,
+        day: row.get(1)?,
+        started_at: row.get(2)?,
+        ended_at: row.get(3)?,
+        label: row.get(4)?,
+        subtype: row.get(5)?,
+        comment: row.get(6)?,
+        intensity: row.get(7)?,
+        raw_cache_key: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+fn read_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
+    Ok(SessionRecord {
+        session_id: row.get(0)?,
+        day: row.get(1)?,
+        started_at: row.get(2)?,
+        ended_at: row.get(3)?,
+        kind: row.get(4)?,
+        state: row.get(5)?,
+        score: row.get(6)?,
+        title: row.get(7)?,
+        raw_cache_key: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+fn read_context_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextEventRecord> {
+    Ok(ContextEventRecord {
+        context_event_id: row.get(0)?,
+        family: parse_context_event_family(&row.get::<_, String>(1)?, 1)?,
+        source_id: row.get(2)?,
+        anchor_day: row.get(3)?,
+        start_at: row.get(4)?,
+        end_at: row.get(5)?,
+        time_semantics: parse_time_semantics(&row.get::<_, String>(6)?, 6)?,
+        title: row.get(7)?,
+        subtype: row.get(8)?,
+        notes: row.get(9)?,
+        intensity: row.get(10)?,
+        metadata_json: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
+}
+
+fn read_pattern_summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PatternSummaryRecord> {
+    Ok(PatternSummaryRecord {
+        summary_id: row.get(0)?,
+        family: parse_context_event_family(&row.get::<_, String>(1)?, 1)?,
+        normalized_key: row.get(2)?,
+        relation_window: parse_pattern_relation_window(&row.get::<_, String>(3)?, 3)?,
+        metric: parse_pattern_metric(&row.get::<_, String>(4)?, 4)?,
+        sample_count: parse_u32(row.get::<_, i64>(5)?, 5)?,
+        median_delta: row.get(6)?,
+        effect_direction: parse_effect_direction(&row.get::<_, String>(7)?, 7)?,
+        confidence: parse_data_sufficiency(&row.get::<_, String>(8)?, 8)?,
+        metadata_json: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
+fn parse_context_event_family(value: &str, column: usize) -> rusqlite::Result<ContextEventFamily> {
+    ContextEventFamily::parse(value).ok_or_else(|| invalid_text_enum(column, value))
+}
+
+fn parse_time_semantics(value: &str, column: usize) -> rusqlite::Result<TimeSemantics> {
+    TimeSemantics::parse(value).ok_or_else(|| invalid_text_enum(column, value))
+}
+
+fn parse_pattern_metric(value: &str, column: usize) -> rusqlite::Result<PatternMetric> {
+    PatternMetric::parse(value).ok_or_else(|| invalid_text_enum(column, value))
+}
+
+fn parse_pattern_relation_window(
+    value: &str,
+    column: usize,
+) -> rusqlite::Result<PatternRelationWindow> {
+    PatternRelationWindow::parse(value).ok_or_else(|| invalid_text_enum(column, value))
+}
+
+fn parse_data_sufficiency(value: &str, column: usize) -> rusqlite::Result<DataSufficiency> {
+    DataSufficiency::parse(value).ok_or_else(|| invalid_text_enum(column, value))
+}
+
+fn parse_effect_direction(value: &str, column: usize) -> rusqlite::Result<EffectDirection> {
+    EffectDirection::parse(value).ok_or_else(|| invalid_text_enum(column, value))
+}
+
+fn invalid_text_enum(column: usize, value: &str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        column,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid enum value `{value}`"),
+        )),
+    )
+}
+
 fn row_count(connection: &Connection, table: &str) -> Result<u64> {
     let query = format!("SELECT COUNT(*) FROM {table}");
     let count = connection.query_row(&query, [], |row| row.get::<_, i64>(0))?;
@@ -941,8 +1909,8 @@ mod tests {
     use crate::error::OuraProblem;
     use crate::store::Store;
     use crate::store::queries::{
-        DailyActivityRecord, DailyReadinessRecord, DailySleepRecord, HeartrateSampleRecord,
-        SyncRunStatus, SyncStateRecord,
+        ContextEventFamily, ContextEventRecord, DailyActivityRecord, DailyReadinessRecord,
+        DailySleepRecord, HeartrateSampleRecord, SyncRunStatus, SyncStateRecord, TimeSemantics,
     };
 
     fn seed_daily_history(store: &Store) {
@@ -1083,5 +2051,53 @@ mod tests {
         assert_eq!(points.len(), 2);
         assert_eq!(points[0].bpm, 58);
         assert_eq!(points[1].bpm, 60);
+    }
+
+    #[test]
+    fn latest_source_day_tracks_newest_persisted_family_day() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        seed_daily_history(&store);
+
+        assert_eq!(
+            store
+                .views()
+                .latest_source_day()
+                .unwrap_or_else(|error| panic!("latest day should load: {error}"))
+                .as_deref(),
+            Some("2026-04-08")
+        );
+    }
+
+    #[test]
+    fn context_events_for_day_respects_offset_timestamps() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        store
+            .derived()
+            .replace_context_events(&[ContextEventRecord {
+                context_event_id: "workout:late-offset".to_owned(),
+                family: ContextEventFamily::Workout,
+                source_id: "late-offset".to_owned(),
+                anchor_day: "2026-04-08".to_owned(),
+                start_at: "2026-04-08T23:30:00-07:00".to_owned(),
+                end_at: Some("2026-04-08T23:45:00-07:00".to_owned()),
+                time_semantics: TimeSemantics::Interval,
+                title: "Late workout".to_owned(),
+                subtype: Some("running".to_owned()),
+                notes: None,
+                intensity: Some("moderate".to_owned()),
+                metadata_json: "{}".to_owned(),
+                updated_at: "2026-04-09T07:00:00Z".to_owned(),
+            }])
+            .unwrap_or_else(|error| panic!("context event should seed: {error}"));
+
+        let events = store
+            .views()
+            .context_events_for_day("2026-04-08")
+            .unwrap_or_else(|error| panic!("context events should load: {error}"));
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].context_event_id, "workout:late-offset");
     }
 }

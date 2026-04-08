@@ -52,13 +52,25 @@ pub struct RefreshConfig {
     pub personal_interval_secs: u64,
     pub daily_interval_secs: u64,
     pub heartrate_interval_secs: u64,
+    pub workout_interval_secs: u64,
+    pub enhanced_tag_interval_secs: u64,
+    pub session_interval_secs: u64,
     pub personal_stale_after_secs: u64,
     pub daily_stale_after_secs: u64,
     pub heartrate_stale_after_secs: u64,
+    pub workout_stale_after_secs: u64,
+    pub enhanced_tag_stale_after_secs: u64,
+    pub session_stale_after_secs: u64,
     pub daily_history_days: u16,
     pub daily_overlap_days: u16,
     pub heartrate_history_days: u16,
     pub heartrate_overlap_minutes: u16,
+    pub workout_history_days: u16,
+    pub workout_overlap_days: u16,
+    pub enhanced_tag_history_days: u16,
+    pub enhanced_tag_overlap_days: u16,
+    pub session_history_days: u16,
+    pub session_overlap_days: u16,
     pub max_backoff_secs: u64,
     pub demo_fixture_dir: Option<PathBuf>,
 }
@@ -92,13 +104,25 @@ struct FileRefreshConfig {
     personal_interval_secs: Option<u64>,
     daily_interval_secs: Option<u64>,
     heartrate_interval_secs: Option<u64>,
+    workout_interval_secs: Option<u64>,
+    enhanced_tag_interval_secs: Option<u64>,
+    session_interval_secs: Option<u64>,
     personal_stale_after_secs: Option<u64>,
     daily_stale_after_secs: Option<u64>,
     heartrate_stale_after_secs: Option<u64>,
+    workout_stale_after_secs: Option<u64>,
+    enhanced_tag_stale_after_secs: Option<u64>,
+    session_stale_after_secs: Option<u64>,
     daily_history_days: Option<u16>,
     daily_overlap_days: Option<u16>,
     heartrate_history_days: Option<u16>,
     heartrate_overlap_minutes: Option<u16>,
+    workout_history_days: Option<u16>,
+    workout_overlap_days: Option<u16>,
+    enhanced_tag_history_days: Option<u16>,
+    enhanced_tag_overlap_days: Option<u16>,
+    session_history_days: Option<u16>,
+    session_overlap_days: Option<u16>,
     max_backoff_secs: Option<u64>,
     demo_fixture_dir: Option<PathBuf>,
 }
@@ -216,6 +240,21 @@ impl Config {
                     .as_ref()
                     .and_then(|refresh| refresh.heartrate_interval_secs)
                     .unwrap_or(60),
+                workout_interval_secs: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.workout_interval_secs)
+                    .unwrap_or(600),
+                enhanced_tag_interval_secs: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.enhanced_tag_interval_secs)
+                    .unwrap_or(300),
+                session_interval_secs: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.session_interval_secs)
+                    .unwrap_or(300),
                 personal_stale_after_secs: file_config
                     .refresh
                     .as_ref()
@@ -231,6 +270,21 @@ impl Config {
                     .as_ref()
                     .and_then(|refresh| refresh.heartrate_stale_after_secs)
                     .unwrap_or(15 * 60),
+                workout_stale_after_secs: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.workout_stale_after_secs)
+                    .unwrap_or(24 * 60 * 60),
+                enhanced_tag_stale_after_secs: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.enhanced_tag_stale_after_secs)
+                    .unwrap_or(12 * 60 * 60),
+                session_stale_after_secs: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.session_stale_after_secs)
+                    .unwrap_or(12 * 60 * 60),
                 daily_history_days: file_config
                     .refresh
                     .as_ref()
@@ -251,6 +305,36 @@ impl Config {
                     .as_ref()
                     .and_then(|refresh| refresh.heartrate_overlap_minutes)
                     .unwrap_or(60),
+                workout_history_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.workout_history_days)
+                    .unwrap_or(90),
+                workout_overlap_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.workout_overlap_days)
+                    .unwrap_or(2),
+                enhanced_tag_history_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.enhanced_tag_history_days)
+                    .unwrap_or(90),
+                enhanced_tag_overlap_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.enhanced_tag_overlap_days)
+                    .unwrap_or(2),
+                session_history_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.session_history_days)
+                    .unwrap_or(90),
+                session_overlap_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.session_overlap_days)
+                    .unwrap_or(2),
                 max_backoff_secs: file_config
                     .refresh
                     .as_ref()
@@ -259,7 +343,8 @@ impl Config {
                 demo_fixture_dir: file_config
                     .refresh
                     .as_ref()
-                    .and_then(|refresh| refresh.demo_fixture_dir.clone()),
+                    .and_then(|refresh| refresh.demo_fixture_dir.clone())
+                    .or_else(|| Some(PathBuf::from("tests/fixtures/phase3"))),
             },
         };
 
@@ -271,9 +356,29 @@ impl Config {
 
 impl RefreshConfig {
     fn validate(&self) -> Result<()> {
-        if self.daily_history_days == 0 {
+        for (label, value) in [
+            ("refresh.daily_history_days", self.daily_history_days),
+            (
+                "refresh.heartrate_history_days",
+                self.heartrate_history_days,
+            ),
+            ("refresh.workout_history_days", self.workout_history_days),
+            (
+                "refresh.enhanced_tag_history_days",
+                self.enhanced_tag_history_days,
+            ),
+            ("refresh.session_history_days", self.session_history_days),
+        ] {
+            if value == 0 {
+                return Err(RingmasterError::Config(format!(
+                    "{label} must be at least 1"
+                )));
+            }
+        }
+
+        if self.max_backoff_secs == 0 {
             return Err(RingmasterError::Config(
-                "refresh.daily_history_days must be at least 1".to_owned(),
+                "refresh.max_backoff_secs must be at least 1".to_owned(),
             ));
         }
 
@@ -398,10 +503,17 @@ fn split_csv(value: &str) -> Vec<String> {
 }
 
 fn default_requested_scopes() -> Vec<String> {
-    ["personal", "daily", "heartrate"]
-        .into_iter()
-        .map(ToOwned::to_owned)
-        .collect()
+    [
+        "personal",
+        "daily",
+        "heartrate",
+        "workout",
+        "session",
+        "enhanced_tag",
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect()
 }
 
 fn load_file_config(path: &Path) -> Result<FileConfig> {
@@ -478,6 +590,9 @@ mod tests {
         assert_eq!(config.refresh.heartrate_interval_secs, 60);
         assert_eq!(config.refresh.daily_interval_secs, 300);
         assert_eq!(config.refresh.personal_interval_secs, 3_600);
+        assert_eq!(config.refresh.workout_interval_secs, 600);
+        assert_eq!(config.refresh.enhanced_tag_interval_secs, 300);
+        assert_eq!(config.refresh.session_interval_secs, 300);
     }
 
     #[test]
@@ -486,13 +601,25 @@ mod tests {
             personal_interval_secs: 3_600,
             daily_interval_secs: 300,
             heartrate_interval_secs: 60,
+            workout_interval_secs: 600,
+            enhanced_tag_interval_secs: 300,
+            session_interval_secs: 300,
             personal_stale_after_secs: 72 * 60 * 60,
             daily_stale_after_secs: 12 * 60 * 60,
             heartrate_stale_after_secs: 15 * 60,
+            workout_stale_after_secs: 24 * 60 * 60,
+            enhanced_tag_stale_after_secs: 12 * 60 * 60,
+            session_stale_after_secs: 12 * 60 * 60,
             daily_history_days: 0,
             daily_overlap_days: 2,
             heartrate_history_days: 7,
             heartrate_overlap_minutes: 60,
+            workout_history_days: 90,
+            workout_overlap_days: 2,
+            enhanced_tag_history_days: 90,
+            enhanced_tag_overlap_days: 2,
+            session_history_days: 90,
+            session_overlap_days: 2,
             max_backoff_secs: 60 * 60,
             demo_fixture_dir: None,
         };

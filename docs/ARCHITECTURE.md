@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document describes the implemented phase-2 MVP architecture for `ringmaster.rs`. It reflects the code that exists in the repository today, not the eventual end-state product.
+This document describes the implemented phase-3 architecture for `ringmaster.rs`. It reflects the code that exists in the repository today, not the eventual end-state product.
 
 ## Design goals
 
@@ -10,10 +10,10 @@ This document describes the implemented phase-2 MVP architecture for `ringmaster
 - poll-first for v1
 - pure UI components
 - single-crate simplicity until pressure justifies more structure
-- deterministic demo mode for development, CI, and screenshots
-- one real vertical slice before broadening the Oura surface
-- explicit freshness semantics instead of vague "loading/error" buckets
-- useful daily operation before expanding features
+- deterministic demo and fixture paths for development, CI, and screenshots
+- explicit freshness and availability semantics instead of vague loading/error buckets
+- explainability that is evidence-based and restrained
+- deterministic derived analytics rather than pseudo-intelligence
 
 ## Runtime shape
 
@@ -23,15 +23,12 @@ CLI
   -> runtime path setup
   -> command dispatcher
 
-doctor / auth / sync once
+doctor / auth / sync once / sync watch / derive rebuild
   -> store + auth/session seams
   -> typed Oura client boundaries
+  -> normalized imports
+  -> bounded auto-derived rebuilds after sync, plus explicit full-history rebuilds
   -> formatted text output
-
-sync watch
-  -> refresh scheduler core
-  -> family-selective sync engine
-  -> bounded/demo watch mode for smoke tests
 
 tui / tui --demo
   -> app state builder
@@ -68,13 +65,16 @@ Responsibilities:
 - refresh policy defaults
 - env-only client secret handling
 
-Current defaults:
+Current refresh defaults now cover all six live families:
 
-- config: `~/.config/ringmaster/config.toml`
-- state: `~/.local/state/ringmaster`
-- cache: `~/.cache/ringmaster`
-- database: `ringmaster.db`
-- OAuth callback: `http://127.0.0.1:8788/callback`
+- personal
+- daily
+- heartrate
+- workouts
+- enhanced tags
+- sessions
+
+History and overlap defaults are also family-aware, so the sync layer does not need to invent bespoke window logic in the UI or import path.
 
 ### `src/app.rs`
 
@@ -83,17 +83,21 @@ Responsibilities:
 - screen enum and navigation state
 - explicit freshness and availability modeling
 - demo/live application snapshots and presentation models
+- shared selected-day and selected-event state
 - user-facing status/footer text
-- shaping store/auth data into presentation structs
-- deterministic insight summaries
+- shaping store/auth/derived data into screen-specific models
+- deterministic selected-day summaries and pattern rows
 
-The app layer is where persisted store rows and auth/capability diagnostics become screen-specific models. It deliberately does not own terminal I/O, HTTP, or SQL.
+The app layer is where persisted normalized rows, derived tables, and auth/capability diagnostics become screen models. It deliberately does not own terminal I/O, HTTP, or SQL.
 
 Important implemented state concepts:
 
 - `FreshnessKind`: `Fresh`, `Stale`, `NoDataYet`, `NeverSynced`, `MissingScope`, `AuthFailure`, `SourceDelayed`
 - `LiveSnapshot`: the immutable persisted-data snapshot sent into the reducer after each background refresh
-- `TrendWindowKind`: 7d / 30d / 90d user-facing trend windows
+- `selected_day_index`: shared by Dashboard, Timeline, and Explain
+- `selected_event_id`: shared by Timeline and Explain
+- `overlay_filters`: shared family toggles for workouts, tags, and sessions
+- `PatternMetricFilter`: shared pattern metric filtering for the Patterns screen
 
 ### `src/tui.rs`
 
@@ -119,11 +123,20 @@ How background refresh works:
 - when new persisted data is available, the worker rebuilds a `LiveSnapshot` and sends `Action::LiveSnapshotLoaded` back to the UI loop
 - this keeps blocking store/auth/sync work off the render path and avoids `Send` pressure on the SQLite + sync stack
 
+Implemented screen set:
+
+- Dashboard
+- Timeline
+- Trends
+- Explain
+- Patterns
+- Ops
+
 ### `src/components/*`
 
 Responsibilities:
 
-- pure rendering for Dashboard, Timeline, Trends, and Ops
+- pure rendering for Dashboard, Timeline, Trends, Explain, Patterns, and Ops
 
 Boundary rule:
 
@@ -132,12 +145,14 @@ Boundary rule:
 - no SQLite handles
 - no token refresh logic
 
-The components are intentionally presentation-only:
+Component responsibilities today:
 
-- Dashboard renders cards, freshness/capability lists, and "what changed"
-- Timeline renders the day selector, gap-aware heartrate chart, and selected-point details
-- Trends renders window tabs, metric sparklines, and notes
-- Ops renders trust/freshness metadata without reaching back into the store
+- Dashboard renders selected-day summaries, cards, freshness/capability lists, and “what likely changed?”
+- Timeline renders the gap-aware heartrate chart, overlay lanes, selected-event details, and selected-day event list
+- Trends renders window tabs, sparklines, and trend notes
+- Explain renders selected-day summary lines, measurements, evidence, context entries, and caveats
+- Patterns renders deterministic association rows plus sufficiency/wording notes
+- Ops renders trust and freshness diagnostics without reaching back into the store
 
 ### `src/refresh.rs`
 
@@ -148,7 +163,7 @@ Responsibilities:
 - persisted backoff handling
 - bounded watch execution for demo/CI
 
-The scheduler is intentionally reusable by both `sync watch` and the live TUI worker. Webhook invalidation remains deferred, but the current shape leaves an obvious seam for future external triggers.
+The scheduler is reusable by both `sync watch` and the live TUI worker. It now treats `workout`, `enhanced_tag`, and `session` as first-class sync families with distinct intervals, stale-after windows, and sync keys.
 
 ### `src/store/*`
 
@@ -159,6 +174,7 @@ Responsibilities:
 - typed query surfaces
 - sync-state persistence
 - view-oriented read models
+- derived table writes and reads
 
 Current schema families:
 
@@ -176,16 +192,17 @@ Current schema families:
 - `enhanced_tags`
 - `sessions`
 - `webhook_subscriptions`
+- `derived_context_events`
+- `derived_pattern_summaries`
 
-`sync_state` tracks per-slice status, watermark, granted scopes, failure counts, next-attempt backoff, and the last structured Oura problem. `raw_payload_cache` is intentionally separate from normalized tables so future debugging and replay work does not leak SQL concerns into the transport layer.
+Important query responsibilities added in phase 3:
 
-Read-side queries now expose enough shape for the MVP screens:
+- normalized reads for workouts, enhanced tags, and sessions
+- selected-day and day-range context-event queries
+- persisted pattern summary reads
+- record counts that include both normalized and derived tables
 
-- latest personal profile snapshot
-- rolling daily history for baseline/trend calculations
-- heartrate-by-day queries for the timeline
-- available heartrate day selection lists
-- sync/auth diagnostics for the Ops screen
+`sync_state` still tracks per-slice status, watermark, granted scopes, failure counts, next-attempt backoff, and the last structured Oura problem. `raw_payload_cache` remains intentionally separate from normalized tables so replay and debugging do not leak transport details into the UI.
 
 ### `src/oura/*`
 
@@ -197,30 +214,120 @@ Responsibilities:
 - typed transport DTOs and client boundary
 - poll-first sync orchestration
 
-Current behavior:
+Current live sync behavior:
 
 - `auth login` prints an authorization URL, listens on the configured loopback callback, validates CSRF state, exchanges the code server-side, and persists auth/session metadata
 - token secrets live behind the keyring-backed `SecretStore` seam; tests use an in-memory secret store
 - `ensure_authorized_session` is the single owner for access-token refresh
-- `ReqwestOuraClient` and `FixtureOuraClient` share the same typed phase-1 fetch surface
-- `sync once` and `sync watch` import the current MVP slice:
+- `ReqwestOuraClient` and `FixtureOuraClient` share the same typed fetch surface
+- `sync once` and `sync watch` import:
   - `/v2/usercollection/personal_info`
   - `/v2/usercollection/daily_sleep`
   - `/v2/usercollection/daily_readiness`
   - `/v2/usercollection/daily_activity`
   - `/v2/usercollection/heartrate`
-- sync remains family-selective internally, so the scheduler can refresh only the families that are due without inventing a separate import path
+  - workouts
+  - enhanced tags
+  - sessions
+
+Each family is imported through idempotent upserts and family-specific reconcile windows. Missing scopes are captured explicitly so the product can show “missing capability” rather than pretending the family is simply empty.
+
+Successful non-dry-run syncs now also refresh the derived context-event and pattern-summary tables over a bounded recent window, so Explain, Timeline overlays, and Patterns stay current without making every background refresh reprocess the entire database. `derive rebuild` remains the explicit full-history recompute path.
+
+### `src/derive.rs`
+
+Responsibilities:
+
+- deterministic rebuild of canonical context events
+- deterministic rebuild of persisted pattern summaries
+- fixture-backed demo rebuild path
+- one place for derivation logic shared by CLI rebuilds and product reads
+
+`derive rebuild` follows this shape:
+
+```text
+open store
+  -> read normalized workouts / tags / enhanced tags / sessions
+  -> build canonical context events
+  -> build descriptive pattern summaries from daily history + context events
+  -> replace derived tables atomically through typed store APIs
+```
+
+The rebuild path is safe to run repeatedly and intentionally avoids any UI or live-network coupling.
 
 ### `src/insights.rs`
 
 Responsibilities:
 
-- 7d and 30d baselines
+- rolling baselines
 - day-over-day deltas
 - deviation scoring when history is sufficient
-- confidence notes when the history is too thin
+- confidence notes when history is too thin
 
-This module is intentionally small and deterministic. It does not make causal claims or try to behave like a medical interpretation layer.
+This module remains small and deterministic. Explain and Patterns may use its baseline semantics, but they do not turn into a freeform narrative or causal interpretation layer.
+
+## Canonical context-event model
+
+`derived_context_events` is the canonical read model for Timeline and Explain.
+
+It unifies workouts, legacy tags, enhanced tags, and sessions behind normalized fields:
+
+- stable derived id
+- family
+- source id
+- anchor day
+- start / end timestamps
+- time semantics (`interval`, `point`, `all_day`)
+- title
+- subtype
+- notes
+- intensity
+- metadata JSON for drill-down
+- updated timestamp
+
+Why it exists:
+
+- avoids assembling overlays ad hoc inside widgets
+- gives Explain a stable evidence source
+- keeps overlap handling deterministic
+- provides one extension seam for future families
+
+## Explainability and pattern architecture
+
+### Explain
+
+Explain is not a language-model feature. It is a deterministic presentation layer over:
+
+- selected-day daily metrics
+- rolling baselines
+- nearby derived context events
+- capability/freshness diagnostics
+
+Explain deliberately uses disciplined templates and caveat rules:
+
+- no medical advice
+- no causal claims
+- no significance theater
+- no “AI says” framing
+
+### Patterns
+
+Patterns is a deterministic descriptive-association layer over persisted history.
+
+Current implementation:
+
+- normalizes event keys by family
+- computes event-occurrence metric deltas against rolling baselines
+- aggregates with simple, documented summaries
+- requires a minimum sample threshold before surfacing rows
+- persists the resulting summary rows for cheap UI reads
+
+Current wording rules:
+
+- `associated with`
+- `co-occurred with`
+- `after days with`
+- never `caused by`
 
 ## Data flow
 
@@ -234,12 +341,12 @@ config
   -> tui::run()
   -> worker thread schedules refreshes
   -> worker runs sync_selected(...)
-  -> worker rebuilds LiveSnapshot
+  -> worker rebuilds LiveSnapshot from persisted + derived tables
   -> Action::LiveSnapshotLoaded enters reducer
   -> components draw presentation models only
 ```
 
-The TUI never performs HTTP, token refresh, or database writes on the render path. Live screens render only from persisted auth/session metadata and SQLite read models.
+The TUI never performs HTTP, token refresh, or database writes on the render path. Live screens render only from persisted auth/session metadata, normalized SQLite rows, and derived SQLite rows.
 
 ### Demo TUI
 
@@ -254,62 +361,39 @@ config
 ```text
 config
   -> auth::ensure_authorized_session()
-  -> ReqwestOuraClient
+  -> ReqwestOuraClient or FixtureOuraClient
   -> sync::sync_once()
   -> raw payload cache + normalized upserts
+  -> derived rebuild when persisted daily/context rows changed
   -> store.sync_state().upsert(...)
 ```
 
-### `sync watch`
+### `derive rebuild`
 
 ```text
 config
-  -> refresh::due_families()/next_wake_duration()
-  -> sync::sync_selected()
-  -> store.sync_state().upsert(...)
-  -> optional bounded exit for demo/CI
+  -> Store::open()
+  -> derive::rebuild()
+  -> replace_context_events(...)
+  -> replace_pattern_summaries(...)
 ```
 
-### Fixture sync
+In `--demo` mode, the rebuild command first seeds a temporary store from the phase-3 fixtures using the same sync engine and then rebuilds the derived tables from that persisted data.
 
-```text
-config
-  -> FixtureOuraClient
-  -> sync::sync_once(dry_run or fixture mode)
-  -> same normalization logic as live sync
-  -> optional no-write smoke path for CI
-```
+## Boundary checks
 
-## Why `rusqlite`
+The current architecture intentionally preserves the following constraints:
 
-Bootstrap uses `rusqlite` instead of `sqlx` because:
+- UI components do not know about HTTP or SQLite
+- the auth layer remains the sole refresh-token owner
+- sync code writes normalized and raw data, but does not know about Ratatui widgets
+- derivation happens from persisted data, not by ad hoc widget joins
+- background work stays off the render path
 
-- it keeps the dependency graph tighter
-- the app is local-first and single-user
-- migrations and typed query boundaries are straightforward at this stage
-- async database orchestration is not required yet for the current command surface
+## Intentionally deferred
 
-We also considered Diesel as a possible path if PostgreSQL ever becomes a real product requirement, but we are deliberately not paying that abstraction cost during the SQLite-first bootstrap.
-
-The detailed decision record lives in [docs/decisions/20260408-storage-backend-rusqlite.md](/home/ubuntu/ringmaster.rs/docs/decisions/20260408-storage-backend-rusqlite.md).
-
-If sync/import throughput later justifies an async or pooled storage story, or if multi-backend support becomes real rather than hypothetical, that decision can be revisited with real pressure.
-
-## Freshness semantics
-
-Each family is evaluated independently and surfaced explicitly in the UI:
-
-- `fresh`: data is inside its configured freshness window
-- `stale`: persisted data exists, but it is too old or the last refresh was partial
-- `no data yet`: sync ran but there are still no rows for the family
-- `never synced`: the family has not completed a sync
-- `missing scope`: the required Oura scope is not granted
-- `auth failure`: persisted sync state points to auth/session failure
-- `source delayed`: Oura has not closed out the daily family yet, so the app compares against the latest fully available day
-
-## Follow-up work
-
-- webhook invalidation feeding the existing scheduler
-- deeper daily and heartrate derived views on top of the current MVP
-- broader Oura collections beyond personal/daily/heartrate
-- packaging and release automation
+- webhook delivery and subscription lifecycle
+- broader Oura endpoints beyond the current phase-3 surface
+- export/share/report workflows
+- generalized machine learning
+- cloud sync services or multi-user architecture

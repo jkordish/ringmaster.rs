@@ -11,8 +11,8 @@ use crate::config::Config;
 use crate::error::{OuraApiError, OuraProblem, Result, RingmasterError};
 use crate::oura::models::{
     CapabilityKind, CapabilityReport, DailyActivityDocument, DailyReadinessDocument,
-    DailySleepDocument, HeartRateDocument, PagedCollection, PersonalInfoDocument,
-    TimeSeriesCollection,
+    DailySleepDocument, EnhancedTagDocument, HeartRateDocument, PagedCollection,
+    PersonalInfoDocument, SessionDocument, TimeSeriesCollection, WorkoutDocument,
 };
 use crate::store::queries::RawPayloadRecord;
 
@@ -54,6 +54,21 @@ pub trait OuraClient {
         start_datetime: String,
         end_datetime: String,
     ) -> ClientFuture<'_, Vec<PageFetch<HeartRateDocument>>>;
+    fn fetch_workouts(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<WorkoutDocument>>>;
+    fn fetch_enhanced_tags(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<EnhancedTagDocument>>>;
+    fn fetch_sessions(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<SessionDocument>>>;
 }
 
 #[derive(Debug, Clone)]
@@ -73,7 +88,7 @@ pub struct FixtureOuraClient {
 impl ReqwestOuraClient {
     pub fn new(config: &Config, access_token: String, granted_scopes: &[String]) -> Result<Self> {
         let http = HttpClient::builder()
-            .user_agent("ringmaster.rs/phase1")
+            .user_agent("ringmaster.rs/phase3")
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
 
@@ -316,6 +331,51 @@ impl OuraClient for ReqwestOuraClient {
             .await
         })
     }
+
+    fn fetch_workouts(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<WorkoutDocument>>> {
+        Box::pin(async move {
+            self.fetch_paged_collection(
+                "workout",
+                "workout",
+                vec![("start_date", start_date), ("end_date", end_date)],
+            )
+            .await
+        })
+    }
+
+    fn fetch_enhanced_tags(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<EnhancedTagDocument>>> {
+        Box::pin(async move {
+            self.fetch_paged_collection(
+                "enhanced_tag",
+                "enhanced_tag",
+                vec![("start_date", start_date), ("end_date", end_date)],
+            )
+            .await
+        })
+    }
+
+    fn fetch_sessions(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<SessionDocument>>> {
+        Box::pin(async move {
+            self.fetch_paged_collection(
+                "session",
+                "session",
+                vec![("start_date", start_date), ("end_date", end_date)],
+            )
+            .await
+        })
+    }
 }
 
 impl FixtureOuraClient {
@@ -523,6 +583,57 @@ impl OuraClient for FixtureOuraClient {
             )
         })
     }
+
+    fn fetch_workouts(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<WorkoutDocument>>> {
+        Box::pin(async move {
+            self.load_paged(
+                "workouts.json",
+                "workout",
+                "workout",
+                "day",
+                &start_date,
+                &end_date,
+            )
+        })
+    }
+
+    fn fetch_enhanced_tags(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<EnhancedTagDocument>>> {
+        Box::pin(async move {
+            self.load_paged(
+                "enhanced_tags.json",
+                "enhanced_tag",
+                "enhanced_tag",
+                "day",
+                &start_date,
+                &end_date,
+            )
+        })
+    }
+
+    fn fetch_sessions(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<SessionDocument>>> {
+        Box::pin(async move {
+            self.load_paged(
+                "sessions.json",
+                "session",
+                "session",
+                "day",
+                &start_date,
+                &end_date,
+            )
+        })
+    }
 }
 
 trait SerializeableDocument: serde::Serialize {
@@ -568,6 +679,36 @@ impl SerializeableDocument for HeartRateDocument {
     }
 }
 
+impl SerializeableDocument for WorkoutDocument {
+    fn field_value(&self, field_name: &str) -> Option<&str> {
+        match field_name {
+            "day" => self.day.as_deref(),
+            "timestamp" => self.start_datetime.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+impl SerializeableDocument for EnhancedTagDocument {
+    fn field_value(&self, field_name: &str) -> Option<&str> {
+        match field_name {
+            "day" => Some(self.day.as_str()),
+            "timestamp" => self.start_time.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+impl SerializeableDocument for SessionDocument {
+    fn field_value(&self, field_name: &str) -> Option<&str> {
+        match field_name {
+            "day" => Some(self.day.as_str()),
+            "timestamp" => self.start_datetime.as_deref(),
+            _ => None,
+        }
+    }
+}
+
 fn available_fixture_scopes(fixture_dir: &Path) -> Vec<String> {
     let mut scopes = Vec::new();
     if fixture_dir.join("personal_info.json").is_file() {
@@ -583,6 +724,15 @@ fn available_fixture_scopes(fixture_dir: &Path) -> Vec<String> {
     }
     if fixture_dir.join("heartrate.json").is_file() {
         scopes.push(CapabilityKind::Heartrate.scope_name().to_owned());
+    }
+    if fixture_dir.join("workouts.json").is_file() {
+        scopes.push(CapabilityKind::Workout.scope_name().to_owned());
+    }
+    if fixture_dir.join("enhanced_tags.json").is_file() {
+        scopes.push(CapabilityKind::EnhancedTag.scope_name().to_owned());
+    }
+    if fixture_dir.join("sessions.json").is_file() {
+        scopes.push(CapabilityKind::Session.scope_name().to_owned());
     }
 
     scopes

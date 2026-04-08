@@ -281,7 +281,7 @@ async fn login_with_secret_store(
         .url();
 
     println!(
-        "Open this URL in your browser to authorize ringmaster.rs:\n{}\n",
+        "Open this URL in your browser to authorize ringmaster:\n{}\n",
         authorization_url
     );
 
@@ -489,10 +489,10 @@ async fn callback_handler(
 
     let body = match query.error.as_deref() {
         Some("access_denied") => {
-            "ringmaster.rs authorization was denied. You can return to the terminal.".to_owned()
+            "ringmaster authorization was denied. You can return to the terminal.".to_owned()
         }
         Some(error) => format!(
-            "ringmaster.rs OAuth callback returned an error: {} ({})",
+            "ringmaster OAuth callback returned an error: {} ({})",
             error,
             query
                 .error_description
@@ -500,10 +500,9 @@ async fn callback_handler(
                 .unwrap_or("no description provided")
         ),
         None if query.code.is_some() => {
-            "ringmaster.rs captured the authorization code. You can return to the terminal."
-                .to_owned()
+            "ringmaster captured the authorization code. You can return to the terminal.".to_owned()
         }
-        None => "ringmaster.rs reached the callback path without an authorization code.".to_owned(),
+        None => "ringmaster reached the callback path without an authorization code.".to_owned(),
     };
 
     Html(body)
@@ -807,6 +806,9 @@ mod tests {
                     "personal".to_owned(),
                     "daily".to_owned(),
                     "heartrate".to_owned(),
+                    "workout".to_owned(),
+                    "enhanced_tag".to_owned(),
+                    "session".to_owned(),
                 ],
                 auth_timeout_secs: 5,
             },
@@ -814,13 +816,25 @@ mod tests {
                 personal_interval_secs: 3_600,
                 daily_interval_secs: 300,
                 heartrate_interval_secs: 60,
+                workout_interval_secs: 600,
+                enhanced_tag_interval_secs: 300,
+                session_interval_secs: 300,
                 personal_stale_after_secs: 72 * 60 * 60,
                 daily_stale_after_secs: 12 * 60 * 60,
                 heartrate_stale_after_secs: 15 * 60,
+                workout_stale_after_secs: 24 * 60 * 60,
+                enhanced_tag_stale_after_secs: 12 * 60 * 60,
+                session_stale_after_secs: 12 * 60 * 60,
                 daily_history_days: 90,
                 daily_overlap_days: 2,
                 heartrate_history_days: 7,
                 heartrate_overlap_minutes: 60,
+                workout_history_days: 90,
+                workout_overlap_days: 2,
+                enhanced_tag_history_days: 90,
+                enhanced_tag_overlap_days: 2,
+                session_history_days: 90,
+                session_overlap_days: 2,
                 max_backoff_secs: 60 * 60,
                 demo_fixture_dir: None,
             },

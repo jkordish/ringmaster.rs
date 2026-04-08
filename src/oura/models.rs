@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::error::OuraProblem;
 
@@ -134,6 +137,71 @@ pub struct HeartRateDocument {
     pub timestamp: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkoutDocument {
+    pub id: String,
+    #[serde(default)]
+    pub day: Option<String>,
+    #[serde(default, alias = "start_time")]
+    pub start_datetime: Option<String>,
+    #[serde(default, alias = "end_time")]
+    pub end_datetime: Option<String>,
+    #[serde(default)]
+    pub timezone: Option<String>,
+    #[serde(default, alias = "sport_name")]
+    pub sport: Option<String>,
+    #[serde(default)]
+    pub activity: Option<String>,
+    #[serde(default)]
+    pub intensity: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnhancedTagDocument {
+    pub id: String,
+    pub day: String,
+    #[serde(default, alias = "start_datetime", alias = "start_date")]
+    pub start_time: Option<String>,
+    #[serde(default, alias = "end_datetime", alias = "end_date")]
+    pub end_time: Option<String>,
+    #[serde(default)]
+    pub tag_type_code: Option<String>,
+    #[serde(default, alias = "label")]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub intensity: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionDocument {
+    pub id: String,
+    pub day: String,
+    #[serde(default, alias = "start_time")]
+    pub start_datetime: Option<String>,
+    #[serde(default, alias = "end_time")]
+    pub end_datetime: Option<String>,
+    #[serde(default, alias = "type")]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub score: Option<i64>,
+    #[serde(default, alias = "title")]
+    pub label: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PagedCollection<T> {
     pub data: Vec<T>,
@@ -252,5 +320,59 @@ impl CapabilityKind {
             Self::Tag => "tag",
             Self::EnhancedTag => "enhanced_tag",
         }
+    }
+}
+
+impl WorkoutDocument {
+    pub fn anchor_day(&self) -> String {
+        self.day.clone().unwrap_or_else(|| {
+            self.start_datetime
+                .as_deref()
+                .map(|value| value.chars().take(10).collect())
+                .unwrap_or_default()
+        })
+    }
+
+    pub fn title(&self) -> String {
+        self.label
+            .clone()
+            .or_else(|| self.sport.clone())
+            .or_else(|| self.activity.clone())
+            .unwrap_or_else(|| "Workout".to_owned())
+    }
+
+    pub fn subtype(&self) -> Option<String> {
+        self.sport.clone().or_else(|| self.activity.clone())
+    }
+}
+
+impl EnhancedTagDocument {
+    pub fn title(&self) -> String {
+        if self.tags.is_empty() {
+            self.tag_type_code
+                .clone()
+                .unwrap_or_else(|| "Enhanced Tag".to_owned())
+        } else {
+            self.tags.join(", ")
+        }
+    }
+
+    pub fn subtype(&self) -> Option<String> {
+        self.tag_type_code.clone()
+    }
+}
+
+impl SessionDocument {
+    pub fn start_at(&self) -> String {
+        self.start_datetime
+            .clone()
+            .unwrap_or_else(|| format!("{}T00:00:00Z", self.day))
+    }
+
+    pub fn title(&self) -> String {
+        self.label
+            .clone()
+            .or_else(|| self.kind.clone())
+            .unwrap_or_else(|| "Session".to_owned())
     }
 }

@@ -54,8 +54,9 @@ async fn demo_output_mentions_dashboard() {
         Err(error) => panic!("unexpected demo failure: {error}"),
     };
 
-    assert!(output.contains("ringmaster.rs demo"));
+    assert!(output.contains("ringmaster"));
+    assert!(output.contains("Selected day: 2026-04-08"));
     assert!(output.contains("Capabilities"));
     assert!(output.contains("What Changed"));
-    assert!(output.contains("Today vs baseline"));
+    assert!(output.contains("sleep is below normal"));
 }

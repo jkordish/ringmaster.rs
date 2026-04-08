@@ -16,6 +16,9 @@ pub enum SyncFamily {
     Personal,
     Daily,
     Heartrate,
+    Workout,
+    EnhancedTag,
+    Session,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -43,13 +46,23 @@ enum SyncInterruption<T> {
 }
 
 impl SyncFamily {
-    pub const ALL: [Self; 3] = [Self::Personal, Self::Daily, Self::Heartrate];
+    pub const ALL: [Self; 6] = [
+        Self::Personal,
+        Self::Daily,
+        Self::Heartrate,
+        Self::Workout,
+        Self::EnhancedTag,
+        Self::Session,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Personal => "personal",
             Self::Daily => "daily",
             Self::Heartrate => "heartrate",
+            Self::Workout => "workout",
+            Self::EnhancedTag => "enhanced_tag",
+            Self::Session => "session",
         }
     }
 
@@ -58,6 +71,9 @@ impl SyncFamily {
             Self::Personal => "oura.personal",
             Self::Daily => "oura.daily",
             Self::Heartrate => "oura.heartrate",
+            Self::Workout => "oura.workouts",
+            Self::EnhancedTag => "oura.enhanced_tags",
+            Self::Session => "oura.sessions",
         }
     }
 
@@ -66,6 +82,9 @@ impl SyncFamily {
             Self::Personal => CapabilityKind::Personal,
             Self::Daily => CapabilityKind::Daily,
             Self::Heartrate => CapabilityKind::Heartrate,
+            Self::Workout => CapabilityKind::Workout,
+            Self::EnhancedTag => CapabilityKind::EnhancedTag,
+            Self::Session => CapabilityKind::Session,
         }
     }
 
@@ -74,6 +93,9 @@ impl SyncFamily {
             Self::Personal => refresh.personal_interval_secs,
             Self::Daily => refresh.daily_interval_secs,
             Self::Heartrate => refresh.heartrate_interval_secs,
+            Self::Workout => refresh.workout_interval_secs,
+            Self::EnhancedTag => refresh.enhanced_tag_interval_secs,
+            Self::Session => refresh.session_interval_secs,
         }
     }
 
@@ -82,6 +104,9 @@ impl SyncFamily {
             Self::Personal => refresh.personal_stale_after_secs,
             Self::Daily => refresh.daily_stale_after_secs,
             Self::Heartrate => refresh.heartrate_stale_after_secs,
+            Self::Workout => refresh.workout_stale_after_secs,
+            Self::EnhancedTag => refresh.enhanced_tag_stale_after_secs,
+            Self::Session => refresh.session_stale_after_secs,
         }
     }
 }
@@ -239,7 +264,7 @@ fn resolve_fixture_dir(config: &Config, options: &WatchOptions) -> Option<PathBu
                 .refresh
                 .demo_fixture_dir
                 .clone()
-                .unwrap_or_else(|| PathBuf::from("tests/fixtures/phase1"))
+                .unwrap_or_else(|| PathBuf::from("tests/fixtures/phase3"))
         })
     })
 }
@@ -410,17 +435,19 @@ mod tests {
     use crate::refresh::run_watch;
     use crate::store::queries::{SyncRunStatus, SyncStateRecord};
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use time::format_description::well_known::Rfc3339;
     use time::{Duration, OffsetDateTime};
 
     fn test_config() -> Config {
+        let unique_root = unique_test_root("refresh");
         Config {
             app_name: "ringmaster",
             paths: AppPaths::from_roots(
                 PathBuf::from("/home/tester"),
-                PathBuf::from("/tmp/config"),
-                PathBuf::from("/tmp/state"),
-                PathBuf::from("/tmp/cache"),
+                unique_root.join("config"),
+                unique_root.join("state"),
+                unique_root.join("cache"),
             )
             .unwrap_or_else(|error| panic!("paths should resolve: {error}")),
             logging: LoggingConfig {
@@ -440,6 +467,9 @@ mod tests {
                     "personal".to_owned(),
                     "daily".to_owned(),
                     "heartrate".to_owned(),
+                    "workout".to_owned(),
+                    "enhanced_tag".to_owned(),
+                    "session".to_owned(),
                 ],
                 auth_timeout_secs: 120,
             },
@@ -447,21 +477,41 @@ mod tests {
                 personal_interval_secs: 3_600,
                 daily_interval_secs: 300,
                 heartrate_interval_secs: 60,
+                workout_interval_secs: 600,
+                enhanced_tag_interval_secs: 300,
+                session_interval_secs: 300,
                 personal_stale_after_secs: 72 * 60 * 60,
                 daily_stale_after_secs: 12 * 60 * 60,
                 heartrate_stale_after_secs: 15 * 60,
+                workout_stale_after_secs: 24 * 60 * 60,
+                enhanced_tag_stale_after_secs: 12 * 60 * 60,
+                session_stale_after_secs: 12 * 60 * 60,
                 daily_history_days: 90,
                 daily_overlap_days: 2,
                 heartrate_history_days: 7,
                 heartrate_overlap_minutes: 60,
+                workout_history_days: 90,
+                workout_overlap_days: 2,
+                enhanced_tag_history_days: 90,
+                enhanced_tag_overlap_days: 2,
+                session_history_days: 90,
+                session_overlap_days: 2,
                 max_backoff_secs: 60 * 60,
                 demo_fixture_dir: None,
             },
         }
     }
 
-    fn phase1_fixture_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase1")
+    fn unique_test_root(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        PathBuf::from("/tmp").join(format!("ringmaster-{label}-{}-{nanos}", std::process::id()))
+    }
+
+    fn phase3_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase3")
     }
 
     #[test]
@@ -512,6 +562,9 @@ mod tests {
             "personal".to_owned(),
             "daily".to_owned(),
             "heartrate".to_owned(),
+            "workout".to_owned(),
+            "enhanced_tag".to_owned(),
+            "session".to_owned(),
         ];
         let report = SyncReport {
             status: SyncRunStatus::Success,
@@ -548,6 +601,33 @@ mod tests {
                     last_error: None,
                     next_attempt_after: None,
                 },
+                SliceReport {
+                    sync_key: SyncFamily::Workout.sync_key().to_owned(),
+                    status: SyncRunStatus::Success,
+                    imported_rows: 2,
+                    watermark: Some("2026-04-08".to_owned()),
+                    message: "workouts synced".to_owned(),
+                    last_error: None,
+                    next_attempt_after: None,
+                },
+                SliceReport {
+                    sync_key: SyncFamily::EnhancedTag.sync_key().to_owned(),
+                    status: SyncRunStatus::Success,
+                    imported_rows: 2,
+                    watermark: Some("2026-04-08".to_owned()),
+                    message: "enhanced tags synced".to_owned(),
+                    last_error: None,
+                    next_attempt_after: None,
+                },
+                SliceReport {
+                    sync_key: SyncFamily::Session.sync_key().to_owned(),
+                    status: SyncRunStatus::Success,
+                    imported_rows: 2,
+                    watermark: Some("2026-04-08".to_owned()),
+                    message: "sessions synced".to_owned(),
+                    last_error: None,
+                    next_attempt_after: None,
+                },
             ],
         };
 
@@ -570,7 +650,7 @@ mod tests {
             WatchOptions {
                 dry_run: false,
                 demo: true,
-                fixture_dir: Some(phase1_fixture_dir()),
+                fixture_dir: Some(phase3_fixture_dir()),
                 max_iterations: Some(1),
             },
         )
@@ -590,7 +670,7 @@ mod tests {
             WatchOptions {
                 dry_run: false,
                 demo: true,
-                fixture_dir: Some(phase1_fixture_dir()),
+                fixture_dir: Some(phase3_fixture_dir()),
                 max_iterations: Some(0),
             },
         )

@@ -3,20 +3,25 @@ use std::path::PathBuf;
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::config::Config;
+use crate::derive;
 use crate::error::{AuthError, OuraApiError, OuraProblem, Result, RingmasterError};
 use crate::oura::auth;
 use crate::oura::client::{FixtureOuraClient, OuraClient, ReqwestOuraClient};
-use crate::oura::models::{CapabilityKind, CapabilityReport};
+use crate::oura::models::{CapabilityKind, CapabilityReport, WorkoutDocument};
 use crate::refresh::SyncFamily;
 use crate::store::Store;
 use crate::store::queries::{
     AuthSessionRecord, DailyActivityRecord, DailyReadinessRecord, DailySleepRecord,
-    HeartrateSampleRecord, OURA_PROVIDER, PersonalInfoRecord, SyncRunStatus, SyncStateRecord,
+    EnhancedTagRecord, HeartrateSampleRecord, OURA_PROVIDER, PersonalInfoRecord, SessionRecord,
+    SyncRunStatus, SyncStateRecord, WorkoutRecord,
 };
 
 const PERSONAL_SYNC_KEY: &str = "oura.personal";
 const DAILY_SYNC_KEY: &str = "oura.daily";
 const HEARTRATE_SYNC_KEY: &str = "oura.heartrate";
+const WORKOUT_SYNC_KEY: &str = "oura.workouts";
+const ENHANCED_TAG_SYNC_KEY: &str = "oura.enhanced_tags";
+const SESSION_SYNC_KEY: &str = "oura.sessions";
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SyncOptions {
@@ -136,7 +141,7 @@ pub async fn sync_selected(
         }
 
         let http_client = reqwest::Client::builder()
-            .user_agent("ringmaster.rs/phase1")
+            .user_agent("ringmaster.rs/phase3")
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
         let session = match auth::ensure_authorized_session(config, store, &http_client).await {
@@ -182,6 +187,16 @@ pub async fn sync_selected(
             SyncFamily::Heartrate => {
                 sync_heartrate(config, store, client.as_ref(), &capability_report, &options).await
             }
+            SyncFamily::Workout => {
+                sync_workouts(config, store, client.as_ref(), &capability_report, &options).await
+            }
+            SyncFamily::EnhancedTag => {
+                sync_enhanced_tags(config, store, client.as_ref(), &capability_report, &options)
+                    .await
+            }
+            SyncFamily::Session => {
+                sync_sessions(config, store, client.as_ref(), &capability_report, &options).await
+            }
         };
 
         match report {
@@ -194,6 +209,15 @@ pub async fn sync_selected(
                 &options,
             )?),
         }
+    }
+
+    if !options.dry_run && should_rebuild_derived_state(&slice_reports) {
+        let derive_report = derive::rebuild_recent_store(store, config)?;
+        notes.push(format!(
+            "Derived context events and pattern summaries were rebuilt after sync (events={}, patterns={}).",
+            derive_report.context_event_count, derive_report.pattern_summary_count
+        ));
+        notes.extend(derive_report.notes);
     }
 
     let status = summarize_status(&slice_reports);
@@ -212,6 +236,16 @@ pub async fn sync_selected(
         notes,
         capability_report,
         slice_reports,
+    })
+}
+
+fn should_rebuild_derived_state(slice_reports: &[SliceReport]) -> bool {
+    slice_reports.iter().any(|report| {
+        report.status == SyncRunStatus::Success
+            && matches!(
+                report.sync_key.as_str(),
+                DAILY_SYNC_KEY | WORKOUT_SYNC_KEY | ENHANCED_TAG_SYNC_KEY | SESSION_SYNC_KEY
+            )
     })
 }
 
@@ -471,6 +505,238 @@ async fn sync_heartrate(
     )
 }
 
+async fn sync_workouts(
+    config: &Config,
+    store: &Store,
+    client: &dyn OuraClient,
+    capability_report: &CapabilityReport,
+    options: &SyncOptions,
+) -> Result<SliceReport> {
+    if !capability_report.is_granted(CapabilityKind::Workout) {
+        return persist_slice_report(
+            config,
+            store,
+            slice_blocked(
+                WORKOUT_SYNC_KEY,
+                "Missing `workout` scope; workout overlays and context evidence remain unavailable.",
+            ),
+            granted_scopes_from_report(capability_report),
+            options,
+        );
+    }
+
+    let end_date = utc_date_string(OffsetDateTime::now_utc());
+    let start_date = if options.fixture_dir.is_some() {
+        "1970-01-01".to_owned()
+    } else {
+        overlap_day_window(
+            store,
+            WORKOUT_SYNC_KEY,
+            i64::from(config.refresh.workout_history_days),
+            i64::from(config.refresh.workout_overlap_days),
+        )?
+    };
+    let workout_pages = client
+        .fetch_workouts(start_date.clone(), end_date.clone())
+        .await?;
+    let imported_at = now_rfc3339()?;
+
+    if !options.dry_run {
+        for page in &workout_pages {
+            store.imports().upsert_raw_payload(&page.raw_payload)?;
+            for document in &page.documents {
+                store.imports().upsert_workout(&WorkoutRecord {
+                    workout_id: document.id.clone(),
+                    day: document.anchor_day(),
+                    started_at: workout_start_at(document),
+                    ended_at: document.end_datetime.clone(),
+                    timezone: document.timezone.clone(),
+                    sport: document.sport.clone(),
+                    activity: document.activity.clone(),
+                    intensity: document.intensity.clone(),
+                    title: document.title(),
+                    notes: json_string_field(&document.extra, "note")
+                        .or_else(|| json_string_field(&document.extra, "notes")),
+                    source: document.source.clone(),
+                    raw_cache_key: Some(page.raw_payload.cache_key.clone()),
+                    updated_at: imported_at.clone(),
+                })?;
+            }
+        }
+    }
+
+    let imported_rows = count_documents(&workout_pages);
+    persist_slice_report(
+        config,
+        store,
+        SliceReport {
+            sync_key: WORKOUT_SYNC_KEY.to_owned(),
+            status: SyncRunStatus::Success,
+            imported_rows,
+            watermark: Some(end_date.clone()),
+            message: format!(
+                "Imported {imported_rows} workouts from {start_date} through {end_date}."
+            ),
+            last_error: None,
+            next_attempt_after: None,
+        },
+        granted_scopes_from_report(capability_report),
+        options,
+    )
+}
+
+async fn sync_enhanced_tags(
+    config: &Config,
+    store: &Store,
+    client: &dyn OuraClient,
+    capability_report: &CapabilityReport,
+    options: &SyncOptions,
+) -> Result<SliceReport> {
+    if !capability_report.is_granted(CapabilityKind::EnhancedTag) {
+        return persist_slice_report(
+            config,
+            store,
+            slice_blocked(
+                ENHANCED_TAG_SYNC_KEY,
+                "Missing `enhanced_tag` scope; tag overlays and explainability evidence remain unavailable.",
+            ),
+            granted_scopes_from_report(capability_report),
+            options,
+        );
+    }
+
+    let end_date = utc_date_string(OffsetDateTime::now_utc());
+    let start_date = if options.fixture_dir.is_some() {
+        "1970-01-01".to_owned()
+    } else {
+        overlap_day_window(
+            store,
+            ENHANCED_TAG_SYNC_KEY,
+            i64::from(config.refresh.enhanced_tag_history_days),
+            i64::from(config.refresh.enhanced_tag_overlap_days),
+        )?
+    };
+    let enhanced_tag_pages = client
+        .fetch_enhanced_tags(start_date.clone(), end_date.clone())
+        .await?;
+    let imported_at = now_rfc3339()?;
+
+    if !options.dry_run {
+        for page in &enhanced_tag_pages {
+            store.imports().upsert_raw_payload(&page.raw_payload)?;
+            for document in &page.documents {
+                store.imports().upsert_enhanced_tag(&EnhancedTagRecord {
+                    enhanced_tag_id: document.id.clone(),
+                    day: document.day.clone(),
+                    label: document.title(),
+                    started_at: document.start_time.clone(),
+                    ended_at: document.end_time.clone(),
+                    subtype: document.subtype(),
+                    comment: document.comment.clone(),
+                    intensity: document.intensity.clone(),
+                    raw_cache_key: Some(page.raw_payload.cache_key.clone()),
+                    updated_at: imported_at.clone(),
+                })?;
+            }
+        }
+    }
+
+    let imported_rows = count_documents(&enhanced_tag_pages);
+    persist_slice_report(
+        config,
+        store,
+        SliceReport {
+            sync_key: ENHANCED_TAG_SYNC_KEY.to_owned(),
+            status: SyncRunStatus::Success,
+            imported_rows,
+            watermark: Some(end_date.clone()),
+            message: format!(
+                "Imported {imported_rows} enhanced tags from {start_date} through {end_date}."
+            ),
+            last_error: None,
+            next_attempt_after: None,
+        },
+        granted_scopes_from_report(capability_report),
+        options,
+    )
+}
+
+async fn sync_sessions(
+    config: &Config,
+    store: &Store,
+    client: &dyn OuraClient,
+    capability_report: &CapabilityReport,
+    options: &SyncOptions,
+) -> Result<SliceReport> {
+    if !capability_report.is_granted(CapabilityKind::Session) {
+        return persist_slice_report(
+            config,
+            store,
+            slice_blocked(
+                SESSION_SYNC_KEY,
+                "Missing `session` scope; session overlays and explainability evidence remain unavailable.",
+            ),
+            granted_scopes_from_report(capability_report),
+            options,
+        );
+    }
+
+    let end_date = utc_date_string(OffsetDateTime::now_utc());
+    let start_date = if options.fixture_dir.is_some() {
+        "1970-01-01".to_owned()
+    } else {
+        overlap_day_window(
+            store,
+            SESSION_SYNC_KEY,
+            i64::from(config.refresh.session_history_days),
+            i64::from(config.refresh.session_overlap_days),
+        )?
+    };
+    let session_pages = client
+        .fetch_sessions(start_date.clone(), end_date.clone())
+        .await?;
+    let imported_at = now_rfc3339()?;
+
+    if !options.dry_run {
+        for page in &session_pages {
+            store.imports().upsert_raw_payload(&page.raw_payload)?;
+            for document in &page.documents {
+                store.imports().upsert_session(&SessionRecord {
+                    session_id: document.id.clone(),
+                    day: document.day.clone(),
+                    started_at: document.start_at(),
+                    ended_at: document.end_datetime.clone(),
+                    kind: document.kind.clone(),
+                    state: document.state.clone(),
+                    score: document.score,
+                    title: document.title(),
+                    raw_cache_key: Some(page.raw_payload.cache_key.clone()),
+                    updated_at: imported_at.clone(),
+                })?;
+            }
+        }
+    }
+
+    let imported_rows = count_documents(&session_pages);
+    persist_slice_report(
+        config,
+        store,
+        SliceReport {
+            sync_key: SESSION_SYNC_KEY.to_owned(),
+            status: SyncRunStatus::Success,
+            imported_rows,
+            watermark: Some(end_date.clone()),
+            message: format!(
+                "Imported {imported_rows} sessions from {start_date} through {end_date}."
+            ),
+            last_error: None,
+            next_attempt_after: None,
+        },
+        granted_scopes_from_report(capability_report),
+        options,
+    )
+}
+
 fn persist_blocked_slice_reports(
     config: &Config,
     store: &Store,
@@ -705,6 +971,9 @@ fn family_from_sync_key(sync_key: &str) -> Option<SyncFamily> {
         PERSONAL_SYNC_KEY => Some(SyncFamily::Personal),
         DAILY_SYNC_KEY => Some(SyncFamily::Daily),
         HEARTRATE_SYNC_KEY => Some(SyncFamily::Heartrate),
+        WORKOUT_SYNC_KEY => Some(SyncFamily::Workout),
+        ENHANCED_TAG_SYNC_KEY => Some(SyncFamily::EnhancedTag),
+        SESSION_SYNC_KEY => Some(SyncFamily::Session),
         _ => None,
     }
 }
@@ -740,6 +1009,22 @@ fn utc_date_string(timestamp: OffsetDateTime) -> String {
     timestamp.date().to_string()
 }
 
+fn workout_start_at(document: &WorkoutDocument) -> String {
+    document
+        .start_datetime
+        .clone()
+        .unwrap_or_else(|| format!("{}T00:00:00Z", document.anchor_day()))
+}
+
+fn json_string_field(
+    map: &std::collections::BTreeMap<String, serde_json::Value>,
+    key: &str,
+) -> Option<String> {
+    map.get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
 fn now_rfc3339() -> Result<String> {
     OffsetDateTime::now_utc().format(&Rfc3339).map_err(|error| {
         AuthError::OAuthFlow(format!("failed to format sync timestamp: {error}")).into()
@@ -757,8 +1042,8 @@ mod tests {
     use crate::store::Store;
     use crate::store::queries::SyncRunStatus;
 
-    fn phase1_fixture_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase1")
+    fn phase3_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase3")
     }
 
     fn fixture_config() -> Config {
@@ -786,6 +1071,9 @@ mod tests {
                     "personal".to_owned(),
                     "daily".to_owned(),
                     "heartrate".to_owned(),
+                    "workout".to_owned(),
+                    "enhanced_tag".to_owned(),
+                    "session".to_owned(),
                 ],
                 auth_timeout_secs: 120,
             },
@@ -793,13 +1081,25 @@ mod tests {
                 personal_interval_secs: 3_600,
                 daily_interval_secs: 300,
                 heartrate_interval_secs: 60,
+                workout_interval_secs: 600,
+                enhanced_tag_interval_secs: 300,
+                session_interval_secs: 300,
                 personal_stale_after_secs: 72 * 60 * 60,
                 daily_stale_after_secs: 12 * 60 * 60,
                 heartrate_stale_after_secs: 15 * 60,
+                workout_stale_after_secs: 24 * 60 * 60,
+                enhanced_tag_stale_after_secs: 12 * 60 * 60,
+                session_stale_after_secs: 12 * 60 * 60,
                 daily_history_days: 90,
                 daily_overlap_days: 2,
                 heartrate_history_days: 7,
                 heartrate_overlap_minutes: 60,
+                workout_history_days: 90,
+                workout_overlap_days: 2,
+                enhanced_tag_history_days: 90,
+                enhanced_tag_overlap_days: 2,
+                session_history_days: 90,
+                session_overlap_days: 2,
                 max_backoff_secs: 60 * 60,
                 demo_fixture_dir: None,
             },
@@ -807,12 +1107,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fixture_sync_populates_phase1_tables_idempotently() {
+    async fn fixture_sync_populates_phase3_tables_idempotently() {
         let store = Store::open_in_memory().expect("store should open");
         let config = fixture_config();
         let options = SyncOptions {
             dry_run: false,
-            fixture_dir: Some(phase1_fixture_dir()),
+            fixture_dir: Some(phase3_fixture_dir()),
             families: SyncFamily::ALL.to_vec(),
         };
 
@@ -827,10 +1127,14 @@ mod tests {
         assert_eq!(first.status, SyncRunStatus::Success);
         assert_eq!(second.status, SyncRunStatus::Success);
         assert_eq!(counts.personal_info, 1);
-        assert_eq!(counts.daily_sleep, 3);
-        assert_eq!(counts.daily_readiness, 3);
-        assert_eq!(counts.daily_activity, 3);
-        assert_eq!(counts.heartrate_samples, 5);
+        assert_eq!(counts.daily_sleep, 7);
+        assert_eq!(counts.daily_readiness, 7);
+        assert_eq!(counts.daily_activity, 7);
+        assert_eq!(counts.heartrate_samples, 12);
+        assert_eq!(counts.workouts, 3);
+        assert_eq!(counts.enhanced_tags, 4);
+        assert_eq!(counts.sessions, 3);
+        assert_eq!(counts.derived_context_events, 10);
     }
 
     #[tokio::test]
@@ -842,7 +1146,7 @@ mod tests {
             &store,
             SyncOptions {
                 dry_run: true,
-                fixture_dir: Some(phase1_fixture_dir()),
+                fixture_dir: Some(phase3_fixture_dir()),
                 families: SyncFamily::ALL.to_vec(),
             },
         )
@@ -854,5 +1158,8 @@ mod tests {
         assert_eq!(counts.personal_info, 0);
         assert_eq!(counts.daily_sleep, 0);
         assert_eq!(counts.heartrate_samples, 0);
+        assert_eq!(counts.workouts, 0);
+        assert_eq!(counts.enhanced_tags, 0);
+        assert_eq!(counts.sessions, 0);
     }
 }

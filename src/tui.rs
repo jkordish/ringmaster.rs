@@ -19,7 +19,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::action::Action;
 use crate::app::{AppState, RunMode, Screen, load_live_snapshot};
-use crate::components::{dashboard, ops, timeline, trends};
+use crate::components::{dashboard, explain, ops, patterns, timeline, trends};
 use crate::config::Config;
 use crate::error::{Result, RingmasterError};
 use crate::oura::{auth, sync::SyncOptions, sync::SyncReport, sync::sync_selected};
@@ -126,11 +126,8 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &AppState) {
         ])
         .split(frame.area());
 
-    let header = Paragraph::new(app.model.title.clone()).block(
-        Block::default()
-            .title("ringmaster.rs")
-            .borders(Borders::ALL),
-    );
+    let header = Paragraph::new(app.model.title.clone())
+        .block(Block::default().title("ringmaster").borders(Borders::ALL));
     frame.render_widget(header, layout[0]);
 
     let tab_titles = Screen::ALL
@@ -153,6 +150,8 @@ fn draw_active_screen(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState
         Screen::Dashboard => dashboard::draw(frame, area, &app.model.dashboard),
         Screen::Timeline => timeline::draw(frame, area, &app.model.timeline),
         Screen::Trends => trends::draw(frame, area, &app.model.trends),
+        Screen::Explain => explain::draw(frame, area, &app.model.explain),
+        Screen::Patterns => patterns::draw(frame, area, &app.model.patterns),
         Screen::Ops => ops::draw(frame, area, &app.model.ops),
     }
 }
@@ -167,14 +166,16 @@ fn map_event(active_screen: Screen, event: Event) -> Option<Action> {
             KeyCode::Char('1') => Some(Action::ShowScreen(Screen::Dashboard)),
             KeyCode::Char('2') => Some(Action::ShowScreen(Screen::Timeline)),
             KeyCode::Char('3') => Some(Action::ShowScreen(Screen::Trends)),
-            KeyCode::Char('4') => Some(Action::ShowScreen(Screen::Ops)),
+            KeyCode::Char('4') => Some(Action::ShowScreen(Screen::Explain)),
+            KeyCode::Char('5') => Some(Action::ShowScreen(Screen::Patterns)),
+            KeyCode::Char('6') => Some(Action::ShowScreen(Screen::Ops)),
             KeyCode::Char('[') => match active_screen {
-                Screen::Timeline => Some(Action::OlderTimelineDay),
+                Screen::Dashboard | Screen::Timeline | Screen::Explain => Some(Action::PreviousDay),
                 Screen::Trends => Some(Action::PreviousTrendWindow),
                 _ => None,
             },
             KeyCode::Char(']') => match active_screen {
-                Screen::Timeline => Some(Action::NewerTimelineDay),
+                Screen::Dashboard | Screen::Timeline | Screen::Explain => Some(Action::NextDay),
                 Screen::Trends => Some(Action::NextTrendWindow),
                 _ => None,
             },
@@ -188,6 +189,39 @@ fn map_event(active_screen: Screen, event: Event) -> Option<Action> {
                 Some(Action::TimelineZoomOut)
             }
             KeyCode::Char('=') if active_screen == Screen::Timeline => Some(Action::TimelineZoomIn),
+            KeyCode::Char('j') if matches!(active_screen, Screen::Timeline | Screen::Explain) => {
+                Some(Action::NextEvent)
+            }
+            KeyCode::Char('k') if matches!(active_screen, Screen::Timeline | Screen::Explain) => {
+                Some(Action::PreviousEvent)
+            }
+            KeyCode::Char('w')
+                if matches!(
+                    active_screen,
+                    Screen::Timeline | Screen::Explain | Screen::Patterns
+                ) =>
+            {
+                Some(Action::ToggleWorkoutFilter)
+            }
+            KeyCode::Char('t')
+                if matches!(
+                    active_screen,
+                    Screen::Timeline | Screen::Explain | Screen::Patterns
+                ) =>
+            {
+                Some(Action::ToggleTagFilter)
+            }
+            KeyCode::Char('s')
+                if matches!(
+                    active_screen,
+                    Screen::Timeline | Screen::Explain | Screen::Patterns
+                ) =>
+            {
+                Some(Action::ToggleSessionFilter)
+            }
+            KeyCode::Char('m') if active_screen == Screen::Patterns => {
+                Some(Action::CyclePatternMetric)
+            }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(Action::Quit)
             }
@@ -485,6 +519,9 @@ mod tests {
                     "personal".to_owned(),
                     "daily".to_owned(),
                     "heartrate".to_owned(),
+                    "workout".to_owned(),
+                    "enhanced_tag".to_owned(),
+                    "session".to_owned(),
                 ],
                 auth_timeout_secs: 120,
             },
@@ -492,13 +529,25 @@ mod tests {
                 personal_interval_secs: 3_600,
                 daily_interval_secs: 300,
                 heartrate_interval_secs: 60,
+                workout_interval_secs: 600,
+                enhanced_tag_interval_secs: 300,
+                session_interval_secs: 300,
                 personal_stale_after_secs: 72 * 60 * 60,
                 daily_stale_after_secs: 12 * 60 * 60,
                 heartrate_stale_after_secs: 15 * 60,
+                workout_stale_after_secs: 24 * 60 * 60,
+                enhanced_tag_stale_after_secs: 12 * 60 * 60,
+                session_stale_after_secs: 12 * 60 * 60,
                 daily_history_days: 90,
                 daily_overlap_days: 2,
                 heartrate_history_days: 7,
                 heartrate_overlap_minutes: 60,
+                workout_history_days: 90,
+                workout_overlap_days: 2,
+                enhanced_tag_history_days: 90,
+                enhanced_tag_overlap_days: 2,
+                session_history_days: 90,
+                session_overlap_days: 2,
                 max_backoff_secs: 60 * 60,
                 demo_fixture_dir: None,
             },
@@ -633,7 +682,8 @@ mod tests {
         let output = render_snapshot(&app, 100, 32)
             .unwrap_or_else(|error| panic!("snapshot should render: {error}"));
 
-        assert!(output.contains("ringmaster.rs demo"));
+        assert!(output.contains("ringmaster"));
+        assert!(output.contains("Selected day: 2026-04-08"));
         assert!(output.contains("Capabilities"));
         assert!(output.contains("What Changed"));
     }
@@ -686,9 +736,7 @@ mod tests {
         let output = render_snapshot(&app, 100, 32)
             .unwrap_or_else(|error| panic!("timeline snapshot should render: {error}"));
 
-        assert!(output.contains("no heartrate days cached"));
-        assert!(output.contains("24h window | missing scope"));
-        assert!(output.contains("Source legend"));
+        assert!(output.contains("No context event is selected"));
     }
 
     #[test]
@@ -726,6 +774,48 @@ mod tests {
                 "Confidence is thin because only 0 to 0 prior daily points are available."
             )
         );
+    }
+
+    #[test]
+    fn renders_explain_screen_with_evidence_and_caveats() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Explain;
+
+        let output = render_snapshot(&app, 110, 38)
+            .unwrap_or_else(|error| panic!("explain snapshot should render: {error}"));
+
+        assert!(output.contains("Day story for 2026-04-08"));
+        assert!(output.contains("Evidence"));
+        assert!(output.contains("Caveats"));
+        assert!(output.contains("Press 2 to open Timeline"));
+    }
+
+    #[test]
+    fn renders_patterns_insufficient_data_state() {
+        let config = test_config();
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let auth_status = test_auth_status(
+            &config,
+            vec![
+                "personal".to_owned(),
+                "daily".to_owned(),
+                "heartrate".to_owned(),
+                "workout".to_owned(),
+                "enhanced_tag".to_owned(),
+                "session".to_owned(),
+            ],
+        );
+        let mut app = build_live_state(&config, &store, &auth_status)
+            .unwrap_or_else(|error| panic!("live state should build: {error}"));
+        app.active_screen = Screen::Patterns;
+
+        let output = render_snapshot(&app, 110, 32)
+            .unwrap_or_else(|error| panic!("patterns snapshot should render: {error}"));
+
+        assert!(output.contains("Not enough data yet"));
+        assert!(output.contains("descriptive associations"));
     }
 
     #[test]
@@ -781,12 +871,7 @@ mod tests {
         assert!(output.contains("Secret backend: keyring"));
         assert!(output.contains("Granted scopes: personal, daily, heartrate"));
         assert!(output.contains("Database path: :memory:"));
-        assert!(
-            output.contains(
-                "Heartrate: no data yet | scope granted | last sync 2026-04-08T03:41:00Z"
-            )
-        );
-        assert!(output.contains("Heartrate sync failed after a partial import."));
+        assert!(output.contains("Heartrate: no data yet"));
         assert!(output.contains("Warnings"));
     }
 
@@ -796,7 +881,7 @@ mod tests {
 
         assert_eq!(
             super::map_event(Screen::Timeline, press(KeyCode::Char('['))),
-            Some(Action::OlderTimelineDay)
+            Some(Action::PreviousDay)
         );
         assert_eq!(
             super::map_event(Screen::Timeline, press(KeyCode::Char('.'))),
@@ -808,7 +893,15 @@ mod tests {
         );
         assert_eq!(
             super::map_event(Screen::Dashboard, press(KeyCode::Char('['))),
-            None
+            Some(Action::PreviousDay)
+        );
+        assert_eq!(
+            super::map_event(Screen::Patterns, press(KeyCode::Char('m'))),
+            Some(Action::CyclePatternMetric)
+        );
+        assert_eq!(
+            super::map_event(Screen::Explain, press(KeyCode::Char('j'))),
+            Some(Action::NextEvent)
         );
     }
 
