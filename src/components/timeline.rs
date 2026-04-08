@@ -26,8 +26,7 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel) {
 
     let day_selector = Paragraph::new(format!(
         "Days: {} | window={}h",
-        format_day_selector(&model.day_labels, model.selected_day_index),
-        model.window_hours
+        model.day_selector, model.window_hours
     ))
     .block(
         Block::default()
@@ -144,25 +143,6 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel) {
         List::new(overlays).block(Block::default().title("Details").borders(Borders::ALL)),
         layout[3],
     );
-}
-
-fn format_day_selector(day_labels: &[String], selected_index: usize) -> String {
-    if day_labels.is_empty() {
-        return "no heartrate days cached".to_owned();
-    }
-
-    day_labels
-        .iter()
-        .enumerate()
-        .map(|(index, day)| {
-            if index == selected_index {
-                format!("[{day}]")
-            } else {
-                day.clone()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" | ")
 }
 
 fn format_minutes(value: f64) -> String {

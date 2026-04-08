@@ -8,7 +8,7 @@ use crate::store::queries::{
     DailyOverviewRow, HeartRatePoint, PersonalInfoRecord, RecordCounts, SyncRunStatus,
     SyncStateRecord,
 };
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DataFamily {
@@ -129,6 +129,7 @@ pub struct TimelineModel {
     pub heart_rate: Vec<TimelinePoint>,
     pub overlays: Vec<String>,
     pub day_labels: Vec<String>,
+    pub day_selector: String,
     pub selected_day_index: usize,
     pub selected_point_index: Option<usize>,
     pub window_hours: u16,
@@ -590,6 +591,7 @@ pub fn build_demo_state(config: &Config) -> AppState {
                     "Source legend: current MVP stores bpm and timestamps, but not per-sample source labels.".to_owned(),
                 ],
                 day_labels: vec!["2026-04-07".to_owned(), "2026-04-08".to_owned()],
+                day_selector: "2026-04-07 | [2026-04-08]".to_owned(),
                 selected_day_index: 1,
                 selected_point_index: Some(6),
                 window_hours: 24,
@@ -845,9 +847,9 @@ fn build_timeline_model(
         "Heartrate timeline for {} | {}h window | {}",
         selected_day_label, window_hours, freshness.summary
     );
-    let overlays =
-        vec![
-        format!("Days: {}", format_day_selector(&day_labels, clamped_day_index)),
+    let day_selector = format_day_selector(&day_labels, clamped_day_index);
+    let overlays = vec![
+        format!("Days: {day_selector}"),
         selected_detail.clone(),
         "Source legend: current MVP stores bpm and timestamps, but not per-sample source labels."
             .to_owned(),
@@ -858,6 +860,7 @@ fn build_timeline_model(
         heart_rate: visible_points,
         overlays,
         day_labels,
+        day_selector,
         selected_day_index: clamped_day_index,
         selected_point_index,
         window_hours,
@@ -1372,10 +1375,22 @@ fn family_has_data(snapshot: &LiveSnapshot, family: DataFamily) -> bool {
 }
 
 fn latest_day_is_before_today(snapshot: &LiveSnapshot) -> bool {
+    latest_day_is_before_reference_day(snapshot, current_local_day_string())
+}
+
+fn latest_day_is_before_reference_day(snapshot: &LiveSnapshot, reference_day: String) -> bool {
     snapshot
         .daily_history
         .last()
-        .is_some_and(|row| row.day < OffsetDateTime::now_utc().date().to_string())
+        .is_some_and(|row| row.day < reference_day)
+}
+
+fn current_local_day_string() -> String {
+    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    OffsetDateTime::now_utc()
+        .to_offset(local_offset)
+        .date()
+        .to_string()
 }
 
 fn capability_views(report: &CapabilityReport) -> Vec<CapabilityView> {
@@ -1700,5 +1715,33 @@ mod tests {
         assert_eq!(app.model.timeline.selected_day_index, 2);
         assert_eq!(app.model.timeline.day_labels[2], "2026-04-08");
         assert_eq!(app.status_line, "Showing a newer heartrate day.");
+    }
+
+    #[test]
+    fn latest_day_delay_check_uses_reference_day_value() {
+        let mut snapshot = make_snapshot(&["2026-04-06"]);
+        snapshot.daily_history = vec![crate::store::queries::DailyOverviewRow {
+            day: "2026-04-08".to_owned(),
+            sleep_score: None,
+            readiness_score: None,
+            activity_score: None,
+            updated_at: "2026-04-08T12:00:00Z".to_owned(),
+        }];
+        assert!(!super::latest_day_is_before_reference_day(
+            &snapshot,
+            "2026-04-08".to_owned()
+        ));
+
+        snapshot.daily_history = vec![crate::store::queries::DailyOverviewRow {
+            day: "2026-04-07".to_owned(),
+            sleep_score: None,
+            readiness_score: None,
+            activity_score: None,
+            updated_at: "2026-04-08T12:00:00Z".to_owned(),
+        }];
+        assert!(super::latest_day_is_before_reference_day(
+            &snapshot,
+            "2026-04-08".to_owned()
+        ));
     }
 }

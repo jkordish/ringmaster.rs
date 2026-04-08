@@ -460,6 +460,10 @@ mod tests {
         }
     }
 
+    fn phase1_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase1")
+    }
+
     #[test]
     fn due_families_respects_next_attempt_after() {
         let config = test_config();
@@ -566,9 +570,7 @@ mod tests {
             WatchOptions {
                 dry_run: false,
                 demo: true,
-                fixture_dir: Some(PathBuf::from(
-                    "/home/ubuntu/ringmaster.rs/tests/fixtures/phase1",
-                )),
+                fixture_dir: Some(phase1_fixture_dir()),
                 max_iterations: Some(1),
             },
         )
@@ -588,9 +590,7 @@ mod tests {
             WatchOptions {
                 dry_run: false,
                 demo: true,
-                fixture_dir: Some(PathBuf::from(
-                    "/home/ubuntu/ringmaster.rs/tests/fixtures/phase1",
-                )),
+                fixture_dir: Some(phase1_fixture_dir()),
                 max_iterations: Some(0),
             },
         )

@@ -60,8 +60,8 @@ Verified on `2026-04-08` after implementation:
 - `cargo fmt --all --check` passed
 - `cargo clippy --all-targets --all-features -- -D warnings` passed
 - `cargo test --all` passed
-- `cargo run -- doctor`
-- `cargo run -- sync watch --demo --max-iterations 1`
+- `cargo run -- doctor` passed
+- `cargo run -- sync watch --demo --max-iterations 1` passed
 
 ## Known intentional deferrals
 
