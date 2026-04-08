@@ -287,6 +287,145 @@ pub const MIGRATIONS: &[Migration] = &[
             ON derived_pattern_summaries(metric, confidence, sample_count);
         ",
     },
+    Migration {
+        version: 7,
+        name: "phase4_webhook_freshness_and_ops_foundation",
+        sql: r"
+        ALTER TABLE sync_state ADD COLUMN last_trigger_source TEXT;
+        ALTER TABLE sync_state ADD COLUMN last_trigger_detail TEXT;
+
+        ALTER TABLE webhook_subscriptions RENAME TO webhook_subscriptions_legacy;
+
+        CREATE TABLE IF NOT EXISTS webhook_desired_subscriptions (
+            data_type TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            callback_url TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (data_type, event_type)
+        );
+
+        CREATE TABLE IF NOT EXISTS webhook_remote_subscriptions (
+            subscription_id TEXT PRIMARY KEY,
+            callback_url TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            data_type TEXT NOT NULL,
+            expiration_time TEXT NOT NULL,
+            drift_status TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        INSERT INTO webhook_remote_subscriptions (
+            subscription_id,
+            callback_url,
+            event_type,
+            data_type,
+            expiration_time,
+            drift_status,
+            last_seen_at,
+            created_at,
+            updated_at
+        )
+        SELECT
+            subscription_id,
+            COALESCE(delivery_mode, ''),
+            event_type,
+            'unknown',
+            COALESCE(updated_at, created_at),
+            COALESCE(status, 'unknown'),
+            COALESCE(updated_at, created_at),
+            created_at,
+            updated_at
+        FROM webhook_subscriptions_legacy;
+
+        DROP TABLE webhook_subscriptions_legacy;
+
+        CREATE TABLE IF NOT EXISTS webhook_deliveries (
+            delivery_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            delivery_fingerprint TEXT NOT NULL UNIQUE,
+            received_at TEXT NOT NULL,
+            signature_timestamp TEXT,
+            data_type TEXT,
+            event_type TEXT,
+            object_id TEXT,
+            payload_json TEXT NOT NULL,
+            headers_json TEXT NOT NULL,
+            query_json TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS webhook_delivery_rejections (
+            rejection_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            received_at TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            signature_timestamp TEXT,
+            payload_json TEXT NOT NULL,
+            headers_json TEXT NOT NULL,
+            query_json TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS webhook_invalidations (
+            invalidation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            queue_key TEXT NOT NULL UNIQUE,
+            data_type TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            object_id TEXT,
+            delivery_id INTEGER NOT NULL,
+            first_queued_at TEXT NOT NULL,
+            last_queued_at TEXT NOT NULL,
+            available_at TEXT NOT NULL,
+            leased_at TEXT,
+            lease_owner TEXT,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            FOREIGN KEY(delivery_id) REFERENCES webhook_deliveries(delivery_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS webhook_processing_attempts (
+            attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invalidation_id INTEGER NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            outcome TEXT NOT NULL,
+            detail TEXT,
+            FOREIGN KEY(invalidation_id) REFERENCES webhook_invalidations(invalidation_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS webhook_runtime_heartbeats (
+            component TEXT PRIMARY KEY,
+            mode TEXT NOT NULL,
+            bind_address TEXT,
+            public_base_url TEXT,
+            detail TEXT,
+            last_seen_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_webhook_remote_subscriptions_kind
+            ON webhook_remote_subscriptions(data_type, event_type);
+        CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_received_at
+            ON webhook_deliveries(received_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_kind
+            ON webhook_deliveries(data_type, event_type, object_id);
+        CREATE INDEX IF NOT EXISTS idx_webhook_rejections_received_at
+            ON webhook_delivery_rejections(received_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_webhook_invalidations_available_at
+            ON webhook_invalidations(available_at ASC, invalidation_id ASC);
+        CREATE INDEX IF NOT EXISTS idx_webhook_attempts_invalidation
+            ON webhook_processing_attempts(invalidation_id, started_at DESC);
+        ",
+    },
+    Migration {
+        version: 8,
+        name: "webhook_invalidation_completion",
+        sql: r"
+        ALTER TABLE webhook_invalidations ADD COLUMN completed_at TEXT;
+
+        CREATE INDEX IF NOT EXISTS idx_webhook_invalidations_pending
+            ON webhook_invalidations(completed_at, available_at ASC, invalidation_id ASC);
+        ",
+    },
 ];
 
 pub fn run_migrations(connection: &mut rusqlite::Connection) -> Result<MigrationReport> {
@@ -366,7 +505,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("migrations should succeed: {error}"));
 
         assert_eq!(report.current_version, current_version());
-        assert_eq!(report.applied_versions, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(report.applied_versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]
@@ -438,7 +577,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("phase-3 migrations should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![5, 6]);
+        assert_eq!(report.applied_versions, vec![5, 6, 7, 8]);
 
         let (workout_day, workout_title): (String, String) = connection
             .query_row(
@@ -459,5 +598,70 @@ mod tests {
             .unwrap_or_else(|error| panic!("backfilled session should load: {error}"));
         assert_eq!(session_day, "2026-04-08");
         assert_eq!(session_title, "breathing");
+    }
+
+    #[test]
+    fn phase4_migration_rehomes_legacy_webhook_subscriptions() {
+        let mut connection = Connection::open_in_memory()
+            .unwrap_or_else(|error| panic!("in-memory db should open: {error}"));
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );",
+            )
+            .unwrap_or_else(|error| panic!("schema migrations table should exist: {error}"));
+
+        for migration in &MIGRATIONS[..6] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| panic!("pre-phase4 migration should apply: {error}"));
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+                    params![migration.version, migration.name, "2026-04-08T00:00:00Z"],
+                )
+                .unwrap_or_else(|error| panic!("migration marker should insert: {error}"));
+        }
+
+        connection
+            .execute(
+                "INSERT INTO webhook_subscriptions (
+                    subscription_id,
+                    event_type,
+                    delivery_mode,
+                    status,
+                    created_at,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    "legacy-subscription",
+                    "create",
+                    "https://example.test/webhooks/oura",
+                    "active",
+                    "2026-04-07T00:00:00Z",
+                    "2026-04-08T00:00:00Z"
+                ],
+            )
+            .unwrap_or_else(|error| panic!("legacy webhook subscription should insert: {error}"));
+
+        let report = run_migrations(&mut connection)
+            .unwrap_or_else(|error| panic!("phase4 migrations should succeed: {error}"));
+        assert_eq!(report.applied_versions, vec![7, 8]);
+
+        let row: (String, String, String) = connection
+            .query_row(
+                "SELECT subscription_id, callback_url, drift_status
+                 FROM webhook_remote_subscriptions
+                 WHERE subscription_id = ?1",
+                params!["legacy-subscription"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap_or_else(|error| panic!("rehomed webhook subscription should load: {error}"));
+        assert_eq!(row.0, "legacy-subscription");
+        assert_eq!(row.1, "https://example.test/webhooks/oura");
+        assert_eq!(row.2, "active");
     }
 }

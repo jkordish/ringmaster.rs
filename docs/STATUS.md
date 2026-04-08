@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This file is the current truth for the repository during the phase-3 context-overlays-and-explainability pass. It records what now works, what drift was removed, and what remains intentionally deferred.
+This file is the current truth for the repository during the phase-4 webhook-freshness-and-ops-excellence pass. It records what now works, what operational gaps were removed, and what remains intentionally deferred.
 
 ## Baseline audit at start of this pass
 
@@ -22,31 +22,35 @@ Repository strengths at baseline:
 - honest live empty/error states
 - local-first poll architecture
 - background refresh already reused the same scheduler core as `sync watch`
+- derived context overlays, explainability, and pattern summaries were already persisted and testable
 
 Repository gaps at baseline:
 
-- context-family placeholders existed, but the product still centered on metrics alone
-- Timeline overlays were placeholder text rather than a real read model
-- there was no selected-day story screen
-- no deterministic pattern surfacing for workouts, tags, or sessions
-- no rebuild command for derived overlays and analytics
+- no real webhook receiver or replay path
+- no subscription lifecycle management for Oura webhook APIs
+- no queue-driven invalidation path inside `sync watch`
+- freshness semantics were still too coarse for operations work
+- Ops and `doctor` could not explain receiver health, queue lag, or subscription drift
 
 ## Current implemented truth
 
 The repository now includes:
 
-- real sync, persistence, and fixture coverage for `workouts`, `enhanced_tags`, and `sessions`
-- family-aware scheduler coverage and freshness semantics for all six supported families
-- persisted `derived_context_events` and `derived_pattern_summaries` tables
-- automatic bounded recent-window derived-table refresh after successful non-dry-run syncs
-- a deterministic `derive rebuild` command with `--demo` and `--fixture-dir` support
-- a shared selected-day concept across Dashboard, Timeline, and Explain
-- a shared selected-event concept across Timeline and Explain
-- a Timeline screen with gap-aware heartrate rendering, real overlay lanes, family toggles, selected-event details, and a selected-day event list
-- an Explain screen with selected-day summary lines, measurement context, evidence bullets, context entries, and explicit caveats
-- a Patterns screen with descriptive association rows, sample counts, magnitude, and sufficiency buckets
-- clear missing-scope and insufficient-history messaging instead of silent emptiness
-- deterministic wording rules that avoid causal claims and medical framing
+- a real `webhook serve` command that verifies Oura webhook traffic, durably records accepted and rejected deliveries, enqueues invalidations, and responds after durable enqueue instead of after sync work
+- a declarative webhook subscription surface:
+  - `webhook subscriptions list`
+  - `webhook subscriptions sync`
+- persisted desired subscription specs, remote subscription snapshots, accepted raw deliveries, rejected deliveries, invalidation queue rows, processing attempts, and webhook runtime heartbeats
+- a real `webhook replay` path for fixture-backed replay and replaying previously stored deliveries
+- a hybrid `sync watch` loop that:
+  - consumes pending invalidations first
+  - triggers family-aware targeted sync windows
+  - preserves scheduled fallback reconciliation
+  - keeps unsupported families such as `heartrate` on scheduled-only freshness
+- persisted sync trigger provenance, so the app can distinguish webhook-driven freshness from periodic reconcile freshness
+- source-aware freshness semantics across the app, Ops, and `doctor`
+- a substantially upgraded Ops view that exposes receiver state, callback configuration, subscription health, expiry horizons, delivery history, queue depth, runtime mode, and recent incidents
+- a substantially upgraded `doctor` surface that reports webhook readiness, queue visibility, receiver/watch heartbeats, and freshness-risk conditions
 
 ## Supported data families
 
@@ -59,26 +63,70 @@ Live sync and persistence currently cover:
 - `enhanced_tag`
 - `session`
 
-Legacy `tags` remain part of the canonical context-event read model when present in SQLite, but the product is intentionally centered on `enhanced_tag`.
+Webhook-driven freshness is intentionally limited to the Oura `data_type` surface the app currently supports:
 
-## Explainability and analytics truth
+- `daily_sleep`
+- `daily_readiness`
+- `daily_activity`
+- `workout`
+- `enhanced_tag`
+- `session`
 
-Explain and Patterns are intentionally restrained:
+`heartrate` remains scheduler-only because it is not currently exposed as an Oura webhook `data_type`.
 
-- Explain summarizes what was measured, what context events occurred, and what evidence exists around the selected day
-- Patterns surface descriptive associations only after a minimum sample threshold
-- the UI always shows `n`
-- thin history is called out explicitly
-- wording uses “associated with”, “co-occurred with”, and “after days with”
-- the product intentionally avoids causal claims, medical advice, and significance theater
+## Freshness and ops truth
+
+The app no longer collapses every stale condition into one generic bucket. Families can now resolve to:
+
+- fresh via webhook-driven sync
+- fresh via periodic reconcile
+- stale because no recent delivery has been seen
+- stale because the last sync failed
+- stale because the family is unsupported by webhooks
+- stale because the receiver is down
+- stale because the subscription is missing or expired
+- stale because the required capability was not granted
+- stale because upstream source data is not yet available
+
+These states are derived from persisted sync state, granted scopes, receiver heartbeat, subscription snapshots, recent deliveries, queue state, and configured freshness policy.
+
+## Webhook and subscription truth
+
+Phase 4 now treats webhook operations as first-class local runtime behavior:
+
+- `webhook serve` is the dedicated HTTP receiver
+- `sync watch` is the dedicated queue consumer and scheduler
+- desired webhook subscriptions are declared in config
+- `webhook subscriptions sync` converges remote state toward local desired state
+- `webhook subscriptions sync --dry-run` provides the safe, inspectable default for local verification
+- `webhook replay` is the canonical local replay and debugging path
+
+The product remains local-first:
+
+- no hosted relay exists
+- no tunnel orchestration exists
+- users must provide their own public HTTPS callback path when running a real receiver against Oura
 
 ## Milestone tracker
 
-- [x] Milestone 1: add the phase-3 plan, schema/config/scheduler foundations, and real sync/store coverage for `workouts`, `enhanced_tags`, and `sessions`
-- [x] Milestone 2: add persisted derivation for canonical context events and pattern summaries plus the `derive rebuild` CLI path
-- [x] Milestone 3: unify selected-day and selected-event state across the TUI, upgrade Timeline with overlays and drill-down, and add Explain + Patterns screens
-- [x] Milestone 4: add meaningful migration/sync/derivation/analytics/UI tests and align docs with the implemented behavior
-- [x] Milestone 5: run the final verification sweep and repair any failures before closeout
+- [x] Milestone 1: add webhook config, schema, typed storage/query support, and the phase 4 execplan/docs scaffolding
+- [x] Milestone 2: implement `webhook serve`, `webhook replay`, and declarative subscription list/sync surfaces with fixture-backed coverage
+- [x] Milestone 3: integrate invalidation-driven processing into `sync watch`, persist freshness trigger provenance, and preserve scheduled fallback semantics
+- [x] Milestone 4: finish the docs sweep, complete full verification, and repair any remaining failures before closeout
+
+## Tests now in place
+
+The phase-4 pass now includes meaningful coverage for:
+
+- migration application for the new webhook and invalidation schema
+- webhook verification challenge handling
+- signed-delivery acceptance and rejection
+- stale timestamp and duplicate delivery handling
+- invalidation queue behavior
+- fixture-backed subscription sync planning and snapshot persistence
+- invalidation-driven targeted sync inside the watch loop
+- doctor reporting for webhook readiness, queue state, and runtime heartbeats
+- Ops and TUI rendering for the new freshness and operational health states
 
 ## Verification completed in this pass
 
@@ -88,29 +136,16 @@ Verified on `2026-04-08` after implementation:
 - `cargo clippy --all-targets --all-features -- -D warnings` passed
 - `cargo test --all` passed
 - `cargo run -- doctor` passed
-- `cargo run -- sync once --dry-run --fixture-dir tests/fixtures/phase3` passed
-- `cargo run -- derive rebuild --demo` passed
-- `cargo run -- demo` passed
+- `cargo run -- webhook replay --fixture tests/fixtures/webhooks/sample.json` passed
 - `cargo run -- sync watch --demo --max-iterations 1` passed
-
-## Tests now in place
-
-The phase-3 pass now includes meaningful coverage for:
-
-- migration application and record-count expectations
-- phase-2-to-phase-3 migration backfill for existing workout/session rows
-- fixture-backed sync for workouts, enhanced tags, and sessions
-- canonical context-event derivation and persisted analytics rebuilds
-- selected-day and selected-event app-state behavior
-- timeline family filters and event selection
-- Explain rendering
-- Patterns insufficient-data rendering
-- non-interactive TUI smoke rendering
+- `cargo run -- webhook subscriptions sync --dry-run --fixture-dir tests/fixtures/webhooks` passed
 
 ## Known intentional deferrals
 
-- webhook receiver and webhook subscription lifecycle
-- broader Oura data surface outside the current personal/daily/heartrate/context-family slice
-- exports, sharing, and reporting flows
+- hosted relay services
+- tunnel orchestration
 - packaging, installers, and release automation
-- generalized machine learning or medical interpretation
+- webhook freshness for Oura families the upstream API does not expose as webhook `data_type`s
+- push notifications and mobile companion features
+- broad theming and non-operational UI polish work
+- ML-style interpretation or “AI insights”

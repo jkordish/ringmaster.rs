@@ -341,6 +341,8 @@ fn spawn_refresh_worker(
                             dry_run: false,
                             fixture_dir: None,
                             families,
+                            trigger_source: Some("manual_sync".to_owned()),
+                            trigger_detail: Some("tui refresh".to_owned()),
                         },
                     ),
                 )
@@ -481,7 +483,7 @@ mod tests {
 
     use crate::action::Action;
     use crate::app::{Screen, build_demo_state, build_live_state};
-    use crate::config::{Config, LoggingConfig, OuraConfig, RefreshConfig};
+    use crate::config::{Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig};
     use crate::error::OuraProblem;
     use crate::oura::models::{AuthStatus, CapabilityReport};
     use crate::store::Store;
@@ -490,6 +492,7 @@ mod tests {
         PersonalInfoRecord, SyncRunStatus, SyncStateRecord,
     };
     use crate::tui::render_snapshot;
+    use crate::webhook::default_desired_subscriptions;
     use std::path::PathBuf;
 
     fn test_config() -> Config {
@@ -551,6 +554,16 @@ mod tests {
                 max_backoff_secs: 60 * 60,
                 demo_fixture_dir: None,
             },
+            webhook: WebhookConfig {
+                bind: "127.0.0.1:8799".parse().unwrap(),
+                path: "/webhooks/oura".to_owned(),
+                public_base_url: Some("https://example.test".to_owned()),
+                verification_token: Some("verify-me".to_owned()),
+                signature_tolerance_secs: 300,
+                heartbeat_secs: 15,
+                renewal_lead_secs: 7 * 24 * 60 * 60,
+                subscriptions: default_desired_subscriptions(),
+            },
         }
     }
 
@@ -602,6 +615,8 @@ mod tests {
                 last_error,
                 failure_count: 0,
                 next_attempt_after: None,
+                last_trigger_source: Some("periodic_reconcile".to_owned()),
+                last_trigger_detail: Some("fixture seed".to_owned()),
             })
             .unwrap_or_else(|error| panic!("sync state should seed: {error}"));
     }
@@ -871,7 +886,7 @@ mod tests {
         assert!(output.contains("Secret backend: keyring"));
         assert!(output.contains("Granted scopes: personal, daily, heartrate"));
         assert!(output.contains("Database path: :memory:"));
-        assert!(output.contains("Heartrate: no data yet"));
+        assert!(output.contains("Heartrate: stale: sync failed"));
         assert!(output.contains("Warnings"));
     }
 

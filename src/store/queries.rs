@@ -30,6 +30,8 @@ pub struct SyncStateRecord {
     pub last_error: Option<OuraProblem>,
     pub failure_count: u32,
     pub next_attempt_after: Option<String>,
+    pub last_trigger_source: Option<String>,
+    pub last_trigger_detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -493,8 +495,10 @@ impl<'connection> SyncStateStore<'connection> {
                 granted_scopes,
                 last_error_json,
                 failure_count,
-                next_attempt_after
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                next_attempt_after,
+                last_trigger_source,
+                last_trigger_detail
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             ON CONFLICT(sync_key) DO UPDATE SET
                 status = excluded.status,
                 cursor = excluded.cursor,
@@ -504,7 +508,9 @@ impl<'connection> SyncStateStore<'connection> {
                 granted_scopes = excluded.granted_scopes,
                 last_error_json = excluded.last_error_json,
                 failure_count = excluded.failure_count,
-                next_attempt_after = excluded.next_attempt_after",
+                next_attempt_after = excluded.next_attempt_after,
+                last_trigger_source = excluded.last_trigger_source,
+                last_trigger_detail = excluded.last_trigger_detail",
             params![
                 record.sync_key,
                 record.status.as_str(),
@@ -516,6 +522,8 @@ impl<'connection> SyncStateStore<'connection> {
                 encode_problem(&record.last_error)?,
                 i64::from(record.failure_count),
                 record.next_attempt_after,
+                record.last_trigger_source,
+                record.last_trigger_detail,
             ],
         )?;
 
@@ -535,7 +543,9 @@ impl<'connection> SyncStateStore<'connection> {
                     granted_scopes,
                     last_error_json,
                     failure_count,
-                    next_attempt_after
+                    next_attempt_after,
+                    last_trigger_source,
+                    last_trigger_detail
                  FROM sync_state
                  ORDER BY last_attempted_at DESC
                  LIMIT 1",
@@ -558,7 +568,9 @@ impl<'connection> SyncStateStore<'connection> {
                 granted_scopes,
                 last_error_json,
                 failure_count,
-                next_attempt_after
+                next_attempt_after,
+                last_trigger_source,
+                last_trigger_detail
              FROM sync_state
              ORDER BY sync_key ASC",
         )?;
@@ -584,7 +596,9 @@ impl<'connection> SyncStateStore<'connection> {
                     granted_scopes,
                     last_error_json,
                     failure_count,
-                    next_attempt_after
+                    next_attempt_after,
+                    last_trigger_source,
+                    last_trigger_detail
                  FROM sync_state
                  WHERE sync_key = ?1",
                 params![sync_key],
@@ -903,6 +917,14 @@ impl<'connection> ImportStore<'connection> {
         Ok(())
     }
 
+    pub fn delete_workout(&self, workout_id: &str) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM workouts WHERE workout_id = ?1",
+            params![workout_id],
+        )?;
+        Ok(())
+    }
+
     pub fn upsert_enhanced_tag(&self, record: &EnhancedTagRecord) -> Result<()> {
         self.connection.execute(
             "INSERT INTO enhanced_tags (
@@ -944,6 +966,14 @@ impl<'connection> ImportStore<'connection> {
         Ok(())
     }
 
+    pub fn delete_enhanced_tag(&self, enhanced_tag_id: &str) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM enhanced_tags WHERE enhanced_tag_id = ?1",
+            params![enhanced_tag_id],
+        )?;
+        Ok(())
+    }
+
     pub fn upsert_session(&self, record: &SessionRecord) -> Result<()> {
         self.connection.execute(
             "INSERT INTO sessions (
@@ -982,6 +1012,14 @@ impl<'connection> ImportStore<'connection> {
             ],
         )?;
 
+        Ok(())
+    }
+
+    pub fn delete_session(&self, session_id: &str) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM sessions WHERE session_id = ?1",
+            params![session_id],
+        )?;
         Ok(())
     }
 }
@@ -1686,6 +1724,8 @@ fn read_sync_state_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncStateRec
         last_error: decode_problem(row.get(7)?).map_err(json_to_sql_error)?,
         failure_count: parse_u32(row.get::<_, i64>(8)?, 8)?,
         next_attempt_after: row.get(9)?,
+        last_trigger_source: row.get(10)?,
+        last_trigger_detail: row.get(11)?,
     })
 }
 
@@ -1976,6 +2016,8 @@ mod tests {
                 )),
                 failure_count: 3,
                 next_attempt_after: Some("2026-04-08T06:05:00Z".to_owned()),
+                last_trigger_source: Some("periodic_reconcile".to_owned()),
+                last_trigger_detail: Some("daily scheduler".to_owned()),
             })
             .unwrap_or_else(|error| panic!("sync state should persist: {error}"));
 

@@ -84,6 +84,8 @@ pub async fn rebuild(config: &Config, options: DeriveOptions) -> Result<DeriveRe
                 dry_run: false,
                 fixture_dir: Some(fixture_dir.clone()),
                 families: SyncFamily::ALL.to_vec(),
+                trigger_source: Some("periodic_reconcile".to_owned()),
+                trigger_detail: Some("derive seed sync".to_owned()),
             },
         )
         .await?;

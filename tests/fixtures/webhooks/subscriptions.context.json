@@ -1,0 +1,4 @@
+{
+  "callback_url": "https://fixture.example.test/webhooks/oura",
+  "verification_token": "fixture-verification-token"
+}

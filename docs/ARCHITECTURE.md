@@ -2,17 +2,18 @@
 
 ## Scope
 
-This document describes the implemented phase-3 architecture for `ringmaster.rs`. It reflects the code that exists in the repository today, not the eventual end-state product.
+This document describes the implemented phase-4 architecture for `ringmaster.rs`. It reflects the code that exists in the repository today, not the eventual end-state product.
 
 ## Design goals
 
 - local-first by default
-- poll-first for v1
 - pure UI components
 - single-crate simplicity until pressure justifies more structure
-- deterministic demo and fixture paths for development, CI, and screenshots
+- deterministic demo, fixture, and replay paths for development and CI
 - explicit freshness and availability semantics instead of vague loading/error buckets
-- explainability that is evidence-based and restrained
+- webhook-first freshness where Oura supports it
+- honest scheduled fallback where Oura does not
+- auditable operations when freshness goes wrong
 - deterministic derived analytics rather than pseudo-intelligence
 
 ## Runtime shape
@@ -29,6 +30,24 @@ doctor / auth / sync once / sync watch / derive rebuild
   -> normalized imports
   -> bounded auto-derived rebuilds after sync, plus explicit full-history rebuilds
   -> formatted text output
+
+webhook serve
+  -> axum receiver
+  -> verification challenge + signature verification
+  -> accepted/rejected delivery audit
+  -> invalidation enqueue
+  -> heartbeat updates
+
+webhook subscriptions list / sync
+  -> desired subscription config
+  -> app-credential admin client or fixture-backed remote state
+  -> explicit diff/reporting
+  -> remote snapshot persistence
+
+webhook replay
+  -> fixture or stored-delivery envelope loading
+  -> same receive/verify/enqueue path
+  -> bounded invalidation-processing pass
 
 tui / tui --demo
   -> app state builder
@@ -53,6 +72,8 @@ Non-responsibilities:
 - side effects
 - command execution
 
+The CLI now exposes a distinct `webhook` command family instead of collapsing receiver, replay, and watch behavior into one giant process.
+
 ### `src/config.rs`
 
 Responsibilities:
@@ -64,8 +85,9 @@ Responsibilities:
 - Oura/logging defaults
 - refresh policy defaults
 - env-only client secret handling
+- webhook receiver and subscription defaults
 
-Current refresh defaults now cover all six live families:
+Current refresh defaults cover all six live families:
 
 - personal
 - daily
@@ -74,7 +96,15 @@ Current refresh defaults now cover all six live families:
 - enhanced tags
 - sessions
 
-History and overlap defaults are also family-aware, so the sync layer does not need to invent bespoke window logic in the UI or import path.
+Current webhook config covers:
+
+- receiver bind/path
+- public callback URL metadata
+- verification token
+- signature timestamp tolerance
+- heartbeat cadence
+- renewal lead window
+- desired subscription specs
 
 ### `src/app.rs`
 
@@ -85,15 +115,25 @@ Responsibilities:
 - demo/live application snapshots and presentation models
 - shared selected-day and selected-event state
 - user-facing status/footer text
-- shaping store/auth/derived data into screen-specific models
+- shaping store/auth/derived/webhook data into screen-specific models
 - deterministic selected-day summaries and pattern rows
 
-The app layer is where persisted normalized rows, derived tables, and auth/capability diagnostics become screen models. It deliberately does not own terminal I/O, HTTP, or SQL.
+The app layer is where persisted normalized rows, derived tables, auth diagnostics, sync provenance, subscription state, delivery history, queue state, and runtime heartbeats become screen models. It deliberately does not own terminal I/O, HTTP, or SQL.
 
 Important implemented state concepts:
 
-- `FreshnessKind`: `Fresh`, `Stale`, `NoDataYet`, `NeverSynced`, `MissingScope`, `AuthFailure`, `SourceDelayed`
+- `FreshnessKind`:
+  - `FreshWebhook`
+  - `FreshPeriodic`
+  - `StaleNoRecentDelivery`
+  - `StaleSyncFailed`
+  - `StaleUnsupportedWebhook`
+  - `StaleReceiverDown`
+  - `StaleSubscriptionMissing`
+  - `StaleCapabilityMissing`
+  - `StaleUpstreamPending`
 - `LiveSnapshot`: the immutable persisted-data snapshot sent into the reducer after each background refresh
+- `WebhookOpsSnapshot`: persisted receiver/subscription/delivery/queue/runtime view data shaped for Ops and `doctor`
 - `selected_day_index`: shared by Dashboard, Timeline, and Explain
 - `selected_event_id`: shared by Timeline and Explain
 - `overlay_filters`: shared family toggles for workouts, tags, and sessions
@@ -119,7 +159,7 @@ How background refresh works:
 
 - the main loop stays focused on terminal input, tick events, reducer updates, and rendering
 - a dedicated worker thread owns a single-thread Tokio runtime
-- that worker opens the store on its own thread, uses the scheduler core from `src/refresh.rs`, and calls the same `sync_selected(...)` path as `sync once`
+- that worker opens the store on its own thread, uses the shared scheduler core from `src/refresh.rs`, and calls the same `sync_selected(...)` path as `sync once`
 - when new persisted data is available, the worker rebuilds a `LiveSnapshot` and sends `Action::LiveSnapshotLoaded` back to the UI loop
 - this keeps blocking store/auth/sync work off the render path and avoids `Send` pressure on the SQLite + sync stack
 
@@ -152,7 +192,7 @@ Component responsibilities today:
 - Trends renders window tabs, sparklines, and trend notes
 - Explain renders selected-day summary lines, measurements, evidence, context entries, and caveats
 - Patterns renders deterministic association rows plus sufficiency/wording notes
-- Ops renders trust and freshness diagnostics without reaching back into the store
+- Ops renders receiver state, callback configuration, subscription health, delivery history, queue lag, freshness source, and recent incidents without reaching back into the store
 
 ### `src/refresh.rs`
 
@@ -161,20 +201,28 @@ Responsibilities:
 - family-aware scheduler decisions
 - interval policy
 - persisted backoff handling
-- bounded watch execution for demo/CI
+- invalidation claim/process/settle loop
+- bounded watch execution for demo and CI
 
-The scheduler is reusable by both `sync watch` and the live TUI worker. It now treats `workout`, `enhanced_tag`, and `session` as first-class sync families with distinct intervals, stale-after windows, and sync keys.
+The watch engine is reusable by both `sync watch` and the live TUI worker. It now treats:
+
+- queued webhook invalidations as first-class work
+- `workout`, `enhanced_tag`, and `session` delete events as explicit local delete side effects
+- `heartrate` as scheduled-only fallback
+
+`sync watch` remains the only long-running invalidation consumer. This preserves the operational split between “receive quickly” and “process carefully.”
 
 ### `src/store/*`
 
 Responsibilities:
 
-- SQLite opening/configuration
+- SQLite opening and configuration
 - migration runner
 - typed query surfaces
 - sync-state persistence
 - view-oriented read models
 - derived table writes and reads
+- webhook audit, queue, and runtime metadata
 
 Current schema families:
 
@@ -191,18 +239,39 @@ Current schema families:
 - `tags`
 - `enhanced_tags`
 - `sessions`
+- `desired_webhook_subscriptions`
 - `webhook_subscriptions`
+- `webhook_deliveries`
+- `webhook_rejections`
+- `webhook_invalidations`
+- `webhook_processing_attempts`
+- `runtime_heartbeats`
 - `derived_context_events`
 - `derived_pattern_summaries`
 
-Important query responsibilities added in phase 3:
+Important query responsibilities added in phase 4:
 
-- normalized reads for workouts, enhanced tags, and sessions
-- selected-day and day-range context-event queries
-- persisted pattern summary reads
-- record counts that include both normalized and derived tables
+- desired and remote subscription persistence
+- accepted and rejected delivery audit
+- invalidation enqueue, claim, retry, and completion tracking
+- receiver and watch heartbeat persistence
+- sync trigger provenance persistence
+- richer Ops-oriented read surfaces for subscriptions, deliveries, queue depth, and incidents
 
-`sync_state` still tracks per-slice status, watermark, granted scopes, failure counts, next-attempt backoff, and the last structured Oura problem. `raw_payload_cache` remains intentionally separate from normalized tables so replay and debugging do not leak transport details into the UI.
+`sync_state` now tracks per-slice status, watermark, granted scopes, failure counts, next-attempt backoff, last structured Oura problem, and the last trigger source and trigger detail. `raw_payload_cache` remains intentionally separate from normalized tables so replay and debugging do not leak transport details into the UI.
+
+### `src/store/webhook_store.rs`
+
+Responsibilities:
+
+- typed storage boundary for all webhook-specific persistence
+- idempotent accepted-delivery writes
+- rejected-delivery audit writes
+- invalidation queue coalescing and lifecycle management
+- remote subscription snapshot persistence
+- runtime heartbeat writes and reads
+
+The explicit split between raw delivery audit and derived invalidation queue is intentional: operators need to know both what arrived and what work it turned into.
 
 ### `src/oura/*`
 
@@ -210,9 +279,10 @@ Responsibilities:
 
 - loopback OAuth login
 - token refresh lifecycle ownership
-- capability/scope modeling
-- typed transport DTOs and client boundary
+- capability and scope modeling
+- typed transport DTOs and client boundaries
 - poll-first sync orchestration
+- webhook admin API integration for subscription lifecycle
 
 Current live sync behavior:
 
@@ -220,6 +290,7 @@ Current live sync behavior:
 - token secrets live behind the keyring-backed `SecretStore` seam; tests use an in-memory secret store
 - `ensure_authorized_session` is the single owner for access-token refresh
 - `ReqwestOuraClient` and `FixtureOuraClient` share the same typed fetch surface
+- the webhook admin client uses app credentials for subscription list/create/update/renew/delete flows
 - `sync once` and `sync watch` import:
   - `/v2/usercollection/personal_info`
   - `/v2/usercollection/daily_sleep`
@@ -232,7 +303,20 @@ Current live sync behavior:
 
 Each family is imported through idempotent upserts and family-specific reconcile windows. Missing scopes are captured explicitly so the product can show “missing capability” rather than pretending the family is simply empty.
 
-Successful non-dry-run syncs now also refresh the derived context-event and pattern-summary tables over a bounded recent window, so Explain, Timeline overlays, and Patterns stay current without making every background refresh reprocess the entire database. `derive rebuild` remains the explicit full-history recompute path.
+Successful non-dry-run syncs also refresh the derived context-event and pattern-summary tables over a bounded recent window, so Explain, Timeline overlays, and Patterns stay current without making every background refresh reprocess the entire database. `derive rebuild` remains the explicit full-history recompute path.
+
+### `src/webhook/*`
+
+Responsibilities:
+
+- receiver routing
+- verification challenge handling
+- signature and timestamp verification
+- accepted and rejected delivery normalization
+- replay plumbing
+- declarative subscription diffing and execution
+
+The webhook module is intentionally separate from the sync runtime. It owns ingress, auditing, and subscription management, while `src/refresh.rs` owns queue consumption and reconciliation.
 
 ### `src/derive.rs`
 
@@ -243,7 +327,7 @@ Responsibilities:
 - fixture-backed demo rebuild path
 - one place for derivation logic shared by CLI rebuilds and product reads
 
-`derive rebuild` follows this shape:
+`derive rebuild` still follows this shape:
 
 ```text
 open store
@@ -255,145 +339,39 @@ open store
 
 The rebuild path is safe to run repeatedly and intentionally avoids any UI or live-network coupling.
 
-### `src/insights.rs`
+## Runtime modes
 
-Responsibilities:
+The product now has explicit operational modes:
 
-- rolling baselines
-- day-over-day deltas
-- deviation scoring when history is sufficient
-- confidence notes when history is too thin
+- scheduler-only: no healthy receiver or no viable subscription state, but periodic fallback still runs
+- receiver-only: receiver is healthy but watch is not actively processing queued invalidations
+- hybrid: receiver and watch are both healthy, subscriptions are present, and the app can report webhook-first freshness where supported
 
-This module remains small and deterministic. Explain and Patterns may use its baseline semantics, but they do not turn into a freeform narrative or causal interpretation layer.
+Ops and `doctor` derive this mode from persisted runtime heartbeats and subscription state rather than from process assumptions.
 
-## Canonical context-event model
+## Freshness semantics
 
-`derived_context_events` is the canonical read model for Timeline and Explain.
+Freshness is now reasoned from multiple persisted inputs:
 
-It unifies workouts, legacy tags, enhanced tags, and sessions behind normalized fields:
+- sync state and last successful timestamps
+- last trigger source
+- receiver heartbeat
+- watch heartbeat
+- desired vs remote subscription state
+- recent accepted and rejected deliveries
+- queue backlog
+- granted capabilities
+- per-family policy windows
 
-- stable derived id
-- family
-- source id
-- anchor day
-- start / end timestamps
-- time semantics (`interval`, `point`, `all_day`)
-- title
-- subtype
-- notes
-- intensity
-- metadata JSON for drill-down
-- updated timestamp
+This is what allows the app to say “stale because receiver down” or “fresh via webhook” instead of flattening all freshness problems into one label.
 
-Why it exists:
+## Local-first webhook model
 
-- avoids assembling overlays ad hoc inside widgets
-- gives Explain a stable evidence source
-- keeps overlap handling deterministic
-- provides one extension seam for future families
+Webhook support remains local-first:
 
-## Explainability and pattern architecture
+- no hosted relay service exists
+- no tunnel orchestration exists
+- a real deployment requires a user-managed public HTTPS callback path
+- the local runtime still has to be understandable and debuggable without public network access
 
-### Explain
-
-Explain is not a language-model feature. It is a deterministic presentation layer over:
-
-- selected-day daily metrics
-- rolling baselines
-- nearby derived context events
-- capability/freshness diagnostics
-
-Explain deliberately uses disciplined templates and caveat rules:
-
-- no medical advice
-- no causal claims
-- no significance theater
-- no “AI says” framing
-
-### Patterns
-
-Patterns is a deterministic descriptive-association layer over persisted history.
-
-Current implementation:
-
-- normalizes event keys by family
-- computes event-occurrence metric deltas against rolling baselines
-- aggregates with simple, documented summaries
-- requires a minimum sample threshold before surfacing rows
-- persists the resulting summary rows for cheap UI reads
-
-Current wording rules:
-
-- `associated with`
-- `co-occurred with`
-- `after days with`
-- never `caused by`
-
-## Data flow
-
-### Live TUI
-
-```text
-config
-  -> Store::open()
-  -> auth::inspect_auth()
-  -> app::build_live_state()
-  -> tui::run()
-  -> worker thread schedules refreshes
-  -> worker runs sync_selected(...)
-  -> worker rebuilds LiveSnapshot from persisted + derived tables
-  -> Action::LiveSnapshotLoaded enters reducer
-  -> components draw presentation models only
-```
-
-The TUI never performs HTTP, token refresh, or database writes on the render path. Live screens render only from persisted auth/session metadata, normalized SQLite rows, and derived SQLite rows.
-
-### Demo TUI
-
-```text
-config
-  -> app::build_demo_state()
-  -> tui::run() or tui::render_snapshot()
-```
-
-### `sync once`
-
-```text
-config
-  -> auth::ensure_authorized_session()
-  -> ReqwestOuraClient or FixtureOuraClient
-  -> sync::sync_once()
-  -> raw payload cache + normalized upserts
-  -> derived rebuild when persisted daily/context rows changed
-  -> store.sync_state().upsert(...)
-```
-
-### `derive rebuild`
-
-```text
-config
-  -> Store::open()
-  -> derive::rebuild()
-  -> replace_context_events(...)
-  -> replace_pattern_summaries(...)
-```
-
-In `--demo` mode, the rebuild command first seeds a temporary store from the phase-3 fixtures using the same sync engine and then rebuilds the derived tables from that persisted data.
-
-## Boundary checks
-
-The current architecture intentionally preserves the following constraints:
-
-- UI components do not know about HTTP or SQLite
-- the auth layer remains the sole refresh-token owner
-- sync code writes normalized and raw data, but does not know about Ratatui widgets
-- derivation happens from persisted data, not by ad hoc widget joins
-- background work stays off the render path
-
-## Intentionally deferred
-
-- webhook delivery and subscription lifecycle
-- broader Oura endpoints beyond the current phase-3 surface
-- export/share/report workflows
-- generalized machine learning
-- cloud sync services or multi-user architecture
+That is why `webhook replay` and fixture-backed subscription sync are part of the core architecture instead of being treated as optional test utilities.

@@ -28,6 +28,8 @@ pub struct SyncOptions {
     pub dry_run: bool,
     pub fixture_dir: Option<PathBuf>,
     pub families: Vec<SyncFamily>,
+    pub trigger_source: Option<String>,
+    pub trigger_detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +66,8 @@ pub async fn sync_once(config: &Config, store: &Store, options: SyncOptions) -> 
             } else {
                 options.families
             },
+            trigger_source: options.trigger_source,
+            trigger_detail: options.trigger_detail,
         },
     )
     .await
@@ -820,6 +824,18 @@ fn persist_slice_report(
             last_error: report.last_error.clone(),
             failure_count,
             next_attempt_after,
+            last_trigger_source: Some(
+                options
+                    .trigger_source
+                    .clone()
+                    .unwrap_or_else(|| "periodic_reconcile".to_owned()),
+            ),
+            last_trigger_detail: Some(
+                options
+                    .trigger_detail
+                    .clone()
+                    .unwrap_or_else(|| "sync_selected".to_owned()),
+            ),
         })?;
     }
 
@@ -1037,10 +1053,13 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{SyncOptions, sync_once};
-    use crate::config::{AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig};
+    use crate::config::{
+        AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
+    };
     use crate::refresh::SyncFamily;
     use crate::store::Store;
     use crate::store::queries::SyncRunStatus;
+    use crate::webhook::default_desired_subscriptions;
 
     fn phase3_fixture_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase3")
@@ -1103,6 +1122,16 @@ mod tests {
                 max_backoff_secs: 60 * 60,
                 demo_fixture_dir: None,
             },
+            webhook: WebhookConfig {
+                bind: "127.0.0.1:8799".parse().unwrap(),
+                path: "/webhooks/oura".to_owned(),
+                public_base_url: Some("https://example.test".to_owned()),
+                verification_token: Some("verify-me".to_owned()),
+                signature_tolerance_secs: 300,
+                heartbeat_secs: 15,
+                renewal_lead_secs: 7 * 24 * 60 * 60,
+                subscriptions: default_desired_subscriptions(),
+            },
         }
     }
 
@@ -1114,6 +1143,8 @@ mod tests {
             dry_run: false,
             fixture_dir: Some(phase3_fixture_dir()),
             families: SyncFamily::ALL.to_vec(),
+            trigger_source: Some("periodic_reconcile".to_owned()),
+            trigger_detail: Some("test fixture sync".to_owned()),
         };
 
         let first = sync_once(&config, &store, options.clone())
@@ -1148,6 +1179,8 @@ mod tests {
                 dry_run: true,
                 fixture_dir: Some(phase3_fixture_dir()),
                 families: SyncFamily::ALL.to_vec(),
+                trigger_source: Some("periodic_reconcile".to_owned()),
+                trigger_detail: Some("test dry-run sync".to_owned()),
             },
         )
         .await

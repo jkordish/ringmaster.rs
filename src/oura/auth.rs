@@ -749,7 +749,8 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::config::{AppPaths, LoggingConfig, OuraConfig, RefreshConfig};
+    use crate::config::{AppPaths, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig};
+    use crate::webhook::default_desired_subscriptions;
 
     #[derive(Debug, Default)]
     struct MemorySecretStore {
@@ -837,6 +838,16 @@ mod tests {
                 session_overlap_days: 2,
                 max_backoff_secs: 60 * 60,
                 demo_fixture_dir: None,
+            },
+            webhook: WebhookConfig {
+                bind: "127.0.0.1:8799".parse().unwrap(),
+                path: "/webhooks/oura".to_owned(),
+                public_base_url: Some("https://example.test".to_owned()),
+                verification_token: Some("verify-me".to_owned()),
+                signature_tolerance_secs: 300,
+                heartbeat_secs: 15,
+                renewal_lead_secs: 7 * 24 * 60 * 60,
+                subscriptions: default_desired_subscriptions(),
             },
         }
     }

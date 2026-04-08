@@ -11,6 +11,11 @@ use crate::store::queries::{
     PatternMetric, PatternRelationWindow, PatternSummaryRecord, PersonalInfoRecord, RecordCounts,
     SyncRunStatus, SyncStateRecord, TimeSemantics,
 };
+use crate::store::webhook_store::{
+    AcceptedWebhookDeliveryRecord, DesiredWebhookSubscriptionRecord, InvalidationRecord,
+    ProcessingAttemptRecord, RejectedWebhookDeliveryRecord, RemoteWebhookSubscriptionRecord,
+    RuntimeHeartbeatRecord,
+};
 use time::{Date, OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,13 +30,15 @@ pub enum DataFamily {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FreshnessKind {
-    Fresh,
-    Stale,
-    NoDataYet,
-    NeverSynced,
-    MissingScope,
-    AuthFailure,
-    SourceDelayed,
+    FreshWebhook,
+    FreshPeriodic,
+    StaleNoRecentDelivery,
+    StaleSyncFailed,
+    StaleUnsupportedWebhook,
+    StaleReceiverDown,
+    StaleSubscriptionMissing,
+    StaleCapabilityMissing,
+    StaleUpstreamPending,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +54,7 @@ pub struct LiveSnapshot {
     pub captured_at: String,
     pub refresh_policy: RefreshPolicySnapshot,
     pub auth_status: AuthStatus,
+    pub webhook: WebhookOpsSnapshot,
     pub personal_info: Option<PersonalInfoRecord>,
     pub daily_history: Vec<DailyOverviewRow>,
     pub heartrate_days: Vec<HeartRateDay>,
@@ -58,6 +66,24 @@ pub struct LiveSnapshot {
     pub schema_version: u32,
     pub database_path: String,
     pub config_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WebhookOpsSnapshot {
+    pub bind_address: String,
+    pub path: String,
+    pub callback_url: Option<String>,
+    pub verification_token_configured: bool,
+    pub signature_tolerance_secs: u64,
+    pub heartbeat_secs: u64,
+    pub renewal_lead_secs: u64,
+    pub desired_subscriptions: Vec<DesiredWebhookSubscriptionRecord>,
+    pub remote_subscriptions: Vec<RemoteWebhookSubscriptionRecord>,
+    pub recent_deliveries: Vec<AcceptedWebhookDeliveryRecord>,
+    pub latest_rejected_delivery: Option<RejectedWebhookDeliveryRecord>,
+    pub pending_invalidations: Vec<InvalidationRecord>,
+    pub recent_processing_attempts: Vec<ProcessingAttemptRecord>,
+    pub runtime_heartbeats: Vec<RuntimeHeartbeatRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,6 +236,7 @@ pub struct PatternsModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpsModel {
     pub mode_label: String,
+    pub summary_lines: Vec<String>,
     pub family_statuses: Vec<FamilyStatusView>,
     pub items: Vec<OpsItem>,
     pub warnings: Vec<String>,
@@ -305,7 +332,7 @@ pub struct FamilyStatusView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpsItem {
-    pub label: &'static str,
+    pub label: String,
     pub value: String,
 }
 
@@ -939,6 +966,22 @@ pub fn load_live_snapshot(
         captured_at: now_rfc3339(),
         refresh_policy: RefreshPolicySnapshot::from_config(config),
         auth_status: auth_status.clone(),
+        webhook: WebhookOpsSnapshot {
+            bind_address: config.webhook.bind.to_string(),
+            path: config.webhook.path.clone(),
+            callback_url: config.webhook.callback_url(),
+            verification_token_configured: config.webhook.verification_token.is_some(),
+            signature_tolerance_secs: config.webhook.signature_tolerance_secs,
+            heartbeat_secs: config.webhook.heartbeat_secs,
+            renewal_lead_secs: config.webhook.renewal_lead_secs,
+            desired_subscriptions: store.webhook().list_desired_subscriptions()?,
+            remote_subscriptions: store.webhook().list_remote_subscriptions()?,
+            recent_deliveries: store.webhook().list_recent_deliveries(32)?,
+            latest_rejected_delivery: store.webhook().latest_rejected_delivery()?,
+            pending_invalidations: store.webhook().list_pending_invalidations()?,
+            recent_processing_attempts: store.webhook().list_recent_processing_attempts(32)?,
+            runtime_heartbeats: store.webhook().list_runtime_heartbeats()?,
+        },
         personal_info: store.views().latest_personal_info()?,
         daily_history,
         heartrate_days,
@@ -1448,14 +1491,46 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
     })
     .collect::<Vec<_>>();
 
+    let last_accepted_delivery = snapshot
+        .webhook
+        .recent_deliveries
+        .first()
+        .map_or_else(|| "none".to_owned(), format_delivery_record);
+    let last_rejected_delivery = snapshot
+        .webhook
+        .latest_rejected_delivery
+        .as_ref()
+        .map_or_else(|| "none".to_owned(), format_rejection_record);
+    let queue_depth = snapshot.webhook.pending_invalidations.len();
+    let queue_oldest = snapshot
+        .webhook
+        .pending_invalidations
+        .iter()
+        .map(|record| record.first_queued_at.as_str())
+        .min()
+        .unwrap_or("n/a")
+        .to_owned();
+    let recent_failures = snapshot
+        .webhook
+        .recent_processing_attempts
+        .iter()
+        .filter(|attempt| attempt.outcome == "failed")
+        .count();
+    let summary_lines = vec![
+        format!("Mode: {}", ops_runtime_mode(snapshot)),
+        format!(
+            "Receiver: {}",
+            receiver_status_line(snapshot).unwrap_or_else(|| "not configured".to_owned())
+        ),
+        format!(
+            "Queue: pending={} oldest={} failed_attempts={}",
+            queue_depth, queue_oldest, recent_failures
+        ),
+    ];
+
     let mut warnings = family_statuses
         .iter()
-        .filter(|status| {
-            matches!(
-                status.state_label.as_str(),
-                "stale" | "auth failure" | "missing scope" | "never synced" | "no data yet"
-            )
-        })
+        .filter(|status| status.state_label.starts_with("stale"))
         .map(|status| format!("{}: {}", status.label, status.detail))
         .collect::<Vec<_>>();
     if refresh_in_flight {
@@ -1471,21 +1546,40 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
                 .to_owned(),
         );
     }
+    warnings.extend(recent_health_incidents(snapshot));
 
     OpsModel {
-        mode_label: if refresh_in_flight {
-            "Live (refreshing)".to_owned()
-        } else {
-            match snapshot.database_path.as_str() {
-                ":memory:" => "Live (in-memory store)".to_owned(),
-                _ => "Live".to_owned(),
-            }
-        },
+        mode_label: ops_runtime_mode(snapshot),
+        summary_lines,
         family_statuses,
         items: vec![
             ops_item("Config path", snapshot.config_path.clone()),
             ops_item("Database path", snapshot.database_path.clone()),
             ops_item("Schema version", snapshot.schema_version.to_string()),
+            ops_item(
+                "Webhook bind",
+                format!("{}{}", snapshot.webhook.bind_address, snapshot.webhook.path),
+            ),
+            ops_item(
+                "Webhook callback",
+                snapshot
+                    .webhook
+                    .callback_url
+                    .clone()
+                    .unwrap_or_else(|| "unconfigured".to_owned()),
+            ),
+            ops_item(
+                "Webhook config",
+                if receiver_config_complete(snapshot) {
+                    format!(
+                        "complete | tolerance={}s | renewal_lead={}s",
+                        snapshot.webhook.signature_tolerance_secs,
+                        snapshot.webhook.renewal_lead_secs
+                    )
+                } else {
+                    "incomplete".to_owned()
+                },
+            ),
             ops_item("Auth state", auth_state_label(&snapshot.auth_status)),
             ops_item(
                 "Granted scopes",
@@ -1515,6 +1609,47 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
                 "Secret backend",
                 snapshot.auth_status.secret_backend.clone(),
             ),
+            ops_item(
+                "Receiver heartbeat",
+                heartbeat_for(snapshot, "webhook.receiver").map_or_else(
+                    || "missing".to_owned(),
+                    |record| format_heartbeat_status(snapshot, record),
+                ),
+            ),
+            ops_item(
+                "Watch heartbeat",
+                heartbeat_for(snapshot, "sync.watch").map_or_else(
+                    || "missing".to_owned(),
+                    |record| format_heartbeat_status(snapshot, record),
+                ),
+            ),
+            ops_item("Subscriptions", overall_subscription_summary(snapshot)),
+            ops_item(
+                "Subscription horizons",
+                subscription_horizon_summary(snapshot),
+            ),
+            ops_item("Last delivery by family", family_delivery_summary(snapshot)),
+            ops_item("Last accepted delivery", last_accepted_delivery),
+            ops_item("Last rejected delivery", last_rejected_delivery),
+            ops_item(
+                "Invalidation queue",
+                format!(
+                    "pending={} oldest={} recent_attempts={} failures={}",
+                    queue_depth,
+                    queue_oldest,
+                    snapshot.webhook.recent_processing_attempts.len(),
+                    recent_failures
+                ),
+            ),
+            ops_item("Freshness sources", freshness_source_summary(snapshot)),
+            ops_item(
+                "Last webhook sync",
+                last_trigger_summary(snapshot, "webhook"),
+            ),
+            ops_item(
+                "Last periodic sync",
+                last_trigger_summary(snapshot, "periodic_reconcile"),
+            ),
             ops_item("Refresh policy", snapshot.refresh_policy.summary()),
             ops_item(
                 "Record counts",
@@ -1536,6 +1671,378 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
         ],
         warnings,
     }
+}
+
+fn receiver_config_complete(snapshot: &LiveSnapshot) -> bool {
+    snapshot.webhook.callback_url.is_some() && snapshot.webhook.verification_token_configured
+}
+
+fn heartbeat_for<'a>(
+    snapshot: &'a LiveSnapshot,
+    component: &str,
+) -> Option<&'a RuntimeHeartbeatRecord> {
+    snapshot
+        .webhook
+        .runtime_heartbeats
+        .iter()
+        .find(|record| record.component == component)
+}
+
+fn heartbeat_is_healthy(snapshot: &LiveSnapshot, record: &RuntimeHeartbeatRecord) -> bool {
+    let Some(last_seen_at) = parse_timestamp(&record.last_seen_at) else {
+        return false;
+    };
+    let now = parse_timestamp(&snapshot.captured_at).unwrap_or_else(OffsetDateTime::now_utc);
+    let age = (now - last_seen_at).whole_seconds().max(0);
+    let max_age = i64::try_from(snapshot.webhook.heartbeat_secs)
+        .unwrap_or_default()
+        .saturating_mul(3);
+    age <= max_age
+}
+
+fn receiver_healthy(snapshot: &LiveSnapshot) -> bool {
+    heartbeat_for(snapshot, "webhook.receiver")
+        .is_some_and(|record| heartbeat_is_healthy(snapshot, record))
+}
+
+fn format_heartbeat_status(snapshot: &LiveSnapshot, record: &RuntimeHeartbeatRecord) -> String {
+    let health = if heartbeat_is_healthy(snapshot, record) {
+        "healthy"
+    } else {
+        "stale"
+    };
+    let detail = record
+        .detail
+        .clone()
+        .unwrap_or_else(|| "no detail".to_owned());
+    format!(
+        "{} | mode={} | last_seen={} | {}",
+        health, record.mode, record.last_seen_at, detail
+    )
+}
+
+fn ops_runtime_mode(snapshot: &LiveSnapshot) -> String {
+    let receiver = heartbeat_for(snapshot, "webhook.receiver")
+        .is_some_and(|record| heartbeat_is_healthy(snapshot, record));
+    let watcher = heartbeat_for(snapshot, "sync.watch")
+        .is_some_and(|record| heartbeat_is_healthy(snapshot, record));
+
+    match (receiver, watcher) {
+        (true, true) => "full hybrid".to_owned(),
+        (true, false) => "receiver only".to_owned(),
+        _ => "scheduler only".to_owned(),
+    }
+}
+
+fn receiver_status_line(snapshot: &LiveSnapshot) -> Option<String> {
+    if !receiver_config_complete(snapshot) {
+        return Some("config incomplete".to_owned());
+    }
+
+    heartbeat_for(snapshot, "webhook.receiver").map(|record| {
+        if heartbeat_is_healthy(snapshot, record) {
+            "healthy".to_owned()
+        } else {
+            format!("stale heartbeat ({})", record.last_seen_at)
+        }
+    })
+}
+
+fn recent_health_incidents(snapshot: &LiveSnapshot) -> Vec<String> {
+    let mut incidents = Vec::new();
+
+    if let Some(rejection) = &snapshot.webhook.latest_rejected_delivery {
+        incidents.push(format!(
+            "Latest rejected delivery: {} at {} ({})",
+            rejection.reason_code, rejection.received_at, rejection.detail
+        ));
+    }
+
+    incidents.extend(
+        snapshot
+            .webhook
+            .recent_processing_attempts
+            .iter()
+            .filter(|attempt| attempt.outcome == "failed")
+            .take(3)
+            .map(|attempt| {
+                format!(
+                    "Invalidation {} failed at {}{}",
+                    attempt.invalidation_id,
+                    attempt
+                        .finished_at
+                        .clone()
+                        .unwrap_or_else(|| attempt.started_at.clone()),
+                    attempt
+                        .detail
+                        .as_ref()
+                        .map_or_else(String::new, |detail| format!(" ({detail})"))
+                )
+            }),
+    );
+
+    for component in ["webhook.receiver", "sync.watch"] {
+        if let Some(record) = heartbeat_for(snapshot, component)
+            && !heartbeat_is_healthy(snapshot, record)
+        {
+            incidents.push(format!(
+                "{} heartbeat is stale (last seen {})",
+                component, record.last_seen_at
+            ));
+        }
+    }
+
+    incidents.extend(
+        snapshot
+            .webhook
+            .remote_subscriptions
+            .iter()
+            .filter(|record| !remote_subscription_is_healthy(snapshot, record))
+            .take(4)
+            .map(|record| {
+                format!(
+                    "Subscription {} {} {} is {} (expires {})",
+                    record.data_type,
+                    record.event_type.as_str(),
+                    record.subscription_id,
+                    record.drift_status,
+                    record.expiration_time
+                )
+            }),
+    );
+
+    incidents
+}
+
+fn overall_subscription_summary(snapshot: &LiveSnapshot) -> String {
+    let desired = snapshot
+        .webhook
+        .desired_subscriptions
+        .iter()
+        .filter(|record| record.enabled)
+        .count();
+    let remote = snapshot.webhook.remote_subscriptions.len();
+    let healthy = snapshot
+        .webhook
+        .remote_subscriptions
+        .iter()
+        .filter(|record| remote_subscription_is_healthy(snapshot, record))
+        .count();
+    let drifted = snapshot
+        .webhook
+        .remote_subscriptions
+        .iter()
+        .filter(|record| record.drift_status != "matched")
+        .count();
+    format!(
+        "desired_enabled={} remote={} healthy={} drifted={}",
+        desired, remote, healthy, drifted
+    )
+}
+
+fn subscription_horizon_summary(snapshot: &LiveSnapshot) -> String {
+    let renewals_due = snapshot
+        .webhook
+        .remote_subscriptions
+        .iter()
+        .filter(|record| remote_subscription_needs_renewal(snapshot, record))
+        .count();
+    let next_expiration = snapshot
+        .webhook
+        .remote_subscriptions
+        .iter()
+        .filter_map(|record| {
+            parse_timestamp(&record.expiration_time).map(|timestamp| (timestamp, record))
+        })
+        .min_by_key(|(timestamp, _)| *timestamp)
+        .map(|(_, record)| format!("{} {}", record.data_type, record.expiration_time))
+        .unwrap_or_else(|| "none".to_owned());
+
+    format!(
+        "renewals_due={} next_expiration={}",
+        renewals_due, next_expiration
+    )
+}
+
+fn family_delivery_summary(snapshot: &LiveSnapshot) -> String {
+    [
+        DataFamily::Daily,
+        DataFamily::Workout,
+        DataFamily::EnhancedTag,
+        DataFamily::Session,
+        DataFamily::Heartrate,
+    ]
+    .into_iter()
+    .map(|family| {
+        let detail = if family_supports_webhooks(family) {
+            family_last_delivery(snapshot, family).map_or_else(
+                || "none".to_owned(),
+                |record| trim_timestamp(&record.received_at),
+            )
+        } else {
+            "scheduled only".to_owned()
+        };
+        format!("{}={detail}", family.label())
+    })
+    .collect::<Vec<_>>()
+    .join(" | ")
+}
+
+fn freshness_source_summary(snapshot: &LiveSnapshot) -> String {
+    let mut webhook_count = 0;
+    let mut periodic_count = 0;
+    let mut other_count = 0;
+
+    for state in &snapshot.sync_states {
+        match state.last_trigger_source.as_deref() {
+            Some("webhook") => webhook_count += 1,
+            Some("periodic_reconcile") => periodic_count += 1,
+            Some(_) => other_count += 1,
+            None => {}
+        }
+    }
+
+    format!(
+        "webhook={} periodic={} other={}",
+        webhook_count, periodic_count, other_count
+    )
+}
+
+fn last_trigger_summary(snapshot: &LiveSnapshot, trigger_source: &str) -> String {
+    snapshot
+        .sync_states
+        .iter()
+        .filter(|state| state.last_trigger_source.as_deref() == Some(trigger_source))
+        .max_by_key(|state| sync_state_effective_timestamp(state))
+        .map_or_else(
+            || "none".to_owned(),
+            |state| {
+                let timestamp = state
+                    .last_completed_at
+                    .clone()
+                    .unwrap_or_else(|| state.last_attempted_at.clone());
+                let detail = state
+                    .last_trigger_detail
+                    .as_ref()
+                    .map_or_else(String::new, |value| format!(" ({value})"));
+                format!("{} at {}{}", state.sync_key, timestamp, detail)
+            },
+        )
+}
+
+fn sync_state_effective_timestamp(state: &SyncStateRecord) -> Option<OffsetDateTime> {
+    state
+        .last_completed_at
+        .as_deref()
+        .or(Some(state.last_attempted_at.as_str()))
+        .and_then(parse_timestamp)
+}
+
+fn format_delivery_record(record: &AcceptedWebhookDeliveryRecord) -> String {
+    let data_type = record
+        .data_type
+        .clone()
+        .unwrap_or_else(|| "unknown".to_owned());
+    let event_type = record
+        .event_type
+        .map_or_else(|| "unknown".to_owned(), |value| value.as_str().to_owned());
+    let object_id = record.object_id.clone().unwrap_or_else(|| "n/a".to_owned());
+    format!(
+        "{} {} object={} at {}",
+        data_type, event_type, object_id, record.received_at
+    )
+}
+
+fn format_rejection_record(record: &RejectedWebhookDeliveryRecord) -> String {
+    format!(
+        "{} at {} ({})",
+        record.reason_code, record.received_at, record.detail
+    )
+}
+
+fn family_supports_webhooks(family: DataFamily) -> bool {
+    matches!(
+        family,
+        DataFamily::Daily | DataFamily::Workout | DataFamily::EnhancedTag | DataFamily::Session
+    )
+}
+
+fn family_matches_data_type(family: DataFamily, data_type: &str) -> bool {
+    match family {
+        DataFamily::Daily => matches!(
+            data_type,
+            "daily_sleep" | "daily_readiness" | "daily_activity"
+        ),
+        DataFamily::Workout => data_type == "workout",
+        DataFamily::EnhancedTag => data_type == "enhanced_tag",
+        DataFamily::Session => data_type == "session",
+        DataFamily::Personal | DataFamily::Heartrate => false,
+    }
+}
+
+fn family_last_delivery(
+    snapshot: &LiveSnapshot,
+    family: DataFamily,
+) -> Option<&AcceptedWebhookDeliveryRecord> {
+    snapshot.webhook.recent_deliveries.iter().find(|record| {
+        record
+            .data_type
+            .as_deref()
+            .is_some_and(|data_type| family_matches_data_type(family, data_type))
+    })
+}
+
+fn family_subscription_ready(snapshot: &LiveSnapshot, family: DataFamily) -> bool {
+    let desired = snapshot
+        .webhook
+        .desired_subscriptions
+        .iter()
+        .filter(|record| record.enabled && family_matches_data_type(family, &record.data_type))
+        .collect::<Vec<_>>();
+    if desired.is_empty() {
+        return false;
+    }
+
+    desired.into_iter().all(|desired_record| {
+        snapshot
+            .webhook
+            .remote_subscriptions
+            .iter()
+            .any(|remote_record| {
+                remote_record.data_type == desired_record.data_type
+                    && remote_record.event_type == desired_record.event_type
+                    && remote_subscription_is_healthy(snapshot, remote_record)
+            })
+    })
+}
+
+fn remote_subscription_is_healthy(
+    snapshot: &LiveSnapshot,
+    record: &RemoteWebhookSubscriptionRecord,
+) -> bool {
+    if record.drift_status != "matched" {
+        return false;
+    }
+
+    let Some(expiration_time) = parse_timestamp(&record.expiration_time) else {
+        return false;
+    };
+    let now = parse_timestamp(&snapshot.captured_at).unwrap_or_else(OffsetDateTime::now_utc);
+    expiration_time > now
+}
+
+fn remote_subscription_needs_renewal(
+    snapshot: &LiveSnapshot,
+    record: &RemoteWebhookSubscriptionRecord,
+) -> bool {
+    let Some(expiration_time) = parse_timestamp(&record.expiration_time) else {
+        return true;
+    };
+    let now = parse_timestamp(&snapshot.captured_at).unwrap_or_else(OffsetDateTime::now_utc);
+    let renewal_lead = time::Duration::seconds(
+        i64::try_from(snapshot.webhook.renewal_lead_secs).unwrap_or_default(),
+    );
+    expiration_time <= now + renewal_lead
 }
 
 fn load_heartrate_days(store: &Store, limit: usize) -> crate::error::Result<Vec<HeartRateDay>> {
@@ -1592,8 +2099,8 @@ fn family_freshness(snapshot: &LiveSnapshot, family: DataFamily) -> FreshnessSta
     if !capability_report.is_granted(family.capability_kind()) {
         return FreshnessState {
             family,
-            kind: FreshnessKind::MissingScope,
-            summary: "missing scope".to_owned(),
+            kind: FreshnessKind::StaleCapabilityMissing,
+            summary: freshness_label(FreshnessKind::StaleCapabilityMissing),
             detail: format!(
                 "{} scope was not granted, so {} stay unavailable.",
                 family.capability_kind().scope_name(),
@@ -1605,106 +2112,154 @@ fn family_freshness(snapshot: &LiveSnapshot, family: DataFamily) -> FreshnessSta
     let has_data = family_has_data(snapshot, family);
     let sync_state = sync_state_for(&snapshot.sync_states, family);
     let now = parse_timestamp(&snapshot.captured_at).unwrap_or_else(OffsetDateTime::now_utc);
+    let supports_webhooks = family_supports_webhooks(family);
+    let subscription_ready = !supports_webhooks || family_subscription_ready(snapshot, family);
+    let receiver_ready = !supports_webhooks || receiver_config_complete(snapshot);
+    let receiver_runtime_healthy = !supports_webhooks || receiver_healthy(snapshot);
+    let last_delivery = family_last_delivery(snapshot, family);
 
-    let Some(sync_state) = sync_state else {
+    if let Some(sync_state) = sync_state {
+        if sync_state.last_error.as_ref().is_some_and(is_auth_problem)
+            || matches!(sync_state.status, SyncRunStatus::Failed)
+        {
+            return FreshnessState {
+                family,
+                kind: FreshnessKind::StaleSyncFailed,
+                summary: freshness_label(FreshnessKind::StaleSyncFailed),
+                detail: sync_state.message.clone().unwrap_or_else(|| {
+                    sync_state.last_error.as_ref().map_or_else(
+                        || format!("{} failed to sync.", family.label()),
+                        ToString::to_string,
+                    )
+                }),
+            };
+        }
+
+        let reference = sync_state
+            .last_completed_at
+            .as_deref()
+            .or(Some(sync_state.last_attempted_at.as_str()));
+        let is_fresh = reference
+            .and_then(parse_timestamp)
+            .map(|timestamp| {
+                now - timestamp
+                    <= time::Duration::seconds(
+                        snapshot.refresh_policy.stale_after_seconds(family) as i64
+                    )
+            })
+            .unwrap_or(false);
+
+        if is_fresh
+            && matches!(
+                sync_state.status,
+                SyncRunStatus::Success | SyncRunStatus::Partial
+            )
+        {
+            let kind = if sync_state.last_trigger_source.as_deref() == Some("webhook") {
+                FreshnessKind::FreshWebhook
+            } else {
+                FreshnessKind::FreshPeriodic
+            };
+            let detail = match (family, latest_day_is_before_today(snapshot)) {
+                (DataFamily::Daily, true) => {
+                    "Daily closeout is current through the latest fully available upstream day."
+                        .to_owned()
+                }
+                _ => format!(
+                    "{} updated at {}.",
+                    family.label(),
+                    sync_state
+                        .last_completed_at
+                        .clone()
+                        .unwrap_or_else(|| sync_state.last_attempted_at.clone())
+                ),
+            };
+            return FreshnessState {
+                family,
+                kind,
+                summary: freshness_label(kind),
+                detail,
+            };
+        }
+    }
+
+    if supports_webhooks && !receiver_ready {
         return FreshnessState {
             family,
-            kind: FreshnessKind::NeverSynced,
-            summary: "never synced".to_owned(),
-            detail: format!("{} has not completed a sync yet.", family.label()),
-        };
-    };
-
-    if sync_state.last_error.as_ref().is_some_and(is_auth_problem) {
-        return FreshnessState {
-            family,
-            kind: FreshnessKind::AuthFailure,
-            summary: "auth failure".to_owned(),
-            detail: sync_state
-                .last_error
-                .as_ref()
-                .map_or_else(String::new, ToString::to_string),
+            kind: FreshnessKind::StaleReceiverDown,
+            summary: freshness_label(FreshnessKind::StaleReceiverDown),
+            detail: "Webhook receiver configuration is incomplete for this family.".to_owned(),
         };
     }
 
-    if matches!(sync_state.status, SyncRunStatus::Blocked) && !has_data {
+    if supports_webhooks && !receiver_runtime_healthy {
         return FreshnessState {
             family,
-            kind: FreshnessKind::NeverSynced,
-            summary: "sync blocked".to_owned(),
-            detail: sync_state.message.clone().unwrap_or_else(|| {
-                format!("{} is waiting for auth or configuration.", family.label())
-            }),
+            kind: FreshnessKind::StaleReceiverDown,
+            summary: freshness_label(FreshnessKind::StaleReceiverDown),
+            detail: "Webhook receiver heartbeat is stale or missing.".to_owned(),
         };
     }
 
-    let reference = sync_state
-        .last_completed_at
-        .as_deref()
-        .or(Some(sync_state.last_attempted_at.as_str()));
-    let is_fresh = reference
-        .and_then(parse_timestamp)
-        .map(|timestamp| {
-            now - timestamp
-                <= time::Duration::seconds(
-                    snapshot.refresh_policy.stale_after_seconds(family) as i64
-                )
-        })
-        .unwrap_or(false);
-
-    if family == DataFamily::Daily
-        && sync_state.status == SyncRunStatus::Success
-        && latest_day_is_before_today(snapshot)
-        && is_fresh
-    {
+    if supports_webhooks && !subscription_ready {
         return FreshnessState {
             family,
-            kind: FreshnessKind::SourceDelayed,
-            summary: "source delayed".to_owned(),
-            detail: "Daily closeout is still pending from Oura, so the app compares against the latest fully available day.".to_owned(),
+            kind: FreshnessKind::StaleSubscriptionMissing,
+            summary: freshness_label(FreshnessKind::StaleSubscriptionMissing),
+            detail: format!(
+                "{} subscriptions are missing, drifted, or expired.",
+                family.label()
+            ),
         };
     }
 
     if !has_data {
         return FreshnessState {
             family,
-            kind: FreshnessKind::NoDataYet,
-            summary: "no data yet".to_owned(),
-            detail: sync_state.message.clone().unwrap_or_else(|| {
-                format!(
-                    "{} has synced, but there is nothing persisted for this family yet.",
-                    family.label()
-                )
-            }),
+            kind: FreshnessKind::StaleUpstreamPending,
+            summary: freshness_label(FreshnessKind::StaleUpstreamPending),
+            detail: sync_state
+                .and_then(|state| state.message.clone())
+                .unwrap_or_else(|| {
+                    format!(
+                        "{} has not produced any persisted records yet.",
+                        family.label()
+                    )
+                }),
         };
     }
 
-    if is_fresh && matches!(sync_state.status, SyncRunStatus::Success) {
-        FreshnessState {
+    if supports_webhooks {
+        return FreshnessState {
             family,
-            kind: FreshnessKind::Fresh,
-            summary: "fresh".to_owned(),
-            detail: format!(
-                "{} updated at {}.",
-                family.label(),
-                sync_state
-                    .last_completed_at
-                    .clone()
-                    .unwrap_or_else(|| sync_state.last_attempted_at.clone())
+            kind: FreshnessKind::StaleNoRecentDelivery,
+            summary: freshness_label(FreshnessKind::StaleNoRecentDelivery),
+            detail: last_delivery.map_or_else(
+                || {
+                    format!(
+                        "No recent webhook delivery was recorded for {}.",
+                        family.label()
+                    )
+                },
+                |record| {
+                    format!(
+                        "Last webhook delivery for {} arrived at {}.",
+                        family.label(),
+                        record.received_at
+                    )
+                },
             ),
-        }
-    } else {
-        FreshnessState {
-            family,
-            kind: FreshnessKind::Stale,
-            summary: "stale".to_owned(),
-            detail: sync_state.message.clone().unwrap_or_else(|| {
-                format!(
-                    "{} is older than its freshness window or the last refresh was partial.",
-                    family.label()
-                )
-            }),
-        }
+        };
+    }
+
+    FreshnessState {
+        family,
+        kind: FreshnessKind::StaleUnsupportedWebhook,
+        summary: freshness_label(FreshnessKind::StaleUnsupportedWebhook),
+        detail: format!(
+            "{} still relies on scheduled reconcile windows because Oura does not expose webhook invalidations for it.",
+            family.label()
+        ),
     }
 }
 
@@ -2432,8 +2987,11 @@ fn score_card(
     }
 }
 
-fn ops_item(label: &'static str, value: String) -> OpsItem {
-    OpsItem { label, value }
+fn ops_item(label: impl Into<String>, value: String) -> OpsItem {
+    OpsItem {
+        label: label.into(),
+        value,
+    }
 }
 
 fn score_text(value: Option<u8>) -> String {
@@ -2472,6 +3030,20 @@ fn window_sparkline(history: &[MetricPoint], days: usize) -> Vec<u64> {
 
 fn freshness_badge(state: &FreshnessState) -> String {
     state.summary.clone()
+}
+
+fn freshness_label(kind: FreshnessKind) -> String {
+    match kind {
+        FreshnessKind::FreshWebhook => "fresh via webhook".to_owned(),
+        FreshnessKind::FreshPeriodic => "fresh via periodic".to_owned(),
+        FreshnessKind::StaleNoRecentDelivery => "stale: no recent delivery".to_owned(),
+        FreshnessKind::StaleSyncFailed => "stale: sync failed".to_owned(),
+        FreshnessKind::StaleUnsupportedWebhook => "stale: scheduled only".to_owned(),
+        FreshnessKind::StaleReceiverDown => "stale: receiver down".to_owned(),
+        FreshnessKind::StaleSubscriptionMissing => "stale: subscription missing".to_owned(),
+        FreshnessKind::StaleCapabilityMissing => "stale: capability missing".to_owned(),
+        FreshnessKind::StaleUpstreamPending => "stale: upstream pending".to_owned(),
+    }
 }
 
 fn format_day_selector(day_labels: &[String], selected_index: usize) -> String {
@@ -2678,6 +3250,7 @@ impl AppModel {
             },
             ops: OpsModel {
                 mode_label: String::new(),
+                summary_lines: Vec::new(),
                 family_statuses: Vec::new(),
                 items: Vec::new(),
                 warnings: Vec::new(),
@@ -2892,6 +3465,22 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
         captured_at: "2026-04-08T22:30:00Z".to_owned(),
         refresh_policy: RefreshPolicySnapshot::from_config(config),
         auth_status,
+        webhook: WebhookOpsSnapshot {
+            bind_address: "127.0.0.1:8799".to_owned(),
+            path: "/webhooks/oura".to_owned(),
+            callback_url: Some("https://example.ngrok.dev/webhooks/oura".to_owned()),
+            verification_token_configured: true,
+            signature_tolerance_secs: 300,
+            heartbeat_secs: 15,
+            renewal_lead_secs: 7 * 24 * 60 * 60,
+            desired_subscriptions: Vec::new(),
+            remote_subscriptions: Vec::new(),
+            recent_deliveries: Vec::new(),
+            latest_rejected_delivery: None,
+            pending_invalidations: Vec::new(),
+            recent_processing_attempts: Vec::new(),
+            runtime_heartbeats: Vec::new(),
+        },
         personal_info: Some(PersonalInfoRecord {
             profile_id: "demo-user".to_owned(),
             age: Some(34),
@@ -2953,7 +3542,7 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
             derived_context_events: 3,
             derived_pattern_summaries: 2,
         },
-        schema_version: 6,
+        schema_version: 8,
         database_path: config.paths.database_file.display().to_string(),
         config_path: config.paths.config_file.display().to_string(),
     }
@@ -2971,6 +3560,8 @@ fn demo_sync_state(family: SyncFamily, message: &str, status: SyncRunStatus) -> 
         last_error: None,
         failure_count: 0,
         next_attempt_after: None,
+        last_trigger_source: Some("periodic_reconcile".to_owned()),
+        last_trigger_detail: Some("demo snapshot".to_owned()),
     }
 }
 
@@ -2980,7 +3571,7 @@ mod tests {
     use super::{
         AppState, DataFamily, HeartRateDay, LiveModelOptions, LiveSnapshot, OverlayFilterState,
         PatternMetricFilter, RefreshPolicySnapshot, RunMode, Screen, TrendWindowKind,
-        build_live_model, newest_day_index,
+        WebhookOpsSnapshot, build_live_model, newest_day_index,
     };
     use crate::action::Action;
     use crate::insights::MetricPoint;
@@ -3051,6 +3642,7 @@ mod tests {
                 account_email: None,
                 last_error: None,
             },
+            webhook: WebhookOpsSnapshot::default(),
             personal_info: None,
             daily_history: days
                 .iter()
@@ -3091,7 +3683,7 @@ mod tests {
                 workouts: 1,
                 ..RecordCounts::default()
             },
-            schema_version: 6,
+            schema_version: 8,
             database_path: ":memory:".to_owned(),
             config_path: "config.toml".to_owned(),
         }
@@ -3215,7 +3807,7 @@ mod tests {
     fn freshness_knows_context_families() {
         let snapshot = make_snapshot(&["2026-04-08"]);
         let freshness = super::family_freshness(&snapshot, DataFamily::Workout);
-        assert_eq!(freshness.summary, "never synced");
+        assert_eq!(freshness.summary, "stale: receiver down");
     }
 
     #[test]
