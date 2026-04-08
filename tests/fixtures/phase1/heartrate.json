@@ -1,0 +1,30 @@
+{
+  "data": [
+    {
+      "bpm": 58,
+      "source": "live",
+      "timestamp": "2026-04-07T06:00:00Z"
+    },
+    {
+      "bpm": 61,
+      "source": "live",
+      "timestamp": "2026-04-07T06:05:00Z"
+    },
+    {
+      "bpm": 64,
+      "source": "live",
+      "timestamp": "2026-04-07T06:10:00Z"
+    },
+    {
+      "bpm": 68,
+      "source": "live",
+      "timestamp": "2026-04-07T06:15:00Z"
+    },
+    {
+      "bpm": 63,
+      "source": "rest",
+      "timestamp": "2026-04-07T06:20:00Z"
+    }
+  ],
+  "next_token": null
+}

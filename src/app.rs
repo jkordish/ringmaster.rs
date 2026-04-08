@@ -2,7 +2,9 @@ use crate::action::Action;
 use crate::config::Config;
 use crate::oura::models::{AuthStatus, CapabilityReport};
 use crate::store::Store;
-use crate::store::queries::{DailyOverviewRow, HeartRatePoint, RecordCounts, SyncStateRecord};
+use crate::store::queries::{
+    DailyOverviewRow, HeartRatePoint, PersonalInfoRecord, RecordCounts, SyncStateRecord,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunMode {
@@ -205,9 +207,10 @@ pub fn build_live_state(
     auth_status: &AuthStatus,
 ) -> crate::error::Result<AppState> {
     let latest_daily = store.views().latest_daily_overview()?;
+    let personal_info = store.views().latest_personal_info()?;
     let heart_rate = store.views().recent_heartrate(32)?;
     let record_counts = store.views().record_counts()?;
-    let latest_sync = store.sync_state().latest()?;
+    let sync_states = store.sync_state().list()?;
     let schema_version = store.metadata().schema_version()?;
     let capability_report = auth_status.capability_report.clone();
 
@@ -218,16 +221,22 @@ pub fn build_live_state(
             title: "ringmaster.rs".to_owned(),
             dashboard: build_live_dashboard(
                 latest_daily.as_ref(),
-                latest_sync.as_ref(),
+                sync_states.as_slice(),
                 &capability_report,
             ),
-            timeline: build_live_timeline(heart_rate),
-            trends: build_live_trends(latest_daily.as_ref(), &record_counts),
+            timeline: build_live_timeline(heart_rate, sync_states.as_slice(), &capability_report),
+            trends: build_live_trends(
+                latest_daily.as_ref(),
+                &record_counts,
+                sync_states.as_slice(),
+                &capability_report,
+            ),
             ops: build_live_ops(
                 config,
                 store,
                 auth_status,
-                latest_sync.as_ref(),
+                personal_info.as_ref(),
+                sync_states.as_slice(),
                 schema_version,
                 record_counts,
             ),
@@ -341,9 +350,12 @@ pub fn build_demo_state(config: &Config) -> AppState {
 
 fn build_live_dashboard(
     latest_daily: Option<&DailyOverviewRow>,
-    latest_sync: Option<&SyncStateRecord>,
+    sync_states: &[SyncStateRecord],
     capability_report: &CapabilityReport,
 ) -> DashboardModel {
+    let daily_sync = sync_states
+        .iter()
+        .find(|record| record.sync_key == "oura.daily");
     let scores = match latest_daily {
         Some(row) => vec![
             score_card("Sleep", row.sleep_score, "Latest local daily_sleep row"),
@@ -365,21 +377,27 @@ fn build_live_dashboard(
         ],
     };
 
-    let freshness = latest_sync
+    let freshness = daily_sync
         .map(|sync| {
             format!(
-                "Last sync status: {} at {}",
+                "Daily sync status: {} at {}",
                 sync.status, sync.last_attempted_at
             )
         })
-        .unwrap_or_else(|| "No sync has been recorded yet.".to_owned());
+        .unwrap_or_else(|| "No daily sync has been recorded yet.".to_owned());
 
-    let change_summary = match latest_daily {
-        Some(row) => format!(
-            "Latest daily snapshot is {}. This bootstrap shell is ready for richer explanations once real sync lands.",
+    let change_summary = match (latest_daily, daily_sync) {
+        (Some(row), _) => format!(
+            "Latest daily snapshot is {}. The dashboard is rendering persisted daily summaries from SQLite.",
             row.day
         ),
-        None => "No Oura daily summaries are cached yet. Run `ringmaster auth login` and `ringmaster sync once` after configuration."
+        (None, Some(sync)) if sync.status == crate::store::queries::SyncRunStatus::Blocked => {
+            sync.message.clone().unwrap_or_else(|| {
+                "Daily sync is blocked, so the dashboard is staying honest about missing data."
+                    .to_owned()
+            })
+        }
+        _ => "No Oura daily summaries are cached yet. Run `ringmaster auth login` and `ringmaster sync once` after configuration."
             .to_owned(),
     };
 
@@ -393,6 +411,11 @@ fn build_live_dashboard(
     if latest_daily.is_none() {
         highlights.push("The UI is reading from the local store only, so empty tables render as honest empty states.".to_owned());
     }
+    if let Some(sync) = daily_sync
+        && let Some(problem) = &sync.last_error
+    {
+        highlights.push(format!("Latest daily sync error: {problem}"));
+    }
 
     DashboardModel {
         scores,
@@ -403,12 +426,38 @@ fn build_live_dashboard(
     }
 }
 
-fn build_live_timeline(points: Vec<HeartRatePoint>) -> TimelineModel {
-    let summary = if points.is_empty() {
-        "No heartrate samples are cached yet. Timeline overlays are scaffolded and will light up after sync.".to_owned()
+fn build_live_timeline(
+    points: Vec<HeartRatePoint>,
+    sync_states: &[SyncStateRecord],
+    capability_report: &CapabilityReport,
+) -> TimelineModel {
+    let heartrate_sync = sync_states
+        .iter()
+        .find(|record| record.sync_key == "oura.heartrate");
+    let summary = if !capability_report.is_granted(crate::oura::models::CapabilityKind::Heartrate) {
+        "Heartrate scope is missing, so the timeline is showing an explicit missing-capability state."
+            .to_owned()
+    } else if points.is_empty() {
+        heartrate_sync
+            .and_then(|sync| sync.message.clone())
+            .unwrap_or_else(|| {
+                "No heartrate samples are cached yet. Timeline overlays will light up after sync."
+                    .to_owned()
+            })
     } else {
         format!("{} heartrate samples loaded from SQLite.", points.len())
     };
+
+    let mut overlays = vec![
+        "Workout overlays remain a pure presentation layer over persisted state.".to_owned(),
+        "Tag and session markers stay in the UI layer; they never call the network directly."
+            .to_owned(),
+    ];
+    if let Some(sync) = heartrate_sync
+        && let Some(problem) = &sync.last_error
+    {
+        overlays.insert(0, format!("Last heartrate sync error: {problem}"));
+    }
 
     TimelineModel {
         summary,
@@ -419,19 +468,35 @@ fn build_live_timeline(points: Vec<HeartRatePoint>) -> TimelineModel {
                 bpm: point.bpm,
             })
             .collect(),
-        overlays: vec![
-            "Workout overlays are scaffolded behind store boundaries.".to_owned(),
-            "Tag and session markers stay in the UI layer; they never call the network directly."
-                .to_owned(),
-        ],
+        overlays,
     }
 }
 
 fn build_live_trends(
     latest_daily: Option<&DailyOverviewRow>,
     record_counts: &RecordCounts,
+    sync_states: &[SyncStateRecord],
+    capability_report: &CapabilityReport,
 ) -> TrendsModel {
-    let windows = if let Some(row) = latest_daily {
+    let heartrate_sync = sync_states
+        .iter()
+        .find(|record| record.sync_key == "oura.heartrate");
+    let windows = if !capability_report.is_granted(crate::oura::models::CapabilityKind::Heartrate) {
+        vec![
+            TrendWindow {
+                label: "7d",
+                summary: "Heartrate scope is missing, so trend windows stay empty instead of inventing data.".to_owned(),
+            },
+            TrendWindow {
+                label: "30d",
+                summary: "Grant heartrate access to unlock the first real trend slice.".to_owned(),
+            },
+            TrendWindow {
+                label: "90d",
+                summary: "Long-range trends remain intentionally deferred until capability coverage exists.".to_owned(),
+            },
+        ]
+    } else if let Some(row) = latest_daily {
         vec![
             TrendWindow {
                 label: "7d",
@@ -471,6 +536,7 @@ fn build_live_trends(
     TrendsModel {
         windows,
         sparkline: vec![
+            record_counts.personal_info,
             record_counts.daily_sleep,
             record_counts.daily_readiness,
             record_counts.daily_activity,
@@ -481,6 +547,9 @@ fn build_live_trends(
                 .to_owned(),
             "Real 7/30/90-day calculations are the next milestone once sync imports actual history."
                 .to_owned(),
+            heartrate_sync
+                .and_then(|sync| sync.message.clone())
+                .unwrap_or_else(|| "Heartrate freshness is derived from persisted sync state.".to_owned()),
         ],
     }
 }
@@ -489,13 +558,25 @@ fn build_live_ops(
     config: &Config,
     store: &Store,
     auth_status: &AuthStatus,
-    latest_sync: Option<&SyncStateRecord>,
+    personal_info: Option<&PersonalInfoRecord>,
+    sync_states: &[SyncStateRecord],
     schema_version: u32,
     record_counts: RecordCounts,
 ) -> OpsModel {
-    let sync_summary = latest_sync
-        .map(|sync| format!("{} at {}", sync.status, sync.last_attempted_at))
-        .unwrap_or_else(|| "never".to_owned());
+    let sync_summary = if sync_states.is_empty() {
+        "never".to_owned()
+    } else {
+        sync_states
+            .iter()
+            .map(|sync| {
+                format!(
+                    "{}={} @ {}",
+                    sync.sync_key, sync.status, sync.last_attempted_at
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
     let capability_summary = if auth_status.granted_scopes.is_empty() {
         "none granted yet".to_owned()
     } else {
@@ -509,11 +590,19 @@ fn build_live_ops(
                 .to_owned(),
         );
     }
-    if auth_status.granted_scopes.is_empty() {
+    if auth_status.granted_scopes.is_empty() && auth_status.configured {
         warnings.push(
             "Granted scopes are empty, so capability coverage is partial by design.".to_owned(),
         );
     }
+    if let Some(problem) = &auth_status.last_error {
+        warnings.push(format!("Auth/session warning: {problem}"));
+    }
+    warnings.extend(sync_states.iter().filter_map(|sync| {
+        sync.last_error
+            .as_ref()
+            .map(|problem| format!("{} error: {problem}", sync.sync_key))
+    }));
 
     OpsModel {
         mode_label: "Live".to_owned(),
@@ -527,16 +616,63 @@ fn build_live_ops(
             ),
             ops_item("State dir", config.paths.state_dir.display().to_string()),
             ops_item(
+                "Config path",
+                config.paths.config_file.display().to_string(),
+            ),
+            ops_item(
                 "Database",
                 path_with_presence(&config.paths.database_file, config.paths.database_present()),
             ),
             ops_item("Schema version", schema_version.to_string()),
+            ops_item(
+                "Auth state",
+                if auth_status.access_token_stored || auth_status.refresh_token_stored {
+                    "authenticated".to_owned()
+                } else if auth_status.configured {
+                    "configured_without_session".to_owned()
+                } else {
+                    "unconfigured".to_owned()
+                },
+            ),
+            ops_item("Secret backend", auth_status.secret_backend.clone()),
             ops_item("Last sync", sync_summary),
             ops_item("Granted scopes", capability_summary),
             ops_item(
+                "Requested scopes",
+                if auth_status.requested_scopes.is_empty() {
+                    "none".to_owned()
+                } else {
+                    auth_status.requested_scopes.join(", ")
+                },
+            ),
+            ops_item(
+                "Access token expiry",
+                auth_status
+                    .access_token_expires_at
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_owned()),
+            ),
+            ops_item(
+                "Last auth refresh",
+                auth_status
+                    .last_refresh_at
+                    .clone()
+                    .unwrap_or_else(|| "never".to_owned()),
+            ),
+            ops_item(
+                "Account",
+                auth_status
+                    .account_email
+                    .clone()
+                    .or_else(|| personal_info.and_then(|profile| profile.email.clone()))
+                    .or_else(|| auth_status.account_id.clone())
+                    .unwrap_or_else(|| "unknown".to_owned()),
+            ),
+            ops_item(
                 "Record counts",
                 format!(
-                    "daily={} hr={} workouts={} tags={} enhanced_tags={} sessions={} raw={}",
+                    "profile={} daily={} hr={} workouts={} tags={} enhanced_tags={} sessions={} raw={}",
+                    record_counts.personal_info,
                     record_counts.daily_sleep
                         + record_counts.daily_readiness
                         + record_counts.daily_activity,
@@ -561,7 +697,7 @@ fn capability_views(report: &CapabilityReport) -> Vec<CapabilityView> {
         .iter()
         .map(|entry| CapabilityView {
             label: entry.kind.label(),
-            available: entry.available,
+            available: entry.granted,
             note: entry.note.clone(),
         })
         .collect()

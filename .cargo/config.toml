@@ -1,0 +1,4 @@
+[alias]
+lint = "clippy --all-targets --all-features -- -D warnings"
+doctor-smoke = "run -- doctor"
+fixture-sync-smoke = "run -- sync once --dry-run --fixture-dir tests/fixtures/phase1"

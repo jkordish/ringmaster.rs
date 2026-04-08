@@ -1,0 +1,29 @@
+{
+  "data": [
+    {
+      "id": "readiness_2026-04-06",
+      "day": "2026-04-06",
+      "score": 75,
+      "temperature_deviation": -0.08,
+      "temperature_trend_deviation": -0.05,
+      "timestamp": "2026-04-06T07:05:00Z"
+    },
+    {
+      "id": "readiness_2026-04-07",
+      "day": "2026-04-07",
+      "score": 77,
+      "temperature_deviation": 0.02,
+      "temperature_trend_deviation": 0.01,
+      "timestamp": "2026-04-07T07:10:00Z"
+    },
+    {
+      "id": "readiness_2026-04-08",
+      "day": "2026-04-08",
+      "score": 83,
+      "temperature_deviation": 0.11,
+      "temperature_trend_deviation": 0.06,
+      "timestamp": "2026-04-08T07:00:00Z"
+    }
+  ],
+  "next_token": null
+}

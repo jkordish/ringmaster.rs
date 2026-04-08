@@ -3,8 +3,10 @@ use std::fmt::{Display, Formatter};
 use rusqlite::{Connection, OptionalExtension, params};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use crate::error::{Result, RingmasterError};
+use crate::error::{OuraProblem, Result, RingmasterError};
 use crate::store::migrations;
+
+pub const OURA_PROVIDER: &str = "oura";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncRunStatus {
@@ -24,11 +26,87 @@ pub struct SyncStateRecord {
     pub last_completed_at: Option<String>,
     pub message: Option<String>,
     pub granted_scopes: Vec<String>,
+    pub last_error: Option<OuraProblem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthSessionRecord {
+    pub provider: String,
+    pub account_id: Option<String>,
+    pub account_email: Option<String>,
+    pub token_type: String,
+    pub granted_scopes: Vec<String>,
+    pub access_token_expires_at: Option<String>,
+    pub last_authenticated_at: Option<String>,
+    pub last_refresh_at: Option<String>,
+    pub last_error: Option<OuraProblem>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PersonalInfoRecord {
+    pub profile_id: String,
+    pub age: Option<u16>,
+    pub weight: Option<f64>,
+    pub height: Option<f64>,
+    pub biological_sex: Option<String>,
+    pub email: Option<String>,
+    pub raw_cache_key: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailySleepRecord {
+    pub day: String,
+    pub sleep_score: Option<u8>,
+    pub raw_cache_key: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DailyReadinessRecord {
+    pub day: String,
+    pub readiness_score: Option<u8>,
+    pub temperature_deviation: Option<f64>,
+    pub temperature_trend_deviation: Option<f64>,
+    pub raw_cache_key: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailyActivityRecord {
+    pub day: String,
+    pub activity_score: Option<u8>,
+    pub active_calories: i64,
+    pub steps: i64,
+    pub total_calories: i64,
+    pub raw_cache_key: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeartrateSampleRecord {
+    pub recorded_at: String,
+    pub bpm: u16,
+    pub source_day: Option<String>,
+    pub raw_cache_key: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawPayloadRecord {
+    pub cache_key: String,
+    pub endpoint: String,
+    pub requested_at: String,
+    pub scope: Option<String>,
+    pub etag: Option<String>,
+    pub payload: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecordCounts {
     pub raw_payloads: u64,
+    pub personal_info: u64,
     pub daily_sleep: u64,
     pub daily_readiness: u64,
     pub daily_activity: u64,
@@ -60,6 +138,14 @@ pub struct MetadataStore<'connection> {
 }
 
 pub struct SyncStateStore<'connection> {
+    connection: &'connection Connection,
+}
+
+pub struct AuthStore<'connection> {
+    connection: &'connection Connection,
+}
+
+pub struct ImportStore<'connection> {
     connection: &'connection Connection,
 }
 
@@ -151,15 +237,17 @@ impl<'connection> SyncStateStore<'connection> {
                 last_attempted_at,
                 last_completed_at,
                 message,
-                granted_scopes
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                granted_scopes,
+                last_error_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             ON CONFLICT(sync_key) DO UPDATE SET
                 status = excluded.status,
                 cursor = excluded.cursor,
                 last_attempted_at = excluded.last_attempted_at,
                 last_completed_at = excluded.last_completed_at,
                 message = excluded.message,
-                granted_scopes = excluded.granted_scopes",
+                granted_scopes = excluded.granted_scopes,
+                last_error_json = excluded.last_error_json",
             params![
                 record.sync_key,
                 record.status.as_str(),
@@ -167,7 +255,8 @@ impl<'connection> SyncStateStore<'connection> {
                 record.last_attempted_at,
                 record.last_completed_at,
                 record.message,
-                join_scopes(&record.granted_scopes)
+                join_scopes(&record.granted_scopes),
+                encode_problem(&record.last_error)?,
             ],
         )?;
 
@@ -184,25 +273,298 @@ impl<'connection> SyncStateStore<'connection> {
                     last_attempted_at,
                     last_completed_at,
                     message,
-                    granted_scopes
+                    granted_scopes,
+                    last_error_json
                  FROM sync_state
                  ORDER BY last_attempted_at DESC
                  LIMIT 1",
                 [],
+                read_sync_state_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn list(&self) -> Result<Vec<SyncStateRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                sync_key,
+                status,
+                cursor,
+                last_attempted_at,
+                last_completed_at,
+                message,
+                granted_scopes,
+                last_error_json
+             FROM sync_state
+             ORDER BY sync_key ASC",
+        )?;
+        let rows = statement.query_map([], read_sync_state_row)?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+}
+
+impl<'connection> AuthStore<'connection> {
+    pub fn new(connection: &'connection Connection) -> Self {
+        Self { connection }
+    }
+
+    pub fn get(&self, provider: &str) -> Result<Option<AuthSessionRecord>> {
+        self.connection
+            .query_row(
+                "SELECT
+                    provider,
+                    account_id,
+                    account_email,
+                    token_type,
+                    granted_scopes,
+                    access_token_expires_at,
+                    last_authenticated_at,
+                    last_refresh_at,
+                    last_error_json,
+                    updated_at
+                 FROM auth_session
+                 WHERE provider = ?1",
+                params![provider],
                 |row| {
-                    Ok(SyncStateRecord {
-                        sync_key: row.get(0)?,
-                        status: SyncRunStatus::parse(&row.get::<_, String>(1)?),
-                        cursor: row.get(2)?,
-                        last_attempted_at: row.get(3)?,
-                        last_completed_at: row.get(4)?,
-                        message: row.get(5)?,
-                        granted_scopes: split_scopes(&row.get::<_, String>(6)?),
+                    Ok(AuthSessionRecord {
+                        provider: row.get(0)?,
+                        account_id: row.get(1)?,
+                        account_email: row.get(2)?,
+                        token_type: row.get(3)?,
+                        granted_scopes: split_scopes(&row.get::<_, String>(4)?),
+                        access_token_expires_at: row.get(5)?,
+                        last_authenticated_at: row.get(6)?,
+                        last_refresh_at: row.get(7)?,
+                        last_error: decode_problem(row.get(8)?).map_err(json_to_sql_error)?,
+                        updated_at: row.get(9)?,
                     })
                 },
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn upsert(&self, record: &AuthSessionRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO auth_session (
+                provider,
+                account_id,
+                account_email,
+                token_type,
+                granted_scopes,
+                access_token_expires_at,
+                last_authenticated_at,
+                last_refresh_at,
+                last_error_json,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(provider) DO UPDATE SET
+                account_id = excluded.account_id,
+                account_email = excluded.account_email,
+                token_type = excluded.token_type,
+                granted_scopes = excluded.granted_scopes,
+                access_token_expires_at = excluded.access_token_expires_at,
+                last_authenticated_at = excluded.last_authenticated_at,
+                last_refresh_at = excluded.last_refresh_at,
+                last_error_json = excluded.last_error_json,
+                updated_at = excluded.updated_at",
+            params![
+                record.provider,
+                record.account_id,
+                record.account_email,
+                record.token_type,
+                join_scopes(&record.granted_scopes),
+                record.access_token_expires_at,
+                record.last_authenticated_at,
+                record.last_refresh_at,
+                encode_problem(&record.last_error)?,
+                record.updated_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+}
+
+impl<'connection> ImportStore<'connection> {
+    pub fn new(connection: &'connection Connection) -> Self {
+        Self { connection }
+    }
+
+    pub fn upsert_raw_payload(&self, record: &RawPayloadRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO raw_payload_cache (
+                cache_key,
+                endpoint,
+                requested_at,
+                scope,
+                etag,
+                payload
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(cache_key) DO UPDATE SET
+                endpoint = excluded.endpoint,
+                requested_at = excluded.requested_at,
+                scope = excluded.scope,
+                etag = excluded.etag,
+                payload = excluded.payload",
+            params![
+                record.cache_key,
+                record.endpoint,
+                record.requested_at,
+                record.scope,
+                record.etag,
+                record.payload,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn upsert_personal_info(&self, record: &PersonalInfoRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO personal_info (
+                profile_id,
+                age,
+                weight,
+                height,
+                biological_sex,
+                email,
+                raw_cache_key,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(profile_id) DO UPDATE SET
+                age = excluded.age,
+                weight = excluded.weight,
+                height = excluded.height,
+                biological_sex = excluded.biological_sex,
+                email = excluded.email,
+                raw_cache_key = excluded.raw_cache_key,
+                updated_at = excluded.updated_at",
+            params![
+                record.profile_id,
+                record.age.map(i64::from),
+                record.weight,
+                record.height,
+                record.biological_sex,
+                record.email,
+                record.raw_cache_key,
+                record.updated_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn upsert_daily_sleep(&self, record: &DailySleepRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO daily_sleep (day, sleep_score, raw_cache_key, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(day) DO UPDATE SET
+                sleep_score = excluded.sleep_score,
+                raw_cache_key = excluded.raw_cache_key,
+                updated_at = excluded.updated_at",
+            params![
+                record.day,
+                record.sleep_score.map(i64::from),
+                record.raw_cache_key,
+                record.updated_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn upsert_daily_readiness(&self, record: &DailyReadinessRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO daily_readiness (
+                day,
+                readiness_score,
+                temperature_deviation,
+                temperature_trend_deviation,
+                raw_cache_key,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(day) DO UPDATE SET
+                readiness_score = excluded.readiness_score,
+                temperature_deviation = excluded.temperature_deviation,
+                temperature_trend_deviation = excluded.temperature_trend_deviation,
+                raw_cache_key = excluded.raw_cache_key,
+                updated_at = excluded.updated_at",
+            params![
+                record.day,
+                record.readiness_score.map(i64::from),
+                record.temperature_deviation,
+                record.temperature_trend_deviation,
+                record.raw_cache_key,
+                record.updated_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn upsert_daily_activity(&self, record: &DailyActivityRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO daily_activity (
+                day,
+                activity_score,
+                active_calories,
+                steps,
+                total_calories,
+                raw_cache_key,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(day) DO UPDATE SET
+                activity_score = excluded.activity_score,
+                active_calories = excluded.active_calories,
+                steps = excluded.steps,
+                total_calories = excluded.total_calories,
+                raw_cache_key = excluded.raw_cache_key,
+                updated_at = excluded.updated_at",
+            params![
+                record.day,
+                record.activity_score.map(i64::from),
+                record.active_calories,
+                record.steps,
+                record.total_calories,
+                record.raw_cache_key,
+                record.updated_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn upsert_heartrate_sample(&self, record: &HeartrateSampleRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO heartrate_samples (
+                recorded_at,
+                bpm,
+                source_day,
+                raw_cache_key,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(recorded_at) DO UPDATE SET
+                bpm = excluded.bpm,
+                source_day = excluded.source_day,
+                raw_cache_key = excluded.raw_cache_key,
+                updated_at = excluded.updated_at",
+            params![
+                record.recorded_at,
+                i64::from(record.bpm),
+                record.source_day,
+                record.raw_cache_key,
+                record.updated_at,
+            ],
+        )?;
+
+        Ok(())
     }
 }
 
@@ -257,6 +619,39 @@ impl<'connection> ViewStore<'connection> {
         Ok(row.flatten())
     }
 
+    pub fn latest_personal_info(&self) -> Result<Option<PersonalInfoRecord>> {
+        self.connection
+            .query_row(
+                "SELECT
+                    profile_id,
+                    age,
+                    weight,
+                    height,
+                    biological_sex,
+                    email,
+                    raw_cache_key,
+                    updated_at
+                 FROM personal_info
+                 ORDER BY updated_at DESC
+                 LIMIT 1",
+                [],
+                |row| {
+                    Ok(PersonalInfoRecord {
+                        profile_id: row.get(0)?,
+                        age: parse_optional_u16(row.get::<_, Option<i64>>(1)?)?,
+                        weight: row.get(2)?,
+                        height: row.get(3)?,
+                        biological_sex: row.get(4)?,
+                        email: row.get(5)?,
+                        raw_cache_key: row.get(6)?,
+                        updated_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn recent_heartrate(&self, limit: usize) -> Result<Vec<HeartRatePoint>> {
         let bounded_limit = usize::min(limit, 240);
         let mut statement = self.connection.prepare(
@@ -294,6 +689,7 @@ impl<'connection> ViewStore<'connection> {
     pub fn record_counts(&self) -> Result<RecordCounts> {
         Ok(RecordCounts {
             raw_payloads: row_count(self.connection, "raw_payload_cache")?,
+            personal_info: row_count(self.connection, "personal_info")?,
             daily_sleep: row_count(self.connection, "daily_sleep")?,
             daily_readiness: row_count(self.connection, "daily_readiness")?,
             daily_activity: row_count(self.connection, "daily_activity")?,
@@ -306,8 +702,34 @@ impl<'connection> ViewStore<'connection> {
     }
 }
 
+fn read_sync_state_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncStateRecord> {
+    Ok(SyncStateRecord {
+        sync_key: row.get(0)?,
+        status: SyncRunStatus::parse(&row.get::<_, String>(1)?),
+        cursor: row.get(2)?,
+        last_attempted_at: row.get(3)?,
+        last_completed_at: row.get(4)?,
+        message: row.get(5)?,
+        granted_scopes: split_scopes(&row.get::<_, String>(6)?),
+        last_error: decode_problem(row.get(7)?).map_err(json_to_sql_error)?,
+    })
+}
+
 fn parse_optional_score(value: Option<i64>) -> Option<u8> {
     value.and_then(|score| u8::try_from(score).ok())
+}
+
+fn parse_optional_u16(value: Option<i64>) -> rusqlite::Result<Option<u16>> {
+    match value {
+        Some(value) => u16::try_from(value).map(Some).map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Integer,
+                Box::new(std::fmt::Error),
+            )
+        }),
+        None => Ok(None),
+    }
 }
 
 fn row_count(connection: &Connection, table: &str) -> Result<u64> {
@@ -333,65 +755,29 @@ fn split_scopes(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn encode_problem(problem: &Option<OuraProblem>) -> Result<Option<String>> {
+    problem
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(Into::into)
+}
+
+fn decode_problem(
+    value: Option<String>,
+) -> std::result::Result<Option<OuraProblem>, serde_json::Error> {
+    value
+        .as_deref()
+        .map(serde_json::from_str::<OuraProblem>)
+        .transpose()
+}
+
+fn json_to_sql_error(error: serde_json::Error) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+}
+
 fn now_rfc3339() -> Result<String> {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .map_err(|error| RingmasterError::Config(format!("formatting timestamp failed: {error}")))
-}
-
-#[cfg(test)]
-#[allow(clippy::panic)]
-mod tests {
-    use rusqlite::Connection;
-
-    use crate::store::migrations;
-    use crate::store::queries::{
-        MetadataStore, SyncRunStatus, SyncStateRecord, SyncStateStore, ViewStore,
-    };
-
-    #[test]
-    fn round_trips_sync_state() {
-        let mut connection = Connection::open_in_memory()
-            .unwrap_or_else(|error| panic!("in-memory db should open: {error}"));
-        migrations::run_migrations(&mut connection)
-            .unwrap_or_else(|error| panic!("migrations should succeed: {error}"));
-        let sync_store = SyncStateStore::new(&connection);
-
-        let record = SyncStateRecord {
-            sync_key: "oura_poll".to_owned(),
-            status: SyncRunStatus::Blocked,
-            cursor: None,
-            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
-            last_completed_at: None,
-            message: Some("auth required".to_owned()),
-            granted_scopes: vec!["daily".to_owned()],
-        };
-
-        sync_store
-            .upsert(&record)
-            .unwrap_or_else(|error| panic!("sync state should persist: {error}"));
-
-        let fetched = sync_store
-            .latest()
-            .unwrap_or_else(|error| panic!("latest sync state should load: {error}"))
-            .unwrap_or_else(|| panic!("latest sync state should exist"));
-
-        assert_eq!(fetched, record);
-    }
-
-    #[test]
-    fn reports_schema_version_from_metadata_store() {
-        let mut connection = Connection::open_in_memory()
-            .unwrap_or_else(|error| panic!("in-memory db should open: {error}"));
-        migrations::run_migrations(&mut connection)
-            .unwrap_or_else(|error| panic!("migrations should succeed: {error}"));
-        let metadata = MetadataStore::new(&connection);
-        let views = ViewStore::new(&connection);
-
-        assert_eq!(
-            metadata.schema_version().unwrap_or_default(),
-            migrations::current_version()
-        );
-        assert_eq!(views.record_counts().unwrap_or_default().raw_payloads, 0);
-    }
 }

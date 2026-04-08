@@ -16,10 +16,11 @@ pub struct MigrationReport {
     pub current_version: u32,
 }
 
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "bootstrap_schema",
-    sql: r#"
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "bootstrap_schema",
+        sql: r#"
         CREATE TABLE IF NOT EXISTS app_metadata (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
@@ -132,7 +133,55 @@ pub const MIGRATIONS: &[Migration] = &[Migration {
         CREATE INDEX IF NOT EXISTS idx_enhanced_tags_day
             ON enhanced_tags(day);
     "#,
-}];
+    },
+    Migration {
+        version: 2,
+        name: "phase1_foundation",
+        sql: r#"
+        CREATE TABLE IF NOT EXISTS auth_session (
+            provider TEXT PRIMARY KEY,
+            account_id TEXT,
+            account_email TEXT,
+            token_type TEXT NOT NULL,
+            granted_scopes TEXT NOT NULL,
+            access_token_expires_at TEXT,
+            last_authenticated_at TEXT,
+            last_refresh_at TEXT,
+            last_error_json TEXT,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS personal_info (
+            profile_id TEXT PRIMARY KEY,
+            age INTEGER,
+            weight REAL,
+            height REAL,
+            biological_sex TEXT,
+            email TEXT,
+            raw_cache_key TEXT,
+            updated_at TEXT NOT NULL
+        );
+
+        ALTER TABLE sync_state ADD COLUMN last_error_json TEXT;
+        ALTER TABLE daily_readiness ADD COLUMN temperature_deviation REAL;
+        ALTER TABLE daily_readiness ADD COLUMN temperature_trend_deviation REAL;
+        ALTER TABLE daily_activity ADD COLUMN active_calories INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE daily_activity ADD COLUMN steps INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE daily_activity ADD COLUMN total_calories INTEGER NOT NULL DEFAULT 0;
+
+        CREATE INDEX IF NOT EXISTS idx_sync_state_attempted_at
+            ON sync_state(last_attempted_at DESC);
+        "#,
+    },
+    Migration {
+        version: 3,
+        name: "phase1_sync_state_cleanup",
+        sql: r#"
+        DELETE FROM sync_state
+        WHERE sync_key NOT IN ('oura.personal', 'oura.daily', 'oura.heartrate');
+        "#,
+    },
+];
 
 pub fn run_migrations(connection: &mut rusqlite::Connection) -> Result<MigrationReport> {
     connection.execute_batch(
@@ -211,6 +260,6 @@ mod tests {
             .unwrap_or_else(|error| panic!("migrations should succeed: {error}"));
 
         assert_eq!(report.current_version, current_version());
-        assert_eq!(report.applied_versions, vec![1]);
+        assert_eq!(report.applied_versions, vec![1, 2, 3]);
     }
 }

@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document describes the implemented bootstrap architecture for `ringmaster.rs`. It reflects the real phase-0 / phase-1 foundation in the repository today, not the eventual end-state product.
+This document describes the implemented phase-1 architecture for `ringmaster.rs`. It reflects the code that exists in the repository today, not the eventual end-state product.
 
 ## Design goals
 
@@ -11,6 +11,7 @@ This document describes the implemented bootstrap architecture for `ringmaster.r
 - pure UI components
 - single-crate simplicity until pressure justifies more structure
 - deterministic demo mode for development, CI, and screenshots
+- one real vertical slice before broadening the Oura surface
 
 ## Runtime shape
 
@@ -21,7 +22,8 @@ CLI
   -> command dispatcher
 
 doctor / sync / auth
-  -> store + Oura seams
+  -> store + auth/session seams
+  -> typed Oura client boundaries
   -> formatted text output
 
 tui / demo
@@ -55,6 +57,7 @@ Responsibilities:
 - environment overrides
 - runtime directory creation
 - Oura/logging defaults
+- env-only client secret handling
 
 Current defaults:
 
@@ -73,7 +76,7 @@ Responsibilities:
 - user-facing status/footer text
 - shaping store/auth data into presentation structs
 
-The app layer is where “local store snapshot + auth/capability diagnostics” become screen-specific models. It deliberately does not own terminal I/O, HTTP, or SQL.
+The app layer is where persisted store rows and auth/capability diagnostics become screen-specific models. It deliberately does not own terminal I/O, HTTP, or SQL.
 
 ### `src/tui.rs`
 
@@ -116,8 +119,10 @@ Responsibilities:
 Current schema families:
 
 - `app_metadata`
+- `auth_session`
 - `sync_state`
 - `raw_payload_cache`
+- `personal_info`
 - `daily_sleep`
 - `daily_readiness`
 - `daily_activity`
@@ -128,23 +133,30 @@ Current schema families:
 - `sessions`
 - `webhook_subscriptions`
 
-The schema intentionally includes webhook metadata now so later webhook work lands without reshaping unrelated storage.
+`sync_state` tracks per-slice status, watermark, granted scopes, and the last structured Oura problem. `raw_payload_cache` is intentionally separate from normalized tables so future debugging and replay work does not leak SQL concerns into the transport layer.
 
 ### `src/oura/*`
 
 Responsibilities:
 
-- OAuth planning and callback router scaffold
+- loopback OAuth login
+- token refresh lifecycle ownership
 - capability/scope modeling
-- typed client interface
-- poll-first sync orchestration scaffold
+- typed transport DTOs and client boundary
+- poll-first sync orchestration
 
 Current behavior:
 
-- `auth login` prepares an authorization URL when credentials exist
-- a loopback router scaffold exists for the configured callback path
-- secure token persistence is intentionally deferred
-- `sync once` records readiness/blocked/partial status in SQLite instead of pretending endpoint imports already exist
+- `auth login` prints an authorization URL, listens on the configured loopback callback, validates CSRF state, exchanges the code server-side, and persists auth/session metadata
+- token secrets live behind the keyring-backed `SecretStore` seam; tests use an in-memory secret store
+- `ensure_authorized_session` is the single owner for access-token refresh
+- `ReqwestOuraClient` and `FixtureOuraClient` share the same typed phase-1 fetch surface
+- `sync once` imports the current phase-1 slice:
+  - `/v2/usercollection/personal_info`
+  - `/v2/usercollection/daily_sleep`
+  - `/v2/usercollection/daily_readiness`
+  - `/v2/usercollection/daily_activity`
+  - `/v2/usercollection/heartrate`
 
 ## Data flow
 
@@ -159,6 +171,8 @@ config
   -> components draw presentation models only
 ```
 
+The TUI never performs HTTP, token refresh, or database writes. Live screens render only from persisted auth/session metadata and SQLite read models.
+
 ### Demo TUI
 
 ```text
@@ -167,14 +181,25 @@ config
   -> tui::run() or tui::render_snapshot()
 ```
 
-### Sync
+### Live sync
 
 ```text
 config
-  -> auth::inspect_auth()
-  -> ReqwestOuraClient capability surface
+  -> auth::ensure_authorized_session()
+  -> ReqwestOuraClient
   -> sync::sync_once()
+  -> raw payload cache + normalized upserts
   -> store.sync_state().upsert(...)
+```
+
+### Fixture sync
+
+```text
+config
+  -> FixtureOuraClient
+  -> sync::sync_once(dry_run or fixture mode)
+  -> same normalization logic as live sync
+  -> optional no-write smoke path for CI
 ```
 
 ## Why `rusqlite`
@@ -194,8 +219,7 @@ If sync/import throughput later justifies an async or pooled storage story, or i
 
 ## Follow-up work
 
-- complete callback capture + token exchange + token persistence
-- implement real Oura API fetchers behind the typed client interface
-- populate daily/trend/timeline views from imported data instead of empty-state scaffolding
+- deepen trend calculations on top of the now-real daily/heartrate slice
+- expand the Oura surface beyond personal/daily/heartrate
 - add scheduled/background polling
 - add webhook subscription management once poll-first sync is stable

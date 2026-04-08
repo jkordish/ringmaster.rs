@@ -1,3 +1,7 @@
+use serde::{Deserialize, Serialize};
+
+use crate::error::OuraProblem;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CapabilityKind {
     Personal,
@@ -12,7 +16,8 @@ pub enum CapabilityKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityEntry {
     pub kind: CapabilityKind,
-    pub available: bool,
+    pub requested: bool,
+    pub granted: bool,
     pub note: String,
 }
 
@@ -30,6 +35,15 @@ pub struct AuthStatus {
     pub missing_fields: Vec<&'static str>,
     pub capability_report: CapabilityReport,
     pub auth_timeout_secs: u64,
+    pub secret_backend: String,
+    pub access_token_stored: bool,
+    pub refresh_token_stored: bool,
+    pub access_token_expires_at: Option<String>,
+    pub last_authenticated_at: Option<String>,
+    pub last_refresh_at: Option<String>,
+    pub account_id: Option<String>,
+    pub account_email: Option<String>,
+    pub last_error: Option<OuraProblem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +88,64 @@ pub struct SessionRecord {
     pub kind: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersonalInfoDocument {
+    pub id: String,
+    pub age: Option<u16>,
+    pub weight: Option<f64>,
+    pub height: Option<f64>,
+    pub biological_sex: Option<String>,
+    pub email: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DailySleepDocument {
+    pub id: String,
+    pub day: String,
+    pub score: Option<u8>,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DailyReadinessDocument {
+    pub id: String,
+    pub day: String,
+    pub score: Option<u8>,
+    pub temperature_deviation: Option<f64>,
+    pub temperature_trend_deviation: Option<f64>,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DailyActivityDocument {
+    pub id: String,
+    pub day: String,
+    pub score: Option<u8>,
+    pub active_calories: i64,
+    pub steps: i64,
+    pub total_calories: i64,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeartRateDocument {
+    pub bpm: u16,
+    pub source: String,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PagedCollection<T> {
+    pub data: Vec<T>,
+    pub next_token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeSeriesCollection<T> {
+    pub data: Vec<T>,
+    pub next_token: Option<String>,
+}
+
 impl CapabilityReport {
     pub fn from_scopes(requested_scopes: &[String], granted_scopes: &[String]) -> Self {
         let entries = CapabilityKind::all()
@@ -93,7 +165,8 @@ impl CapabilityReport {
 
                 CapabilityEntry {
                     kind,
-                    available: granted,
+                    requested,
+                    granted,
                     note,
                 }
             })
@@ -108,7 +181,8 @@ impl CapabilityReport {
                 .into_iter()
                 .map(|kind| CapabilityEntry {
                     kind,
-                    available: true,
+                    requested: true,
+                    granted: true,
                     note: "demo data".to_owned(),
                 })
                 .collect(),
@@ -118,7 +192,7 @@ impl CapabilityReport {
     pub fn available_labels(&self) -> Vec<&'static str> {
         self.entries
             .iter()
-            .filter(|entry| entry.available)
+            .filter(|entry| entry.granted)
             .map(|entry| entry.kind.label())
             .collect()
     }
@@ -126,9 +200,20 @@ impl CapabilityReport {
     pub fn missing_scope_names(&self) -> Vec<&'static str> {
         self.entries
             .iter()
-            .filter(|entry| !entry.available && entry.note == "missing scope")
+            .filter(|entry| entry.requested && !entry.granted)
             .map(|entry| entry.kind.scope_name())
             .collect()
+    }
+
+    pub fn is_granted(&self, kind: CapabilityKind) -> bool {
+        self.entries
+            .iter()
+            .find(|entry| entry.kind == kind)
+            .is_some_and(|entry| entry.granted)
+    }
+
+    pub fn status_for(&self, kind: CapabilityKind) -> Option<&CapabilityEntry> {
+        self.entries.iter().find(|entry| entry.kind == kind)
     }
 }
 

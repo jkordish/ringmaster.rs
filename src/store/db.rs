@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use crate::config::Config;
 use crate::error::{Result, RingmasterError};
 use crate::store::migrations::{MigrationReport, run_migrations};
-use crate::store::queries::{MetadataStore, SyncStateStore, ViewStore};
+use crate::store::queries::{AuthStore, ImportStore, MetadataStore, SyncStateStore, ViewStore};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorePlan {
@@ -89,6 +89,14 @@ impl Store {
         SyncStateStore::new(&self.connection)
     }
 
+    pub fn auth(&self) -> AuthStore<'_> {
+        AuthStore::new(&self.connection)
+    }
+
+    pub fn imports(&self) -> ImportStore<'_> {
+        ImportStore::new(&self.connection)
+    }
+
     pub fn views(&self) -> ViewStore<'_> {
         ViewStore::new(&self.connection)
     }
@@ -115,6 +123,6 @@ mod tests {
         let store =
             Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
 
-        assert_eq!(store.migration_report().current_version, 1);
+        assert_eq!(store.migration_report().current_version, 3);
     }
 }

@@ -39,10 +39,10 @@ pub struct OuraConfig {
     pub client_secret: Option<String>,
     pub authorize_url: String,
     pub token_url: String,
+    pub api_base_url: String,
     pub callback_bind: SocketAddr,
     pub callback_path: String,
     pub requested_scopes: Vec<String>,
-    pub granted_scopes: Vec<String>,
     pub auth_timeout_secs: u64,
 }
 
@@ -60,13 +60,12 @@ struct FileLoggingConfig {
 #[derive(Debug, Default, Deserialize)]
 struct FileOuraConfig {
     client_id: Option<String>,
-    client_secret: Option<String>,
     authorize_url: Option<String>,
     token_url: Option<String>,
+    api_base_url: Option<String>,
     callback_bind: Option<String>,
     callback_path: Option<String>,
     requested_scopes: Option<Vec<String>>,
-    granted_scopes: Option<Vec<String>>,
     auth_timeout_secs: Option<u64>,
 }
 
@@ -121,12 +120,7 @@ impl Config {
                         .as_ref()
                         .and_then(|oura| oura.client_id.clone())
                 }),
-                client_secret: env_string("RINGMASTER_OURA_CLIENT_SECRET").or_else(|| {
-                    file_config
-                        .oura
-                        .as_ref()
-                        .and_then(|oura| oura.client_secret.clone())
-                }),
+                client_secret: env_string("RINGMASTER_OURA_CLIENT_SECRET"),
                 authorize_url: env_string("RINGMASTER_OURA_AUTHORIZE_URL")
                     .or_else(|| {
                         file_config
@@ -143,6 +137,14 @@ impl Config {
                             .and_then(|oura| oura.token_url.clone())
                     })
                     .unwrap_or_else(|| "https://api.oura.com/oauth/token".to_owned()),
+                api_base_url: env_string("RINGMASTER_OURA_API_BASE_URL")
+                    .or_else(|| {
+                        file_config
+                            .oura
+                            .as_ref()
+                            .and_then(|oura| oura.api_base_url.clone())
+                    })
+                    .unwrap_or_else(|| "https://api.oura.com".to_owned()),
                 callback_bind,
                 callback_path,
                 requested_scopes: env_csv("RINGMASTER_OURA_REQUESTED_SCOPES").unwrap_or_else(
@@ -154,13 +156,6 @@ impl Config {
                             .unwrap_or_else(default_requested_scopes)
                     },
                 ),
-                granted_scopes: env_csv("RINGMASTER_OURA_GRANTED_SCOPES").unwrap_or_else(|| {
-                    file_config
-                        .oura
-                        .as_ref()
-                        .and_then(|oura| oura.granted_scopes.clone())
-                        .unwrap_or_default()
-                }),
                 auth_timeout_secs: env_string("RINGMASTER_OURA_AUTH_TIMEOUT_SECS")
                     .and_then(|value| value.parse::<u64>().ok())
                     .or_else(|| {
@@ -292,17 +287,10 @@ fn split_csv(value: &str) -> Vec<String> {
 }
 
 fn default_requested_scopes() -> Vec<String> {
-    [
-        "personal",
-        "daily",
-        "heartrate",
-        "workout",
-        "session",
-        "tag",
-    ]
-    .into_iter()
-    .map(ToOwned::to_owned)
-    .collect()
+    ["personal", "daily", "heartrate"]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn load_file_config(path: &Path) -> Result<FileConfig> {
@@ -358,12 +346,12 @@ mod tests {
             client_secret: None,
             authorize_url: String::new(),
             token_url: String::new(),
+            api_base_url: String::new(),
             callback_bind: "127.0.0.1:8788"
                 .parse()
                 .unwrap_or_else(|error| panic!("test socket addr should parse: {error}")),
             callback_path: "/callback".to_owned(),
             requested_scopes: default_requested_scopes(),
-            granted_scopes: Vec::new(),
             auth_timeout_secs: 120,
         };
 

@@ -1,4 +1,6 @@
-use clap::{CommandFactory, Parser, Subcommand};
+use std::path::PathBuf;
+
+use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use crate::error::{Result, RingmasterError};
 
@@ -42,7 +44,17 @@ pub enum AuthCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum SyncCommand {
     /// Run one poll-first sync cycle.
-    Once,
+    Once(SyncOnceArgs),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct SyncOnceArgs {
+    /// Fetch and normalize data without mutating SQLite.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Load Oura payloads from a fixture directory instead of the live API.
+    #[arg(long)]
+    pub fixture_dir: Option<PathBuf>,
 }
 
 impl Cli {
@@ -67,7 +79,7 @@ impl Cli {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::{AuthCommand, Cli, Command, SyncCommand};
+    use super::{AuthCommand, Cli, Command, SyncCommand, SyncOnceArgs};
 
     #[test]
     fn parses_nested_subcommands() {
@@ -91,7 +103,11 @@ mod tests {
 
         match cli.command {
             Some(Command::Sync {
-                command: SyncCommand::Once,
+                command:
+                    SyncCommand::Once(SyncOnceArgs {
+                        dry_run: false,
+                        fixture_dir: None,
+                    }),
             }) => {}
             other => panic!("unexpected command: {other:?}"),
         }
