@@ -141,7 +141,7 @@ impl Config {
             })
             .unwrap_or_else(|| "/callback".to_owned());
 
-        Ok(Self {
+        let config = Self {
             app_name: APP_NAME,
             paths,
             logging: LoggingConfig {
@@ -261,7 +261,23 @@ impl Config {
                     .as_ref()
                     .and_then(|refresh| refresh.demo_fixture_dir.clone()),
             },
-        })
+        };
+
+        config.refresh.validate()?;
+
+        Ok(config)
+    }
+}
+
+impl RefreshConfig {
+    fn validate(&self) -> Result<()> {
+        if self.daily_history_days == 0 {
+            return Err(RingmasterError::Config(
+                "refresh.daily_history_days must be at least 1".to_owned(),
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -412,7 +428,7 @@ fn is_empty_path(path: &Path) -> bool {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{AppPaths, Config, OuraConfig, default_requested_scopes};
+    use super::{AppPaths, Config, OuraConfig, RefreshConfig, default_requested_scopes};
 
     #[test]
     fn builds_xdg_paths_from_roots() {
@@ -462,5 +478,34 @@ mod tests {
         assert_eq!(config.refresh.heartrate_interval_secs, 60);
         assert_eq!(config.refresh.daily_interval_secs, 300);
         assert_eq!(config.refresh.personal_interval_secs, 3_600);
+    }
+
+    #[test]
+    fn rejects_zero_daily_history_days() {
+        let refresh = RefreshConfig {
+            personal_interval_secs: 3_600,
+            daily_interval_secs: 300,
+            heartrate_interval_secs: 60,
+            personal_stale_after_secs: 72 * 60 * 60,
+            daily_stale_after_secs: 12 * 60 * 60,
+            heartrate_stale_after_secs: 15 * 60,
+            daily_history_days: 0,
+            daily_overlap_days: 2,
+            heartrate_history_days: 7,
+            heartrate_overlap_minutes: 60,
+            max_backoff_secs: 60 * 60,
+            demo_fixture_dir: None,
+        };
+
+        let error = refresh
+            .validate()
+            .err()
+            .unwrap_or_else(|| panic!("zero daily history days should be rejected"));
+
+        assert!(
+            error
+                .to_string()
+                .contains("refresh.daily_history_days must be at least 1")
+        );
     }
 }

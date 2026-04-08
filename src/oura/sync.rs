@@ -757,6 +757,10 @@ mod tests {
     use crate::store::Store;
     use crate::store::queries::SyncRunStatus;
 
+    fn phase1_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase1")
+    }
+
     fn fixture_config() -> Config {
         Config {
             app_name: "ringmaster",
@@ -808,9 +812,7 @@ mod tests {
         let config = fixture_config();
         let options = SyncOptions {
             dry_run: false,
-            fixture_dir: Some(PathBuf::from(
-                "/home/ubuntu/ringmaster.rs/tests/fixtures/phase1",
-            )),
+            fixture_dir: Some(phase1_fixture_dir()),
             families: SyncFamily::ALL.to_vec(),
         };
 
@@ -840,9 +842,7 @@ mod tests {
             &store,
             SyncOptions {
                 dry_run: true,
-                fixture_dir: Some(PathBuf::from(
-                    "/home/ubuntu/ringmaster.rs/tests/fixtures/phase1",
-                )),
+                fixture_dir: Some(phase1_fixture_dir()),
                 families: SyncFamily::ALL.to_vec(),
             },
         )
