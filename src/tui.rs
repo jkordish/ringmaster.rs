@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::io::{self, IsTerminal, Stdout, stdout};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -27,6 +28,14 @@ use crate::store::Store;
 
 enum WorkerCommand {
     ManualRefresh,
+    Shutdown,
+}
+
+enum InFlightRefreshResult<T> {
+    Completed {
+        result: T,
+        queued_manual_refresh: bool,
+    },
     Shutdown,
 }
 
@@ -235,6 +244,7 @@ fn spawn_refresh_worker(
                     return;
                 }
             };
+            let mut pending_manual_refresh = false;
 
             loop {
                 let sync_states = match store.sync_state().list() {
@@ -252,20 +262,25 @@ fn spawn_refresh_worker(
                 let delay = next_wake_duration(&config, &sync_states, now)
                     .unwrap_or_else(|_| Duration::from_secs(1));
 
-                let refresh_request = tokio::select! {
-                    command = command_rx.recv() => match command {
-                        Some(WorkerCommand::ManualRefresh) => Some((SyncFamily::ALL.to_vec(), true)),
-                        Some(WorkerCommand::Shutdown) | None => None,
-                    },
-                    _ = tokio::time::sleep(delay) => {
-                        match due_families(&config, &sync_states, time::OffsetDateTime::now_utc(), false) {
-                            Ok(families) if !families.is_empty() => Some((families, false)),
-                            Ok(_) => continue,
-                            Err(error) => {
-                                let _ = action_tx.send(Action::RefreshFailed {
-                                    message: format!("Background refresh scheduling failed: {error}"),
-                                });
-                                continue;
+                let refresh_request = if pending_manual_refresh {
+                    pending_manual_refresh = false;
+                    Some((SyncFamily::ALL.to_vec(), true))
+                } else {
+                    tokio::select! {
+                        command = command_rx.recv() => match command {
+                            Some(WorkerCommand::ManualRefresh) => Some((SyncFamily::ALL.to_vec(), true)),
+                            Some(WorkerCommand::Shutdown) | None => None,
+                        },
+                        _ = tokio::time::sleep(delay) => {
+                            match due_families(&config, &sync_states, time::OffsetDateTime::now_utc(), false) {
+                                Ok(families) if !families.is_empty() => Some((families, false)),
+                                Ok(_) => continue,
+                                Err(error) => {
+                                    let _ = action_tx.send(Action::RefreshFailed {
+                                        message: format!("Background refresh scheduling failed: {error}"),
+                                    });
+                                    continue;
+                                }
                             }
                         }
                     }
@@ -283,17 +298,30 @@ fn spawn_refresh_worker(
                     manual,
                 });
 
-                match sync_selected(
-                    &config,
-                    &store,
-                    SyncOptions {
-                        dry_run: false,
-                        fixture_dir: None,
-                        families,
-                    },
+                let refresh_result = await_inflight_refresh(
+                    &mut command_rx,
+                    sync_selected(
+                        &config,
+                        &store,
+                        SyncOptions {
+                            dry_run: false,
+                            fixture_dir: None,
+                            families,
+                        },
+                    ),
                 )
-                .await
-                {
+                .await;
+
+                let InFlightRefreshResult::Completed {
+                    result,
+                    queued_manual_refresh,
+                } = refresh_result
+                else {
+                    return;
+                };
+                pending_manual_refresh |= queued_manual_refresh;
+
+                match result {
                     Ok(report) => match refresh_snapshot_action(&config, &store, report, manual) {
                         Ok(action) => {
                             let _ = action_tx.send(action);
@@ -317,6 +345,34 @@ fn spawn_refresh_worker(
     });
 
     (command_tx, action_rx, worker)
+}
+
+async fn await_inflight_refresh<F>(
+    command_rx: &mut UnboundedReceiver<WorkerCommand>,
+    sync_future: F,
+) -> InFlightRefreshResult<F::Output>
+where
+    F: Future,
+{
+    let mut sync_future = std::pin::pin!(sync_future);
+    let mut queued_manual_refresh = false;
+
+    loop {
+        tokio::select! {
+            result = &mut sync_future => {
+                return InFlightRefreshResult::Completed {
+                    result,
+                    queued_manual_refresh,
+                };
+            }
+            command = command_rx.recv() => match command {
+                Some(WorkerCommand::ManualRefresh) => {
+                    queued_manual_refresh = true;
+                }
+                Some(WorkerCommand::Shutdown) | None => return InFlightRefreshResult::Shutdown,
+            }
+        }
+    }
 }
 
 fn refresh_snapshot_action(
@@ -385,6 +441,9 @@ impl Drop for TerminalSession {
 #[allow(clippy::panic)]
 mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use std::future::pending;
+    use std::time::Duration;
+    use tokio::sync::mpsc::unbounded_channel;
 
     use crate::action::Action;
     use crate::app::{Screen, build_demo_state, build_live_state};
@@ -751,5 +810,48 @@ mod tests {
             super::map_event(Screen::Dashboard, press(KeyCode::Char('['))),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_preempts_inflight_refresh() {
+        let (command_tx, mut command_rx) = unbounded_channel();
+        let send_result = command_tx.send(super::WorkerCommand::Shutdown);
+        assert!(send_result.is_ok());
+
+        let result = super::await_inflight_refresh(&mut command_rx, pending::<usize>()).await;
+        assert!(matches!(result, super::InFlightRefreshResult::Shutdown));
+    }
+
+    #[tokio::test]
+    async fn manual_refresh_is_queued_while_sync_is_inflight() {
+        let (command_tx, mut command_rx) = unbounded_channel();
+        let delayed_tx = command_tx.clone();
+        let sender = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = delayed_tx.send(super::WorkerCommand::ManualRefresh);
+        });
+
+        let result = super::await_inflight_refresh(&mut command_rx, async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            7usize
+        })
+        .await;
+
+        sender
+            .await
+            .unwrap_or_else(|error| panic!("sender task should complete: {error}"));
+
+        match result {
+            super::InFlightRefreshResult::Completed {
+                result,
+                queued_manual_refresh,
+            } => {
+                assert_eq!(result, 7);
+                assert!(queued_manual_refresh);
+            }
+            super::InFlightRefreshResult::Shutdown => {
+                panic!("refresh should complete instead of shutting down")
+            }
+        }
     }
 }

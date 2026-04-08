@@ -6,7 +6,7 @@ use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::config::{Config, RefreshConfig};
 use crate::error::{Result, RingmasterError};
 use crate::oura::models::CapabilityKind;
-use crate::oura::sync::{SyncOptions, SyncReport, sync_selected};
+use crate::oura::sync::{SliceReport, SyncOptions, SyncReport, sync_selected};
 use crate::store::Store;
 use crate::store::queries::SyncStateRecord;
 
@@ -117,12 +117,21 @@ pub async fn run_watch(config: &Config, options: WatchOptions) -> Result<WatchRe
     let store = Store::open(config)?;
     let fixture_dir = resolve_fixture_dir(config, &options);
     let dry_run = options.dry_run || options.demo;
+    let mut simulated_sync_states = if dry_run {
+        Some(store.sync_state().list()?)
+    } else {
+        None
+    };
     let mut iterations = 0_u32;
     let mut last_report = None;
     let mut notes = Vec::new();
 
     loop {
-        let sync_states = store.sync_state().list()?;
+        let sync_states = if let Some(sync_states) = simulated_sync_states.as_ref() {
+            sync_states.clone()
+        } else {
+            store.sync_state().list()?
+        };
         let force_all = options.max_iterations.is_some() && iterations == 0;
         let families = due_families(config, &sync_states, OffsetDateTime::now_utc(), force_all)?;
 
@@ -149,6 +158,9 @@ pub async fn run_watch(config: &Config, options: WatchOptions) -> Result<WatchRe
             },
         )
         .await?;
+        if let Some(simulated_sync_states) = simulated_sync_states.as_mut() {
+            advance_dry_run_sync_states(config, simulated_sync_states, &report);
+        }
         iterations = iterations.saturating_add(1);
         last_report = Some(report);
 
@@ -237,11 +249,118 @@ fn parse_timestamp(value: &str) -> Result<OffsetDateTime> {
     })
 }
 
+fn advance_dry_run_sync_states(
+    config: &Config,
+    sync_states: &mut Vec<SyncStateRecord>,
+    report: &SyncReport,
+) {
+    let granted_scopes = report
+        .capability_report
+        .entries
+        .iter()
+        .filter(|entry| entry.granted)
+        .map(|entry| entry.kind.scope_name().to_owned())
+        .collect::<Vec<_>>();
+
+    for slice in &report.slice_reports {
+        let next_state = build_simulated_sync_state(
+            config,
+            sync_states,
+            slice,
+            &report.finished_at,
+            &granted_scopes,
+        );
+        upsert_simulated_sync_state(sync_states, next_state);
+    }
+}
+
+fn build_simulated_sync_state(
+    config: &Config,
+    sync_states: &[SyncStateRecord],
+    slice: &SliceReport,
+    completed_at: &str,
+    granted_scopes: &[String],
+) -> SyncStateRecord {
+    let previous = sync_states
+        .iter()
+        .find(|state| state.sync_key == slice.sync_key);
+    let failure_count = match slice.status {
+        crate::store::queries::SyncRunStatus::Failed => previous
+            .map(|state| state.failure_count.saturating_add(1))
+            .unwrap_or(1),
+        _ => 0,
+    };
+    let next_attempt_after = if slice.status == crate::store::queries::SyncRunStatus::Failed {
+        slice.next_attempt_after.clone().or_else(|| {
+            simulated_next_attempt_after(
+                config,
+                sync_family_from_key(&slice.sync_key),
+                failure_count,
+            )
+        })
+    } else {
+        None
+    };
+
+    SyncStateRecord {
+        sync_key: slice.sync_key.clone(),
+        status: slice.status.clone(),
+        cursor: slice.watermark.clone(),
+        last_attempted_at: completed_at.to_owned(),
+        last_completed_at: Some(completed_at.to_owned()),
+        message: Some(slice.message.clone()),
+        granted_scopes: granted_scopes.to_vec(),
+        last_error: slice.last_error.clone(),
+        failure_count,
+        next_attempt_after,
+    }
+}
+
+fn sync_family_from_key(sync_key: &str) -> Option<SyncFamily> {
+    SyncFamily::ALL
+        .into_iter()
+        .find(|family| family.sync_key() == sync_key)
+}
+
+fn simulated_next_attempt_after(
+    config: &Config,
+    family: Option<SyncFamily>,
+    failure_count: u32,
+) -> Option<String> {
+    let family = family?;
+    let base_interval_secs = family.interval_secs(&config.refresh);
+    let capped_shift = failure_count.saturating_sub(1).min(6);
+    let multiplier = 1_u64 << capped_shift;
+    let backoff_secs = base_interval_secs
+        .saturating_mul(multiplier)
+        .min(config.refresh.max_backoff_secs);
+
+    (OffsetDateTime::now_utc() + Duration::seconds(backoff_secs as i64))
+        .format(&Rfc3339)
+        .ok()
+}
+
+fn upsert_simulated_sync_state(
+    sync_states: &mut Vec<SyncStateRecord>,
+    next_state: SyncStateRecord,
+) {
+    if let Some(existing) = sync_states
+        .iter_mut()
+        .find(|state| state.sync_key == next_state.sync_key)
+    {
+        *existing = next_state;
+    } else {
+        sync_states.push(next_state);
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
     use super::{SyncFamily, WatchOptions, due_families, next_wake_duration};
     use crate::config::{AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig};
+    use crate::oura::models::CapabilityReport;
+    use crate::oura::sync::{SliceReport, SyncReport};
     use crate::refresh::run_watch;
     use crate::store::queries::{SyncRunStatus, SyncStateRecord};
     use std::path::PathBuf;
@@ -331,6 +450,66 @@ mod tests {
         let duration = next_wake_duration(&config, &[], OffsetDateTime::now_utc())
             .unwrap_or_else(|error| panic!("next wake should compute: {error}"));
         assert!(duration.as_secs() >= 1);
+    }
+
+    #[test]
+    fn dry_run_reports_advance_local_schedule_state() {
+        let config = test_config();
+        let base = OffsetDateTime::parse("2026-04-08T06:00:00Z", &Rfc3339)
+            .unwrap_or_else(|error| panic!("timestamp should parse: {error}"));
+        let mut sync_states = Vec::new();
+        let scopes = vec![
+            "personal".to_owned(),
+            "daily".to_owned(),
+            "heartrate".to_owned(),
+        ];
+        let report = SyncReport {
+            status: SyncRunStatus::Success,
+            started_at: base.format(&Rfc3339).unwrap_or_default(),
+            finished_at: base.format(&Rfc3339).unwrap_or_default(),
+            database_path: ":memory:".to_owned(),
+            notes: Vec::new(),
+            capability_report: CapabilityReport::from_scopes(&scopes, &scopes),
+            slice_reports: vec![
+                SliceReport {
+                    sync_key: SyncFamily::Personal.sync_key().to_owned(),
+                    status: SyncRunStatus::Success,
+                    imported_rows: 1,
+                    watermark: Some(base.format(&Rfc3339).unwrap_or_default()),
+                    message: "personal synced".to_owned(),
+                    last_error: None,
+                    next_attempt_after: None,
+                },
+                SliceReport {
+                    sync_key: SyncFamily::Daily.sync_key().to_owned(),
+                    status: SyncRunStatus::Success,
+                    imported_rows: 3,
+                    watermark: Some("2026-04-08".to_owned()),
+                    message: "daily synced".to_owned(),
+                    last_error: None,
+                    next_attempt_after: None,
+                },
+                SliceReport {
+                    sync_key: SyncFamily::Heartrate.sync_key().to_owned(),
+                    status: SyncRunStatus::Success,
+                    imported_rows: 5,
+                    watermark: Some(base.format(&Rfc3339).unwrap_or_default()),
+                    message: "heartrate synced".to_owned(),
+                    last_error: None,
+                    next_attempt_after: None,
+                },
+            ],
+        };
+
+        super::advance_dry_run_sync_states(&config, &mut sync_states, &report);
+
+        let due = due_families(&config, &sync_states, base + Duration::seconds(1), false)
+            .unwrap_or_else(|error| panic!("due families should compute: {error}"));
+        assert!(due.is_empty());
+
+        let next_wake = next_wake_duration(&config, &sync_states, base)
+            .unwrap_or_else(|error| panic!("next wake should compute: {error}"));
+        assert_eq!(next_wake.as_secs(), config.refresh.heartrate_interval_secs);
     }
 
     #[tokio::test]
