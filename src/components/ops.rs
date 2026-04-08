@@ -1,26 +1,50 @@
-use crate::app::AppState;
-use crate::components::Component;
+use ratatui::{
+    Frame,
+    layout::{Constraint, Direction, Layout},
+    prelude::Rect,
+    widgets::{Block, Borders, List, ListItem, Paragraph},
+};
 
-#[derive(Debug, Default)]
-pub struct Ops;
+use crate::app::OpsModel;
 
-impl Component for Ops {
-    fn render(&self, state: &AppState) -> String {
-        let warning_lines = state
+pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &OpsModel) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(10),
+            Constraint::Length(6),
+        ])
+        .split(area);
+
+    frame.render_widget(
+        Paragraph::new(format!("Mode: {}", model.mode_label))
+            .block(Block::default().title("Ops Summary").borders(Borders::ALL)),
+        layout[0],
+    );
+
+    let items = model
+        .items
+        .iter()
+        .map(|item| ListItem::new(format!("{}: {}", item.label, item.value)))
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        List::new(items).block(Block::default().title("Diagnostics").borders(Borders::ALL)),
+        layout[1],
+    );
+
+    let warnings = if model.warnings.is_empty() {
+        vec![ListItem::new("No warnings.")]
+    } else {
+        model
             .warnings
             .iter()
-            .map(|warning| format!("  - {warning}"))
+            .cloned()
+            .map(ListItem::new)
             .collect::<Vec<_>>()
-            .join("\n");
-
-        format!(
-            "\
-[Ops]
-active_screen: {}
-warnings:
-{}",
-            state.screen_name(),
-            warning_lines
-        )
-    }
+    };
+    frame.render_widget(
+        List::new(warnings).block(Block::default().title("Warnings").borders(Borders::ALL)),
+        layout[2],
+    );
 }

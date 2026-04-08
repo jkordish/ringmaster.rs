@@ -1,84 +1,171 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CapabilitySet {
-    pub daily: bool,
-    pub heartrate: bool,
-    pub workouts: bool,
-    pub sessions: bool,
-    pub tags: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CapabilityKind {
+    Personal,
+    Daily,
+    Heartrate,
+    Workout,
+    Session,
+    Tag,
+    EnhancedTag,
 }
 
-impl CapabilitySet {
-    pub fn bootstrap_default() -> Self {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityEntry {
+    pub kind: CapabilityKind,
+    pub available: bool,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityReport {
+    pub entries: Vec<CapabilityEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthStatus {
+    pub configured: bool,
+    pub callback_url: String,
+    pub requested_scopes: Vec<String>,
+    pub granted_scopes: Vec<String>,
+    pub missing_fields: Vec<&'static str>,
+    pub capability_report: CapabilityReport,
+    pub auth_timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailySummary {
+    pub day: String,
+    pub sleep_score: Option<u8>,
+    pub readiness_score: Option<u8>,
+    pub activity_score: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeartRateSample {
+    pub recorded_at: String,
+    pub bpm: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkoutRecord {
+    pub workout_id: String,
+    pub started_at: String,
+    pub sport: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TagSource {
+    Basic,
+    Enhanced,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagRecord {
+    pub tag_id: String,
+    pub day: String,
+    pub label: String,
+    pub source: TagSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRecord {
+    pub session_id: String,
+    pub started_at: String,
+    pub kind: Option<String>,
+}
+
+impl CapabilityReport {
+    pub fn from_scopes(requested_scopes: &[String], granted_scopes: &[String]) -> Self {
+        let entries = CapabilityKind::all()
+            .into_iter()
+            .map(|kind| {
+                let requested = requested_scopes
+                    .iter()
+                    .any(|scope| scope == kind.scope_name());
+                let granted = granted_scopes
+                    .iter()
+                    .any(|scope| scope == kind.scope_name());
+                let note = match (requested, granted) {
+                    (true, true) => "granted".to_owned(),
+                    (true, false) => "missing scope".to_owned(),
+                    (false, _) => "not requested".to_owned(),
+                };
+
+                CapabilityEntry {
+                    kind,
+                    available: granted,
+                    note,
+                }
+            })
+            .collect();
+
+        Self { entries }
+    }
+
+    pub fn demo() -> Self {
         Self {
-            daily: true,
-            heartrate: false,
-            workouts: false,
-            sessions: false,
-            tags: false,
+            entries: CapabilityKind::all()
+                .into_iter()
+                .map(|kind| CapabilityEntry {
+                    kind,
+                    available: true,
+                    note: "demo data".to_owned(),
+                })
+                .collect(),
         }
     }
 
-    pub fn render(&self) -> String {
-        let capabilities = [
-            ("daily", self.daily),
-            ("heartrate", self.heartrate),
-            ("workouts", self.workouts),
-            ("sessions", self.sessions),
-            ("tags", self.tags),
-        ];
+    pub fn available_labels(&self) -> Vec<&'static str> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.available)
+            .map(|entry| entry.kind.label())
+            .collect()
+    }
 
-        capabilities
-            .into_iter()
-            .filter_map(|(name, enabled)| enabled.then_some(name))
-            .collect::<Vec<_>>()
-            .join(", ")
+    pub fn missing_scope_names(&self) -> Vec<&'static str> {
+        self.entries
+            .iter()
+            .filter(|entry| !entry.available && entry.note == "missing scope")
+            .map(|entry| entry.kind.scope_name())
+            .collect()
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Freshness {
-    pub minutes_since_sync: u32,
-}
-
-impl Freshness {
-    pub fn minutes(minutes_since_sync: u32) -> Self {
-        Self { minutes_since_sync }
+impl CapabilityKind {
+    pub fn all() -> [Self; 7] {
+        [
+            Self::Personal,
+            Self::Daily,
+            Self::Heartrate,
+            Self::Workout,
+            Self::Session,
+            Self::Tag,
+            Self::EnhancedTag,
+        ]
     }
 
-    pub fn render(&self) -> String {
-        format!("synced {}m ago", self.minutes_since_sync)
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Personal => "Personal",
+            Self::Daily => "Daily",
+            Self::Heartrate => "Heartrate",
+            Self::Workout => "Workouts",
+            Self::Session => "Sessions",
+            Self::Tag => "Tags",
+            Self::EnhancedTag => "Enhanced Tags",
+        }
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DailySnapshot {
-    pub sleep_score: u8,
-    pub readiness_score: u8,
-    pub activity_score: u8,
-    pub baseline_7d: String,
-    pub baseline_30d: String,
-    pub baseline_90d: String,
-    pub delta_summary: String,
-    pub heart_rate_preview: Vec<String>,
-}
-
-impl DailySnapshot {
-    pub fn demo() -> Self {
-        Self {
-            sleep_score: 86,
-            readiness_score: 79,
-            activity_score: 72,
-            baseline_7d: "sleep +2, readiness -1, activity +4".to_owned(),
-            baseline_30d: "sleep stable, readiness slightly down".to_owned(),
-            baseline_90d: "activity trending up".to_owned(),
-            delta_summary: "HRV softer than baseline; late workout likely contributor".to_owned(),
-            heart_rate_preview: vec![
-                "61".to_owned(),
-                "60".to_owned(),
-                "59".to_owned(),
-                "62".to_owned(),
-                "64".to_owned(),
-            ],
+    pub fn scope_name(self) -> &'static str {
+        match self {
+            Self::Personal => "personal",
+            Self::Daily => "daily",
+            Self::Heartrate => "heartrate",
+            Self::Workout => "workout",
+            Self::Session => "session",
+            Self::Tag => "tag",
+            Self::EnhancedTag => "enhanced_tag",
         }
     }
 }

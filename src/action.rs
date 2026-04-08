@@ -1,9 +1,11 @@
+use crate::app::Screen;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Tick,
-    Render,
+    Quit,
     NextScreen,
     PreviousScreen,
+    ShowScreen(Screen),
     RefreshRequested,
-    Quit,
 }

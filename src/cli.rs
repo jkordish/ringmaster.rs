@@ -1,92 +1,111 @@
+use clap::{CommandFactory, Parser, Subcommand};
+
 use crate::error::{Result, RingmasterError};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Parser)]
+#[command(
+    name = "ringmaster",
+    version,
+    about = "Local-first Rust terminal app for exploring Oura Cloud data"
+)]
 pub struct Cli {
-    pub command: Command,
+    #[command(subcommand)]
+    pub command: Option<Command>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum Command {
-    Help,
+    /// Launch the live terminal UI.
     Tui,
-    Demo,
+    /// Print paths, config, storage, and health information.
     Doctor,
-    AuthLogin,
-    SyncOnce,
+    /// Launch deterministic demo mode.
+    Demo,
+    /// Authentication commands.
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
+    /// Sync commands.
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommand,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum AuthCommand {
+    /// Start or describe the OAuth login flow.
+    Login,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum SyncCommand {
+    /// Run one poll-first sync cycle.
+    Once,
 }
 
 impl Cli {
-    pub fn parse<I, S>(args: I) -> Result<Self>
+    pub fn parse_from<I, T>(args: I) -> Result<Self>
     where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
     {
-        let collected: Vec<String> = args.into_iter().map(Into::into).collect();
+        Self::try_parse_from(args).map_err(|error| RingmasterError::Cli(error.to_string()))
+    }
 
-        let mut parts = collected.iter().skip(1).map(String::as_str);
-
-        let command = match parts.next() {
-            None => Command::Help,
-            Some("help" | "-h" | "--help") => Command::Help,
-            Some("tui") => Command::Tui,
-            Some("demo") => Command::Demo,
-            Some("doctor") => Command::Doctor,
-            Some("auth") => match parts.next() {
-                Some("login") => Command::AuthLogin,
-                Some(other) => {
-                    return Err(RingmasterError::Usage(format!(
-                        "unknown auth subcommand: {other}\n\n{}",
-                        help_text()
-                    )));
-                }
-                None => {
-                    return Err(RingmasterError::Usage(format!(
-                        "missing auth subcommand\n\n{}",
-                        help_text()
-                    )));
-                }
-            },
-            Some("sync") => match parts.next() {
-                Some("once") => Command::SyncOnce,
-                Some(other) => {
-                    return Err(RingmasterError::Usage(format!(
-                        "unknown sync subcommand: {other}\n\n{}",
-                        help_text()
-                    )));
-                }
-                None => {
-                    return Err(RingmasterError::Usage(format!(
-                        "missing sync subcommand\n\n{}",
-                        help_text()
-                    )));
-                }
-            },
-            Some(other) => {
-                return Err(RingmasterError::Usage(format!(
-                    "unknown command: {other}\n\n{}",
-                    help_text()
-                )));
-            }
-        };
-
-        Ok(Self { command })
+    pub fn help_text() -> String {
+        let mut command = Self::command();
+        let mut buffer = Vec::new();
+        match command.write_long_help(&mut buffer) {
+            Ok(()) => String::from_utf8_lossy(&buffer).into_owned(),
+            Err(_) => "ringmaster help is currently unavailable".to_owned(),
+        }
     }
 }
 
-pub fn help_text() -> String {
-    let text = r#"ringmaster.rs
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod tests {
+    use super::{AuthCommand, Cli, Command, SyncCommand};
 
-Usage:
-  ringmaster <command>
+    #[test]
+    fn parses_nested_subcommands() {
+        let cli = Cli::parse_from(["ringmaster", "auth", "login"]).unwrap_or_else(|error| {
+            panic!("expected clap parsing to succeed in test: {error}");
+        });
 
-Commands:
-  tui           Launch the terminal UI (placeholder shell today)
-  demo          Launch deterministic demo output
-  doctor        Print environment and project health information
-  auth login    Start or describe the OAuth login flow
-  sync once     Run one sync cycle (scaffold)
-  help          Show this help text
-"#;
+        match cli.command {
+            Some(Command::Auth {
+                command: AuthCommand::Login,
+            }) => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
 
-    text.to_owned()
+    #[test]
+    fn parses_sync_once() {
+        let cli = Cli::parse_from(["ringmaster", "sync", "once"]).unwrap_or_else(|error| {
+            panic!("expected clap parsing to succeed in test: {error}");
+        });
+
+        match cli.command {
+            Some(Command::Sync {
+                command: SyncCommand::Once,
+            }) => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn help_text_mentions_required_commands() {
+        let help = Cli::help_text();
+
+        for command in ["tui", "doctor", "auth", "sync", "demo"] {
+            assert!(
+                help.contains(command),
+                "help text should mention `{command}`"
+            );
+        }
+    }
 }

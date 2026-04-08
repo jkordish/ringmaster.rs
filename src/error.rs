@@ -1,21 +1,35 @@
-use std::error::Error as StdError;
-use std::fmt::{Display, Formatter};
+use std::io;
+
+use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, RingmasterError>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum RingmasterError {
-    Usage(String),
+    #[error("{0}")]
+    Cli(String),
+    #[error("config error: {0}")]
     Config(String),
+    #[error("I/O error while {context}: {source}")]
+    Io {
+        context: &'static str,
+        #[source]
+        source: io::Error,
+    },
+    #[error("config parse error: {0}")]
+    ConfigParse(#[from] toml::de::Error),
+    #[error("storage error: {0}")]
+    Storage(#[from] rusqlite::Error),
+    #[error("oauth error: {0}")]
+    Auth(String),
+    #[error("transport error: {0}")]
+    Transport(#[from] reqwest::Error),
+    #[error("ui error: {0}")]
+    Ui(String),
 }
 
-impl Display for RingmasterError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Usage(message) => write!(f, "usage error: {message}"),
-            Self::Config(message) => write!(f, "config error: {message}"),
-        }
+impl RingmasterError {
+    pub fn io(context: &'static str, source: io::Error) -> Self {
+        Self::Io { context, source }
     }
 }
-
-impl StdError for RingmasterError {}

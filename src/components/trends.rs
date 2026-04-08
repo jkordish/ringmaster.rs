@@ -1,22 +1,48 @@
-use crate::app::AppState;
-use crate::components::Component;
+use ratatui::{
+    Frame,
+    layout::{Constraint, Direction, Layout},
+    prelude::Rect,
+    widgets::{Block, Borders, List, ListItem, Paragraph, Sparkline},
+};
 
-#[derive(Debug, Default)]
-pub struct Trends;
+use crate::app::TrendsModel;
 
-impl Component for Trends {
-    fn render(&self, state: &AppState) -> String {
-        format!(
-            "\
-[Trends]
-7d_baseline: {}
-30d_baseline: {}
-90d_baseline: {}
-delta_summary: {}",
-            state.snapshot.baseline_7d,
-            state.snapshot.baseline_30d,
-            state.snapshot.baseline_90d,
-            state.snapshot.delta_summary,
+pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &TrendsModel) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Length(6),
+            Constraint::Min(8),
+        ])
+        .split(area);
+
+    let window_lines = model
+        .windows
+        .iter()
+        .map(|window| ListItem::new(format!("{}  {}", window.label, window.summary)))
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        List::new(window_lines).block(
+            Block::default()
+                .title("Trend Windows")
+                .borders(Borders::ALL),
+        ),
+        layout[0],
+    );
+
+    let sparkline = Sparkline::default()
+        .block(
+            Block::default()
+                .title("Trend Sparkline")
+                .borders(Borders::ALL),
         )
-    }
+        .data(&model.sparkline);
+    frame.render_widget(sparkline, layout[1]);
+
+    let notes = model.notes.join("\n");
+    frame.render_widget(
+        Paragraph::new(notes).block(Block::default().title("Notes").borders(Borders::ALL)),
+        layout[2],
+    );
 }
