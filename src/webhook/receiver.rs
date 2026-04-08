@@ -443,7 +443,24 @@ fn handle_signed_delivery(
         }
     };
 
-    if !timestamp_is_fresh(&signature_timestamp, security.signature_tolerance_secs)? {
+    let signature_time = match parse_signature_timestamp(&signature_timestamp) {
+        Ok(signature_time) => signature_time,
+        Err(detail) => {
+            return reject_request(
+                store,
+                RejectionContext {
+                    request: &request,
+                    received_at,
+                    reason_code: "invalid_timestamp",
+                    detail,
+                    signature_timestamp: Some(signature_timestamp),
+                    status: StatusCode::BAD_REQUEST,
+                },
+            );
+        }
+    };
+
+    if !timestamp_is_fresh(signature_time, security.signature_tolerance_secs)? {
         return reject_request(
             store,
             RejectionContext {
@@ -648,20 +665,19 @@ fn verify_signature(secret: &str, timestamp: &str, body: &str, signature: &str) 
     Ok(mac.verify_slice(&signature_bytes).is_ok())
 }
 
-fn timestamp_is_fresh(timestamp: &str, tolerance_secs: u64) -> Result<bool> {
-    let parsed = if let Ok(seconds) = timestamp.parse::<i64>() {
+fn parse_signature_timestamp(timestamp: &str) -> std::result::Result<OffsetDateTime, String> {
+    if let Ok(seconds) = timestamp.parse::<i64>() {
         OffsetDateTime::from_unix_timestamp(seconds).map_err(|error| {
-            RingmasterError::Config(format!(
-                "webhook timestamp `{timestamp}` was not a valid unix timestamp: {error}"
-            ))
-        })?
+            format!("webhook timestamp `{timestamp}` was not a valid unix timestamp: {error}")
+        })
     } else {
         OffsetDateTime::parse(timestamp, &Rfc3339).map_err(|error| {
-            RingmasterError::Config(format!(
-                "webhook timestamp `{timestamp}` was not valid RFC3339: {error}"
-            ))
-        })?
-    };
+            format!("webhook timestamp `{timestamp}` was not valid RFC3339: {error}")
+        })
+    }
+}
+
+fn timestamp_is_fresh(parsed: OffsetDateTime, tolerance_secs: u64) -> Result<bool> {
     let tolerance = Duration::seconds(i64::try_from(tolerance_secs).map_err(|error| {
         RingmasterError::Config(format!("invalid webhook signature tolerance: {error}"))
     })?);
@@ -931,6 +947,7 @@ mod tests {
     use crate::config::Config;
     use crate::store::Store;
     use crate::webhook::receiver::{WebhookReplayOptions, delivery_fingerprint};
+    use axum::http::StatusCode;
     use hmac::{Hmac, Mac};
     use serde_json::json;
     use sha2::Sha256;
@@ -1034,6 +1051,44 @@ mod tests {
                 .unwrap_or_else(|error| panic!("latest rejection should load: {error}"))
                 .is_some()
         );
+    }
+
+    #[test]
+    fn rejects_malformed_timestamp_instead_of_returning_internal_error() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let body = r#"{"data_type":"daily_sleep","event_type":"create","object_id":"sleep_123"}"#;
+        let response = process_inbound_request(
+            &security_config(),
+            &store,
+            InboundWebhookRequest {
+                method: "POST".to_owned(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::from([
+                    (
+                        "x-oura-signature".to_owned(),
+                        sign("not-a-time", body, "fixture-secret"),
+                    ),
+                    ("x-oura-timestamp".to_owned(), "not-a-time".to_owned()),
+                ]),
+                body: body.to_owned(),
+            },
+        )
+        .unwrap_or_else(|error| panic!("malformed timestamp should produce a rejection: {error}"));
+
+        assert_eq!(response.status_code, StatusCode::BAD_REQUEST.as_u16());
+        match response.outcome {
+            ReceiverOutcome::Rejected { reason_code } => {
+                assert_eq!(reason_code, "invalid_timestamp");
+            }
+            other => panic!("unexpected receiver outcome: {other:?}"),
+        }
+        let rejection = store
+            .webhook()
+            .latest_rejected_delivery()
+            .unwrap_or_else(|error| panic!("latest rejection should load: {error}"))
+            .unwrap_or_else(|| panic!("a rejected delivery should be recorded"));
+        assert_eq!(rejection.reason_code, "invalid_timestamp");
     }
 
     #[test]
