@@ -168,6 +168,11 @@ pub fn next_wake_duration(
     Ok(StdDuration::from_secs(delay as u64))
 }
 
+fn watch_idle_sleep_duration(config: &Config, target: StdDuration) -> StdDuration {
+    let heartbeat_sleep = StdDuration::from_secs(config.webhook.heartbeat_secs.max(1));
+    target.min(heartbeat_sleep)
+}
+
 pub async fn run_watch(config: &Config, options: WatchOptions) -> Result<WatchReport> {
     let store = Store::open(config)?;
     upsert_watch_heartbeat(
@@ -260,8 +265,10 @@ async fn run_watch_inner(
                 } else {
                     store.sync_state().list()?
                 };
-                let sleep_for =
-                    next_wake_duration(config, &sync_states, OffsetDateTime::now_utc())?;
+                let sleep_for = watch_idle_sleep_duration(
+                    config,
+                    next_wake_duration(config, &sync_states, OffsetDateTime::now_utc())?,
+                );
                 tokio::select! {
                     _ = tokio::time::sleep(sleep_for) => {}
                     signal = tokio::signal::ctrl_c() => {
@@ -298,7 +305,10 @@ async fn run_watch_inner(
         let families = due_families(config, &sync_states, OffsetDateTime::now_utc(), force_all)?;
 
         if families.is_empty() {
-            let sleep_for = next_wake_duration(config, &sync_states, OffsetDateTime::now_utc())?;
+            let sleep_for = watch_idle_sleep_duration(
+                config,
+                next_wake_duration(config, &sync_states, OffsetDateTime::now_utc())?,
+            );
             tokio::select! {
                 _ = tokio::time::sleep(sleep_for) => {}
                 signal = tokio::signal::ctrl_c() => {
@@ -1051,7 +1061,9 @@ fn upsert_simulated_sync_state(
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::{SyncFamily, WatchOptions, due_families, next_wake_duration};
+    use super::{
+        SyncFamily, WatchOptions, due_families, next_wake_duration, watch_idle_sleep_duration,
+    };
     use crate::config::{
         AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
     };
@@ -1222,6 +1234,46 @@ mod tests {
         let duration = next_wake_duration(&config, &[], OffsetDateTime::now_utc())
             .unwrap_or_else(|error| panic!("next wake should compute: {error}"));
         assert!(duration.as_secs() >= 1);
+    }
+
+    #[test]
+    fn watch_idle_sleep_is_capped_to_heartbeat_cadence() {
+        let config = test_config();
+        let base = OffsetDateTime::parse("2026-04-08T06:00:00Z", &Rfc3339)
+            .unwrap_or_else(|error| panic!("timestamp should parse: {error}"));
+        let granted_scopes = vec![
+            "personal".to_owned(),
+            "daily".to_owned(),
+            "heartrate".to_owned(),
+            "workout".to_owned(),
+            "enhanced_tag".to_owned(),
+            "session".to_owned(),
+        ];
+        let sync_states = SyncFamily::ALL
+            .into_iter()
+            .map(|family| SyncStateRecord {
+                sync_key: family.sync_key().to_owned(),
+                status: SyncRunStatus::Success,
+                cursor: None,
+                last_attempted_at: base.format(&Rfc3339).unwrap_or_default(),
+                last_completed_at: Some(base.format(&Rfc3339).unwrap_or_default()),
+                message: Some(format!("{} synced", family.label())),
+                granted_scopes: granted_scopes.clone(),
+                last_error: None,
+                failure_count: 0,
+                next_attempt_after: None,
+                last_trigger_source: Some("periodic_reconcile".to_owned()),
+                last_trigger_detail: Some("test idle heartbeat sleep".to_owned()),
+            })
+            .collect::<Vec<_>>();
+        let next_wake = next_wake_duration(&config, &sync_states, base)
+            .unwrap_or_else(|error| panic!("next wake should compute: {error}"));
+
+        assert_eq!(next_wake.as_secs(), config.refresh.heartrate_interval_secs);
+        assert_eq!(
+            watch_idle_sleep_duration(&config, next_wake).as_secs(),
+            config.webhook.heartbeat_secs
+        );
     }
 
     #[test]
