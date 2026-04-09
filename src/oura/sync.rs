@@ -365,16 +365,16 @@ async fn sync_daily(
         )?
     };
     let (
-        sleep_pages,
-        readiness_pages,
-        activity_pages,
-        sleep_time_pages,
-        rest_mode_period_pages,
-        daily_stress_pages,
-        daily_resilience_pages,
-        cardiovascular_age_pages,
-        vo2_max_pages,
-    ) = tokio::try_join!(
+        sleep_pages_result,
+        readiness_pages_result,
+        activity_pages_result,
+        sleep_time_pages_result,
+        rest_mode_period_pages_result,
+        daily_stress_pages_result,
+        daily_resilience_pages_result,
+        cardiovascular_age_pages_result,
+        vo2_max_pages_result,
+    ) = tokio::join!(
         client.fetch_daily_sleep(start_date.clone(), end_date.clone()),
         client.fetch_daily_readiness(start_date.clone(), end_date.clone()),
         client.fetch_daily_activity(start_date.clone(), end_date.clone()),
@@ -384,7 +384,38 @@ async fn sync_daily(
         client.fetch_daily_resilience(start_date.clone(), end_date.clone()),
         client.fetch_daily_cardiovascular_age(start_date.clone(), end_date.clone()),
         client.fetch_vo2_max(start_date.clone(), end_date.clone()),
-    )?;
+    );
+    let sleep_pages = sleep_pages_result?;
+    let readiness_pages = readiness_pages_result?;
+    let activity_pages = activity_pages_result?;
+    let mut optional_failures = Vec::new();
+    let sleep_time_pages = collect_optional_daily_pages(
+        "sleep_time",
+        sleep_time_pages_result,
+        &mut optional_failures,
+    );
+    let rest_mode_period_pages = collect_optional_daily_pages(
+        "rest_mode_period",
+        rest_mode_period_pages_result,
+        &mut optional_failures,
+    );
+    let daily_stress_pages = collect_optional_daily_pages(
+        "daily_stress",
+        daily_stress_pages_result,
+        &mut optional_failures,
+    );
+    let daily_resilience_pages = collect_optional_daily_pages(
+        "daily_resilience",
+        daily_resilience_pages_result,
+        &mut optional_failures,
+    );
+    let cardiovascular_age_pages = collect_optional_daily_pages(
+        "daily_cardiovascular_age",
+        cardiovascular_age_pages_result,
+        &mut optional_failures,
+    );
+    let vo2_max_pages =
+        collect_optional_daily_pages("vo2_max", vo2_max_pages_result, &mut optional_failures);
     let imported_at = now_rfc3339()?;
 
     if !options.dry_run {
@@ -548,18 +579,40 @@ async fn sync_daily(
         + count_documents(&daily_resilience_pages)
         + count_documents(&cardiovascular_age_pages)
         + count_documents(&vo2_max_pages);
+    let (status, message, last_error) = if optional_failures.is_empty() {
+        (
+            SyncRunStatus::Success,
+            format!(
+                "Imported {imported_rows} daily summary and review-support rows from {start_date} through {end_date}."
+            ),
+            None,
+        )
+    } else {
+        let failure_summary = optional_failures
+            .iter()
+            .map(|(endpoint, problem)| format!("{endpoint} ({problem})"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        (
+            SyncRunStatus::Partial,
+            format!(
+                "Imported {imported_rows} core daily rows from {start_date} through {end_date}; optional review-support endpoints degraded independently: {failure_summary}."
+            ),
+            optional_failures
+                .first()
+                .map(|(_, problem)| problem.clone()),
+        )
+    };
     persist_slice_report(
         config,
         store,
         SliceReport {
             sync_key: DAILY_SYNC_KEY.to_owned(),
-            status: SyncRunStatus::Success,
+            status,
             imported_rows,
             watermark: Some(end_date.clone()),
-            message: format!(
-                "Imported {imported_rows} daily summary and review-support rows from {start_date} through {end_date}."
-            ),
-            last_error: None,
+            message,
+            last_error,
             next_attempt_after: None,
         },
         granted_scopes_from_report(capability_report),
@@ -1066,6 +1119,20 @@ fn count_documents<T>(pages: &[crate::oura::client::PageFetch<T>]) -> usize {
     pages.iter().map(|page| page.documents.len()).sum()
 }
 
+fn collect_optional_daily_pages<T>(
+    endpoint: &'static str,
+    result: Result<Vec<crate::oura::client::PageFetch<T>>>,
+    failures: &mut Vec<(&'static str, OuraProblem)>,
+) -> Vec<crate::oura::client::PageFetch<T>> {
+    match result {
+        Ok(pages) => pages,
+        Err(error) => {
+            failures.push((endpoint, error_problem(&error)));
+            Vec::new()
+        }
+    }
+}
+
 fn summarize_status(slice_reports: &[SliceReport]) -> SyncRunStatus {
     if slice_reports
         .iter()
@@ -1180,7 +1247,8 @@ fn now_rfc3339() -> Result<String> {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
-    use std::path::PathBuf;
+    use std::fs;
+    use std::path::{Path, PathBuf};
 
     use super::{SyncOptions, sync_once};
     use crate::config::{
@@ -1197,6 +1265,32 @@ mod tests {
 
     fn phase5_fixture_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase5")
+    }
+
+    fn copy_fixture_dir(source: &Path, destination: &Path) {
+        fs::create_dir_all(destination)
+            .unwrap_or_else(|error| panic!("fixture destination should exist: {error}"));
+        for entry in fs::read_dir(source).unwrap_or_else(|error| {
+            panic!(
+                "fixture directory {} should read: {error}",
+                source.display()
+            )
+        }) {
+            let entry = entry.unwrap_or_else(|error| panic!("fixture entry should load: {error}"));
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            if source_path.is_dir() {
+                copy_fixture_dir(&source_path, &destination_path);
+            } else {
+                fs::copy(&source_path, &destination_path).unwrap_or_else(|error| {
+                    panic!(
+                        "fixture file {} should copy to {}: {error}",
+                        source_path.display(),
+                        destination_path.display()
+                    )
+                });
+            }
+        }
     }
 
     fn fixture_config() -> Config {
@@ -1361,5 +1455,45 @@ mod tests {
         assert_eq!(counts.vo2_max, 7);
         assert_eq!(counts.rest_mode_periods, 2);
         assert_eq!(latest_source_day.as_deref(), Some("2026-04-08"));
+    }
+
+    #[tokio::test]
+    async fn daily_sync_degrades_when_optional_review_endpoint_fixture_is_malformed() {
+        let store = Store::open_in_memory().expect("store should open");
+        let config = fixture_config();
+        let tempdir = tempfile::tempdir().expect("tempdir should build");
+        let fixture_dir = tempdir.path().join("phase5-malformed-sleep-time");
+        copy_fixture_dir(&phase5_fixture_dir(), &fixture_dir);
+        fs::write(fixture_dir.join("sleep_time.json"), "{ not valid json")
+            .expect("optional fixture should be rewritable");
+
+        let report = sync_once(
+            &config,
+            &store,
+            SyncOptions {
+                dry_run: false,
+                fixture_dir: Some(fixture_dir),
+                families: vec![SyncFamily::Daily],
+                trigger_source: Some("periodic_reconcile".to_owned()),
+                trigger_detail: Some("test degraded optional daily sync".to_owned()),
+            },
+        )
+        .await
+        .expect("daily sync should degrade instead of failing");
+        let counts = store.views().record_counts().expect("record counts");
+        let daily_slice = report
+            .slice_reports
+            .iter()
+            .find(|slice| slice.sync_key == "oura.daily")
+            .expect("daily slice should exist");
+
+        assert_eq!(report.status, SyncRunStatus::Partial);
+        assert_eq!(daily_slice.status, SyncRunStatus::Partial);
+        assert!(daily_slice.message.contains("sleep_time"));
+        assert_eq!(counts.daily_sleep, 7);
+        assert_eq!(counts.daily_readiness, 7);
+        assert_eq!(counts.daily_activity, 7);
+        assert_eq!(counts.sleep_time, 0);
+        assert!(daily_slice.last_error.is_some());
     }
 }

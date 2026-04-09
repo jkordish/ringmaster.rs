@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use time::{OffsetDateTime, UtcOffset};
 
 use crate::error::OuraProblem;
 
@@ -521,7 +522,8 @@ impl LongTermResilienceLevel {
 
 impl RestModePeriodDocument {
     pub fn overlaps_day_window(&self, start_day: &str, end_day: &str) -> bool {
-        let effective_end_day = self.end_day.as_deref().unwrap_or(self.start_day.as_str());
+        let current_day = current_local_day_string();
+        let effective_end_day = self.end_day.as_deref().unwrap_or(current_day.as_str());
         self.start_day.as_str() <= end_day && effective_end_day >= start_day
     }
 
@@ -532,5 +534,37 @@ impl RestModePeriodDocument {
             .map(|episode| episode.tags.clone())
             .collect::<Vec<_>>();
         serde_json::to_string(&tags)
+    }
+}
+
+fn current_local_day_string() -> String {
+    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    OffsetDateTime::now_utc()
+        .to_offset(local_offset)
+        .date()
+        .to_string()
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod tests {
+    use super::{RestModeEpisodeDocument, RestModePeriodDocument, current_local_day_string};
+
+    #[test]
+    fn open_rest_mode_period_overlaps_windows_after_start_day() {
+        let current_day = current_local_day_string();
+        let period = RestModePeriodDocument {
+            id: "rest-open".to_owned(),
+            episodes: vec![RestModeEpisodeDocument {
+                tags: vec!["rest_mode".to_owned()],
+                timestamp: "2026-04-02T00:00:00Z".to_owned(),
+            }],
+            start_day: "2026-04-02".to_owned(),
+            start_time: Some("2026-04-02T00:00:00Z".to_owned()),
+            end_day: None,
+            end_time: None,
+        };
+
+        assert!(period.overlaps_day_window("2026-04-03", &current_day));
     }
 }

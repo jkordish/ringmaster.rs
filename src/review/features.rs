@@ -269,7 +269,7 @@ pub fn build_review_signal_days(inputs: &FeatureInputs<'_>) -> Result<Vec<Review
         )?;
     }
 
-    let rest_days = expand_rest_mode_days(inputs.rest_mode_periods)?;
+    let rest_days = expand_rest_mode_days(inputs.rest_mode_periods, captured_day)?;
     for day in rest_days {
         insert_numeric_seed(
             &mut series,
@@ -572,7 +572,10 @@ fn resilience_level_score(level: &str) -> u8 {
     }
 }
 
-fn expand_rest_mode_days(rest_mode_periods: &[RestModePeriodRecord]) -> Result<Vec<String>> {
+fn expand_rest_mode_days(
+    rest_mode_periods: &[RestModePeriodRecord],
+    captured_day: Date,
+) -> Result<Vec<String>> {
     let mut days = BTreeSet::new();
 
     for period in rest_mode_periods {
@@ -582,7 +585,7 @@ fn expand_rest_mode_days(rest_mode_periods: &[RestModePeriodRecord]) -> Result<V
             .as_deref()
             .map(parse_day)
             .transpose()?
-            .unwrap_or(start_day);
+            .unwrap_or(captured_day);
         let mut current_day = start_day;
         loop {
             days.insert(current_day.to_string());
@@ -831,6 +834,44 @@ mod tests {
 
         assert_eq!(vo2_rows.len(), 1);
         assert_eq!(vo2_rows[0].numeric_value, Some(42.0));
+    }
+
+    #[test]
+    fn feature_builder_expands_open_rest_mode_through_captured_day() {
+        let rows = build_review_signal_days(&FeatureInputs {
+            daily_history: &[],
+            daily_activity: &[],
+            daily_readiness: &[],
+            daily_stress: &[],
+            daily_resilience: &[],
+            daily_cardiovascular_age: &[],
+            vo2_max: &[],
+            sleep_time: &[],
+            rest_mode_periods: &[RestModePeriodRecord {
+                period_id: "rest-open".to_owned(),
+                start_day: "2026-04-02".to_owned(),
+                start_time: Some("2026-04-02T00:00:00Z".to_owned()),
+                end_day: None,
+                end_time: None,
+                episode_count: 1,
+                tags_json: "[]".to_owned(),
+                raw_cache_key: None,
+                updated_at: "2026-04-02T08:00:00Z".to_owned(),
+            }],
+            captured_at: "2026-04-05T10:00:00Z",
+        })
+        .unwrap_or_else(|error| panic!("feature build should succeed: {error}"));
+
+        let rest_days = rows
+            .iter()
+            .filter(|row| row.signal_key == "rest_mode_active")
+            .map(|row| row.day.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rest_days,
+            vec!["2026-04-02", "2026-04-03", "2026-04-04", "2026-04-05"]
+        );
     }
 
     #[test]
