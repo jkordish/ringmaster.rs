@@ -43,6 +43,7 @@ pub mod refresh;
 pub mod review;
 pub mod store;
 pub mod tui;
+pub mod ui;
 pub mod webhook;
 
 use std::io::{IsTerminal, stdin, stdout};
@@ -52,9 +53,10 @@ use std::sync::OnceLock;
 use app::{build_demo_state, build_live_state, load_live_snapshot};
 use cli::{
     AuthCommand, Cli, Command, DeriveCommand, DeriveRebuildArgs, ReviewCommand, ReviewFocusArg,
-    ReviewInvestigateArgs, ReviewTodayArgs, ReviewWeekArgs, SyncCommand, SyncOnceArgs,
-    SyncWatchArgs, TuiArgs, WebhookCommand, WebhookReplayArgs, WebhookServeArgs,
-    WebhookSubscriptionCommand, WebhookSubscriptionsListArgs, WebhookSubscriptionsSyncArgs,
+    ReviewInvestigateArgs, ReviewTodayArgs, ReviewWeekArgs, SnapshotScreenArg, SnapshotSizeArg,
+    SyncCommand, SyncOnceArgs, SyncWatchArgs, TuiArgs, UiCommand, UiSnapshotArgs, WebhookCommand,
+    WebhookReplayArgs, WebhookServeArgs, WebhookSubscriptionCommand, WebhookSubscriptionsListArgs,
+    WebhookSubscriptionsSyncArgs,
 };
 use config::{AppPaths, Config};
 use error::{Result, RingmasterError};
@@ -102,6 +104,9 @@ pub async fn run_cli(cli: Cli) -> Result<Option<String>> {
         Command::Doctor => run_doctor(&config),
         Command::Demo => run_demo(&config).await,
         Command::Tui(args) => run_tui(&config, args).await,
+        Command::Ui { command } => match command {
+            UiCommand::Snapshot(args) => run_ui_snapshot(&config, args).await,
+        },
         Command::Auth {
             command: AuthCommand::Login,
         } => run_auth_login(&config).await,
@@ -583,6 +588,605 @@ async fn run_tui(config: &Config, args: TuiArgs) -> Result<Option<String>> {
         }
         tui::render_snapshot(&app, 100, 32).map(Some)
     }
+}
+
+async fn run_ui_snapshot(config: &Config, args: UiSnapshotArgs) -> Result<Option<String>> {
+    let screens = snapshot_screens(&args);
+    let sizes = snapshot_sizes(&args);
+    let render_source =
+        build_snapshot_render_source(config, args.demo, args.fixture_dir.clone()).await?;
+    let scenario_list = render_source.scenarios();
+    let requests = ui::snapshot::build_requests(
+        &screens,
+        &sizes,
+        if scenario_list.is_empty() {
+            None
+        } else {
+            Some(scenario_list.as_slice())
+        },
+    );
+    let artifact_paths = ui::snapshot::write_snapshots(&args.out_dir, &requests, |request| {
+        render_source.app_for_request(request)
+    })?;
+
+    let artifacts = artifact_paths
+        .iter()
+        .map(|path| format!("  - {}", path.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let scenarios = if scenario_list.is_empty() {
+        "legacy single source".to_owned()
+    } else {
+        scenario_list
+            .iter()
+            .map(|scenario| scenario.label())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    Ok(Some(format!(
+        "\
+ringmaster ui snapshot
+
+source: {}
+scenarios: {}
+screens: {}
+sizes: {}
+out_dir: {}
+artifacts:
+{}
+",
+        render_source.label(),
+        scenarios,
+        screens
+            .iter()
+            .map(|screen| screen.title().to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join(", "),
+        sizes
+            .iter()
+            .map(|size| size.label().to_owned())
+            .collect::<Vec<_>>()
+            .join(", "),
+        args.out_dir.display(),
+        artifacts
+    )))
+}
+
+fn snapshot_screens(args: &UiSnapshotArgs) -> Vec<app::Screen> {
+    if args.screen.is_empty() {
+        app::Screen::ALL.to_vec()
+    } else {
+        args.screen
+            .iter()
+            .map(|screen| match screen {
+                SnapshotScreenArg::Dashboard => app::Screen::Dashboard,
+                SnapshotScreenArg::Timeline => app::Screen::Timeline,
+                SnapshotScreenArg::Trends => app::Screen::Trends,
+                SnapshotScreenArg::Explain => app::Screen::Explain,
+                SnapshotScreenArg::Patterns => app::Screen::Patterns,
+                SnapshotScreenArg::Review => app::Screen::Review,
+                SnapshotScreenArg::Ops => app::Screen::Ops,
+            })
+            .collect()
+    }
+}
+
+fn snapshot_sizes(args: &UiSnapshotArgs) -> Vec<ui::snapshot::SnapshotSize> {
+    if args.size.is_empty() {
+        ui::snapshot::SnapshotSize::ALL.to_vec()
+    } else {
+        args.size
+            .iter()
+            .map(|size| match size {
+                SnapshotSizeArg::Compact => ui::snapshot::SnapshotSize::Compact,
+                SnapshotSizeArg::Medium => ui::snapshot::SnapshotSize::Medium,
+                SnapshotSizeArg::Wide => ui::snapshot::SnapshotSize::Wide,
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SnapshotScenarioState {
+    scenario: ui::snapshot::SnapshotScenario,
+    app: app::AppState,
+}
+
+#[derive(Debug, Clone)]
+enum SnapshotRenderSource {
+    Single {
+        label: String,
+        app: Box<app::AppState>,
+    },
+    ScenarioMatrix {
+        label: String,
+        states: Vec<SnapshotScenarioState>,
+    },
+}
+
+impl SnapshotRenderSource {
+    fn label(&self) -> &str {
+        match self {
+            Self::Single { label, .. } | Self::ScenarioMatrix { label, .. } => label,
+        }
+    }
+
+    fn scenarios(&self) -> Vec<ui::snapshot::SnapshotScenario> {
+        match self {
+            Self::Single { .. } => Vec::new(),
+            Self::ScenarioMatrix { states, .. } => {
+                states.iter().map(|state| state.scenario).collect()
+            }
+        }
+    }
+
+    fn app_for_request(&self, request: ui::snapshot::SnapshotRequest) -> Result<app::AppState> {
+        match self {
+            Self::Single { app, .. } => Ok((**app).clone()),
+            Self::ScenarioMatrix { states, .. } => states
+                .iter()
+                .find(|state| Some(state.scenario) == request.scenario)
+                .map(|state| state.app.clone())
+                .ok_or_else(|| {
+                    RingmasterError::Ui(format!(
+                        "snapshot scenario {:?} was not prepared",
+                        request.scenario
+                    ))
+                }),
+        }
+    }
+}
+
+async fn build_snapshot_render_source(
+    config: &Config,
+    demo: bool,
+    fixture_dir: Option<PathBuf>,
+) -> Result<SnapshotRenderSource> {
+    if let Some(fixture_dir) = fixture_dir {
+        if ui::snapshot::is_phase7_fixture_root(&fixture_dir) {
+            let states = build_phase7_snapshot_states(config, &fixture_dir).await?;
+            return Ok(SnapshotRenderSource::ScenarioMatrix {
+                label: format!("phase7 fixture root {}", fixture_dir.display()),
+                states,
+            });
+        }
+
+        let app = build_fixture_snapshot_app(
+            config,
+            fixture_dir.clone(),
+            "Fixture-backed snapshot is reading from a seeded local store.",
+        )
+        .await?;
+        return Ok(SnapshotRenderSource::Single {
+            label: format!("fixture {}", fixture_dir.display()),
+            app: Box::new(app),
+        });
+    }
+
+    if demo {
+        return Ok(SnapshotRenderSource::Single {
+            label: "demo".to_owned(),
+            app: Box::new(build_demo_state(config)),
+        });
+    }
+
+    let store = Store::open(config)?;
+    let auth_status = oura::auth::inspect_auth(config, &store)?;
+    Ok(SnapshotRenderSource::Single {
+        label: "live store".to_owned(),
+        app: Box::new(build_live_state(config, &store, &auth_status)?),
+    })
+}
+
+async fn build_fixture_snapshot_app(
+    config: &Config,
+    fixture_dir: PathBuf,
+    status_line: &str,
+) -> Result<app::AppState> {
+    let snapshot = load_fixture_snapshot(config, fixture_dir).await?;
+    Ok(app::build_state_from_snapshot(
+        app::RunMode::Live,
+        status_line,
+        snapshot,
+    ))
+}
+
+async fn load_fixture_snapshot(config: &Config, fixture_dir: PathBuf) -> Result<app::LiveSnapshot> {
+    let temp_root = TempRootGuard::new("ui-snapshot");
+    let mut temp_config = config.clone();
+    temp_config.paths = AppPaths::from_roots(
+        config.paths.home_dir.clone(),
+        temp_root.path().join("config"),
+        temp_root.path().join("state"),
+        temp_root.path().join("cache"),
+    )?;
+
+    let store = Store::open(&temp_config)?;
+    oura::sync::sync_once(
+        &temp_config,
+        &store,
+        oura::sync::SyncOptions {
+            dry_run: false,
+            fixture_dir: Some(fixture_dir),
+            families: SyncFamily::ALL.to_vec(),
+            trigger_source: Some("periodic_reconcile".to_owned()),
+            trigger_detail: Some("ui snapshot fixture seed".to_owned()),
+        },
+    )
+    .await?;
+    derive::rebuild_store(&store)?;
+    let auth_status = oura::auth::inspect_auth(&temp_config, &store)?;
+    load_live_snapshot(&temp_config, &store, &auth_status)
+}
+
+async fn build_phase7_snapshot_states(
+    config: &Config,
+    fixture_root: &std::path::Path,
+) -> Result<Vec<SnapshotScenarioState>> {
+    let mut states = Vec::new();
+    for scenario in ui::snapshot::SnapshotScenario::ALL {
+        let fixture_dir = phase7_fixture_seed_dir(fixture_root, scenario);
+        let mut snapshot = load_fixture_snapshot(config, fixture_dir).await?;
+        apply_phase7_snapshot_overlay(config, &mut snapshot, scenario);
+        states.push(SnapshotScenarioState {
+            scenario,
+            app: app::build_state_from_snapshot(
+                app::RunMode::Live,
+                format!(
+                    "Scenario fixture `{}` is driving this deterministic snapshot.",
+                    scenario.label()
+                ),
+                snapshot,
+            ),
+        });
+    }
+    Ok(states)
+}
+
+#[cfg(test)]
+pub(crate) async fn build_phase7_snapshot_apps_for_tests(
+    config: &Config,
+    fixture_root: &std::path::Path,
+) -> Result<Vec<(ui::snapshot::SnapshotScenario, app::AppState)>> {
+    build_phase7_snapshot_states(config, fixture_root)
+        .await
+        .map(|states| {
+            states
+                .into_iter()
+                .map(|state| (state.scenario, state.app))
+                .collect()
+        })
+}
+
+fn phase7_fixture_seed_dir(
+    fixture_root: &std::path::Path,
+    scenario: ui::snapshot::SnapshotScenario,
+) -> PathBuf {
+    let fixture_label = match scenario {
+        ui::snapshot::SnapshotScenario::Strong
+        | ui::snapshot::SnapshotScenario::Weak
+        | ui::snapshot::SnapshotScenario::Empty => scenario.label(),
+        ui::snapshot::SnapshotScenario::Stale | ui::snapshot::SnapshotScenario::Error => "strong",
+    };
+    fixture_root.join(fixture_label)
+}
+
+fn apply_phase7_snapshot_overlay(
+    config: &Config,
+    snapshot: &mut app::LiveSnapshot,
+    scenario: ui::snapshot::SnapshotScenario,
+) {
+    snapshot.webhook.desired_subscriptions = phase7_desired_subscription_records(config);
+    snapshot.webhook.remote_subscriptions = phase7_remote_subscription_records(
+        &snapshot.webhook.desired_subscriptions,
+        "matched",
+        "2026-04-15T12:00:00Z",
+        "2026-04-09T11:55:00Z",
+    );
+    snapshot.webhook.recent_deliveries =
+        vec![crate::store::webhook_store::AcceptedWebhookDeliveryRecord {
+            delivery_id: 101,
+            delivery_fingerprint: format!("phase7-{}", scenario.label()),
+            received_at: "2026-04-09T11:54:00Z".to_owned(),
+            signature_timestamp: Some("2026-04-09T11:54:00Z".to_owned()),
+            data_type: Some("daily_sleep".to_owned()),
+            event_type: Some(crate::webhook::WebhookEventType::Update),
+            object_id: Some("daily_sleep_2026-04-08".to_owned()),
+            payload_json: "{}".to_owned(),
+            headers_json: "{}".to_owned(),
+            query_json: "{}".to_owned(),
+        }];
+    snapshot.webhook.latest_rejected_delivery = None;
+    snapshot.webhook.pending_invalidations.clear();
+    snapshot.webhook.recent_processing_attempts.clear();
+    snapshot.webhook.runtime_heartbeats = vec![
+        crate::store::webhook_store::RuntimeHeartbeatRecord {
+            component: "webhook.receiver".to_owned(),
+            mode: "running".to_owned(),
+            bind_address: Some(snapshot.webhook.bind_address.clone()),
+            public_base_url: snapshot.webhook.callback_url.clone(),
+            detail: Some("phase7 fixture".to_owned()),
+            last_seen_at: "2026-04-09T11:59:30Z".to_owned(),
+        },
+        crate::store::webhook_store::RuntimeHeartbeatRecord {
+            component: "sync.watch".to_owned(),
+            mode: "running".to_owned(),
+            bind_address: None,
+            public_base_url: None,
+            detail: Some("phase7 fixture".to_owned()),
+            last_seen_at: "2026-04-09T11:59:30Z".to_owned(),
+        },
+    ];
+
+    match scenario {
+        ui::snapshot::SnapshotScenario::Strong => {
+            "2026-04-09T12:00:00Z".clone_into(&mut snapshot.captured_at);
+        }
+        ui::snapshot::SnapshotScenario::Weak => {
+            "2026-04-09T12:00:00Z".clone_into(&mut snapshot.captured_at);
+            for state in &mut snapshot.sync_states {
+                if state.message.is_none() {
+                    state.message =
+                        Some("Thin local history keeps comparisons tentative.".to_owned());
+                }
+            }
+        }
+        ui::snapshot::SnapshotScenario::Empty => {
+            "2026-04-09T12:00:00Z".clone_into(&mut snapshot.captured_at);
+            snapshot.personal_info = None;
+            snapshot.daily_history.clear();
+            snapshot.heartrate_days.clear();
+            snapshot.heartrate_daily_averages.clear();
+            snapshot.context_events.clear();
+            snapshot.pattern_summaries.clear();
+            snapshot.review_signal_days.clear();
+            snapshot.sleep_time.clear();
+            snapshot.rest_mode_periods.clear();
+            snapshot.record_counts = crate::store::queries::RecordCounts::default();
+            for state in &mut snapshot.sync_states {
+                state.status = crate::store::queries::SyncRunStatus::Success;
+                state.message =
+                    Some("Scope granted, but the local cache is still empty.".to_owned());
+                state.last_error = None;
+                state.failure_count = 0;
+                state.next_attempt_after = None;
+            }
+        }
+        ui::snapshot::SnapshotScenario::Stale => {
+            "2026-04-11T12:00:00Z".clone_into(&mut snapshot.captured_at);
+            snapshot.webhook.remote_subscriptions = phase7_remote_subscription_records(
+                &snapshot.webhook.desired_subscriptions,
+                "drifted",
+                "2026-04-10T08:00:00Z",
+                "2026-04-09T08:00:00Z",
+            );
+            snapshot.webhook.runtime_heartbeats = vec![
+                crate::store::webhook_store::RuntimeHeartbeatRecord {
+                    component: "webhook.receiver".to_owned(),
+                    mode: "running".to_owned(),
+                    bind_address: Some(snapshot.webhook.bind_address.clone()),
+                    public_base_url: snapshot.webhook.callback_url.clone(),
+                    detail: Some("stale heartbeat".to_owned()),
+                    last_seen_at: "2026-04-09T07:30:00Z".to_owned(),
+                },
+                crate::store::webhook_store::RuntimeHeartbeatRecord {
+                    component: "sync.watch".to_owned(),
+                    mode: "running".to_owned(),
+                    bind_address: None,
+                    public_base_url: None,
+                    detail: Some("lagging".to_owned()),
+                    last_seen_at: "2026-04-09T07:35:00Z".to_owned(),
+                },
+            ];
+            snapshot.webhook.latest_rejected_delivery =
+                Some(crate::store::webhook_store::RejectedWebhookDeliveryRecord {
+                    rejection_id: 7,
+                    received_at: "2026-04-10T05:00:00Z".to_owned(),
+                    reason_code: "signature_stale".to_owned(),
+                    detail: "delivery arrived outside the tolerance window".to_owned(),
+                    signature_timestamp: Some("2026-04-10T04:40:00Z".to_owned()),
+                    payload_json: "{}".to_owned(),
+                    headers_json: "{}".to_owned(),
+                    query_json: "{}".to_owned(),
+                });
+            snapshot.webhook.pending_invalidations =
+                vec![crate::store::webhook_store::InvalidationRecord {
+                    invalidation_id: 14,
+                    queue_key: "daily_sleep:update:2026-04-08".to_owned(),
+                    data_type: "daily_sleep".to_owned(),
+                    event_type: crate::webhook::WebhookEventType::Update,
+                    object_id: Some("daily_sleep_2026-04-08".to_owned()),
+                    delivery_id: 101,
+                    first_queued_at: "2026-04-10T05:10:00Z".to_owned(),
+                    last_queued_at: "2026-04-10T05:10:00Z".to_owned(),
+                    available_at: "2026-04-10T05:10:00Z".to_owned(),
+                    leased_at: None,
+                    lease_owner: None,
+                    attempt_count: 2,
+                    last_error: Some("receiver heartbeat went stale before processing".to_owned()),
+                    completed_at: None,
+                }];
+            snapshot.webhook.recent_processing_attempts =
+                vec![crate::store::webhook_store::ProcessingAttemptRecord {
+                    attempt_id: 3,
+                    invalidation_id: 14,
+                    started_at: "2026-04-10T05:11:00Z".to_owned(),
+                    finished_at: Some("2026-04-10T05:12:00Z".to_owned()),
+                    outcome: "failed".to_owned(),
+                    detail: Some("watch loop was offline".to_owned()),
+                }];
+            for state in &mut snapshot.sync_states {
+                "2026-04-09T05:00:00Z".clone_into(&mut state.last_attempted_at);
+                state.last_completed_at = Some("2026-04-09T05:01:00Z".to_owned());
+                state.failure_count = 2;
+                state.next_attempt_after = Some("2026-04-11T12:05:00Z".to_owned());
+                state.message = Some(
+                    "Persisted data is present, but freshness is now outside the expected window."
+                        .to_owned(),
+                );
+            }
+        }
+        ui::snapshot::SnapshotScenario::Error => {
+            "2026-04-09T12:00:00Z".clone_into(&mut snapshot.captured_at);
+            let granted_scopes = vec!["personal".to_owned(), "daily".to_owned()];
+            snapshot
+                .auth_status
+                .granted_scopes
+                .clone_from(&granted_scopes);
+            snapshot.auth_status.capability_report =
+                crate::oura::models::CapabilityReport::from_scopes(
+                    &snapshot.auth_status.requested_scopes,
+                    &granted_scopes,
+                );
+            snapshot.auth_status.access_token_stored = false;
+            snapshot.auth_status.refresh_token_stored = false;
+            snapshot.auth_status.last_error = Some(crate::error::OuraProblem::new(
+                Some(401),
+                "session missing",
+                Some("run `ringmaster auth login` to restore the local session".to_owned()),
+            ));
+            snapshot.heartrate_days.clear();
+            snapshot.heartrate_daily_averages.clear();
+            snapshot.context_events.clear();
+            snapshot.pattern_summaries.clear();
+            snapshot.review_signal_days.clear();
+            snapshot.sleep_time.clear();
+            snapshot.rest_mode_periods.clear();
+            snapshot.record_counts.heartrate_samples = 0;
+            snapshot.record_counts.workouts = 0;
+            snapshot.record_counts.enhanced_tags = 0;
+            snapshot.record_counts.sessions = 0;
+            snapshot.record_counts.derived_context_events = 0;
+            snapshot.record_counts.derived_pattern_summaries = 0;
+            snapshot.record_counts.derived_review_signal_days = 0;
+            snapshot.webhook.callback_url = None;
+            snapshot.webhook.verification_token_configured = false;
+            snapshot.webhook.remote_subscriptions.clear();
+            snapshot.webhook.runtime_heartbeats.clear();
+            snapshot.webhook.latest_rejected_delivery =
+                Some(crate::store::webhook_store::RejectedWebhookDeliveryRecord {
+                    rejection_id: 9,
+                    received_at: "2026-04-09T11:40:00Z".to_owned(),
+                    reason_code: "verification_failed".to_owned(),
+                    detail: "receiver is missing the verification token".to_owned(),
+                    signature_timestamp: Some("2026-04-09T11:39:00Z".to_owned()),
+                    payload_json: "{}".to_owned(),
+                    headers_json: "{}".to_owned(),
+                    query_json: "{}".to_owned(),
+                });
+            for state in &mut snapshot.sync_states {
+                state.failure_count = 3;
+                state.next_attempt_after = Some("2026-04-09T12:05:00Z".to_owned());
+                match state.sync_key.as_str() {
+                    "oura.daily" => {
+                        state.status = crate::store::queries::SyncRunStatus::Failed;
+                        state.message = Some(
+                            "The last daily sync failed because the local auth session is missing."
+                                .to_owned(),
+                        );
+                        state.last_error = Some(crate::error::OuraProblem::new(
+                            Some(401),
+                            "auth required",
+                            Some(
+                                "run `ringmaster auth login` before trying another sync".to_owned(),
+                            ),
+                        ));
+                    }
+                    "oura.heartrate" => {
+                        state.status = crate::store::queries::SyncRunStatus::Blocked;
+                        state.message = Some(
+                            "Missing `heartrate` scope; timeline and trends cannot refresh."
+                                .to_owned(),
+                        );
+                        state.last_error = None;
+                    }
+                    "oura.workouts" => {
+                        state.status = crate::store::queries::SyncRunStatus::Blocked;
+                        state.message = Some(
+                            "Missing `workout` scope; workout context stays unavailable."
+                                .to_owned(),
+                        );
+                        state.last_error = None;
+                    }
+                    "oura.enhanced_tags" => {
+                        state.status = crate::store::queries::SyncRunStatus::Blocked;
+                        state.message = Some(
+                            "Missing `enhanced_tag` scope; tag context stays unavailable."
+                                .to_owned(),
+                        );
+                        state.last_error = None;
+                    }
+                    "oura.sessions" => {
+                        state.status = crate::store::queries::SyncRunStatus::Blocked;
+                        state.message = Some(
+                            "Missing `session` scope; session context stays unavailable."
+                                .to_owned(),
+                        );
+                        state.last_error = None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn phase7_desired_subscription_records(
+    config: &Config,
+) -> Vec<crate::store::webhook_store::DesiredWebhookSubscriptionRecord> {
+    let updated_at = "2026-04-09T11:50:00Z".to_owned();
+    let callback_url = config.webhook.callback_url();
+    config
+        .webhook
+        .subscriptions
+        .iter()
+        .filter(|subscription| subscription.enabled)
+        .flat_map(|subscription| {
+            let callback_url = callback_url.clone();
+            let updated_at = updated_at.clone();
+            subscription
+                .normalized_event_types()
+                .into_iter()
+                .map(move |event_type| {
+                    crate::store::webhook_store::DesiredWebhookSubscriptionRecord {
+                        data_type: subscription.data_type.clone(),
+                        event_type,
+                        enabled: true,
+                        callback_url: callback_url.clone(),
+                        updated_at: updated_at.clone(),
+                    }
+                })
+        })
+        .collect()
+}
+
+fn phase7_remote_subscription_records(
+    desired: &[crate::store::webhook_store::DesiredWebhookSubscriptionRecord],
+    drift_status: &str,
+    expiration_time: &str,
+    last_seen_at: &str,
+) -> Vec<crate::store::webhook_store::RemoteWebhookSubscriptionRecord> {
+    desired
+        .iter()
+        .enumerate()
+        .map(
+            |(index, desired)| crate::store::webhook_store::RemoteWebhookSubscriptionRecord {
+                subscription_id: format!("sub-{:02}", index + 1),
+                callback_url: desired
+                    .callback_url
+                    .clone()
+                    .unwrap_or_else(|| "https://fixture.example.test/webhooks/oura".to_owned()),
+                event_type: desired.event_type,
+                data_type: desired.data_type.clone(),
+                expiration_time: expiration_time.to_owned(),
+                drift_status: drift_status.to_owned(),
+                last_seen_at: last_seen_at.to_owned(),
+                created_at: "2026-04-08T12:00:00Z".to_owned(),
+                updated_at: last_seen_at.to_owned(),
+            },
+        )
+        .collect()
 }
 
 async fn run_auth_login(config: &Config) -> Result<Option<String>> {

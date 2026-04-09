@@ -19,6 +19,11 @@ pub struct Cli {
 pub enum Command {
     /// Launch the live terminal UI.
     Tui(TuiArgs),
+    /// Non-interactive UI tooling.
+    Ui {
+        #[command(subcommand)]
+        command: UiCommand,
+    },
     /// Print paths, config, storage, and health information.
     Doctor,
     /// Launch deterministic demo mode.
@@ -54,6 +59,12 @@ pub enum Command {
 pub enum AuthCommand {
     /// Start or describe the OAuth login flow.
     Login,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum UiCommand {
+    /// Render deterministic screen snapshots for visual QA.
+    Snapshot(UiSnapshotArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
@@ -106,6 +117,43 @@ pub struct TuiArgs {
     /// Launch the TUI with deterministic demo data.
     #[arg(long)]
     pub demo: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SnapshotScreenArg {
+    Dashboard,
+    Timeline,
+    Trends,
+    Explain,
+    Patterns,
+    Review,
+    Ops,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SnapshotSizeArg {
+    Compact,
+    Medium,
+    Wide,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct UiSnapshotArgs {
+    /// Use deterministic demo-mode screen data.
+    #[arg(long)]
+    pub demo: bool,
+    /// Seed a temporary local store from fixture payloads before rendering snapshots.
+    #[arg(long)]
+    pub fixture_dir: Option<PathBuf>,
+    /// Limit snapshot generation to specific screens. Defaults to all primary screens.
+    #[arg(long, value_enum)]
+    pub screen: Vec<SnapshotScreenArg>,
+    /// Limit snapshot generation to specific terminal sizes. Defaults to compact, medium, and wide.
+    #[arg(long, value_enum)]
+    pub size: Vec<SnapshotSizeArg>,
+    /// Output directory for deterministic snapshot artifacts.
+    #[arg(long)]
+    pub out_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
@@ -262,11 +310,13 @@ impl Cli {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::{
         AuthCommand, Cli, Command, DeriveCommand, DeriveRebuildArgs, ReviewCommand, ReviewFocusArg,
-        ReviewInvestigateArgs, ReviewTodayArgs, SyncCommand, SyncOnceArgs, SyncWatchArgs,
-        WebhookCommand, WebhookReplayArgs, WebhookSubscriptionCommand,
-        WebhookSubscriptionsSyncArgs,
+        ReviewInvestigateArgs, ReviewTodayArgs, SnapshotScreenArg, SnapshotSizeArg, SyncCommand,
+        SyncOnceArgs, SyncWatchArgs, UiCommand, UiSnapshotArgs, WebhookCommand, WebhookReplayArgs,
+        WebhookSubscriptionCommand, WebhookSubscriptionsSyncArgs,
     };
 
     #[test]
@@ -306,7 +356,7 @@ mod tests {
         let help = Cli::help_text();
 
         for command in [
-            "tui", "doctor", "auth", "sync", "webhook", "derive", "review", "demo",
+            "tui", "ui", "doctor", "auth", "sync", "webhook", "derive", "review", "demo",
         ] {
             assert!(
                 help.contains(command),
@@ -465,6 +515,50 @@ mod tests {
                         fixture_dir: None,
                     }),
             }) => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ui_snapshot_args() {
+        let cli = Cli::parse_from([
+            "ringmaster",
+            "ui",
+            "snapshot",
+            "--demo",
+            "--screen",
+            "dashboard",
+            "--screen",
+            "ops",
+            "--size",
+            "compact",
+            "--size",
+            "wide",
+            "--out-dir",
+            "/tmp/ringmaster-snapshots",
+        ])
+        .unwrap_or_else(|error| {
+            panic!("expected clap parsing to succeed in test: {error}");
+        });
+
+        match cli.command {
+            Some(Command::Ui {
+                command:
+                    UiCommand::Snapshot(UiSnapshotArgs {
+                        demo: true,
+                        fixture_dir: None,
+                        screen,
+                        size,
+                        out_dir,
+                    }),
+            }) => {
+                assert_eq!(
+                    screen,
+                    vec![SnapshotScreenArg::Dashboard, SnapshotScreenArg::Ops]
+                );
+                assert_eq!(size, vec![SnapshotSizeArg::Compact, SnapshotSizeArg::Wide]);
+                assert_eq!(out_dir, PathBuf::from("/tmp/ringmaster-snapshots"));
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }

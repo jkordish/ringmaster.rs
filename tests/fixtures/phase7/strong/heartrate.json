@@ -1,0 +1,65 @@
+{
+  "data": [
+    {
+      "bpm": 57,
+      "source": "rest",
+      "timestamp": "2026-04-07T05:50:00Z"
+    },
+    {
+      "bpm": 59,
+      "source": "rest",
+      "timestamp": "2026-04-07T05:55:00Z"
+    },
+    {
+      "bpm": 61,
+      "source": "live",
+      "timestamp": "2026-04-07T06:00:00Z"
+    },
+    {
+      "bpm": 63,
+      "source": "live",
+      "timestamp": "2026-04-07T06:05:00Z"
+    },
+    {
+      "bpm": 66,
+      "source": "live",
+      "timestamp": "2026-04-07T06:10:00Z"
+    },
+    {
+      "bpm": 71,
+      "source": "live",
+      "timestamp": "2026-04-07T18:20:00Z"
+    },
+    {
+      "bpm": 88,
+      "source": "live",
+      "timestamp": "2026-04-07T18:30:00Z"
+    },
+    {
+      "bpm": 104,
+      "source": "live",
+      "timestamp": "2026-04-07T18:40:00Z"
+    },
+    {
+      "bpm": 96,
+      "source": "live",
+      "timestamp": "2026-04-07T18:50:00Z"
+    },
+    {
+      "bpm": 78,
+      "source": "live",
+      "timestamp": "2026-04-07T19:00:00Z"
+    },
+    {
+      "bpm": 62,
+      "source": "rest",
+      "timestamp": "2026-04-07T21:30:00Z"
+    },
+    {
+      "bpm": 60,
+      "source": "rest",
+      "timestamp": "2026-04-07T21:35:00Z"
+    }
+  ],
+  "next_token": null
+}

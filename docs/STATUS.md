@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This file is the current truth for the repository during the phase-5 smart-reviews-and-guided-investigations pass. It records what now works, what gaps this pass closed, and what remains intentionally deferred.
+This file is the current truth for the repository during the phase-7 scenario-hardening-and-state-coverage pass. It records what now works, what gaps this pass closed, and what remains intentionally deferred.
 
 ## Baseline audit at start of this pass
 
@@ -21,129 +21,170 @@ Repository strengths at baseline:
 - SQLite-backed typed store/query seams
 - honest live empty/error states
 - local-first poll plus webhook freshness architecture
-- bounded derived context overlays, explainability, and pattern summaries
+- bounded derived context overlays, explainability, pattern summaries, and smart reviews
 
 Repository gaps at baseline:
 
-- no ranked daily or weekly review workflow
-- no bounded guided investigation flow
-- no canonical registry for reviewable signals
-- no persisted review feature snapshots
-- no TUI smart surface above Explain and Patterns
-- no CLI family for deterministic review output
-- limited use of Oura families that materially strengthen daily and weekly review quality
+- demo snapshots were strong enough for smoke coverage, but fixture-backed scenario coverage was still shallow
+- `ui snapshot` could render only one fixture-backed app state at a time
+- screen regression coverage did not exercise canonical strong, weak, empty, stale, and error states across the full screen set
+- selected-day continuity still jumped to the newest day when the current day disappeared after reload
+- uncertainty and missing-capability copy still had a few ambiguous or awkward phrases
 
 ## Current implemented truth
 
 The repository now includes:
 
-- normalized sync, store, fixture, and demo coverage for:
-  - `daily_stress`
-  - `daily_resilience`
-  - `sleep_time`
-  - `daily_cardiovascular_age`
-  - `vo2_max`
-  - `rest_mode_period`
-- a canonical review signal registry that defines:
-  - source family
-  - granularity
-  - baseline window
-  - directionality
-  - evidence kind
-  - required capability
-  - safe wording constraints
-  - allowed smart surfaces
-- persisted `derived_review_signal_days` rows rebuilt from local stored data
-- bounded recent-window review snapshot refresh during derivation and full rebuild support through `derive rebuild`
-- a deterministic review engine that produces:
-  - ranked Today review cards
-  - ranked Week review cards
-  - explicit evidence and counterevidence
-  - confidence and sufficiency labels
-  - “why this is shown” explanations
-- a bounded investigation engine for these focuses:
-  - readiness
-  - sleep
-  - recovery
-  - stress
-  - activity
-- deterministic templates shared by CLI and TUI
-- a new `Review` TUI screen with:
-  - Today mode
-  - Week mode
-  - Investigate mode
-  - ranked card selection
-  - evidence detail
-  - warning detail
-- a canonical `review` CLI family:
-  - `review today`
-  - `review week`
-  - `review investigate`
-- concise smart-summary reuse in existing surfaces:
-  - Dashboard top insight reuse
-  - weekly drift note in Trends
-  - Review hint in Explain
+- a new design audit in `docs/DESIGN_AUDIT.md` with explicit screen-by-screen hierarchy and clutter findings
+- a centralized design-system reference in `docs/DESIGN_SYSTEM.md`
+- an internal presentation layer under `src/ui/*` for:
+  - semantic palette roles
+  - state tones
+  - text emphasis helpers
+  - breakpoint-aware layout helpers
+  - shared panel, badge, and title-row chrome
+  - shared chart styling helpers
+  - deterministic snapshot artifact generation
+- a dedicated `ui snapshot` CLI family for deterministic design QA
+- a canonical phase-7 fixture root under `tests/fixtures/phase7` with `strong`, `weak`, and `empty` seed states plus code-driven `stale` and `error` overlays
+- deterministic snapshot output across these viewport classes:
+  - `compact` = `90x28`
+  - `medium` = `120x36`
+  - `wide` = `160x44`
+- deterministic scenario-matrix output across these scenario classes:
+  - `strong`
+  - `weak`
+  - `empty`
+  - `stale`
+  - `error`
+- redesigned screen choreography for:
+  - Dashboard as the editorial front page
+  - Timeline as the immersive temporal view
+  - Trends as the comparative scanning matrix
+  - Explain as the deliberate evidence view
+  - Patterns as the grouped association browser
+  - Review as the editorial digest
+  - Ops as the utilitarian operator console
+- shared state styling for:
+  - selected
+  - focused
+  - stale
+  - syncing
+  - empty
+  - missing capability
+  - warning
+  - error
+  - de-emphasized metadata
+- non-color-only state emphasis through wording, badges, prefixes, ordering, and chrome
+- tighter copy for:
+  - thin-history uncertainty
+  - missing capability states
+  - empty local-cache states
+  - stale receiver/subscription/sync states
+- selected-day restoration that prefers nearest continuity instead of defaulting straight to newest data
+- lightweight breadcrumbs on Timeline, Explain, and Review when they reduce cognitive load around shared day and linked-event context
+- snapshot and smoke coverage for:
+  - core screen rendering
+  - compact / medium / wide sizing
+  - canonical strong / weak / empty / stale / error scenario shaping
+  - `ui snapshot` artifact plumbing
+  - selected-card and screen-role regressions
+  - scenario-tagged smoke output
 
-## What “smart” means here
+## What changed in this pass
 
-This pass deliberately does not add a chat assistant.
+Dashboard:
 
-The implemented smart layer is:
+- now has one clear focal point: “what matters now”
+- treats metric cards and freshness/capability context as secondary rhythm
+- uses drill-down cues as tertiary navigation instead of another block wall
+- now has canonical strong, weak, empty, stale, and error fixture coverage in the snapshot matrix
 
-- deterministic
-- local-data-backed
-- capability-aware
-- template-based
-- explicit about weak evidence
+Timeline:
 
-The implemented smart layer is not:
+- leads with the chart rather than splitting attention equally with side panels
+- uses overlay lanes and selected detail to reinforce temporal reading
+- keeps compact terminals usable instead of collapsing into crushed sections
+- shows a lightweight breadcrumb when the selected day or linked event context would otherwise be easy to lose
 
-- freeform chat
-- hidden heuristic prose generation
-- causal inference
-- medical interpretation
-- hosted AI
+Trends:
 
-## Review and investigation truth
+- now reads like a comparison surface instead of a stacked card list
+- uses baseline relationships, deltas, and compact spark hints for scanability
 
-Today review:
+Explain:
 
-- anchors on the selected day
-- compares direct evidence signals against prior comparable history
-- ranks observations using explicit scoring factors
+- now emphasizes the claim first, then measured inputs, then evidence and uncertainty
+- feels deliberately narrower and more narrative without turning into prose soup
+- labels prior-day carryover explicitly so late events are not mistaken for same-day evidence
 
-Week review:
+Patterns:
 
-- anchors on the selected day and reviews the trailing 7-day window
-- compares that window against a prior 28-day baseline window
-- highlights positive changes, negative drifts, and unresolved anomalies
+- now groups findings and interpretation so it reads differently from Explain at a glance
+- uses cleaner relation copy instead of awkward “associated with lower ...” phrasing
 
-Investigation:
+Review:
 
-- stays bounded to fixed focuses
-- reuses ranked review cards rather than inventing a new reasoning stack
-- surfaces evidence bundles, counterevidence bundles, warnings, and “look next” pointers
+- now feels like an editorial digest with ranked observations and bounded brief detail
+- keeps selected day, review mode, and focus visible through a lightweight breadcrumb
 
-Confidence and sufficiency:
+Ops:
 
-- remain separate concepts
-- sufficiency reflects comparable-history volume
-- confidence reflects sufficiency plus freshness plus evidence balance
-- thin or stale data never renders as high confidence
+- remains dense, but diagnostics no longer compete equally with every other element
+- uses sharper grouping for summary, family status, diagnostics, and warnings
+- now has explicit strong, weak, empty, stale, and error regression coverage through fixture-backed snapshots
+
+## Design-system truth
+
+The code now standardizes:
+
+- palette roles:
+  - background
+  - layered surfaces
+  - strong/default/muted foreground tiers
+  - accent
+  - positive
+  - warning
+  - danger
+  - info
+  - focus
+- typography/emphasis roles:
+  - hero
+  - section title
+  - label
+  - body
+  - annotation
+  - metadata
+- spacing rhythm:
+  - compact internal gaps
+  - standard block spacing
+  - section separation
+  - viewport-specific density rules
+- chrome language:
+  - full panels for primary regions
+  - dividers and implied grouping for secondary regions
+  - consistent badge and chip treatment
+  - standardized focus and state emphasis
+- chart grammar:
+  - lines for time
+  - compact bars for discrete comparison
+  - sparklines for directional hints
+  - consistent missing-data and stale-data treatment
 
 ## Tests now in place
 
-The phase-5 pass now includes meaningful coverage for:
+The phase-7 pass now includes meaningful coverage for:
 
-- migration application for review-support tables and review snapshot tables
-- fixture-backed sync for the six review-support Oura families
-- review registry behavior
-- review feature snapshot shaping
-- today review ranking
-- bounded investigation assembly
-- deterministic template wording
-- Review screen rendering and key mapping
-- CLI parsing and demo-output smoke coverage for the review family
+- semantic theme and layout helpers
+- deterministic snapshot size selection
+- `ui snapshot` artifact generation
+- CLI parsing for the new `ui snapshot` surface
+- compact vs wide screen rendering expectations
+- selected-state emphasis that does not depend on color alone
+- selected-day continuity after live snapshot replacement
+- carryover labeling and missing-capability copy regression tests
+- phase-7 fixture-root smoke coverage with scenario-tagged artifact assertions
+- smoke coverage for design-QA snapshot output
 
 ## Verification completed in this pass
 
@@ -153,17 +194,14 @@ Verified on `2026-04-09` after implementation:
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test --all`
 - `cargo run -- doctor`
-- `cargo run -- review today --demo`
-- `cargo run -- review week --demo`
-- `cargo run -- review investigate --focus readiness --demo`
-- `cargo run -- derive rebuild --demo`
+- `cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots`
+- `cargo run -- ui snapshot --fixture-dir tests/fixtures/phase7 --screen dashboard --screen explain --screen review --screen ops --size compact --size wide --out-dir /tmp/ringmaster-ui-snapshots-phase7-smoke`
 
 ## Known intentional deferrals
 
-- freeform chat or open-ended assistant prompts
-- runtime LLM dependencies or hosted AI services
-- recommendation or coaching systems
+- new Oura analytics families beyond the existing live and review-support surface
+- freeform chat or hosted AI assistance
+- PNG/image snapshot export; text snapshots remain the canonical visual QA surface
+- richer animation or transition effects
 - notifications
 - packaging, installers, and release automation
-- broad theming and UI redesign
-- broader Oura family expansion beyond the six review-support additions in this pass

@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document describes the implemented phase-5 architecture for `ringmaster.rs`. It reflects the code that exists in the repository today, not the eventual end-state product.
+This document describes the implemented phase-7 architecture for `ringmaster.rs`. It reflects the code that exists in the repository today, not the eventual end-state product.
 
 ## Design goals
 
@@ -56,6 +56,13 @@ tui / tui --demo
   -> Event -> Action -> State -> Render loop
   -> background refresh worker
   -> pure screen renderers
+
+ui snapshot
+  -> app state builder
+  -> deterministic screen + size matrix selection
+  -> optional phase-7 scenario matrix expansion
+  -> shared Ratatui render path
+  -> text artifact writing for visual QA
 ```
 
 ## Module boundaries
@@ -74,7 +81,7 @@ Non-responsibilities:
 - side effects
 - command execution
 
-The CLI now exposes a distinct `webhook` command family instead of collapsing receiver, replay, and watch behavior into one giant process.
+The CLI now exposes a distinct `webhook` command family instead of collapsing receiver, replay, and watch behavior into one giant process. It also exposes `ui snapshot` as a dedicated non-interactive design-QA path instead of relying on ad hoc `tui --demo` capture.
 
 ### `src/config.rs`
 
@@ -139,6 +146,7 @@ Important implemented state concepts:
 - `LiveSnapshot`: the immutable persisted-data snapshot sent into the reducer after each background refresh
 - `WebhookOpsSnapshot`: persisted receiver/subscription/delivery/queue/runtime view data shaped for Ops and `doctor`
 - `selected_day_index`: shared by Dashboard, Timeline, Explain, and Review
+- selected-day continuity preserves the exact selected day when possible, then the nearest earlier available day, then the next later day, before falling back to the newest day
 - `selected_event_id`: shared by Timeline and Explain
 - `overlay_filters`: shared family toggles for workouts, tags, and sessions
 - `PatternMetricFilter`: shared pattern metric filtering for the Patterns screen
@@ -155,12 +163,21 @@ Responsibilities:
 - keyboard-to-action mapping
 - live background refresh worker wiring
 - deterministic snapshot rendering via `TestBackend`
+- shared frame chrome driven by semantic theme and viewport context
 
 Why snapshot rendering exists:
 
 - keeps demo mode useful without a TTY
 - supports stable tests and CI smoke checks
 - reuses the same component tree as the interactive UI
+- gives the repo a canonical scenario-matrix QA path without duplicating widget logic
+
+The shared frame now owns the design-system-driven shell:
+
+- semantic header and active-screen treatment
+- consistent footer/help strip
+- centralized compact/medium/wide viewport context
+- shared panel/badge/divider language used by all screens
 
 How background refresh works:
 
@@ -180,11 +197,40 @@ Implemented screen set:
 - Ops
 - Review
 
+### `src/ui/*`
+
+Responsibilities:
+
+- semantic palette and emphasis roles
+- breakpoint-aware spacing and layout helpers
+- reusable chrome/panel/badge builders
+- shared chart grammar
+- deterministic multi-screen snapshot artifact generation
+- phase-7 scenario tagging for `strong`, `weak`, `empty`, `stale`, and `error`
+
+Implemented modules:
+
+- `src/ui/theme.rs`: semantic palette roles, tones, and emphasis helpers
+- `src/ui/layout.rs`: viewport classes and layout helpers
+- `src/ui/chrome.rs`: section titles, panels, badges, and focus/state affordances
+- `src/ui/charts.rs`: shared line/bar/spark styling and annotation helpers
+- `src/ui/snapshot.rs`: deterministic `ui snapshot` artifact writing
+
+The snapshot writer now supports two naming modes:
+
+- legacy/demo mode: `screen-size.txt`
+- phase-7 scenario mode: `screen-scenario-size.txt`
+
+Boundary rule:
+
+- these modules are presentation-only and do not own persistence, auth, sync, or network work
+
 ### `src/components/*`
 
 Responsibilities:
 
 - pure rendering for Dashboard, Timeline, Trends, Explain, Patterns, Ops, and Review
+- screen-specific choreography using shared semantic theme, layout, and chrome helpers
 
 Boundary rule:
 
@@ -195,13 +241,14 @@ Boundary rule:
 
 Component responsibilities today:
 
-- Dashboard renders selected-day summaries, cards, freshness/capability lists, and “what likely changed?”
-- Timeline renders the gap-aware heartrate chart, overlay lanes, selected-event details, and selected-day event list
-- Trends renders window tabs, sparklines, and trend notes
-- Explain renders selected-day summary lines, measurements, evidence, context entries, and caveats
-- Patterns renders deterministic association rows plus sufficiency/wording notes
-- Ops renders receiver state, callback configuration, subscription health, delivery history, queue lag, freshness source, and recent incidents without reaching back into the store
-- Review renders ranked today and week cards plus bounded investigation detail without making network or database calls
+- Dashboard renders the editorial front page: “what matters now,” the daily metric band, freshness/capability framing, and drill-down cues
+- Timeline renders the chart-first temporal composition, overlay lanes, selected detail, and selected-day event list
+- Trends renders the comparative scanning matrix with windows, deltas, spark hints, and baseline readouts
+- Explain renders a deliberate evidence flow: claim, measured inputs, supporting evidence, context, and uncertainty
+- Timeline, Explain, and Review include lightweight breadcrumbs only when they keep shared day or event context visible
+- Patterns renders grouped associations and interpretive notes distinct from Explain
+- Ops renders the utilitarian operator console with summary, family status, diagnostics, and warnings without reaching back into the store
+- Review renders ranked briefing cards plus bounded investigation detail without making network or database calls
 
 ### `src/refresh.rs`
 

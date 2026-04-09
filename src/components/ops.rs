@@ -2,77 +2,185 @@ use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
     prelude::Rect,
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    text::Line,
+    widgets::{Cell, List, ListItem, Paragraph, Row, Table},
 };
 
 use crate::app::OpsModel;
+use crate::ui::{
+    chrome::{self, PanelKind},
+    layout::UiContext,
+    theme::{Theme, Tone},
+};
 
-pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &OpsModel) {
+pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, ui: &UiContext, theme: &Theme) {
+    if ui.viewport.is_compact() {
+        draw_compact(frame, area, model, theme);
+    } else {
+        draw_wide(frame, area, model, theme);
+    }
+}
+
+fn draw_wide(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &Theme) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(5),
-            Constraint::Length(10),
-            Constraint::Min(10),
-            Constraint::Length(6),
+            Constraint::Min(16),
+            Constraint::Length(7),
         ])
         .split(area);
 
-    let summary = if model.summary_lines.is_empty() {
+    draw_summary(frame, layout[0], model, theme, false);
+
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+        .split(layout[1]);
+
+    draw_family_table(frame, body[0], model, theme);
+    draw_diagnostics_list(frame, body[1], model, theme, None);
+    draw_warnings(frame, layout[2], model, theme);
+}
+
+fn draw_compact(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &Theme) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Min(10),
+            Constraint::Length(4),
+        ])
+        .split(area);
+
+    draw_summary(frame, layout[0], model, theme, true);
+
+    let body = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(6)])
+        .split(layout[1]);
+
+    let family_items = model
+        .family_statuses
+        .iter()
+        .take(4)
+        .map(|status| {
+            ListItem::new(format!(
+                "[{}] {} | {}",
+                status.state_label, status.label, status.scope_label
+            ))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        List::new(family_items).block(chrome::panel(
+            theme,
+            Line::from("Family status"),
+            PanelKind::Diagnostic,
+        )),
+        body[0],
+    );
+
+    draw_diagnostics_list(frame, body[1], model, theme, Some(6));
+    draw_warnings(frame, layout[2], model, theme);
+}
+
+fn draw_summary(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &Theme, compact: bool) {
+    let summary = if compact {
+        model
+            .summary_lines
+            .iter()
+            .take(2)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else if model.summary_lines.is_empty() {
         format!("Mode: {}", model.mode_label)
     } else {
         model.summary_lines.join("\n")
     };
     frame.render_widget(
-        Paragraph::new(summary).block(Block::default().title("Ops Summary").borders(Borders::ALL)),
-        layout[0],
+        Paragraph::new(summary)
+            .style(theme.hero())
+            .block(chrome::panel(
+                theme,
+                chrome::title_with_badge(theme, "Ops console", &model.mode_label, Tone::Info),
+                PanelKind::Diagnostic,
+            )),
+        area,
     );
+}
 
-    let family_items = model
-        .family_statuses
-        .iter()
-        .map(|status| {
-            ListItem::new(format!(
-                "{}: {} | {} | last sync {} | {}",
-                status.label,
-                status.state_label,
-                status.scope_label,
-                status.last_sync,
-                status.detail
-            ))
-        })
-        .collect::<Vec<_>>();
+fn draw_family_table(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &Theme) {
+    let family_rows = model.family_statuses.iter().map(|status| {
+        Row::new(vec![
+            Cell::from(status.label),
+            Cell::from(status.state_label.clone()),
+            Cell::from(status.scope_label.clone()),
+            Cell::from(status.last_sync.clone()),
+        ])
+    });
     frame.render_widget(
-        List::new(family_items).block(
-            Block::default()
-                .title("Family Status")
-                .borders(Borders::ALL),
-        ),
-        layout[1],
+        Table::new(
+            family_rows,
+            [
+                Constraint::Length(12),
+                Constraint::Length(12),
+                Constraint::Length(16),
+                Constraint::Min(12),
+            ],
+        )
+        .header(
+            Row::new(vec!["Family", "State", "Scope", "Last sync"])
+                .style(theme.section_title(Tone::Info)),
+        )
+        .block(chrome::panel(
+            theme,
+            Line::from("Family status"),
+            PanelKind::Diagnostic,
+        )),
+        area,
     );
+}
 
-    let items = model
+fn draw_diagnostics_list(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &OpsModel,
+    theme: &Theme,
+    max_items: Option<usize>,
+) {
+    let diagnostics = model
         .items
         .iter()
+        .take(max_items.unwrap_or(model.items.len()))
         .map(|item| ListItem::new(format!("{}: {}", item.label, item.value)))
         .collect::<Vec<_>>();
     frame.render_widget(
-        List::new(items).block(Block::default().title("Diagnostics").borders(Borders::ALL)),
-        layout[2],
+        List::new(diagnostics).block(chrome::panel(
+            theme,
+            chrome::title_with_badge(theme, "Diagnostics", "dense operator read", Tone::Muted),
+            PanelKind::Subtle,
+        )),
+        area,
     );
+}
 
+fn draw_warnings(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &Theme) {
     let warnings = if model.warnings.is_empty() {
-        vec![ListItem::new("No warnings.")]
+        vec![ListItem::new("[quiet] No warnings.")]
     } else {
         model
             .warnings
             .iter()
-            .cloned()
-            .map(ListItem::new)
+            .map(|warning| ListItem::new(format!("[warn] {warning}")))
             .collect::<Vec<_>>()
     };
     frame.render_widget(
-        List::new(warnings).block(Block::default().title("Warnings").borders(Borders::ALL)),
-        layout[3],
+        List::new(warnings).block(chrome::panel(
+            theme,
+            chrome::title_with_badge(theme, "Warnings", "operator attention", Tone::Warning),
+            PanelKind::Section,
+        )),
+        area,
     );
 }
