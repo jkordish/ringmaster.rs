@@ -208,8 +208,8 @@ fn map_event(active_screen: Screen, event: Event) -> Option<Action> {
             KeyCode::Char('3') => Some(Action::ShowScreen(Screen::Trends)),
             KeyCode::Char('4') => Some(Action::ShowScreen(Screen::Explain)),
             KeyCode::Char('5') => Some(Action::ShowScreen(Screen::Patterns)),
-            KeyCode::Char('6') => Some(Action::ShowScreen(Screen::Ops)),
-            KeyCode::Char('7') => Some(Action::ShowScreen(Screen::Review)),
+            KeyCode::Char('6') => Some(Action::ShowScreen(Screen::Review)),
+            KeyCode::Char('7') => Some(Action::ShowScreen(Screen::Ops)),
             KeyCode::Char('[') => match active_screen {
                 Screen::Dashboard | Screen::Timeline | Screen::Explain | Screen::Review => {
                     Some(Action::PreviousDay)
@@ -1009,7 +1009,7 @@ mod tests {
                 ),
                 (Screen::Patterns, "Patterns browser", "Patterns browser"),
                 (Screen::Review, "Review digest", "Review digest"),
-                (Screen::Ops, "Ops console", "Ops console"),
+                (Screen::Ops, "Status console", "Status console"),
             ] {
                 app.active_screen = screen;
 
@@ -1072,8 +1072,12 @@ mod tests {
             Some(Action::NextEvent)
         );
         assert_eq!(
-            super::map_event(Screen::Review, press(KeyCode::Char('7'))),
+            super::map_event(Screen::Review, press(KeyCode::Char('6'))),
             Some(Action::ShowScreen(Screen::Review))
+        );
+        assert_eq!(
+            super::map_event(Screen::Review, press(KeyCode::Char('7'))),
+            Some(Action::ShowScreen(Screen::Ops))
         );
         assert_eq!(
             super::map_event(Screen::Review, press(KeyCode::Char('v'))),

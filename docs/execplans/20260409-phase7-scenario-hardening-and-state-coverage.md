@@ -69,7 +69,7 @@ Phase 6 improved the visual language, but snapshot QA is still mostly demo-first
 - `cargo test --all`
 - `cargo run -- doctor`
 - `cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots`
-- `cargo run -- ui snapshot --fixture-dir tests/fixtures/phase7 --screen dashboard --screen explain --screen review --screen ops --size compact --size wide --out-dir /tmp/ringmaster-ui-snapshots-phase7-smoke`
+- `cargo run -- ui snapshot --fixture-dir tests/fixtures/phase7 --screen dashboard --screen explain --screen review --screen status --size compact --size wide --out-dir /tmp/ringmaster-ui-snapshots-phase7-smoke`
 
 ## Follow-up work
 

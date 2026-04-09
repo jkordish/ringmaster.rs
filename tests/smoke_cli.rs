@@ -80,7 +80,7 @@ async fn ui_snapshot_demo_writes_artifacts() {
         "--screen",
         "dashboard",
         "--screen",
-        "ops",
+        "status",
         "--size",
         "compact",
         "--size",
@@ -99,9 +99,9 @@ async fn ui_snapshot_demo_writes_artifacts() {
 
     assert!(output.contains("ringmaster ui snapshot"));
     assert!(output.contains("dashboard"));
-    assert!(output.contains("ops"));
+    assert!(output.contains("status"));
     assert!(out_path.join("dashboard-compact.txt").exists());
-    assert!(out_path.join("ops-wide.txt").exists());
+    assert!(out_path.join("status-wide.txt").exists());
 }
 
 #[tokio::test]
@@ -119,7 +119,7 @@ async fn ui_snapshot_phase7_fixture_root_writes_scenario_tagged_artifacts() {
         "--screen",
         "dashboard",
         "--screen",
-        "ops",
+        "status",
         "--size",
         "compact",
         "--size",
@@ -140,7 +140,7 @@ async fn ui_snapshot_phase7_fixture_root_writes_scenario_tagged_artifacts() {
     assert!(output.contains("strong, weak, empty, stale, error"));
     assert!(out_path.join("dashboard-strong-compact.txt").exists());
     assert!(out_path.join("dashboard-error-wide.txt").exists());
-    assert!(out_path.join("ops-stale-compact.txt").exists());
+    assert!(out_path.join("status-stale-compact.txt").exists());
 }
 
 #[tokio::test]

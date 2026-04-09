@@ -76,13 +76,13 @@ Examples:
 cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots
 
 cargo run -- ui snapshot --demo \
-  --screen dashboard --screen timeline --screen review --screen ops \
+  --screen dashboard --screen timeline --screen review --screen status \
   --size compact --size wide \
   --out-dir /tmp/ringmaster-ui-snapshots-smoke
 
 cargo run -- ui snapshot \
   --fixture-dir tests/fixtures/phase7 \
-  --screen dashboard --screen explain --screen review --screen ops \
+  --screen dashboard --screen explain --screen review --screen status \
   --size compact --size wide \
   --out-dir /tmp/ringmaster-ui-snapshots-phase7-smoke
 ```
@@ -172,7 +172,7 @@ This remains the full-history recompute path. Normal syncs still use bounded rec
 - groups deterministic associations and interpretation
 - avoids duplicating Explain’s evidence layout
 
-### Ops
+### Status
 
 - keeps diagnostic density
 - separates summary, family status, diagnostics, and warnings more clearly
@@ -192,7 +192,7 @@ This remains the full-history recompute path. Normal syncs still use bounded rec
 
 Default key flow:
 
-- `1-7`: Dashboard, Timeline, Trends, Explain, Patterns, Ops, Review
+- `1-7`: Dashboard, Timeline, Trends, Explain, Patterns, Review, Status
 - `[` / `]`: previous/next selected day on Dashboard, Timeline, Explain, and Review
 - `,` / `.`: previous/next heartrate point on Timeline
 - `j` / `k`: previous/next selected event on Timeline and Explain
@@ -226,12 +226,12 @@ cargo test --all
 cargo run -- doctor
 cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots
 cargo run -- ui snapshot --demo \
-  --screen dashboard --screen timeline --screen review --screen ops \
+  --screen dashboard --screen timeline --screen review --screen status \
   --size compact --size wide \
   --out-dir /tmp/ringmaster-ui-snapshots-smoke
 cargo run -- ui snapshot \
   --fixture-dir tests/fixtures/phase7 \
-  --screen dashboard --screen explain --screen review --screen ops \
+  --screen dashboard --screen explain --screen review --screen status \
   --size compact --size wide \
   --out-dir /tmp/ringmaster-ui-snapshots-phase7-smoke
 ```

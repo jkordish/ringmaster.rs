@@ -103,7 +103,7 @@ fn draw_summary(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &The
             .style(theme.hero())
             .block(chrome::panel(
                 theme,
-                chrome::title_with_badge(theme, "Ops console", &model.mode_label, Tone::Info),
+                chrome::title_with_badge(theme, "Status console", &model.mode_label, Tone::Info),
                 PanelKind::Diagnostic,
             )),
         area,

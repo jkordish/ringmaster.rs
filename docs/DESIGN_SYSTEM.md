@@ -108,7 +108,7 @@ Every state should be legible in monochrome and in low-color terminals.
 - `Explain`: narrow evidence view with claim, support, and uncertainty
 - `Patterns`: grouped cross-day association browser
 - `Review`: ranked editorial digest and bounded investigation surface
-- `Ops`: utilitarian diagnostic console with disciplined hierarchy
+- `Status`: utilitarian diagnostic console with disciplined hierarchy
 
 ## Terminal size adaptation
 

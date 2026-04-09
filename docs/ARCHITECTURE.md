@@ -144,7 +144,7 @@ Important implemented state concepts:
   - `StaleCapabilityMissing`
   - `StaleUpstreamPending`
 - `LiveSnapshot`: the immutable persisted-data snapshot sent into the reducer after each background refresh
-- `WebhookOpsSnapshot`: persisted receiver/subscription/delivery/queue/runtime view data shaped for Ops and `doctor`
+- `WebhookOpsSnapshot`: persisted receiver/subscription/delivery/queue/runtime view data shaped for the Status screen and `doctor`
 - `selected_day_index`: shared by Dashboard, Timeline, Explain, and Review
 - selected-day continuity preserves the exact selected day when possible, then the nearest earlier available day, then the next later day, before falling back to the newest day
 - `selected_event_id`: shared by Timeline and Explain
@@ -194,8 +194,8 @@ Implemented screen set:
 - Trends
 - Explain
 - Patterns
-- Ops
 - Review
+- Status
 
 ### `src/ui/*`
 
@@ -229,7 +229,7 @@ Boundary rule:
 
 Responsibilities:
 
-- pure rendering for Dashboard, Timeline, Trends, Explain, Patterns, Ops, and Review
+- pure rendering for Dashboard, Timeline, Trends, Explain, Patterns, Review, and Status
 - screen-specific choreography using shared semantic theme, layout, and chrome helpers
 
 Boundary rule:
@@ -247,7 +247,7 @@ Component responsibilities today:
 - Explain renders a deliberate evidence flow: claim, measured inputs, supporting evidence, context, and uncertainty
 - Timeline, Explain, and Review include lightweight breadcrumbs only when they keep shared day or event context visible
 - Patterns renders grouped associations and interpretive notes distinct from Explain
-- Ops renders the utilitarian operator console with summary, family status, diagnostics, and warnings without reaching back into the store
+- Status renders the utilitarian operator console with summary, family status, diagnostics, and warnings without reaching back into the store
 - Review renders ranked briefing cards plus bounded investigation detail without making network or database calls
 
 ### `src/refresh.rs`
@@ -337,7 +337,7 @@ Important query responsibilities added in phase 4:
 - invalidation enqueue, claim, retry, and completion tracking
 - receiver and watch heartbeat persistence
 - sync trigger provenance persistence
-- richer Ops-oriented read surfaces for subscriptions, deliveries, queue depth, and incidents
+- richer Status-oriented read surfaces for subscriptions, deliveries, queue depth, and incidents
 
 `sync_state` now tracks per-slice status, watermark, granted scopes, failure counts, next-attempt backoff, last structured Oura problem, and the last trigger source and trigger detail. `raw_payload_cache` remains intentionally separate from normalized tables so replay and debugging do not leak transport details into the UI.
 
@@ -436,7 +436,7 @@ The product now has explicit operational modes:
 - receiver-only: receiver is healthy but watch is not actively processing queued invalidations
 - hybrid: receiver and watch are both healthy, subscriptions are present, and the app can report webhook-first freshness where supported
 
-Ops and `doctor` derive this mode from persisted runtime heartbeats and subscription state rather than from process assumptions.
+Status and `doctor` derive this mode from persisted runtime heartbeats and subscription state rather than from process assumptions.
 
 ## Freshness semantics
 

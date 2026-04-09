@@ -61,7 +61,7 @@ Phase 5 delivered a useful product, but the current UI still reads like a stable
 
 - [x] Milestone 1: create the phase-6 exec plan, design audit, design-system docs, and initial UI module seams.
 - [x] Milestone 2: add centralized theme/layout/chrome helpers and refactor the shared app frame to use them.
-- [x] Milestone 3: redesign Dashboard, Timeline, Trends, Explain, Patterns, Review, and Ops around distinct visual roles and breakpoint-aware layouts.
+- [x] Milestone 3: redesign Dashboard, Timeline, Trends, Explain, Patterns, Review, and Status around distinct visual roles and breakpoint-aware layouts.
 - [x] Milestone 4: add the `ui snapshot` command, deterministic artifact generation, and snapshot/state regression tests.
 - [x] Milestone 5: update product docs, run the full validation sweep, and repair any failures.
 
@@ -72,7 +72,7 @@ Phase 5 delivered a useful product, but the current UI still reads like a stable
 - `cargo test --all`
 - `cargo run -- doctor`
 - `cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots`
-- additional bounded visual smoke checks covering Dashboard, Timeline, Review, and Ops across at least compact and wide terminal sizes
+- additional bounded visual smoke checks covering Dashboard, Timeline, Review, and Status across at least compact and wide terminal sizes
 
 Completed on `2026-04-09`:
 
@@ -81,7 +81,7 @@ Completed on `2026-04-09`:
 - `cargo test --all`
 - `cargo run -- doctor`
 - `cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots`
-- `cargo run -- ui snapshot --demo --screen dashboard --screen timeline --screen review --screen ops --size compact --size wide --out-dir /tmp/ringmaster-ui-snapshots-smoke`
+- `cargo run -- ui snapshot --demo --screen dashboard --screen timeline --screen review --screen status --size compact --size wide --out-dir /tmp/ringmaster-ui-snapshots-smoke`
 
 ## Follow-up work
 

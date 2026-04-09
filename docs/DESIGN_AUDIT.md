@@ -124,17 +124,17 @@ Patterns should read as a browser of grouped cross-day associations, not as anot
 
 Review should feel like the product’s briefing surface, not another dashboard variant.
 
-## Ops
+## Status
 
 ### What is wrong
 
-- Ops has useful density, but the hierarchy between summary, diagnostics, warnings, and per-family state is weak.
+- Status has useful density, but the hierarchy between summary, diagnostics, warnings, and per-family state is weak.
 - Dense information appears in long plain strings without enough structural rhythm.
 - The utilitarian nature is good, but the current layout is noisier than necessary.
 
 ### Why it matters
 
-Ops should be denser than the other screens, but it still needs strong grouping so the operator can scan without fatigue.
+Status should be denser than the other screens, but it still needs strong grouping so the operator can scan without fatigue.
 
 ## Cross-screen flow issues
 

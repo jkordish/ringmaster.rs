@@ -64,7 +64,7 @@ The repository now includes:
   - Explain as the deliberate evidence view
   - Patterns as the grouped association browser
   - Review as the editorial digest
-  - Ops as the utilitarian operator console
+  - Status as the utilitarian operator console
 - shared state styling for:
   - selected
   - focused
@@ -128,7 +128,7 @@ Review:
 - now feels like an editorial digest with ranked observations and bounded brief detail
 - keeps selected day, review mode, and focus visible through a lightweight breadcrumb
 
-Ops:
+Status:
 
 - remains dense, but diagnostics no longer compete equally with every other element
 - uses sharper grouping for summary, family status, diagnostics, and warnings
@@ -195,7 +195,7 @@ Verified on `2026-04-09` after implementation:
 - `cargo test --all`
 - `cargo run -- doctor`
 - `cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots`
-- `cargo run -- ui snapshot --fixture-dir tests/fixtures/phase7 --screen dashboard --screen explain --screen review --screen ops --size compact --size wide --out-dir /tmp/ringmaster-ui-snapshots-phase7-smoke`
+- `cargo run -- ui snapshot --fixture-dir tests/fixtures/phase7 --screen dashboard --screen explain --screen review --screen status --size compact --size wide --out-dir /tmp/ringmaster-ui-snapshots-phase7-smoke`
 
 ## Known intentional deferrals
 

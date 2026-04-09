@@ -657,8 +657,8 @@ impl AppState {
             Screen::Trends => "[ ] window",
             Screen::Explain => "[ ] day | j k event | w/t/s filters",
             Screen::Patterns => "w/t/s family | m metric",
-            Screen::Ops => "1-7 jump",
             Screen::Review => "[ ] day | v mode | f focus | j k cards",
+            Screen::Ops => "1-7 jump",
         };
         let refresh_hint = if self.refresh_in_flight {
             "refreshing"
@@ -889,8 +889,8 @@ impl Screen {
         Self::Trends,
         Self::Explain,
         Self::Patterns,
-        Self::Ops,
         Self::Review,
+        Self::Ops,
     ];
 
     pub fn title(self) -> &'static str {
@@ -900,8 +900,8 @@ impl Screen {
             Self::Trends => "Trends",
             Self::Explain => "Explain",
             Self::Patterns => "Patterns",
-            Self::Ops => "Ops",
             Self::Review => "Review",
+            Self::Ops => "Status",
         }
     }
 
@@ -912,8 +912,8 @@ impl Screen {
             Self::Trends => 2,
             Self::Explain => 3,
             Self::Patterns => 4,
-            Self::Ops => 5,
-            Self::Review => 6,
+            Self::Review => 5,
+            Self::Ops => 6,
         }
     }
 
@@ -923,21 +923,21 @@ impl Screen {
             Self::Timeline => Self::Trends,
             Self::Trends => Self::Explain,
             Self::Explain => Self::Patterns,
-            Self::Patterns => Self::Ops,
-            Self::Ops => Self::Review,
-            Self::Review => Self::Dashboard,
+            Self::Patterns => Self::Review,
+            Self::Review => Self::Ops,
+            Self::Ops => Self::Dashboard,
         }
     }
 
     fn previous(self) -> Self {
         match self {
-            Self::Dashboard => Self::Review,
+            Self::Dashboard => Self::Ops,
             Self::Timeline => Self::Dashboard,
             Self::Trends => Self::Timeline,
             Self::Explain => Self::Trends,
             Self::Patterns => Self::Explain,
-            Self::Ops => Self::Patterns,
-            Self::Review => Self::Ops,
+            Self::Review => Self::Patterns,
+            Self::Ops => Self::Review,
         }
     }
 }
@@ -2316,7 +2316,7 @@ fn empty_investigation_report(
             error.to_string()
         )],
         look_at: vec![
-            "Open Ops to confirm sync freshness and granted capabilities.".to_owned(),
+            "Open Status to confirm sync freshness and granted capabilities.".to_owned(),
             "Run derive rebuild after syncing more history.".to_owned(),
         ],
     }

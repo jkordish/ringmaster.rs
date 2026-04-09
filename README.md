@@ -7,10 +7,10 @@
 This repository now includes an operationally trustworthy personal observability MVP with a deliberate visual system:
 
 - `clap` CLI with `tui`, `tui --demo`, `ui snapshot`, `doctor`, `auth login`, `sync once`, `sync watch`, `derive rebuild`, `review today`, `review week`, `review investigate`, `webhook serve`, `webhook replay`, `webhook subscriptions list`, `webhook subscriptions sync`, and the compatibility alias `demo`
-- a useful Ratatui Dashboard, Timeline, Trends, Explain, Patterns, Ops, and Review screen backed by persisted SQLite data
+- a useful Ratatui Dashboard, Timeline, Trends, Explain, Patterns, Review, and Status screen backed by persisted SQLite data
 - deterministic demo data that exercises the same seven-screen shell without credentials or network access
 - a centralized semantic theme/token layer for palette roles, spacing rhythm, badge language, panel chrome, breakpoint-aware layout, and chart styling
-- stronger screen-specific reading paths so Dashboard, Timeline, Trends, Explain, Patterns, Review, and Ops no longer feel like the same grid with different labels
+- stronger screen-specific reading paths so Dashboard, Timeline, Trends, Explain, Patterns, Review, and Status no longer feel like the same grid with different labels
 - deterministic visual QA via `ringmaster ui snapshot` for demo, single-fixture, and canonical phase-7 scenario-matrix snapshot generation across compact, medium, and wide terminal sizes
 - real loopback OAuth login with server-side code exchange, PKCE, and CSRF-safe state handling
 - persisted auth/session metadata in SQLite with token secrets stored through the OS keyring seam
@@ -22,7 +22,7 @@ This repository now includes an operationally trustworthy personal observability
 - a dedicated webhook receiver with explicit verification, accepted/rejected delivery audit, invalidation enqueue, and clean shutdown
 - declarative webhook subscription lifecycle management with list, diff, dry-run, create, update, renew, and optional prune flows
 - explicit freshness-source and stale-reason semantics instead of a generic “fresh/stale/error” model
-- a substantially upgraded Ops and `doctor` surface for receiver health, subscription expiry, queue lag, delivery history, and freshness debugging
+- a substantially upgraded Status and `doctor` surface for receiver health, subscription expiry, queue lag, delivery history, and freshness debugging
 - structured logging via `tracing`
 
 The project is intentionally not feature-complete yet. The goal is a trustworthy local foundation with one operationally credible observability slice, not a one-shot full product dump.
@@ -236,7 +236,7 @@ What the screens now do:
 - Timeline, Explain, and Review now expose lightweight breadcrumbs when they materially reduce cognitive load. These breadcrumbs keep the current day, linked event, and carryover context visible without changing the render pipeline.
 - Patterns is the grouped association browser. It clusters findings by interpretation and comparison instead of reading like another evidence detail page.
 - Review is the editorial briefing surface. It presents ranked observations, concise rationale, and bounded investigations without becoming another dashboard clone.
-- Ops remains the utilitarian operator console, but with clearer grouping, stronger status emphasis, and less visual competition between diagnostics.
+- Status remains the utilitarian operator console, but with clearer grouping, stronger status emphasis, and less visual competition between diagnostics.
 
 Shared interaction semantics:
 
@@ -247,7 +247,7 @@ Shared interaction semantics:
 
 Key navigation defaults:
 
-- `1-7`: Dashboard, Timeline, Trends, Explain, Patterns, Ops, Review
+- `1-7`: Dashboard, Timeline, Trends, Explain, Patterns, Review, Status
 - `[` / `]`: move the shared selected day on Dashboard, Timeline, Explain, and Review
 - `,` / `.`: move the selected heartrate point on Timeline
 - `j` / `k`: move the selected event on Timeline and Explain
@@ -266,12 +266,12 @@ Examples:
 ```bash
 cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots
 cargo run -- ui snapshot --demo \
-  --screen dashboard --screen timeline --screen review --screen ops \
+  --screen dashboard --screen timeline --screen review --screen status \
   --size compact --size wide \
   --out-dir /tmp/ringmaster-ui-snapshots-smoke
 cargo run -- ui snapshot \
   --fixture-dir tests/fixtures/phase7 \
-  --screen dashboard --screen explain --screen review --screen ops \
+  --screen dashboard --screen explain --screen review --screen status \
   --size compact --size wide \
   --out-dir /tmp/ringmaster-ui-snapshots-phase7-smoke
 ```

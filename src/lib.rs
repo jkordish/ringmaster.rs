@@ -77,6 +77,16 @@ struct TempRootGuard {
     path: PathBuf,
 }
 
+const PHASE7_WEBHOOK_BIND_ADDRESS: &str = "127.0.0.1:8799";
+const PHASE7_WEBHOOK_PATH: &str = "/oura/webhook";
+const PHASE7_WEBHOOK_CALLBACK_URL: &str = "https://fixture.example.test/webhooks/oura";
+const PHASE7_SYNC_ATTEMPTED_AT: &str = "2026-04-09T11:58:00Z";
+const PHASE7_SYNC_COMPLETED_AT: &str = "2026-04-09T11:59:00Z";
+const PHASE7_STALE_SYNC_ATTEMPTED_AT: &str = "2026-04-09T05:00:00Z";
+const PHASE7_STALE_SYNC_COMPLETED_AT: &str = "2026-04-09T05:01:00Z";
+const PHASE7_ERROR_SYNC_ATTEMPTED_AT: &str = "2026-04-09T11:45:00Z";
+const PHASE7_ERROR_SYNC_COMPLETED_AT: &str = "2026-04-09T11:46:00Z";
+
 pub async fn run_from<I, T>(args: I) -> Result<Option<String>>
 where
     I: IntoIterator<Item = T>,
@@ -666,7 +676,7 @@ fn snapshot_screens(args: &UiSnapshotArgs) -> Vec<app::Screen> {
                 SnapshotScreenArg::Explain => app::Screen::Explain,
                 SnapshotScreenArg::Patterns => app::Screen::Patterns,
                 SnapshotScreenArg::Review => app::Screen::Review,
-                SnapshotScreenArg::Ops => app::Screen::Ops,
+                SnapshotScreenArg::Status => app::Screen::Ops,
             })
             .collect()
     }
@@ -828,7 +838,7 @@ async fn build_phase7_snapshot_states(
     for scenario in ui::snapshot::SnapshotScenario::ALL {
         let fixture_dir = phase7_fixture_seed_dir(fixture_root, scenario);
         let mut snapshot = load_fixture_snapshot(config, fixture_dir).await?;
-        apply_phase7_snapshot_overlay(config, &mut snapshot, scenario);
+        apply_phase7_snapshot_overlay(&mut snapshot, scenario);
         states.push(SnapshotScenarioState {
             scenario,
             app: app::build_state_from_snapshot(
@@ -873,11 +883,19 @@ fn phase7_fixture_seed_dir(
 }
 
 fn apply_phase7_snapshot_overlay(
-    config: &Config,
     snapshot: &mut app::LiveSnapshot,
     scenario: ui::snapshot::SnapshotScenario,
 ) {
-    snapshot.webhook.desired_subscriptions = phase7_desired_subscription_records(config);
+    snapshot.config_path = phase7_config_path(scenario);
+    snapshot.database_path = phase7_database_path(scenario);
+    snapshot.webhook.bind_address = PHASE7_WEBHOOK_BIND_ADDRESS.to_owned();
+    snapshot.webhook.path = PHASE7_WEBHOOK_PATH.to_owned();
+    snapshot.webhook.callback_url = Some(PHASE7_WEBHOOK_CALLBACK_URL.to_owned());
+    snapshot.webhook.verification_token_configured = true;
+    snapshot.webhook.signature_tolerance_secs = 300;
+    snapshot.webhook.heartbeat_secs = 15;
+    snapshot.webhook.renewal_lead_secs = 7 * 24 * 60 * 60;
+    snapshot.webhook.desired_subscriptions = phase7_desired_subscription_records();
     snapshot.webhook.remote_subscriptions = phase7_remote_subscription_records(
         &snapshot.webhook.desired_subscriptions,
         "matched",
@@ -922,9 +940,19 @@ fn apply_phase7_snapshot_overlay(
     match scenario {
         ui::snapshot::SnapshotScenario::Strong => {
             "2026-04-09T12:00:00Z".clone_into(&mut snapshot.captured_at);
+            normalize_phase7_sync_state_timestamps(
+                &mut snapshot.sync_states,
+                PHASE7_SYNC_ATTEMPTED_AT,
+                PHASE7_SYNC_COMPLETED_AT,
+            );
         }
         ui::snapshot::SnapshotScenario::Weak => {
             "2026-04-09T12:00:00Z".clone_into(&mut snapshot.captured_at);
+            normalize_phase7_sync_state_timestamps(
+                &mut snapshot.sync_states,
+                PHASE7_SYNC_ATTEMPTED_AT,
+                PHASE7_SYNC_COMPLETED_AT,
+            );
             for state in &mut snapshot.sync_states {
                 if state.message.is_none() {
                     state.message =
@@ -952,6 +980,11 @@ fn apply_phase7_snapshot_overlay(
                 state.failure_count = 0;
                 state.next_attempt_after = None;
             }
+            normalize_phase7_sync_state_timestamps(
+                &mut snapshot.sync_states,
+                PHASE7_SYNC_ATTEMPTED_AT,
+                PHASE7_SYNC_COMPLETED_AT,
+            );
         }
         ui::snapshot::SnapshotScenario::Stale => {
             "2026-04-11T12:00:00Z".clone_into(&mut snapshot.captured_at);
@@ -1017,8 +1050,6 @@ fn apply_phase7_snapshot_overlay(
                     detail: Some("watch loop was offline".to_owned()),
                 }];
             for state in &mut snapshot.sync_states {
-                "2026-04-09T05:00:00Z".clone_into(&mut state.last_attempted_at);
-                state.last_completed_at = Some("2026-04-09T05:01:00Z".to_owned());
                 state.failure_count = 2;
                 state.next_attempt_after = Some("2026-04-11T12:05:00Z".to_owned());
                 state.message = Some(
@@ -1026,6 +1057,11 @@ fn apply_phase7_snapshot_overlay(
                         .to_owned(),
                 );
             }
+            normalize_phase7_sync_state_timestamps(
+                &mut snapshot.sync_states,
+                PHASE7_STALE_SYNC_ATTEMPTED_AT,
+                PHASE7_STALE_SYNC_COMPLETED_AT,
+            );
         }
         ui::snapshot::SnapshotScenario::Error => {
             "2026-04-09T12:00:00Z".clone_into(&mut snapshot.captured_at);
@@ -1128,19 +1164,48 @@ fn apply_phase7_snapshot_overlay(
                     _ => {}
                 }
             }
+            normalize_phase7_sync_state_timestamps(
+                &mut snapshot.sync_states,
+                PHASE7_ERROR_SYNC_ATTEMPTED_AT,
+                PHASE7_ERROR_SYNC_COMPLETED_AT,
+            );
         }
     }
 }
 
-fn phase7_desired_subscription_records(
-    config: &Config,
-) -> Vec<crate::store::webhook_store::DesiredWebhookSubscriptionRecord> {
+fn phase7_config_path(scenario: ui::snapshot::SnapshotScenario) -> String {
+    format!("tests/fixtures/phase7/{}/config.toml", scenario.label())
+}
+
+fn phase7_database_path(scenario: ui::snapshot::SnapshotScenario) -> String {
+    format!("tests/fixtures/phase7/{}/ringmaster.db", scenario.label())
+}
+
+fn normalize_phase7_sync_state_timestamps(
+    sync_states: &mut [crate::store::queries::SyncStateRecord],
+    attempted_at: &str,
+    completed_at: &str,
+) {
+    for state in sync_states {
+        attempted_at.clone_into(&mut state.last_attempted_at);
+        state.last_completed_at = if matches!(
+            state.status,
+            crate::store::queries::SyncRunStatus::Failed
+                | crate::store::queries::SyncRunStatus::Blocked
+        ) {
+            None
+        } else {
+            Some(completed_at.to_owned())
+        };
+    }
+}
+
+fn phase7_desired_subscription_records()
+-> Vec<crate::store::webhook_store::DesiredWebhookSubscriptionRecord> {
     let updated_at = "2026-04-09T11:50:00Z".to_owned();
-    let callback_url = config.webhook.callback_url();
-    config
-        .webhook
-        .subscriptions
-        .iter()
+    let callback_url = Some(PHASE7_WEBHOOK_CALLBACK_URL.to_owned());
+    crate::webhook::default_desired_subscriptions()
+        .into_iter()
         .filter(|subscription| subscription.enabled)
         .flat_map(|subscription| {
             let callback_url = callback_url.clone();
@@ -2873,5 +2938,48 @@ mod tests {
         assert!(output.contains(
             "Previewed 1 invalidation(s) via fixture-backed sync from tests/fixtures/phase3 without writing to the local store"
         ));
+    }
+
+    #[tokio::test]
+    async fn phase7_status_snapshots_are_stable_across_host_config_and_temp_roots() {
+        let fixture_root = std::path::Path::new("tests/fixtures/phase7");
+        let (_first_tempdir, first_config) =
+            test_config(Some("https://host-one.example.test"), Some("verify-one"));
+        let (_second_tempdir, second_config) = test_config(None, None);
+
+        let mut first_app =
+            super::build_phase7_snapshot_apps_for_tests(&first_config, fixture_root)
+                .await
+                .unwrap_or_else(|error| panic!("first phase7 snapshot apps should build: {error}"))
+                .into_iter()
+                .find_map(|(scenario, app)| {
+                    (scenario == crate::ui::snapshot::SnapshotScenario::Stale).then_some(app)
+                })
+                .unwrap_or_else(|| panic!("stale phase7 app should exist"));
+        let mut second_app =
+            super::build_phase7_snapshot_apps_for_tests(&second_config, fixture_root)
+                .await
+                .unwrap_or_else(|error| panic!("second phase7 snapshot apps should build: {error}"))
+                .into_iter()
+                .find_map(|(scenario, app)| {
+                    (scenario == crate::ui::snapshot::SnapshotScenario::Stale).then_some(app)
+                })
+                .unwrap_or_else(|| panic!("stale phase7 app should exist"));
+
+        first_app.active_screen = crate::app::Screen::Ops;
+        second_app.active_screen = crate::app::Screen::Ops;
+
+        let first_snapshot = crate::tui::render_snapshot(&first_app, 160, 44)
+            .unwrap_or_else(|error| panic!("first status snapshot should render: {error}"));
+        let second_snapshot = crate::tui::render_snapshot(&second_app, 160, 44)
+            .unwrap_or_else(|error| panic!("second status snapshot should render: {error}"));
+
+        assert_eq!(
+            first_snapshot, second_snapshot,
+            "phase7 Status snapshots should not vary with host webhook config or temp paths"
+        );
+        assert!(first_snapshot.contains(super::PHASE7_WEBHOOK_CALLBACK_URL));
+        assert!(first_snapshot.contains(super::PHASE7_STALE_SYNC_COMPLETED_AT));
+        assert!(first_snapshot.contains("tests/fixtures/phase7/stale/ringmaster.db"));
     }
 }

@@ -127,7 +127,8 @@ pub enum SnapshotScreenArg {
     Explain,
     Patterns,
     Review,
-    Ops,
+    #[value(alias = "ops")]
+    Status,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -529,7 +530,7 @@ mod tests {
             "--screen",
             "dashboard",
             "--screen",
-            "ops",
+            "status",
             "--size",
             "compact",
             "--size",
@@ -554,9 +555,38 @@ mod tests {
             }) => {
                 assert_eq!(
                     screen,
-                    vec![SnapshotScreenArg::Dashboard, SnapshotScreenArg::Ops]
+                    vec![SnapshotScreenArg::Dashboard, SnapshotScreenArg::Status]
                 );
                 assert_eq!(size, vec![SnapshotSizeArg::Compact, SnapshotSizeArg::Wide]);
+                assert_eq!(out_dir, PathBuf::from("/tmp/ringmaster-snapshots"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ui_snapshot_status_alias() {
+        let cli = Cli::parse_from([
+            "ringmaster",
+            "ui",
+            "snapshot",
+            "--screen",
+            "ops",
+            "--out-dir",
+            "/tmp/ringmaster-snapshots",
+        ])
+        .unwrap_or_else(|error| {
+            panic!("expected clap parsing to succeed in test: {error}");
+        });
+
+        match cli.command {
+            Some(Command::Ui {
+                command:
+                    UiCommand::Snapshot(UiSnapshotArgs {
+                        screen, out_dir, ..
+                    }),
+            }) => {
+                assert_eq!(screen, vec![SnapshotScreenArg::Status]);
                 assert_eq!(out_dir, PathBuf::from("/tmp/ringmaster-snapshots"));
             }
             other => panic!("unexpected command: {other:?}"),
