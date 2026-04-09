@@ -481,7 +481,7 @@ fn counterevidence_lines(
         if !sibling_rows.is_empty()
             && sibling_rows.iter().all(|row| {
                 row.z_score
-                    .is_none_or(|value| value.abs() < DEVIATION_THRESHOLD)
+                    .is_some_and(|value| value.abs() < DEVIATION_THRESHOLD)
             })
             && let Some(definition) = signal_definition(sibling_key)
         {
@@ -1448,6 +1448,70 @@ mod tests {
                 .iter()
                 .all(|line| !line.contains("stayed near baseline")),
             "weekly sibling drift elsewhere in the window should prevent a mixed-signal penalty"
+        );
+    }
+
+    #[test]
+    fn sibling_counterevidence_ignores_unknown_baselines() {
+        let auth_status = auth_status();
+        let signal_days = vec![
+            ReviewSignalDayRecord {
+                signal_key: "readiness_score".to_owned(),
+                day: "2026-04-08".to_owned(),
+                numeric_value: Some(62.0),
+                text_value: None,
+                baseline_mean: Some(80.0),
+                baseline_stddev: Some(5.0),
+                delta: Some(-18.0),
+                z_score: Some(-3.6),
+                persistence_days: 3,
+                sufficiency: ReviewSufficiency::Strong,
+                stale_days: 0,
+                metadata_json: "{}".to_owned(),
+                updated_at: "2026-04-08T12:00:00Z".to_owned(),
+            },
+            ReviewSignalDayRecord {
+                signal_key: "activity_score".to_owned(),
+                day: "2026-04-08".to_owned(),
+                numeric_value: Some(77.0),
+                text_value: None,
+                baseline_mean: None,
+                baseline_stddev: None,
+                delta: None,
+                z_score: None,
+                persistence_days: 0,
+                sufficiency: ReviewSufficiency::Missing,
+                stale_days: 0,
+                metadata_json: "{}".to_owned(),
+                updated_at: "2026-04-08T12:00:00Z".to_owned(),
+            },
+        ];
+
+        let deck = build_review_deck(
+            ReviewMode::Today,
+            "2026-04-08",
+            &ReviewInputs {
+                auth_status: &auth_status,
+                signal_days: &signal_days,
+                context_events: &[],
+                pattern_summaries: &[],
+                sleep_time: &[],
+                rest_mode_periods: &[],
+            },
+        )
+        .unwrap_or_else(|error| panic!("today review should build: {error}"));
+
+        let readiness_card = ranked_cards(&deck)
+            .into_iter()
+            .find(|card| card.signal_key == "readiness_score")
+            .unwrap_or_else(|| panic!("readiness card should be ranked"));
+
+        assert!(
+            readiness_card
+                .counterevidence
+                .iter()
+                .all(|line| !line.contains("stayed near baseline")),
+            "siblings without usable z-scores should not produce mixed-signal counterevidence"
         );
     }
 }

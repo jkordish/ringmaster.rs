@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter};
 
 use rusqlite::{Connection, OptionalExtension, params};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
 use crate::error::{OuraProblem, Result, RingmasterError};
 use crate::oura::models::{TagRecord, TagSource};
@@ -9,6 +9,14 @@ use crate::review::features::ReviewSufficiency;
 use crate::store::migrations;
 
 pub const OURA_PROVIDER: &str = "oura";
+
+fn current_local_day_string() -> String {
+    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    OffsetDateTime::now_utc()
+        .to_offset(local_offset)
+        .date()
+        .to_string()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncRunStatus {
@@ -1745,6 +1753,7 @@ impl<'connection> ViewStore<'connection> {
     }
 
     pub fn latest_source_day(&self) -> Result<Option<String>> {
+        let local_day = current_local_day_string();
         self.connection
             .query_row(
                 "SELECT MAX(day) FROM (
@@ -1773,18 +1782,19 @@ impl<'connection> ViewStore<'connection> {
                     SELECT day FROM sessions
                     UNION ALL
                     SELECT CASE
-                        WHEN end_day IS NULL THEN MAX(start_day, DATE('now'))
+                        WHEN end_day IS NULL THEN MAX(start_day, ?1)
                         ELSE end_day
                     END AS day
                     FROM rest_mode_periods
                 )",
-                [],
+                [local_day],
                 |row| row.get::<_, Option<String>>(0),
             )
             .map_err(Into::into)
     }
 
     pub fn latest_review_day(&self) -> Result<Option<String>> {
+        let local_day = current_local_day_string();
         self.connection
             .query_row(
                 "SELECT MAX(day) FROM (
@@ -1793,12 +1803,12 @@ impl<'connection> ViewStore<'connection> {
                     SELECT day FROM sleep_time
                     UNION ALL
                     SELECT CASE
-                        WHEN end_day IS NULL THEN MAX(start_day, DATE('now'))
+                        WHEN end_day IS NULL THEN MAX(start_day, ?1)
                         ELSE end_day
                     END AS day
                     FROM rest_mode_periods
                 )",
-                [],
+                [local_day],
                 |row| row.get::<_, Option<String>>(0),
             )
             .map_err(Into::into)
@@ -2784,8 +2794,6 @@ fn now_rfc3339() -> Result<String> {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use time::OffsetDateTime;
-
     use crate::error::OuraProblem;
     use crate::review::features::ReviewSufficiency;
     use crate::store::Store;
@@ -2974,7 +2982,7 @@ mod tests {
     fn latest_source_day_treats_open_rest_mode_as_current() {
         let store =
             Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
-        let current_day = OffsetDateTime::now_utc().date().to_string();
+        let current_day = super::current_local_day_string();
         store
             .imports()
             .upsert_rest_mode_period(&RestModePeriodRecord {
@@ -3052,7 +3060,7 @@ mod tests {
     fn latest_review_day_treats_open_rest_mode_as_current() {
         let store =
             Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
-        let current_day = OffsetDateTime::now_utc().date().to_string();
+        let current_day = super::current_local_day_string();
         store
             .imports()
             .upsert_rest_mode_period(&RestModePeriodRecord {
