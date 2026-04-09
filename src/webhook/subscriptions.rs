@@ -378,7 +378,10 @@ impl LiveWebhookAdminClient {
         .await
     }
 
-    async fn create(&self, desired: &DesiredWebhookSubscriptionTarget) -> Result<()> {
+    async fn create(
+        &self,
+        desired: &DesiredWebhookSubscriptionTarget,
+    ) -> Result<RemoteWebhookSubscription> {
         self.send(
             reqwest::Method::POST,
             "/v2/webhook/subscription",
@@ -392,7 +395,7 @@ impl LiveWebhookAdminClient {
         .await
     }
 
-    async fn update(&self, update: &SubscriptionUpdate) -> Result<()> {
+    async fn update(&self, update: &SubscriptionUpdate) -> Result<RemoteWebhookSubscription> {
         self.send(
             reqwest::Method::PUT,
             &format!("/v2/webhook/subscription/{}", update.existing.id),
@@ -424,10 +427,10 @@ impl LiveWebhookAdminClient {
 
     async fn apply(&self, plan: &SubscriptionSyncPlan) -> Result<()> {
         for desired in &plan.create {
-            self.create(desired).await?;
+            let _ = self.create(desired).await?;
         }
         for update in &plan.update {
-            self.update(update).await?;
+            let _ = self.update(update).await?;
         }
         for subscription in &plan.renew {
             self.renew(subscription).await?;
@@ -788,6 +791,28 @@ mod tests {
     use crate::store::Store;
     use crate::webhook::WebhookEventType;
     use tempfile::tempdir;
+
+    #[test]
+    fn remote_subscription_deserializes_from_live_write_response_shape() {
+        let payload = r#"{
+            "id":"sub-1",
+            "callback_url":"https://example.test/webhooks/oura",
+            "event_type":"create",
+            "data_type":"daily_sleep",
+            "expiration_time":"2099-01-01T00:00:00Z"
+        }"#;
+
+        let subscription: RemoteWebhookSubscription = serde_json::from_str(payload)
+            .unwrap_or_else(|error| panic!("live write response should decode: {error}"));
+
+        assert_eq!(subscription.id, "sub-1");
+        assert_eq!(
+            subscription.callback_url,
+            "https://example.test/webhooks/oura"
+        );
+        assert_eq!(subscription.event_type, WebhookEventType::Create);
+        assert_eq!(subscription.data_type, "daily_sleep");
+    }
 
     #[test]
     fn builds_create_update_renew_and_prune_plan() {
