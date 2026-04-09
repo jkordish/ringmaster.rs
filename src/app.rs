@@ -1674,7 +1674,12 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
 }
 
 fn receiver_config_complete(snapshot: &LiveSnapshot) -> bool {
-    snapshot.webhook.callback_url.is_some() && snapshot.webhook.verification_token_configured
+    snapshot.webhook.callback_url.is_some()
+        && snapshot.webhook.verification_token_configured
+        && !snapshot
+            .auth_status
+            .missing_fields
+            .contains(&"client_secret")
 }
 
 fn heartbeat_for<'a>(
@@ -3817,6 +3822,19 @@ mod tests {
         let snapshot = make_snapshot(&["2026-04-08"]);
         let freshness = super::family_freshness(&snapshot, DataFamily::Workout);
         assert_eq!(freshness.summary, "stale: receiver down");
+    }
+
+    #[test]
+    fn receiver_status_is_config_incomplete_without_client_secret() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.webhook.callback_url = Some("https://example.ngrok.dev/webhooks/oura".to_owned());
+        snapshot.webhook.verification_token_configured = true;
+        snapshot.auth_status.missing_fields = vec!["client_secret"];
+
+        assert_eq!(
+            super::receiver_status_line(&snapshot),
+            Some("config incomplete".to_owned())
+        );
     }
 
     #[test]

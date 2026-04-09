@@ -474,6 +474,10 @@ impl Config {
 
         Ok(config)
     }
+
+    pub fn webhook_receiver_configured(&self) -> bool {
+        self.webhook.receiver_configured() && self.oura.client_secret.is_some()
+    }
 }
 
 impl RefreshConfig {

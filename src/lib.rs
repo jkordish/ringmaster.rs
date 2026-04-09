@@ -371,7 +371,7 @@ record_counts:
         refresh_lines,
         demo_fixture_dir,
         sync_lines,
-        config.webhook.receiver_configured(),
+        config.webhook_receiver_configured(),
         snapshot
             .webhook
             .callback_url
@@ -410,7 +410,7 @@ record_counts:
 }
 
 fn doctor_receiver_status(snapshot: &app::LiveSnapshot) -> String {
-    if snapshot.webhook.callback_url.is_none() || !snapshot.webhook.verification_token_configured {
+    if !doctor_receiver_config_complete(snapshot) {
         return "config incomplete".to_owned();
     }
 
@@ -430,6 +430,15 @@ fn doctor_receiver_status(snapshot: &app::LiveSnapshot) -> String {
     } else {
         format!("stale heartbeat ({})", record.last_seen_at)
     }
+}
+
+fn doctor_receiver_config_complete(snapshot: &app::LiveSnapshot) -> bool {
+    snapshot.webhook.callback_url.is_some()
+        && snapshot.webhook.verification_token_configured
+        && !snapshot
+            .auth_status
+            .missing_fields
+            .contains(&"client_secret")
 }
 
 fn doctor_runtime_mode(snapshot: &app::LiveSnapshot) -> &'static str {
@@ -1216,6 +1225,20 @@ mod tests {
         assert!(report.contains("webhook_receiver_configured: false"));
         assert!(report.contains("webhook_receiver_status: config incomplete"));
         assert!(report.contains("webhook_missing_public_prereq: true"));
+    }
+
+    #[test]
+    fn doctor_requires_client_secret_for_receiver_readiness() {
+        let (_tempdir, mut config) =
+            test_config(Some("https://example.test"), Some("verify-token"));
+        config.oura.client_secret = None;
+
+        let report = run_doctor(&config)
+            .unwrap_or_else(|error| panic!("doctor should run without client secret: {error}"))
+            .unwrap_or_else(|| panic!("doctor should return output"));
+
+        assert!(report.contains("webhook_receiver_configured: false"));
+        assert!(report.contains("webhook_receiver_status: config incomplete"));
     }
 
     #[test]

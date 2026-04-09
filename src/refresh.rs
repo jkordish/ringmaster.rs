@@ -825,7 +825,7 @@ fn record_global_invalidation_failure(
 }
 
 fn watch_mode_label(config: &Config) -> &'static str {
-    if config.webhook.receiver_configured() {
+    if config.webhook_receiver_configured() {
         "hybrid"
     } else {
         "scheduler_only"
