@@ -1397,16 +1397,24 @@ mod tests {
             } => invalidation_id,
             other => panic!("unexpected first outcome: {other:?}"),
         };
+        let processing_started_at = OffsetDateTime::now_utc()
+            .saturating_add(time::Duration::seconds(1))
+            .format(&Rfc3339)
+            .unwrap_or_else(|error| panic!("processing start should format: {error}"));
+        let processing_finished_at = OffsetDateTime::now_utc()
+            .saturating_add(time::Duration::seconds(2))
+            .format(&Rfc3339)
+            .unwrap_or_else(|error| panic!("processing finish should format: {error}"));
         let attempt = store
             .webhook()
-            .start_processing_attempt(invalidation_id, &timestamp)
+            .start_processing_attempt(invalidation_id, &processing_started_at)
             .unwrap_or_else(|error| panic!("attempt should start: {error}"));
         store
             .webhook()
             .complete_processing_attempt_success(
                 invalidation_id,
                 attempt.attempt_id,
-                &timestamp,
+                &processing_finished_at,
                 Some("processed"),
             )
             .unwrap_or_else(|error| panic!("attempt should complete: {error}"));

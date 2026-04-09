@@ -1518,10 +1518,7 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
         .count();
     let summary_lines = vec![
         format!("Mode: {}", ops_runtime_mode(snapshot)),
-        format!(
-            "Receiver: {}",
-            receiver_status_line(snapshot).unwrap_or_else(|| "not configured".to_owned())
-        ),
+        format!("Receiver: {}", receiver_status_line(snapshot)),
         format!(
             "Queue: pending={} oldest={} failed_attempts={}",
             queue_depth, queue_oldest, recent_failures
@@ -1745,20 +1742,23 @@ fn ops_runtime_mode(snapshot: &LiveSnapshot) -> String {
     }
 }
 
-fn receiver_status_line(snapshot: &LiveSnapshot) -> Option<String> {
+fn receiver_status_line(snapshot: &LiveSnapshot) -> String {
     if !receiver_config_complete(snapshot) {
-        return Some("config incomplete".to_owned());
+        return "config incomplete".to_owned();
     }
 
-    heartbeat_for(snapshot, "webhook.receiver").map(|record| {
-        if heartbeat_is_active(snapshot, record) {
-            "healthy".to_owned()
-        } else if record.mode == "stopped" {
-            format!("stopped ({})", record.last_seen_at)
-        } else {
-            format!("stale heartbeat ({})", record.last_seen_at)
-        }
-    })
+    heartbeat_for(snapshot, "webhook.receiver").map_or_else(
+        || "missing heartbeat".to_owned(),
+        |record| {
+            if heartbeat_is_active(snapshot, record) {
+                "healthy".to_owned()
+            } else if record.mode == "stopped" {
+                format!("stopped ({})", record.last_seen_at)
+            } else {
+                format!("stale heartbeat ({})", record.last_seen_at)
+            }
+        },
+    )
 }
 
 fn recent_health_incidents(snapshot: &LiveSnapshot) -> Vec<String> {
@@ -3833,7 +3833,20 @@ mod tests {
 
         assert_eq!(
             super::receiver_status_line(&snapshot),
-            Some("config incomplete".to_owned())
+            "config incomplete".to_owned()
+        );
+    }
+
+    #[test]
+    fn receiver_status_reports_missing_heartbeat_when_config_complete() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.webhook.callback_url = Some("https://example.ngrok.dev/webhooks/oura".to_owned());
+        snapshot.webhook.verification_token_configured = true;
+        snapshot.webhook.runtime_heartbeats.clear();
+
+        assert_eq!(
+            super::receiver_status_line(&snapshot),
+            "missing heartbeat".to_owned()
         );
     }
 
