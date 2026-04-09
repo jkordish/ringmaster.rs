@@ -112,10 +112,32 @@ pub fn rebuild_store(store: &Store) -> Result<DeriveReport> {
 }
 
 pub fn rebuild_recent_store(store: &Store, config: &Config) -> Result<DeriveReport> {
-    let latest_source_day = store.views().latest_source_day()?;
+    rebuild_store_for_anchor_day(store, config, None)
+}
+
+pub fn rebuild_store_for_anchor_day(
+    store: &Store,
+    config: &Config,
+    anchor_day: Option<&str>,
+) -> Result<DeriveReport> {
+    let resolved_anchor_day = match anchor_day {
+        Some(day) => {
+            Date::parse(
+                day,
+                &time::macros::format_description!("[year]-[month]-[day]"),
+            )
+            .map_err(|error| {
+                RingmasterError::Config(format!(
+                    "failed to parse derive anchor day `{day}`: {error}"
+                ))
+            })?;
+            Some(day.to_owned())
+        }
+        None => store.views().latest_source_day()?,
+    };
     rebuild_store_with_bounds(
         store,
-        DeriveBounds::bounded_refresh(&config.refresh, latest_source_day.as_deref()),
+        DeriveBounds::bounded_refresh(&config.refresh, resolved_anchor_day.as_deref()),
     )
 }
 

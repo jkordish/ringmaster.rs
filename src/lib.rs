@@ -1248,7 +1248,7 @@ async fn load_review_store_snapshot(
     }
 
     let store = Store::open(config)?;
-    let _ = derive::rebuild_recent_store(&store, config)?;
+    let _ = derive::rebuild_store_for_anchor_day(&store, config, requested_anchor_day)?;
     let auth_status = oura::auth::inspect_auth(config, &store)?;
     let snapshot = load_review_snapshot_from_store(&store, &auth_status, requested_anchor_day)?;
     Ok((None, snapshot))
@@ -1556,19 +1556,24 @@ fn interactive_terminal_available() -> bool {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::{run_doctor, run_review_investigate, run_review_week, run_webhook_replay};
-    use crate::cli::{ReviewFocusArg, ReviewInvestigateArgs, ReviewWeekArgs, WebhookReplayArgs};
+    use super::{
+        run_doctor, run_review_investigate, run_review_today, run_review_week, run_webhook_replay,
+    };
+    use crate::cli::{
+        ReviewFocusArg, ReviewInvestigateArgs, ReviewTodayArgs, ReviewWeekArgs, WebhookReplayArgs,
+    };
     use crate::config::{
         AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
     };
     use crate::store::Store;
+    use crate::store::queries::{DailyActivityRecord, DailyReadinessRecord, DailySleepRecord};
     use crate::store::webhook_store::{
         AcceptedWebhookDeliveryInput, DesiredWebhookSubscriptionRecord, InvalidationInput,
         RemoteWebhookSubscriptionRecord, RuntimeHeartbeatRecord, now_rfc3339,
     };
     use crate::webhook::{WebhookEventType, default_desired_subscriptions};
     use tempfile::tempdir;
-    use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
+    use time::{Date, Duration, Month, OffsetDateTime, format_description::well_known::Rfc3339};
 
     fn test_config(
         public_base_url: Option<&str>,
@@ -1656,6 +1661,88 @@ mod tests {
         (OffsetDateTime::now_utc() + Duration::days(days))
             .format(&Rfc3339)
             .unwrap_or_else(|error| panic!("future timestamp should format in test: {error}"))
+    }
+
+    fn seed_historical_review_days(store: &Store) {
+        let imports = store.imports();
+        let updated_at = "2026-04-08T12:00:00Z";
+        let anchor_day = "2025-10-08";
+        let start_day = Date::from_calendar_date(2025, Month::September, 1)
+            .unwrap_or_else(|error| panic!("historical start day should parse: {error}"));
+
+        for offset in 0_i64..38_i64 {
+            let day = start_day
+                .checked_add(Duration::days(offset))
+                .unwrap_or_else(|| panic!("historical seed day should stay in range"))
+                .to_string();
+            let is_anchor_day = day == anchor_day;
+
+            imports
+                .upsert_daily_sleep(&DailySleepRecord {
+                    oura_id: None,
+                    day: day.clone(),
+                    sleep_score: Some(if is_anchor_day { 60 } else { 82 }),
+                    raw_cache_key: None,
+                    updated_at: updated_at.to_owned(),
+                })
+                .unwrap_or_else(|error| panic!("sleep seed row should insert: {error}"));
+            imports
+                .upsert_daily_readiness(&DailyReadinessRecord {
+                    oura_id: None,
+                    day: day.clone(),
+                    readiness_score: Some(if is_anchor_day { 55 } else { 80 }),
+                    temperature_deviation: None,
+                    temperature_trend_deviation: None,
+                    raw_cache_key: None,
+                    updated_at: updated_at.to_owned(),
+                })
+                .unwrap_or_else(|error| panic!("readiness seed row should insert: {error}"));
+            imports
+                .upsert_daily_activity(&DailyActivityRecord {
+                    oura_id: None,
+                    day,
+                    activity_score: Some(70),
+                    active_calories: 350,
+                    steps: 8_000,
+                    total_calories: 2_000,
+                    raw_cache_key: None,
+                    updated_at: updated_at.to_owned(),
+                })
+                .unwrap_or_else(|error| panic!("activity seed row should insert: {error}"));
+        }
+
+        imports
+            .upsert_daily_sleep(&DailySleepRecord {
+                oura_id: None,
+                day: "2026-04-08".to_owned(),
+                sleep_score: Some(83),
+                raw_cache_key: None,
+                updated_at: updated_at.to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("latest sleep seed row should insert: {error}"));
+        imports
+            .upsert_daily_readiness(&DailyReadinessRecord {
+                oura_id: None,
+                day: "2026-04-08".to_owned(),
+                readiness_score: Some(81),
+                temperature_deviation: None,
+                temperature_trend_deviation: None,
+                raw_cache_key: None,
+                updated_at: updated_at.to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("latest readiness seed row should insert: {error}"));
+        imports
+            .upsert_daily_activity(&DailyActivityRecord {
+                oura_id: None,
+                day: "2026-04-08".to_owned(),
+                activity_score: Some(72),
+                active_calories: 360,
+                steps: 8_300,
+                total_calories: 2_050,
+                raw_cache_key: None,
+                updated_at: updated_at.to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("latest activity seed row should insert: {error}"));
     }
 
     #[test]
@@ -1898,6 +1985,34 @@ mod tests {
         assert!(output.contains("ringmaster review investigate"));
         assert!(output.contains("No reviewable days are available yet"));
         assert!(!output.contains("unknown"));
+    }
+
+    #[tokio::test]
+    async fn review_today_rebuilds_around_requested_historical_day() {
+        let (_tempdir, config) = test_config(Some("https://example.test"), Some("verify-token"));
+        let store = Store::open(&config)
+            .unwrap_or_else(|error| panic!("store should open for review test: {error}"));
+        seed_historical_review_days(&store);
+
+        let output = run_review_today(
+            &config,
+            ReviewTodayArgs {
+                day: Some("2025-10-08".to_owned()),
+                json: false,
+                demo: false,
+                fixture_dir: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("review today should build from a requested historical day: {error}")
+        })
+        .unwrap_or_else(|| panic!("review today should render text output"));
+
+        assert!(output.contains("anchor_day: 2025-10-08"));
+        assert!(output.contains("top_observations:"));
+        assert!(output.contains("\n  1. "));
+        assert!(!output.contains("No reviewable days are available yet"));
     }
 
     #[tokio::test]

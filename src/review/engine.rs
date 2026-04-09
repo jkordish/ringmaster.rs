@@ -497,12 +497,7 @@ fn context_support_lines(
     inputs: &ReviewInputs<'_>,
 ) -> Vec<String> {
     let mut lines = Vec::new();
-    let related_events = inputs
-        .context_events
-        .iter()
-        .filter(|event| event.anchor_day == anchor_day)
-        .take(2)
-        .collect::<Vec<_>>();
+    let related_events = context_events_in_review_window(mode, anchor_day, inputs.context_events);
     for event in related_events {
         lines.push(format!(
             "{} context nearby: {}.",
@@ -562,10 +557,7 @@ fn corroboration_points(
     inputs: &ReviewInputs<'_>,
 ) -> i32 {
     let context_match = i32::from(
-        inputs
-            .context_events
-            .iter()
-            .any(|event| event.anchor_day == anchor_day),
+        !context_events_in_review_window(mode, anchor_day, inputs.context_events).is_empty(),
     );
     let pattern_match = i32::from(
         pattern_metric_for_signal(definition.key)
@@ -778,14 +770,8 @@ fn overlapping_rest_mode_days(
     anchor_day: &str,
     rest_mode_periods: &[RestModePeriodRecord],
 ) -> usize {
-    let Ok(anchor_date) = parse_day(anchor_day) else {
+    let Some((window_start, anchor_date)) = review_window_bounds(mode, anchor_day) else {
         return 0;
-    };
-    let window_start = match mode {
-        ReviewMode::Today => anchor_date,
-        ReviewMode::Week => anchor_date
-            .checked_sub(time::Duration::days(6))
-            .unwrap_or(anchor_date),
     };
     let mut overlapped_days = BTreeSet::new();
 
@@ -819,6 +805,37 @@ fn overlapping_rest_mode_days(
     }
 
     overlapped_days.len()
+}
+
+fn context_events_in_review_window<'a>(
+    mode: ReviewMode,
+    anchor_day: &str,
+    context_events: &'a [ContextEventRecord],
+) -> Vec<&'a ContextEventRecord> {
+    let Some((window_start, window_end)) = review_window_bounds(mode, anchor_day) else {
+        return Vec::new();
+    };
+
+    context_events
+        .iter()
+        .filter(|event| {
+            parse_day(&event.anchor_day)
+                .ok()
+                .is_some_and(|event_day| event_day >= window_start && event_day <= window_end)
+        })
+        .take(2)
+        .collect()
+}
+
+fn review_window_bounds(mode: ReviewMode, anchor_day: &str) -> Option<(Date, Date)> {
+    let anchor_date = parse_day(anchor_day).ok()?;
+    let window_start = match mode {
+        ReviewMode::Today => anchor_date,
+        ReviewMode::Week => anchor_date
+            .checked_sub(time::Duration::days(6))
+            .unwrap_or(anchor_date),
+    };
+    Some((window_start, anchor_date))
 }
 
 fn event_family_label(family: ContextEventFamily) -> &'static str {
@@ -1043,6 +1060,85 @@ mod tests {
                 .iter()
                 .all(|card| card.signal_key.as_str() != "steps"),
             "equal weekly step totals should not be ranked as a drift"
+        );
+    }
+
+    #[test]
+    fn weekly_review_uses_context_events_from_the_full_week_window() {
+        let auth_status = auth_status();
+        let start_day = time::Date::from_calendar_date(2026, Month::March, 5)
+            .unwrap_or_else(|error| panic!("test start day should be valid: {error}"));
+        let signal_days = (0_i64..35_i64)
+            .map(|offset| {
+                let day = start_day
+                    .checked_add(time::Duration::days(offset))
+                    .unwrap_or_else(|| panic!("test day should stay in range"));
+                let day = day
+                    .format(&time::macros::format_description!("[year]-[month]-[day]"))
+                    .unwrap_or_else(|error| panic!("test day should format: {error}"));
+                let in_current_week = offset >= 28;
+                ReviewSignalDayRecord {
+                    signal_key: "readiness_score".to_owned(),
+                    day,
+                    numeric_value: Some(if in_current_week { 60.0 } else { 80.0 }),
+                    text_value: None,
+                    baseline_mean: Some(80.0),
+                    baseline_stddev: Some(5.0),
+                    delta: Some(if in_current_week { -20.0 } else { 0.0 }),
+                    z_score: Some(if in_current_week { -4.0 } else { 0.0 }),
+                    persistence_days: if in_current_week { 4 } else { 0 },
+                    sufficiency: ReviewSufficiency::Strong,
+                    stale_days: 0,
+                    metadata_json: "{}".to_owned(),
+                    updated_at: "2026-04-08T12:00:00Z".to_owned(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let deck = build_review_deck(
+            ReviewMode::Week,
+            "2026-04-08",
+            &ReviewInputs {
+                auth_status: &auth_status,
+                signal_days: &signal_days,
+                context_events: &[ContextEventRecord {
+                    context_event_id: "workout:week-window".to_owned(),
+                    family: ContextEventFamily::Workout,
+                    source_id: "week-window".to_owned(),
+                    anchor_day: "2026-04-04".to_owned(),
+                    start_at: "2026-04-04T18:00:00Z".to_owned(),
+                    end_at: Some("2026-04-04T18:40:00Z".to_owned()),
+                    time_semantics: crate::store::queries::TimeSemantics::Interval,
+                    title: "Tempo run".to_owned(),
+                    subtype: Some("running".to_owned()),
+                    notes: None,
+                    intensity: Some("moderate".to_owned()),
+                    metadata_json: "{}".to_owned(),
+                    updated_at: "2026-04-04T19:00:00Z".to_owned(),
+                }],
+                pattern_summaries: &[],
+                sleep_time: &[],
+                rest_mode_periods: &[],
+            },
+        )
+        .unwrap_or_else(|error| panic!("weekly review should build: {error}"));
+
+        let readiness_card = ranked_cards(&deck)
+            .into_iter()
+            .find(|card| card.signal_key == "readiness_score")
+            .unwrap_or_else(|| panic!("readiness card should be ranked"));
+
+        assert!(
+            readiness_card
+                .evidence
+                .iter()
+                .any(|line| line.contains("Workout context nearby: Tempo run."))
+        );
+        assert!(
+            readiness_card
+                .evidence
+                .iter()
+                .all(|line| line != "No strong contextual corroboration was found for this week.")
         );
     }
 
