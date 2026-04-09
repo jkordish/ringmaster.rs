@@ -47,19 +47,46 @@ pub fn equal_columns(count: usize) -> Vec<Constraint> {
         return Vec::new();
     }
 
+    let base = (100 / count) as u16;
+    let remainder = (100 % count) as u16;
+
     (0..count)
-        .map(|_| Constraint::Percentage((100 / count.max(1)) as u16))
+        .map(|index| Constraint::Percentage(base + u16::from(index < remainder as usize)))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ViewportClass;
+    use ratatui::prelude::Constraint;
+
+    use super::{ViewportClass, equal_columns};
 
     #[test]
     fn viewport_breakpoints_are_stable() {
         assert_eq!(ViewportClass::from_width(90), ViewportClass::Compact);
         assert_eq!(ViewportClass::from_width(120), ViewportClass::Medium);
         assert_eq!(ViewportClass::from_width(160), ViewportClass::Wide);
+    }
+
+    #[test]
+    fn equal_columns_distributes_remainder() {
+        assert_eq!(
+            equal_columns(3),
+            vec![
+                Constraint::Percentage(34),
+                Constraint::Percentage(33),
+                Constraint::Percentage(33),
+            ]
+        );
+        assert_eq!(
+            equal_columns(6)
+                .into_iter()
+                .map(|constraint| match constraint {
+                    Constraint::Percentage(value) => u32::from(value),
+                    _ => 0,
+                })
+                .sum::<u32>(),
+            100
+        );
     }
 }

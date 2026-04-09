@@ -46,6 +46,7 @@ pub mod tui;
 pub mod ui;
 pub mod webhook;
 
+use std::collections::HashMap;
 use std::io::{IsTerminal, stdin, stdout};
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -78,7 +79,7 @@ struct TempRootGuard {
 }
 
 const FIXTURE_SNAPSHOT_WEBHOOK_BIND_ADDRESS: &str = "127.0.0.1:8799";
-const FIXTURE_SNAPSHOT_WEBHOOK_PATH: &str = "/oura/webhook";
+const FIXTURE_SNAPSHOT_WEBHOOK_PATH: &str = "/webhooks/oura";
 const FIXTURE_SNAPSHOT_WEBHOOK_CALLBACK_URL: &str = "https://fixture.example.test/webhooks/oura";
 const FIXTURE_SNAPSHOT_BASE_SYNC_ATTEMPTED_AT: &str = "2026-04-09T11:58:00Z";
 const FIXTURE_SNAPSHOT_BASE_SYNC_COMPLETED_AT: &str = "2026-04-09T11:59:00Z";
@@ -837,10 +838,17 @@ async fn build_scenario_fixture_snapshot_states(
     fixture_root: &std::path::Path,
 ) -> Result<Vec<SnapshotScenarioState>> {
     let mut states = Vec::new();
+    let mut snapshot_cache: HashMap<PathBuf, app::LiveSnapshot> = HashMap::new();
     for scenario in ui::snapshot::SnapshotScenario::ALL {
         let fixture_dir = scenario_fixture_seed_dir(fixture_root, scenario);
-        let mut snapshot = load_fixture_snapshot(config, fixture_dir).await?;
-        apply_scenario_fixture_snapshot_overlay(&mut snapshot, scenario);
+        let mut snapshot = if let Some(snapshot) = snapshot_cache.get(&fixture_dir) {
+            snapshot.clone()
+        } else {
+            let snapshot = load_fixture_snapshot(config, fixture_dir.clone()).await?;
+            snapshot_cache.insert(fixture_dir, snapshot.clone());
+            snapshot
+        };
+        apply_scenario_fixture_snapshot_overlay(&mut snapshot, fixture_root, scenario);
         states.push(SnapshotScenarioState {
             scenario,
             app: app::build_state_from_snapshot(
@@ -913,10 +921,11 @@ fn apply_fixture_snapshot_overlay(snapshot: &mut app::LiveSnapshot, fixture_dir:
 
 fn apply_scenario_fixture_snapshot_overlay(
     snapshot: &mut app::LiveSnapshot,
+    fixture_root: &std::path::Path,
     scenario: ui::snapshot::SnapshotScenario,
 ) {
-    snapshot.config_path = scenario_fixture_config_path(scenario);
-    snapshot.database_path = scenario_fixture_database_path(scenario);
+    snapshot.config_path = scenario_fixture_config_path(fixture_root, scenario);
+    snapshot.database_path = scenario_fixture_database_path(fixture_root, scenario);
     FIXTURE_SNAPSHOT_WEBHOOK_BIND_ADDRESS.clone_into(&mut snapshot.webhook.bind_address);
     FIXTURE_SNAPSHOT_WEBHOOK_PATH.clone_into(&mut snapshot.webhook.path);
     snapshot.webhook.callback_url = Some(FIXTURE_SNAPSHOT_WEBHOOK_CALLBACK_URL.to_owned());
@@ -1202,12 +1211,24 @@ fn apply_scenario_fixture_snapshot_overlay(
     }
 }
 
-fn scenario_fixture_config_path(scenario: ui::snapshot::SnapshotScenario) -> String {
-    format!("tests/fixtures/phase7/{}/config.toml", scenario.label())
+fn scenario_fixture_config_path(
+    fixture_root: &std::path::Path,
+    scenario: ui::snapshot::SnapshotScenario,
+) -> String {
+    format!(
+        "{}/config.toml",
+        fixture_snapshot_display_path(&fixture_root.join(scenario.label()))
+    )
 }
 
-fn scenario_fixture_database_path(scenario: ui::snapshot::SnapshotScenario) -> String {
-    format!("tests/fixtures/phase7/{}/ringmaster.db", scenario.label())
+fn scenario_fixture_database_path(
+    fixture_root: &std::path::Path,
+    scenario: ui::snapshot::SnapshotScenario,
+) -> String {
+    format!(
+        "{}/ringmaster.db",
+        fixture_snapshot_display_path(&fixture_root.join(scenario.label()))
+    )
 }
 
 fn fixture_snapshot_display_path(fixture_dir: &std::path::Path) -> String {
@@ -2340,6 +2361,34 @@ mod tests {
     use tempfile::tempdir;
     use time::{Date, Duration, Month, OffsetDateTime, format_description::well_known::Rfc3339};
 
+    fn copy_dir_recursive(source: &std::path::Path, destination: &std::path::Path) {
+        std::fs::create_dir_all(destination).unwrap_or_else(|error| {
+            panic!(
+                "destination directory {} should exist: {error}",
+                destination.display()
+            )
+        });
+        for entry in std::fs::read_dir(source).unwrap_or_else(|error| {
+            panic!("source directory {} should read: {error}", source.display())
+        }) {
+            let entry =
+                entry.unwrap_or_else(|error| panic!("source entry should load cleanly: {error}"));
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            if source_path.is_dir() {
+                copy_dir_recursive(&source_path, &destination_path);
+            } else {
+                std::fs::copy(&source_path, &destination_path).unwrap_or_else(|error| {
+                    panic!(
+                        "fixture file {} should copy to {}: {error}",
+                        source_path.display(),
+                        destination_path.display()
+                    )
+                });
+            }
+        }
+    }
+
     fn test_config(
         public_base_url: Option<&str>,
         verification_token: Option<&str>,
@@ -3022,6 +3071,36 @@ mod tests {
         assert!(first_snapshot.contains(super::FIXTURE_SNAPSHOT_WEBHOOK_CALLBACK_URL));
         assert!(first_snapshot.contains(super::FIXTURE_SNAPSHOT_STALE_SYNC_COMPLETED_AT));
         assert!(first_snapshot.contains("tests/fixtures/phase7/stale/ringmaster.db"));
+    }
+
+    #[tokio::test]
+    async fn scenario_fixture_status_snapshots_report_the_actual_fixture_root() {
+        let copied_root_tempdir =
+            tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
+        let copied_root = copied_root_tempdir.path().join("scenario-fixtures");
+        copy_dir_recursive(std::path::Path::new("tests/fixtures/phase7"), &copied_root);
+        let (_tempdir, config) = test_config(Some("https://example.test"), Some("verify-token"));
+
+        let mut stale_app =
+            super::build_scenario_fixture_snapshot_apps_for_tests(&config, copied_root.as_path())
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("copied scenario fixture apps should build: {error}")
+                })
+                .into_iter()
+                .find_map(|(scenario, app)| {
+                    (scenario == crate::ui::snapshot::SnapshotScenario::Stale).then_some(app)
+                })
+                .unwrap_or_else(|| panic!("stale scenario fixture app should exist"));
+        stale_app.active_screen = crate::app::Screen::Ops;
+
+        let snapshot = crate::tui::render_snapshot(&stale_app, 160, 44)
+            .unwrap_or_else(|error| panic!("status snapshot should render: {error}"));
+        let copied_root_display = copied_root.display().to_string();
+
+        assert!(snapshot.contains(&format!("{copied_root_display}/stale/config.toml")));
+        assert!(snapshot.contains(&format!("{copied_root_display}/stale/ringmaster.db")));
+        assert!(!snapshot.contains("tests/fixtures/phase7/stale/ringmaster.db"));
     }
 
     #[tokio::test]

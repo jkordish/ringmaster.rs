@@ -357,7 +357,7 @@ impl LiveWebhookAdminClient {
             )
         })?;
         let http = HttpClient::builder()
-            .user_agent("ringmaster.rs/phase4")
+            .user_agent("ringmaster.rs/webhook-admin")
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
 

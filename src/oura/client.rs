@@ -20,6 +20,8 @@ use crate::store::queries::RawPayloadRecord;
 
 type ClientFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
+const OURA_API_USER_AGENT: &str = "ringmaster.rs/oura-api";
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SingleFetch<T> {
     pub raw_payload: RawPayloadRecord,
@@ -120,7 +122,7 @@ pub struct FixtureOuraClient {
 impl ReqwestOuraClient {
     pub fn new(config: &Config, access_token: String, granted_scopes: &[String]) -> Result<Self> {
         let http = HttpClient::builder()
-            .user_agent("ringmaster.rs/phase3")
+            .user_agent(OURA_API_USER_AGENT)
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
 
