@@ -13,8 +13,8 @@ use crate::review::{FeatureInputs, build_review_signal_days};
 use crate::store::Store;
 use crate::store::queries::{
     ContextEventFamily, ContextEventRecord, DailyOverviewRow, DataSufficiency, EffectDirection,
-    PatternMetric, PatternRelationWindow, PatternSummaryRecord, RecordCounts, SessionRecord,
-    TimeSemantics, WorkoutRecord,
+    PatternMetric, PatternRelationWindow, PatternSummaryRecord, RecordCounts,
+    ReviewSignalDayRecord, SessionRecord, TimeSemantics, WorkoutRecord,
 };
 
 const MIN_PATTERN_SAMPLES: usize = 3;
@@ -34,6 +34,13 @@ pub struct DeriveReport {
     pub pattern_summary_count: usize,
     pub review_signal_day_count: usize,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DerivedReviewArtifacts {
+    pub context_events: Vec<ContextEventRecord>,
+    pub pattern_summaries: Vec<PatternSummaryRecord>,
+    pub review_signal_days: Vec<ReviewSignalDayRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -141,7 +148,68 @@ pub fn rebuild_store_for_anchor_day(
     )
 }
 
+pub fn derive_review_artifacts_for_anchor_day(
+    store: &Store,
+    config: &Config,
+    anchor_day: Option<&str>,
+) -> Result<Option<DerivedReviewArtifacts>> {
+    let resolved_anchor_day = match anchor_day {
+        Some(day) => {
+            Date::parse(
+                day,
+                &time::macros::format_description!("[year]-[month]-[day]"),
+            )
+            .map_err(|error| {
+                RingmasterError::Config(format!(
+                    "failed to parse derive anchor day `{day}`: {error}"
+                ))
+            })?;
+            Some(day.to_owned())
+        }
+        None => store.views().latest_source_day()?,
+    };
+
+    resolved_anchor_day
+        .as_deref()
+        .map(|resolved_anchor_day| {
+            derive_review_artifacts_with_bounds(
+                store,
+                DeriveBounds::bounded_refresh(&config.refresh, Some(resolved_anchor_day)),
+            )
+        })
+        .transpose()
+}
+
 fn rebuild_store_with_bounds(store: &Store, bounds: DeriveBounds) -> Result<DeriveReport> {
+    let derived = derive_review_artifacts_with_bounds(store, bounds.clone())?;
+    store
+        .derived()
+        .replace_context_events(&derived.context_events)?;
+    store
+        .derived()
+        .replace_pattern_summaries(&derived.pattern_summaries)?;
+    store
+        .derived()
+        .replace_review_signal_days(&derived.review_signal_days)?;
+
+    let counts = store.views().record_counts()?;
+    let mut notes = derivation_notes(&counts);
+    if let Some(note) = bounds.note {
+        notes.insert(0, note);
+    }
+    Ok(DeriveReport {
+        database_path: store.plan().db_path.display().to_string(),
+        context_event_count: derived.context_events.len(),
+        pattern_summary_count: derived.pattern_summaries.len(),
+        review_signal_day_count: derived.review_signal_days.len(),
+        notes,
+    })
+}
+
+fn derive_review_artifacts_with_bounds(
+    store: &Store,
+    bounds: DeriveBounds,
+) -> Result<DerivedReviewArtifacts> {
     let daily_history = store
         .views()
         .daily_history_between_days(&bounds.start_day, &bounds.end_day)?;
@@ -198,25 +266,10 @@ fn rebuild_store_with_bounds(store: &Store, bounds: DeriveBounds) -> Result<Deri
         captured_at: &review_updated_at,
     })?;
 
-    store.derived().replace_context_events(&context_events)?;
-    store
-        .derived()
-        .replace_pattern_summaries(&pattern_summaries)?;
-    store
-        .derived()
-        .replace_review_signal_days(&review_signal_days)?;
-
-    let counts = store.views().record_counts()?;
-    let mut notes = derivation_notes(&counts);
-    if let Some(note) = bounds.note {
-        notes.insert(0, note);
-    }
-    Ok(DeriveReport {
-        database_path: store.plan().db_path.display().to_string(),
-        context_event_count: context_events.len(),
-        pattern_summary_count: pattern_summaries.len(),
-        review_signal_day_count: review_signal_days.len(),
-        notes,
+    Ok(DerivedReviewArtifacts {
+        context_events,
+        pattern_summaries,
+        review_signal_days,
     })
 }
 

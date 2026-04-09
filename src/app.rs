@@ -3453,18 +3453,6 @@ fn available_days(snapshot: &LiveSnapshot) -> Vec<String> {
     for event in &snapshot.context_events {
         days.insert(event.anchor_day.clone());
     }
-    for row in &snapshot.review_signal_days {
-        days.insert(row.day.clone());
-    }
-    for row in &snapshot.sleep_time {
-        days.insert(row.day.clone());
-    }
-    for period in &snapshot.rest_mode_periods {
-        days.insert(period.start_day.clone());
-        if let Some(end_day) = &period.end_day {
-            days.insert(end_day.clone());
-        }
-    }
     days.into_iter().collect()
 }
 
@@ -4309,7 +4297,8 @@ mod tests {
         ReviewSection, ReviewSufficiency,
     };
     use crate::store::queries::{
-        ContextEventFamily, ContextEventRecord, HeartRatePoint, RecordCounts, TimeSemantics,
+        ContextEventFamily, ContextEventRecord, HeartRatePoint, RecordCounts, RestModePeriodRecord,
+        ReviewSignalDayRecord, SleepTimeRecord, TimeSemantics,
     };
 
     fn make_review_card(id: &str, signal_key: &str, score: i32) -> ReviewCard {
@@ -4491,6 +4480,53 @@ mod tests {
 
         app.handle(Action::NextDay);
         assert_eq!(app.model.timeline.selected_day_label, "2026-04-08");
+    }
+
+    #[test]
+    fn available_days_ignore_review_only_baseline_rows() {
+        let mut snapshot = make_snapshot(&["2026-04-07", "2026-04-08"]);
+        snapshot.review_signal_days = vec![ReviewSignalDayRecord {
+            signal_key: "sleep_score".to_owned(),
+            day: "2026-02-01".to_owned(),
+            numeric_value: Some(82.0),
+            text_value: None,
+            baseline_mean: Some(80.0),
+            baseline_stddev: Some(2.0),
+            delta: Some(2.0),
+            z_score: Some(1.0),
+            persistence_days: 1,
+            sufficiency: ReviewSufficiency::Strong,
+            stale_days: 0,
+            metadata_json: "{}".to_owned(),
+            updated_at: "2026-04-08T12:00:00Z".to_owned(),
+        }];
+        snapshot.sleep_time = vec![SleepTimeRecord {
+            oura_id: Some("baseline-sleep".to_owned()),
+            day: "2026-02-01".to_owned(),
+            status: Some("late".to_owned()),
+            recommendation: None,
+            optimal_bedtime_start_offset: None,
+            optimal_bedtime_end_offset: None,
+            optimal_bedtime_day_tz: None,
+            raw_cache_key: None,
+            updated_at: "2026-04-08T12:00:00Z".to_owned(),
+        }];
+        snapshot.rest_mode_periods = vec![RestModePeriodRecord {
+            period_id: "baseline-rest-mode".to_owned(),
+            start_day: "2026-02-01".to_owned(),
+            start_time: None,
+            end_day: Some("2026-02-03".to_owned()),
+            end_time: None,
+            episode_count: 1,
+            tags_json: "[]".to_owned(),
+            raw_cache_key: None,
+            updated_at: "2026-04-08T12:00:00Z".to_owned(),
+        }];
+
+        assert_eq!(
+            super::available_days(&snapshot),
+            vec!["2026-04-07".to_owned(), "2026-04-08".to_owned()]
+        );
     }
 
     #[test]

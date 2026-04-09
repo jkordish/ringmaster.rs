@@ -1243,29 +1243,39 @@ async fn load_review_store_snapshot(
         .await?;
         derive::rebuild_store(&store)?;
         let auth_status = oura::auth::inspect_auth(&temp_config, &store)?;
-        let snapshot = load_review_snapshot_from_store(&store, &auth_status, requested_anchor_day)?;
+        let snapshot =
+            load_review_snapshot_from_artifacts(&store, &auth_status, requested_anchor_day, None)?;
         return Ok((Some(temp_root), snapshot));
     }
 
     let store = Store::open(config)?;
-    let _ = derive::rebuild_store_for_anchor_day(&store, config, requested_anchor_day)?;
     let auth_status = oura::auth::inspect_auth(config, &store)?;
-    let snapshot = load_review_snapshot_from_store(&store, &auth_status, requested_anchor_day)?;
+    let derived =
+        derive::derive_review_artifacts_for_anchor_day(&store, config, requested_anchor_day)?;
+    let snapshot = load_review_snapshot_from_artifacts(
+        &store,
+        &auth_status,
+        requested_anchor_day,
+        derived.as_ref(),
+    )?;
     Ok((None, snapshot))
 }
 
-fn load_review_snapshot_from_store(
+fn load_review_snapshot_from_artifacts(
     store: &Store,
     auth_status: &oura::models::AuthStatus,
     requested_anchor_day: Option<&str>,
+    derived: Option<&derive::DerivedReviewArtifacts>,
 ) -> Result<ReviewStoreSnapshot> {
-    let pattern_summaries = store.views().pattern_summaries(None, None)?;
-    let Some(anchor_day) = resolve_review_anchor_day(store, requested_anchor_day)? else {
+    let materialized_pattern_summaries = store.views().pattern_summaries(None, None)?;
+    let Some(anchor_day) = resolve_review_anchor_day(store, requested_anchor_day, derived)? else {
         return Ok(ReviewStoreSnapshot {
             auth_status: auth_status.clone(),
             signal_days: Vec::new(),
             context_events: Vec::new(),
-            pattern_summaries,
+            pattern_summaries: derived
+                .map(|artifacts| artifacts.pattern_summaries.clone())
+                .unwrap_or(materialized_pattern_summaries),
             sleep_time: Vec::new(),
             rest_mode_periods: Vec::new(),
         });
@@ -1285,16 +1295,38 @@ fn load_review_snapshot_from_store(
         REVIEW_REST_MODE_LOOKBACK_DAYS,
         REVIEW_CONTEXT_FORWARD_DAYS,
     )?;
+    let signal_days = if let Some(artifacts) = derived {
+        artifacts
+            .review_signal_days
+            .iter()
+            .filter(|row| row.day >= signal_start_day && row.day <= signal_end_day)
+            .cloned()
+            .collect()
+    } else {
+        store
+            .views()
+            .review_signal_days_between_days(&signal_start_day, &signal_end_day)?
+    };
+    let context_events = if let Some(artifacts) = derived {
+        artifacts
+            .context_events
+            .iter()
+            .filter(|row| row.anchor_day >= context_start_day && row.anchor_day <= context_end_day)
+            .cloned()
+            .collect()
+    } else {
+        store
+            .views()
+            .context_events_between_days(&context_start_day, &context_end_day)?
+    };
 
     Ok(ReviewStoreSnapshot {
         auth_status: auth_status.clone(),
-        signal_days: store
-            .views()
-            .review_signal_days_between_days(&signal_start_day, &signal_end_day)?,
-        context_events: store
-            .views()
-            .context_events_between_days(&context_start_day, &context_end_day)?,
-        pattern_summaries,
+        signal_days,
+        context_events,
+        pattern_summaries: derived
+            .map(|artifacts| artifacts.pattern_summaries.clone())
+            .unwrap_or(materialized_pattern_summaries),
         sleep_time: store
             .views()
             .sleep_time_between_days(&sleep_start_day, &sleep_end_day)?,
@@ -1323,13 +1355,27 @@ fn latest_review_day(snapshot: &ReviewStoreSnapshot) -> Option<String> {
 fn resolve_review_anchor_day(
     store: &Store,
     requested_anchor_day: Option<&str>,
+    derived: Option<&derive::DerivedReviewArtifacts>,
 ) -> Result<Option<String>> {
-    match requested_anchor_day {
-        Some(day) => {
-            let _ = parse_review_day(day)?;
-            Ok(Some(day.to_owned()))
+    if let Some(day) = requested_anchor_day {
+        let _ = parse_review_day(day)?;
+        Ok(Some(day.to_owned()))
+    } else {
+        if let Some(derived) = derived {
+            let latest_derived_day = derived
+                .review_signal_days
+                .iter()
+                .map(|row| row.day.clone())
+                .max();
+            if latest_derived_day.is_some() {
+                return Ok(latest_derived_day);
+            }
         }
-        None => store.views().latest_review_day(),
+
+        store
+            .views()
+            .latest_review_day()?
+            .map_or_else(|| store.views().latest_source_day(), |day| Ok(Some(day)))
     }
 }
 
@@ -2013,6 +2059,64 @@ mod tests {
         assert!(output.contains("top_observations:"));
         assert!(output.contains("\n  1. "));
         assert!(!output.contains("No reviewable days are available yet"));
+    }
+
+    #[tokio::test]
+    async fn review_today_requested_day_does_not_mutate_materialized_derived_tables() {
+        let (_tempdir, config) = test_config(Some("https://example.test"), Some("verify-token"));
+        let store = Store::open(&config)
+            .unwrap_or_else(|error| panic!("store should open for review mutation test: {error}"));
+        seed_historical_review_days(&store);
+        crate::derive::rebuild_store(&store).unwrap_or_else(|error| {
+            panic!(
+                "full derive rebuild should materialize review data before the read test: {error}"
+            )
+        });
+
+        let counts_before = store.views().record_counts().unwrap_or_else(|error| {
+            panic!("record counts should load before review read test: {error}")
+        });
+        let latest_review_before = store.views().latest_review_day().unwrap_or_else(|error| {
+            panic!("latest review day should load before review read test: {error}")
+        });
+
+        let output = run_review_today(
+            &config,
+            ReviewTodayArgs {
+                day: Some("2024-01-01".to_owned()),
+                json: false,
+                demo: false,
+                fixture_dir: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("review today should stay read-only for out-of-window historical days: {error}")
+        })
+        .unwrap_or_else(|| panic!("review today should render text output"));
+
+        assert!(output.contains("anchor_day: 2024-01-01"));
+
+        let counts_after = store.views().record_counts().unwrap_or_else(|error| {
+            panic!("record counts should load after review read test: {error}")
+        });
+        let latest_review_after = store.views().latest_review_day().unwrap_or_else(|error| {
+            panic!("latest review day should load after review read test: {error}")
+        });
+
+        assert_eq!(
+            counts_after.derived_context_events,
+            counts_before.derived_context_events
+        );
+        assert_eq!(
+            counts_after.derived_pattern_summaries,
+            counts_before.derived_pattern_summaries
+        );
+        assert_eq!(
+            counts_after.derived_review_signal_days,
+            counts_before.derived_review_signal_days
+        );
+        assert_eq!(latest_review_after, latest_review_before);
     }
 
     #[tokio::test]
