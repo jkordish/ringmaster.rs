@@ -796,7 +796,7 @@ fn overlapping_rest_mode_days(
     anchor_day: &str,
     rest_mode_periods: &[RestModePeriodRecord],
 ) -> usize {
-    let Some((window_start, anchor_date)) = review_window_bounds(mode, anchor_day) else {
+    let Some((window_start, window_end)) = review_window_bounds(mode, anchor_day) else {
         return 0;
     };
     let mut overlapped_days = BTreeSet::new();
@@ -809,10 +809,10 @@ fn overlapping_rest_mode_days(
             .end_day
             .as_deref()
             .and_then(|day| parse_day(day).ok())
-            .unwrap_or(start_day);
+            .unwrap_or(window_end);
 
         let overlap_start = start_day.max(window_start);
-        let overlap_end = end_day.min(anchor_date);
+        let overlap_end = end_day.min(window_end);
         if overlap_start > overlap_end {
             continue;
         }
@@ -1205,6 +1205,30 @@ mod tests {
         assert_eq!(
             overlapping_rest_mode_days(ReviewMode::Week, "2026-04-05", &periods),
             3
+        );
+    }
+
+    #[test]
+    fn overlapping_rest_mode_days_treats_open_periods_as_active_through_anchor_day() {
+        let periods = vec![RestModePeriodRecord {
+            period_id: "rest-mode-open".to_owned(),
+            start_day: "2026-04-01".to_owned(),
+            start_time: Some("2026-04-01T00:00:00Z".to_owned()),
+            end_day: None,
+            end_time: None,
+            episode_count: 1,
+            tags_json: "[]".to_owned(),
+            raw_cache_key: None,
+            updated_at: "2026-04-01T23:59:59Z".to_owned(),
+        }];
+
+        assert_eq!(
+            overlapping_rest_mode_days(ReviewMode::Today, "2026-04-03", &periods),
+            1
+        );
+        assert_eq!(
+            overlapping_rest_mode_days(ReviewMode::Week, "2026-04-05", &periods),
+            5
         );
     }
 
