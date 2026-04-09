@@ -534,7 +534,7 @@ mod tests {
 
     use crate::action::Action;
     use crate::app::{Screen, build_demo_state, build_live_state};
-    use crate::build_phase7_snapshot_apps_for_tests;
+    use crate::build_scenario_fixture_snapshot_apps_for_tests;
     use crate::config::{Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig};
     use crate::error::OuraProblem;
     use crate::oura::models::{AuthStatus, CapabilityReport};
@@ -1054,12 +1054,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn renders_phase7_scenario_matrix_across_compact_and_wide() {
+    async fn renders_scenario_fixture_matrix_across_compact_and_wide() {
         let config = test_config();
-        let states =
-            build_phase7_snapshot_apps_for_tests(&config, Path::new("tests/fixtures/phase7"))
-                .await
-                .unwrap_or_else(|error| panic!("phase7 snapshot apps should build: {error}"));
+        let states = build_scenario_fixture_snapshot_apps_for_tests(
+            &config,
+            Path::new("tests/fixtures/phase7"),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("scenario fixture apps should build: {error}"));
 
         for (scenario, mut app) in states {
             let scenario_marker = format!("Scenario fixture `{}`", scenario.label());

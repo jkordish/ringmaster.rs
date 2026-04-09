@@ -105,7 +105,7 @@ async fn ui_snapshot_demo_writes_artifacts() {
 }
 
 #[tokio::test]
-async fn ui_snapshot_phase7_fixture_root_writes_scenario_tagged_artifacts() {
+async fn ui_snapshot_scenario_fixture_root_writes_scenario_tagged_artifacts() {
     let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
     let out_path = out_dir.path().join("phase7");
     let out_arg = out_path.to_string_lossy().into_owned();
@@ -128,15 +128,15 @@ async fn ui_snapshot_phase7_fixture_root_writes_scenario_tagged_artifacts() {
         &out_arg,
     ])
     .await;
-    assert!(result.is_ok(), "phase7 ui snapshot should run");
+    assert!(result.is_ok(), "scenario fixture ui snapshot should run");
 
     let output = match result {
         Ok(Some(output)) => output,
-        Ok(None) => panic!("phase7 ui snapshot should render command output"),
-        Err(error) => panic!("unexpected phase7 ui snapshot failure: {error}"),
+        Ok(None) => panic!("scenario fixture ui snapshot should render command output"),
+        Err(error) => panic!("unexpected scenario fixture ui snapshot failure: {error}"),
     };
 
-    assert!(output.contains("phase7 fixture root"));
+    assert!(output.contains("scenario fixture root"));
     assert!(output.contains("strong, weak, empty, stale, error"));
     assert!(out_path.join("dashboard-strong-compact.txt").exists());
     assert!(out_path.join("dashboard-error-wide.txt").exists());

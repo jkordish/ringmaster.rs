@@ -114,7 +114,7 @@ pub fn build_requests(
     requests
 }
 
-pub fn is_phase7_fixture_root(path: &Path) -> bool {
+pub fn is_scenario_fixture_root(path: &Path) -> bool {
     SnapshotScenario::FIXTURE_BACKED
         .into_iter()
         .all(|scenario| path.join(scenario.label()).is_dir())
@@ -155,7 +155,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        SnapshotRequest, SnapshotScenario, SnapshotSize, build_requests, is_phase7_fixture_root,
+        SnapshotRequest, SnapshotScenario, SnapshotSize, build_requests, is_scenario_fixture_root,
         write_snapshots,
     };
     use crate::{
@@ -263,20 +263,20 @@ mod tests {
     }
 
     #[test]
-    fn phase7_root_detection_requires_fixture_backed_scenarios() {
+    fn scenario_fixture_root_detection_requires_fixture_backed_scenarios() {
         let temp_root = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
-        assert!(!is_phase7_fixture_root(temp_root.path()));
+        assert!(!is_scenario_fixture_root(temp_root.path()));
 
         for scenario in SnapshotScenario::FIXTURE_BACKED {
             std::fs::create_dir_all(temp_root.path().join(scenario.label()))
                 .unwrap_or_else(|error| panic!("fixture dir should create: {error}"));
         }
 
-        assert!(is_phase7_fixture_root(temp_root.path()));
+        assert!(is_scenario_fixture_root(temp_root.path()));
     }
 
     #[test]
-    fn build_requests_tags_phase7_scenarios_in_artifact_names() {
+    fn build_requests_tags_scenario_matrix_artifact_names() {
         let requests = build_requests(
             &[Screen::Dashboard],
             &[SnapshotSize::Compact],
