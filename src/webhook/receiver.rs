@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::{
     Router,
@@ -16,7 +17,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{Mutex, watch};
 use tracing::{info, warn};
 
 use crate::config::Config;
@@ -133,17 +134,15 @@ struct DeliveryPayload {
 
 #[derive(Debug, Clone)]
 struct ReceiverState {
-    config: Config,
     security: ReceiverSecurityConfig,
+    store: Arc<Mutex<Store>>,
 }
 
 pub async fn serve(config: &Config) -> Result<WebhookServeReport> {
     let security = security_from_config(config)?;
     let bind_address = config.webhook.bind;
-    let state = ReceiverState {
-        config: config.clone(),
-        security,
-    };
+    let store = Arc::new(Mutex::new(Store::open(config)?));
+    let state = ReceiverState { security, store };
 
     let app = Router::new()
         .route(
@@ -316,7 +315,7 @@ async fn handle_verification(
         headers: normalize_headers(&headers),
         body: "{}".to_owned(),
     };
-    match execute_receiver_request(&state, request) {
+    match execute_receiver_request(&state, request).await {
         Ok(response) => (
             StatusCode::from_u16(response.status_code).unwrap_or(StatusCode::OK),
             response.body,
@@ -340,7 +339,7 @@ async fn handle_delivery(
         headers: normalize_headers(&headers),
         body: String::from_utf8_lossy(&body).into_owned(),
     };
-    match execute_receiver_request(&state, request) {
+    match execute_receiver_request(&state, request).await {
         Ok(response) => (
             StatusCode::from_u16(response.status_code).unwrap_or(StatusCode::OK),
             response.body,
@@ -357,7 +356,8 @@ async fn handle_health() -> impl IntoResponse {
 }
 
 async fn handle_ready(State(state): State<ReceiverState>) -> impl IntoResponse {
-    match Store::open(&state.config) {
+    let store = state.store.lock().await;
+    match store.metadata().schema_version() {
         Ok(_) => (StatusCode::OK, "ready".to_owned()),
         Err(error) => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -366,11 +366,11 @@ async fn handle_ready(State(state): State<ReceiverState>) -> impl IntoResponse {
     }
 }
 
-fn execute_receiver_request(
+async fn execute_receiver_request(
     state: &ReceiverState,
     request: InboundWebhookRequest,
 ) -> Result<ReceiverResponse> {
-    let store = Store::open(&state.config)?;
+    let store = state.store.lock().await;
     process_inbound_request(&state.security, &store, request)
 }
 
@@ -954,10 +954,12 @@ async fn heartbeat_loop(
 mod tests {
     use std::collections::BTreeMap;
     use std::net::TcpListener as StdTcpListener;
+    use std::sync::Arc;
 
     use super::{
-        InboundWebhookRequest, ReceiverOutcome, ReceiverSecurityConfig, ReplayFixture,
-        fixture_into_request, process_inbound_request, replay, serve,
+        InboundWebhookRequest, ReceiverOutcome, ReceiverSecurityConfig, ReceiverState,
+        ReplayFixture, execute_receiver_request, fixture_into_request, process_inbound_request,
+        replay, serve,
     };
     use crate::config::{
         APP_NAME, AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
@@ -967,11 +969,12 @@ mod tests {
     use crate::webhook::receiver::{WebhookReplayOptions, delivery_fingerprint};
     use axum::http::StatusCode;
     use hmac::{Hmac, Mac};
+    use rusqlite::Connection;
     use serde_json::json;
     use sha2::Sha256;
     use tempfile::tempdir;
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-    use tokio::sync::watch;
+    use tokio::sync::{Mutex, watch};
 
     type TestHmacSha256 = Hmac<Sha256>;
 
@@ -1061,6 +1064,18 @@ mod tests {
         )
     }
 
+    fn metadata_updated_at(database_path: &std::path::Path) -> String {
+        let connection = Connection::open(database_path)
+            .unwrap_or_else(|error| panic!("connection should open: {error}"));
+        connection
+            .query_row(
+                "SELECT updated_at FROM app_metadata WHERE key = 'app_name'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_else(|error| panic!("app metadata timestamp should load: {error}"))
+    }
+
     #[test]
     fn accepts_valid_signed_delivery_and_enqueues_invalidation() {
         let store =
@@ -1124,6 +1139,45 @@ mod tests {
         )
         .await
         .unwrap_or_else(|error| panic!("heartbeat loop should exit after sender drop: {error}"));
+    }
+
+    #[tokio::test]
+    async fn execute_receiver_request_reuses_initialized_store_without_reopening() {
+        let bind = "127.0.0.1:0"
+            .parse()
+            .unwrap_or_else(|error| panic!("bind should parse: {error}"));
+        let (_tempdir, config) = test_config(bind);
+        let security =
+            super::security_from_config(&config).unwrap_or_else(|error| panic!("{error}"));
+        let store = Arc::new(Mutex::new(
+            Store::open(&config).unwrap_or_else(|error| panic!("store should open: {error}")),
+        ));
+        let state = ReceiverState { security, store };
+        let before = metadata_updated_at(&config.paths.database_file);
+
+        let response = execute_receiver_request(
+            &state,
+            InboundWebhookRequest {
+                method: "GET".to_owned(),
+                query: BTreeMap::from([
+                    ("challenge".to_owned(), "abc123".to_owned()),
+                    ("verification_token".to_owned(), "wrong".to_owned()),
+                ]),
+                headers: BTreeMap::new(),
+                body: "{}".to_owned(),
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("request should complete: {error}"));
+        let after = metadata_updated_at(&config.paths.database_file);
+
+        match response.outcome {
+            ReceiverOutcome::Rejected { reason_code } => {
+                assert_eq!(reason_code, "verification_token_mismatch");
+            }
+            other => panic!("unexpected receiver outcome: {other:?}"),
+        }
+        assert_eq!(before, after);
     }
 
     #[test]
