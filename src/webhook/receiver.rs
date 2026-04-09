@@ -163,24 +163,36 @@ pub async fn serve(config: &Config) -> Result<WebhookServeReport> {
         Some(format!("listening on {}", bind_address)),
     )?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let heartbeat_shutdown_tx = shutdown_tx.clone();
     let heartbeat_task = tokio::spawn(heartbeat_loop(config.clone(), bind_address, shutdown_rx));
 
     info!(bind = %bind_address, path = %config.webhook.path, "starting webhook receiver");
-    axum::serve(listener, app)
+    let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             if tokio::signal::ctrl_c().await.is_ok() {
                 let _ = shutdown_tx.send(true);
             }
         })
         .await
-        .map_err(|error| RingmasterError::io("serving webhook receiver", error))?;
+        .map_err(|error| RingmasterError::io("serving webhook receiver", error));
 
+    let _ = heartbeat_shutdown_tx.send(true);
     let _ = heartbeat_task.await;
-    write_heartbeat(
-        config,
-        "stopped",
-        Some("receiver shut down cleanly".to_owned()),
-    )?;
+    match serve_result {
+        Ok(()) => write_heartbeat(
+            config,
+            "stopped",
+            Some("receiver shut down cleanly".to_owned()),
+        )?,
+        Err(error) => {
+            write_heartbeat(
+                config,
+                "stopped",
+                Some(format!("receiver stopped after error: {error}")),
+            )?;
+            return Err(error);
+        }
+    }
     Ok(WebhookServeReport {
         bind_address,
         callback_url: config.webhook.callback_url(),
@@ -926,8 +938,10 @@ async fn heartbeat_loop(
         }
         tokio::select! {
             changed = shutdown.changed() => {
-                if changed.is_ok() && *shutdown.borrow() {
-                    break;
+                match changed {
+                    Ok(()) if *shutdown.borrow() => break,
+                    Ok(()) => {}
+                    Err(_) => break,
                 }
             }
             _ = tokio::time::sleep(interval) => {}
@@ -957,6 +971,7 @@ mod tests {
     use sha2::Sha256;
     use tempfile::tempdir;
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+    use tokio::sync::watch;
 
     type TestHmacSha256 = Hmac<Sha256>;
 
@@ -1091,6 +1106,24 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_loop_exits_when_shutdown_sender_is_dropped() {
+        let bind = "127.0.0.1:0"
+            .parse()
+            .unwrap_or_else(|error| panic!("bind should parse: {error}"));
+        let (_tempdir, mut config) = test_config(bind);
+        config.webhook.heartbeat_secs = 60;
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        drop(shutdown_tx);
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            super::heartbeat_loop(config, bind, shutdown_rx),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("heartbeat loop should exit after sender drop: {error}"));
     }
 
     #[test]
