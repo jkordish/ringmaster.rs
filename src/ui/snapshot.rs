@@ -78,11 +78,10 @@ pub struct SnapshotRequest {
 impl SnapshotRequest {
     pub fn artifact_name(self) -> String {
         let screen = self.screen.title().to_ascii_lowercase();
-        if let Some(scenario) = self.scenario {
-            format!("{screen}-{}-{}.txt", scenario.label(), self.size.label())
-        } else {
-            format!("{screen}-{}.txt", self.size.label())
-        }
+        self.scenario.map_or_else(
+            || format!("{screen}-{}.txt", self.size.label()),
+            |scenario| format!("{screen}-{}-{}.txt", scenario.label(), self.size.label()),
+        )
     }
 }
 

@@ -7,7 +7,7 @@ use crate::review::engine::{
 use crate::review::features::ReviewSufficiency;
 use crate::review::registry::ReviewFocus;
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct InvestigationReport {
     pub focus: ReviewFocus,
     pub anchor_day: String,

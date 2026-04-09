@@ -22,13 +22,13 @@ type ClientFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
 const OURA_API_USER_AGENT: &str = "ringmaster.rs/oura-api";
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SingleFetch<T> {
     pub raw_payload: RawPayloadRecord,
     pub document: T,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageFetch<T> {
     pub raw_payload: RawPayloadRecord,
     pub documents: Vec<T>,

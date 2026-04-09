@@ -356,7 +356,7 @@ fn spawn_refresh_worker(
                             Some(WorkerCommand::ManualRefresh) => Some((SyncFamily::ALL.to_vec(), true)),
                             Some(WorkerCommand::Shutdown) | None => None,
                         },
-                        _ = tokio::time::sleep(delay) => {
+                        () = tokio::time::sleep(delay) => {
                             match due_families(&config, &sync_states, time::OffsetDateTime::now_utc(), false) {
                                 Ok(families) if !families.is_empty() => Some((families, false)),
                                 Ok(_) => continue,

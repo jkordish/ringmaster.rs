@@ -639,10 +639,10 @@ fn derive_queue_key(
     event_type: WebhookEventType,
     object_id: Option<&str>,
 ) -> String {
-    match object_id {
-        Some(object_id) => format!("{data_type}:{}:{object_id}", event_type.as_str()),
-        None => format!("{data_type}:{}:*", event_type.as_str()),
-    }
+    object_id.map_or_else(
+        || format!("{data_type}:{}:*", event_type.as_str()),
+        |object_id| format!("{data_type}:{}:{object_id}", event_type.as_str()),
+    )
 }
 
 fn delivery_fingerprint(signature_timestamp: &str, body: &str) -> String {
@@ -678,15 +678,18 @@ fn verify_signature(secret: &str, timestamp: &str, body: &str, signature: &str) 
 }
 
 fn parse_signature_timestamp(timestamp: &str) -> std::result::Result<OffsetDateTime, String> {
-    if let Ok(seconds) = timestamp.parse::<i64>() {
-        OffsetDateTime::from_unix_timestamp(seconds).map_err(|error| {
-            format!("webhook timestamp `{timestamp}` was not a valid unix timestamp: {error}")
-        })
-    } else {
-        OffsetDateTime::parse(timestamp, &Rfc3339).map_err(|error| {
-            format!("webhook timestamp `{timestamp}` was not valid RFC3339: {error}")
-        })
-    }
+    timestamp.parse::<i64>().map_or_else(
+        |_| {
+            OffsetDateTime::parse(timestamp, &Rfc3339).map_err(|error| {
+                format!("webhook timestamp `{timestamp}` was not valid RFC3339: {error}")
+            })
+        },
+        |seconds| {
+            OffsetDateTime::from_unix_timestamp(seconds).map_err(|error| {
+                format!("webhook timestamp `{timestamp}` was not a valid unix timestamp: {error}")
+            })
+        },
+    )
 }
 
 fn timestamp_is_fresh(parsed: OffsetDateTime, tolerance_secs: u64) -> Result<bool> {
@@ -944,7 +947,7 @@ async fn heartbeat_loop(
                     Err(_) => break,
                 }
             }
-            _ = tokio::time::sleep(interval) => {}
+            () = tokio::time::sleep(interval) => {}
         }
     }
 }

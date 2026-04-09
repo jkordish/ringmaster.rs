@@ -314,7 +314,7 @@ pub struct ReviewSignalDayRecord {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawPayloadRecord {
     pub cache_key: String,
     pub endpoint: String,
@@ -410,7 +410,6 @@ impl SyncRunStatus {
             "blocked" => Self::Blocked,
             "partial" => Self::Partial,
             "success" => Self::Success,
-            "failed" => Self::Failed,
             _ => Self::Failed,
         }
     }
@@ -2533,16 +2532,18 @@ fn parse_optional_score(value: Option<i64>) -> Option<u8> {
 }
 
 fn parse_optional_u16(value: Option<i64>) -> rusqlite::Result<Option<u16>> {
-    match value {
-        Some(value) => u16::try_from(value).map(Some).map_err(|_| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Integer,
-                Box::new(std::fmt::Error),
-            )
-        }),
-        None => Ok(None),
-    }
+    value.map_or_else(
+        || Ok(None),
+        |value| {
+            u16::try_from(value).map(Some).map_err(|_| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Integer,
+                    Box::new(std::fmt::Error),
+                )
+            })
+        },
+    )
 }
 
 fn parse_u32(value: i64, column: usize) -> rusqlite::Result<u32> {

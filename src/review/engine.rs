@@ -42,7 +42,7 @@ pub enum ReviewConfidence {
     High,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReviewCard {
     pub id: String,
     pub signal_key: String,
@@ -60,7 +60,7 @@ pub struct ReviewCard {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReviewDeck {
     pub mode: ReviewMode,
     pub anchor_day: String,
@@ -1466,7 +1466,6 @@ mod tests {
                 };
                 let activity_z_score = match offset {
                     28..=33 => -1.5,
-                    34 => 0.0,
                     _ => 0.0,
                 };
                 let activity = ReviewSignalDayRecord {

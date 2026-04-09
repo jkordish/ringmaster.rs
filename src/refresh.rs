@@ -270,7 +270,7 @@ async fn run_watch_inner(
                     next_wake_duration(config, &sync_states, OffsetDateTime::now_utc())?,
                 );
                 tokio::select! {
-                    _ = tokio::time::sleep(sleep_for) => {}
+                    () = tokio::time::sleep(sleep_for) => {}
                     signal = tokio::signal::ctrl_c() => {
                         signal.map_err(|error| RingmasterError::Config(format!("failed to listen for ctrl-c: {error}")))?;
                         notes.push("watch loop interrupted by ctrl-c".to_owned());
@@ -310,7 +310,7 @@ async fn run_watch_inner(
                 next_wake_duration(config, &sync_states, OffsetDateTime::now_utc())?,
             );
             tokio::select! {
-                _ = tokio::time::sleep(sleep_for) => {}
+                () = tokio::time::sleep(sleep_for) => {}
                 signal = tokio::signal::ctrl_c() => {
                     signal.map_err(|error| RingmasterError::Config(format!("failed to listen for ctrl-c: {error}")))?;
                     notes.push("watch loop interrupted by ctrl-c".to_owned());
