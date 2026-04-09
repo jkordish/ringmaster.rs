@@ -246,11 +246,13 @@ pub async fn sync_selected(
 
 fn should_rebuild_derived_state(slice_reports: &[SliceReport]) -> bool {
     slice_reports.iter().any(|report| {
-        report.status == SyncRunStatus::Success
-            && matches!(
-                report.sync_key.as_str(),
-                DAILY_SYNC_KEY | WORKOUT_SYNC_KEY | ENHANCED_TAG_SYNC_KEY | SESSION_SYNC_KEY
-            )
+        matches!(
+            report.status,
+            SyncRunStatus::Success | SyncRunStatus::Partial
+        ) && matches!(
+            report.sync_key.as_str(),
+            DAILY_SYNC_KEY | WORKOUT_SYNC_KEY | ENHANCED_TAG_SYNC_KEY | SESSION_SYNC_KEY
+        )
     })
 }
 
@@ -1495,5 +1497,18 @@ mod tests {
         assert_eq!(counts.daily_activity, 7);
         assert_eq!(counts.sleep_time, 0);
         assert!(daily_slice.last_error.is_some());
+    }
+
+    #[test]
+    fn partial_daily_slice_still_triggers_derive_rebuild() {
+        assert!(super::should_rebuild_derived_state(&[super::SliceReport {
+            sync_key: "oura.daily".to_owned(),
+            status: SyncRunStatus::Partial,
+            imported_rows: 3,
+            watermark: Some("2026-04-08".to_owned()),
+            message: "partial daily sync".to_owned(),
+            last_error: None,
+            next_attempt_after: None,
+        }]));
     }
 }
