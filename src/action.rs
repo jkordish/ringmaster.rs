@@ -33,4 +33,8 @@ pub enum Action {
     PreviousTrendWindow,
     NextTrendWindow,
     CyclePatternMetric,
+    CycleReviewMode,
+    CycleReviewFocus,
+    PreviousReviewCard,
+    NextReviewCard,
 }

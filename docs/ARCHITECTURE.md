@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document describes the implemented phase-4 architecture for `ringmaster.rs`. It reflects the code that exists in the repository today, not the eventual end-state product.
+This document describes the implemented phase-5 architecture for `ringmaster.rs`. It reflects the code that exists in the repository today, not the eventual end-state product.
 
 ## Design goals
 
@@ -15,6 +15,7 @@ This document describes the implemented phase-4 architecture for `ringmaster.rs`
 - honest scheduled fallback where Oura does not
 - auditable operations when freshness goes wrong
 - deterministic derived analytics rather than pseudo-intelligence
+- bounded smart reviews and investigations rather than a chat assistant
 
 ## Runtime shape
 
@@ -24,11 +25,12 @@ CLI
   -> runtime path setup
   -> command dispatcher
 
-doctor / auth / sync once / sync watch / derive rebuild
+doctor / auth / sync once / sync watch / derive rebuild / review today / review week / review investigate
   -> store + auth/session seams
   -> typed Oura client boundaries
   -> normalized imports
   -> bounded auto-derived rebuilds after sync, plus explicit full-history rebuilds
+  -> deterministic review feature snapshots and ranking
   -> formatted text output
 
 webhook serve
@@ -114,9 +116,11 @@ Responsibilities:
 - explicit freshness and availability modeling
 - demo/live application snapshots and presentation models
 - shared selected-day and selected-event state
+- shared selected-review state
 - user-facing status/footer text
 - shaping store/auth/derived/webhook data into screen-specific models
 - deterministic selected-day summaries and pattern rows
+- deterministic review decks and bounded investigations
 
 The app layer is where persisted normalized rows, derived tables, auth diagnostics, sync provenance, subscription state, delivery history, queue state, and runtime heartbeats become screen models. It deliberately does not own terminal I/O, HTTP, or SQL.
 
@@ -134,10 +138,13 @@ Important implemented state concepts:
   - `StaleUpstreamPending`
 - `LiveSnapshot`: the immutable persisted-data snapshot sent into the reducer after each background refresh
 - `WebhookOpsSnapshot`: persisted receiver/subscription/delivery/queue/runtime view data shaped for Ops and `doctor`
-- `selected_day_index`: shared by Dashboard, Timeline, and Explain
+- `selected_day_index`: shared by Dashboard, Timeline, Explain, and Review
 - `selected_event_id`: shared by Timeline and Explain
 - `overlay_filters`: shared family toggles for workouts, tags, and sessions
 - `PatternMetricFilter`: shared pattern metric filtering for the Patterns screen
+- `review_mode`: Today, Week, or Investigate within the Review screen
+- `review_focus`: readiness, sleep, recovery, stress, or activity within Investigate mode
+- `selected_review_card_index`: selected ranked card within Review
 
 ### `src/tui.rs`
 
@@ -171,12 +178,13 @@ Implemented screen set:
 - Explain
 - Patterns
 - Ops
+- Review
 
 ### `src/components/*`
 
 Responsibilities:
 
-- pure rendering for Dashboard, Timeline, Trends, Explain, Patterns, and Ops
+- pure rendering for Dashboard, Timeline, Trends, Explain, Patterns, Ops, and Review
 
 Boundary rule:
 
@@ -193,6 +201,7 @@ Component responsibilities today:
 - Explain renders selected-day summary lines, measurements, evidence, context entries, and caveats
 - Patterns renders deterministic association rows plus sufficiency/wording notes
 - Ops renders receiver state, callback configuration, subscription health, delivery history, queue lag, freshness source, and recent incidents without reaching back into the store
+- Review renders ranked today and week cards plus bounded investigation detail without making network or database calls
 
 ### `src/refresh.rs`
 
@@ -239,6 +248,12 @@ Current schema families:
 - `tags`
 - `enhanced_tags`
 - `sessions`
+- `sleep_time`
+- `daily_stress`
+- `daily_resilience`
+- `daily_cardiovascular_age`
+- `vo2_max`
+- `rest_mode_periods`
 - `webhook_desired_subscriptions`
 - `webhook_remote_subscriptions`
 - `webhook_deliveries`
@@ -248,6 +263,25 @@ Current schema families:
 - `webhook_runtime_heartbeats`
 - `derived_context_events`
 - `derived_pattern_summaries`
+- `derived_review_signal_days`
+
+Important query responsibilities added in phase 5:
+
+- normalized upserts and views for the six review-support Oura families
+- persisted review signal snapshots rebuilt from local data
+- typed reads for ranked review and investigation inputs
+
+### `src/review/*`
+
+Responsibilities:
+
+- canonical review signal registry
+- per-signal feature shaping into rebuildable daily snapshots
+- deterministic ranking for today and week review decks
+- bounded investigation assembly for fixed focuses
+- deterministic user-facing templates shared by CLI and TUI
+
+This layer is intentionally structured data first. It does not own open-ended prompting, hosted AI integration, or freeform chat semantics.
 
 Important query responsibilities added in phase 4:
 
@@ -297,13 +331,19 @@ Current live sync behavior:
   - `/v2/usercollection/daily_readiness`
   - `/v2/usercollection/daily_activity`
   - `/v2/usercollection/heartrate`
+  - `/v2/usercollection/daily_stress`
+  - `/v2/usercollection/daily_resilience`
+  - `/v2/usercollection/sleep_time`
+  - `/v2/usercollection/daily_cardiovascular_age`
+  - `/v2/usercollection/vO2_max`
+  - `/v2/usercollection/rest_mode_period`
   - workouts
   - enhanced tags
   - sessions
 
 Each family is imported through idempotent upserts and family-specific reconcile windows. Missing scopes are captured explicitly so the product can show “missing capability” rather than pretending the family is simply empty.
 
-Successful non-dry-run syncs also refresh the derived context-event and pattern-summary tables over a bounded recent window, so Explain, Timeline overlays, and Patterns stay current without making every background refresh reprocess the entire database. `derive rebuild` remains the explicit full-history recompute path.
+Successful non-dry-run syncs also refresh the derived context-event, pattern-summary, and review-signal tables over a bounded recent window, so Explain, Timeline overlays, Patterns, and Review stay current without making every background refresh reprocess the entire database. `derive rebuild` remains the explicit full-history recompute path.
 
 ### `src/webhook/*`
 
@@ -324,6 +364,7 @@ Responsibilities:
 
 - deterministic rebuild of canonical context events
 - deterministic rebuild of persisted pattern summaries
+- deterministic rebuild of persisted review signal snapshots
 - fixture-backed demo rebuild path
 - one place for derivation logic shared by CLI rebuilds and product reads
 
@@ -331,9 +372,10 @@ Responsibilities:
 
 ```text
 open store
-  -> read normalized workouts / tags / enhanced tags / sessions
+  -> read normalized daily metrics, review-support families, workouts, tags, enhanced tags, and sessions
   -> build canonical context events
   -> build descriptive pattern summaries from daily history + context events
+  -> build review signal snapshots from persisted local data
   -> replace derived tables atomically through typed store APIs
 ```
 

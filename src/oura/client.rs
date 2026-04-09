@@ -10,9 +10,11 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::config::Config;
 use crate::error::{OuraApiError, OuraProblem, Result, RingmasterError};
 use crate::oura::models::{
-    CapabilityKind, CapabilityReport, DailyActivityDocument, DailyReadinessDocument,
-    DailySleepDocument, EnhancedTagDocument, HeartRateDocument, PagedCollection,
-    PersonalInfoDocument, SessionDocument, TimeSeriesCollection, WorkoutDocument,
+    CapabilityKind, CapabilityReport, DailyActivityDocument, DailyCardiovascularAgeDocument,
+    DailyReadinessDocument, DailyResilienceDocument, DailySleepDocument, DailyStressDocument,
+    EnhancedTagDocument, HeartRateDocument, PagedCollection, PersonalInfoDocument,
+    RestModePeriodDocument, SessionDocument, SleepTimeDocument, TimeSeriesCollection,
+    Vo2MaxDocument, WorkoutDocument,
 };
 use crate::store::queries::RawPayloadRecord;
 
@@ -49,6 +51,36 @@ pub trait OuraClient {
         start_date: String,
         end_date: String,
     ) -> ClientFuture<'_, Vec<PageFetch<DailyActivityDocument>>>;
+    fn fetch_sleep_time(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<SleepTimeDocument>>>;
+    fn fetch_rest_mode_periods(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<RestModePeriodDocument>>>;
+    fn fetch_daily_stress(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<DailyStressDocument>>>;
+    fn fetch_daily_resilience(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<DailyResilienceDocument>>>;
+    fn fetch_daily_cardiovascular_age(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<DailyCardiovascularAgeDocument>>>;
+    fn fetch_vo2_max(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<Vo2MaxDocument>>>;
     fn fetch_heartrate(
         &self,
         start_datetime: String,
@@ -314,6 +346,96 @@ impl OuraClient for ReqwestOuraClient {
         })
     }
 
+    fn fetch_sleep_time(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<SleepTimeDocument>>> {
+        Box::pin(async move {
+            self.fetch_paged_collection(
+                "sleep_time",
+                "daily",
+                vec![("start_date", start_date), ("end_date", end_date)],
+            )
+            .await
+        })
+    }
+
+    fn fetch_rest_mode_periods(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<RestModePeriodDocument>>> {
+        Box::pin(async move {
+            self.fetch_paged_collection(
+                "rest_mode_period",
+                "daily",
+                vec![("start_date", start_date), ("end_date", end_date)],
+            )
+            .await
+        })
+    }
+
+    fn fetch_daily_stress(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<DailyStressDocument>>> {
+        Box::pin(async move {
+            self.fetch_paged_collection(
+                "daily_stress",
+                "daily",
+                vec![("start_date", start_date), ("end_date", end_date)],
+            )
+            .await
+        })
+    }
+
+    fn fetch_daily_resilience(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<DailyResilienceDocument>>> {
+        Box::pin(async move {
+            self.fetch_paged_collection(
+                "daily_resilience",
+                "daily",
+                vec![("start_date", start_date), ("end_date", end_date)],
+            )
+            .await
+        })
+    }
+
+    fn fetch_daily_cardiovascular_age(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<DailyCardiovascularAgeDocument>>> {
+        Box::pin(async move {
+            self.fetch_paged_collection(
+                "daily_cardiovascular_age",
+                "daily",
+                vec![("start_date", start_date), ("end_date", end_date)],
+            )
+            .await
+        })
+    }
+
+    fn fetch_vo2_max(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<Vo2MaxDocument>>> {
+        Box::pin(async move {
+            self.fetch_paged_collection(
+                "vO2_max",
+                "daily",
+                vec![("start_date", start_date), ("end_date", end_date)],
+            )
+            .await
+        })
+    }
+
     fn fetch_heartrate(
         &self,
         start_datetime: String,
@@ -434,6 +556,9 @@ impl FixtureOuraClient {
     where
         T: DeserializeOwned + Clone + SerializeableDocument,
     {
+        if !self.fixture_dir.join(file_name).is_file() {
+            return Ok(Vec::new());
+        }
         let payload = self.load_json(file_name)?;
         let page: PagedCollection<T> = serde_json::from_str(&payload)
             .map_err(|source| OuraApiError::Decode { endpoint, source })?;
@@ -464,6 +589,42 @@ impl FixtureOuraClient {
         }])
     }
 
+    fn load_paged_filter<T, F>(
+        &self,
+        file_name: &str,
+        endpoint: &'static str,
+        scope: &'static str,
+        predicate: F,
+    ) -> Result<Vec<PageFetch<T>>>
+    where
+        T: DeserializeOwned + Clone + SerializeableDocument,
+        F: Fn(&T) -> bool,
+    {
+        if !self.fixture_dir.join(file_name).is_file() {
+            return Ok(Vec::new());
+        }
+        let payload = self.load_json(file_name)?;
+        let page: PagedCollection<T> = serde_json::from_str(&payload)
+            .map_err(|source| OuraApiError::Decode { endpoint, source })?;
+        let documents = page.data.into_iter().filter(predicate).collect::<Vec<_>>();
+        let filtered_payload = serde_json::to_string(&PagedCollection {
+            data: documents.clone(),
+            next_token: None::<String>,
+        })?;
+
+        Ok(vec![PageFetch {
+            raw_payload: RawPayloadRecord {
+                cache_key: format!("{endpoint}|fixture"),
+                endpoint: endpoint.to_owned(),
+                requested_at: now_rfc3339()?,
+                scope: Some(scope.to_owned()),
+                etag: None,
+                payload: filtered_payload,
+            },
+            documents,
+        }])
+    }
+
     fn load_timeseries<T>(
         &self,
         file_name: &str,
@@ -476,6 +637,9 @@ impl FixtureOuraClient {
     where
         T: DeserializeOwned + Clone + SerializeableDocument,
     {
+        if !self.fixture_dir.join(file_name).is_file() {
+            return Ok(Vec::new());
+        }
         let payload = self.load_json(file_name)?;
         let page: TimeSeriesCollection<T> = serde_json::from_str(&payload)
             .map_err(|source| OuraApiError::Decode { endpoint, source })?;
@@ -559,6 +723,108 @@ impl OuraClient for FixtureOuraClient {
             self.load_paged(
                 "daily_activity.json",
                 "daily_activity",
+                "daily",
+                "day",
+                &start_date,
+                &end_date,
+            )
+        })
+    }
+
+    fn fetch_sleep_time(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<SleepTimeDocument>>> {
+        Box::pin(async move {
+            self.load_paged(
+                "sleep_time.json",
+                "sleep_time",
+                "daily",
+                "day",
+                &start_date,
+                &end_date,
+            )
+        })
+    }
+
+    fn fetch_rest_mode_periods(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<RestModePeriodDocument>>> {
+        Box::pin(async move {
+            self.load_paged_filter(
+                "rest_mode_periods.json",
+                "rest_mode_period",
+                "daily",
+                |document: &RestModePeriodDocument| {
+                    document.overlaps_day_window(&start_date, &end_date)
+                },
+            )
+        })
+    }
+
+    fn fetch_daily_stress(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<DailyStressDocument>>> {
+        Box::pin(async move {
+            self.load_paged(
+                "daily_stress.json",
+                "daily_stress",
+                "daily",
+                "day",
+                &start_date,
+                &end_date,
+            )
+        })
+    }
+
+    fn fetch_daily_resilience(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<DailyResilienceDocument>>> {
+        Box::pin(async move {
+            self.load_paged(
+                "daily_resilience.json",
+                "daily_resilience",
+                "daily",
+                "day",
+                &start_date,
+                &end_date,
+            )
+        })
+    }
+
+    fn fetch_daily_cardiovascular_age(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<DailyCardiovascularAgeDocument>>> {
+        Box::pin(async move {
+            self.load_paged(
+                "daily_cardiovascular_age.json",
+                "daily_cardiovascular_age",
+                "daily",
+                "day",
+                &start_date,
+                &end_date,
+            )
+        })
+    }
+
+    fn fetch_vo2_max(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<Vo2MaxDocument>>> {
+        Box::pin(async move {
+            self.load_paged(
+                "vo2_max.json",
+                "vO2_max",
                 "daily",
                 "day",
                 &start_date,
@@ -670,6 +936,62 @@ impl SerializeableDocument for DailyActivityDocument {
     }
 }
 
+impl SerializeableDocument for SleepTimeDocument {
+    fn field_value(&self, field_name: &str) -> Option<&str> {
+        match field_name {
+            "day" => Some(self.day.as_str()),
+            _ => None,
+        }
+    }
+}
+
+impl SerializeableDocument for DailyStressDocument {
+    fn field_value(&self, field_name: &str) -> Option<&str> {
+        match field_name {
+            "day" => Some(self.day.as_str()),
+            _ => None,
+        }
+    }
+}
+
+impl SerializeableDocument for DailyResilienceDocument {
+    fn field_value(&self, field_name: &str) -> Option<&str> {
+        match field_name {
+            "day" => Some(self.day.as_str()),
+            _ => None,
+        }
+    }
+}
+
+impl SerializeableDocument for DailyCardiovascularAgeDocument {
+    fn field_value(&self, field_name: &str) -> Option<&str> {
+        match field_name {
+            "day" => Some(self.day.as_str()),
+            _ => None,
+        }
+    }
+}
+
+impl SerializeableDocument for Vo2MaxDocument {
+    fn field_value(&self, field_name: &str) -> Option<&str> {
+        match field_name {
+            "day" => Some(self.day.as_str()),
+            "timestamp" => Some(self.timestamp.as_str()),
+            _ => None,
+        }
+    }
+}
+
+impl SerializeableDocument for RestModePeriodDocument {
+    fn field_value(&self, field_name: &str) -> Option<&str> {
+        match field_name {
+            "day" => Some(self.start_day.as_str()),
+            "timestamp" => self.start_time.as_deref(),
+            _ => None,
+        }
+    }
+}
+
 impl SerializeableDocument for HeartRateDocument {
     fn field_value(&self, field_name: &str) -> Option<&str> {
         match field_name {
@@ -718,8 +1040,14 @@ fn available_fixture_scopes(fixture_dir: &Path) -> Vec<String> {
         fixture_dir.join("daily_sleep.json"),
         fixture_dir.join("daily_readiness.json"),
         fixture_dir.join("daily_activity.json"),
+        fixture_dir.join("sleep_time.json"),
+        fixture_dir.join("rest_mode_periods.json"),
+        fixture_dir.join("daily_stress.json"),
+        fixture_dir.join("daily_resilience.json"),
+        fixture_dir.join("daily_cardiovascular_age.json"),
+        fixture_dir.join("vo2_max.json"),
     ];
-    if daily_files.iter().all(|path| path.is_file()) {
+    if daily_files.iter().any(|path| path.is_file()) {
         scopes.push(CapabilityKind::Daily.scope_name().to_owned());
     }
     if fixture_dir.join("heartrate.json").is_file() {

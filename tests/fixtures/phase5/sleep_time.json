@@ -1,0 +1,82 @@
+{
+  "data": [
+    {
+      "id": "sleep_time_2026-04-02",
+      "day": "2026-04-02",
+      "optimal_bedtime": {
+        "day_tz": 0,
+        "start_offset": 80100,
+        "end_offset": 83700
+      },
+      "recommendation": "follow_optimal_bedtime",
+      "status": "optimal_found"
+    },
+    {
+      "id": "sleep_time_2026-04-03",
+      "day": "2026-04-03",
+      "optimal_bedtime": {
+        "day_tz": 0,
+        "start_offset": 79800,
+        "end_offset": 83400
+      },
+      "recommendation": "follow_optimal_bedtime",
+      "status": "optimal_found"
+    },
+    {
+      "id": "sleep_time_2026-04-04",
+      "day": "2026-04-04",
+      "optimal_bedtime": {
+        "day_tz": 0,
+        "start_offset": 79500,
+        "end_offset": 83100
+      },
+      "recommendation": "earlier_bedtime",
+      "status": "bad_sleep_quality"
+    },
+    {
+      "id": "sleep_time_2026-04-05",
+      "day": "2026-04-05",
+      "optimal_bedtime": {
+        "day_tz": 0,
+        "start_offset": 79200,
+        "end_offset": 82800
+      },
+      "recommendation": "earlier_bedtime",
+      "status": "bad_sleep_quality"
+    },
+    {
+      "id": "sleep_time_2026-04-06",
+      "day": "2026-04-06",
+      "optimal_bedtime": {
+        "day_tz": 0,
+        "start_offset": 78900,
+        "end_offset": 82500
+      },
+      "recommendation": "follow_optimal_bedtime",
+      "status": "optimal_found"
+    },
+    {
+      "id": "sleep_time_2026-04-07",
+      "day": "2026-04-07",
+      "optimal_bedtime": {
+        "day_tz": 0,
+        "start_offset": 78600,
+        "end_offset": 82200
+      },
+      "recommendation": "earlier_bedtime",
+      "status": "bad_sleep_quality"
+    },
+    {
+      "id": "sleep_time_2026-04-08",
+      "day": "2026-04-08",
+      "optimal_bedtime": {
+        "day_tz": 0,
+        "start_offset": 78300,
+        "end_offset": 81900
+      },
+      "recommendation": "follow_optimal_bedtime",
+      "status": "optimal_found"
+    }
+  ],
+  "next_token": null
+}

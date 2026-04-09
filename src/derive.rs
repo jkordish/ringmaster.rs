@@ -9,6 +9,7 @@ use crate::error::{AuthError, Result, RingmasterError};
 use crate::oura::models::TagRecord;
 use crate::oura::sync::{SyncOptions, sync_once};
 use crate::refresh::SyncFamily;
+use crate::review::{FeatureInputs, build_review_signal_days};
 use crate::store::Store;
 use crate::store::queries::{
     ContextEventFamily, ContextEventRecord, DailyOverviewRow, DataSufficiency, EffectDirection,
@@ -31,6 +32,7 @@ pub struct DeriveReport {
     pub database_path: String,
     pub context_event_count: usize,
     pub pattern_summary_count: usize,
+    pub review_signal_day_count: usize,
     pub notes: Vec<String>,
 }
 
@@ -66,7 +68,7 @@ pub async fn rebuild(config: &Config, options: DeriveOptions) -> Result<DeriveRe
             .fixture_dir
             .clone()
             .or_else(|| config.refresh.demo_fixture_dir.clone())
-            .unwrap_or_else(|| PathBuf::from("tests/fixtures/phase3"));
+            .unwrap_or_else(|| PathBuf::from("tests/fixtures/phase5"));
         let temp_root = TempRootGuard::new("derive");
         let mut temp_config = config.clone();
         temp_config.paths = AppPaths::from_roots(
@@ -133,14 +135,54 @@ fn rebuild_store_with_bounds(store: &Store, bounds: DeriveBounds) -> Result<Deri
     let sessions = store
         .views()
         .sessions_between_days(&bounds.start_day, &bounds.end_day)?;
+    let daily_activity = store
+        .views()
+        .daily_activity_between_days(&bounds.start_day, &bounds.end_day)?;
+    let daily_readiness = store
+        .views()
+        .daily_readiness_between_days(&bounds.start_day, &bounds.end_day)?;
+    let daily_stress = store
+        .views()
+        .daily_stress_between_days(&bounds.start_day, &bounds.end_day)?;
+    let daily_resilience = store
+        .views()
+        .daily_resilience_between_days(&bounds.start_day, &bounds.end_day)?;
+    let daily_cardiovascular_age = store
+        .views()
+        .daily_cardiovascular_age_between_days(&bounds.start_day, &bounds.end_day)?;
+    let vo2_max = store
+        .views()
+        .vo2_max_between_days(&bounds.start_day, &bounds.end_day)?;
+    let sleep_time = store
+        .views()
+        .sleep_time_between_days(&bounds.start_day, &bounds.end_day)?;
+    let rest_mode_periods = store
+        .views()
+        .rest_mode_periods_between_days(&bounds.start_day, &bounds.end_day)?;
 
     let context_events = build_context_events(&workouts, &tags, &enhanced_tags, &sessions)?;
     let pattern_summaries = build_pattern_summaries(&daily_history, &context_events)?;
+    let review_updated_at = now_rfc3339()?;
+    let review_signal_days = build_review_signal_days(&FeatureInputs {
+        daily_history: &daily_history,
+        daily_activity: &daily_activity,
+        daily_readiness: &daily_readiness,
+        daily_stress: &daily_stress,
+        daily_resilience: &daily_resilience,
+        daily_cardiovascular_age: &daily_cardiovascular_age,
+        vo2_max: &vo2_max,
+        sleep_time: &sleep_time,
+        rest_mode_periods: &rest_mode_periods,
+        captured_at: &review_updated_at,
+    })?;
 
     store.derived().replace_context_events(&context_events)?;
     store
         .derived()
         .replace_pattern_summaries(&pattern_summaries)?;
+    store
+        .derived()
+        .replace_review_signal_days(&review_signal_days)?;
 
     let counts = store.views().record_counts()?;
     let mut notes = derivation_notes(&counts);
@@ -151,6 +193,7 @@ fn rebuild_store_with_bounds(store: &Store, bounds: DeriveBounds) -> Result<Deri
         database_path: store.plan().db_path.display().to_string(),
         context_event_count: context_events.len(),
         pattern_summary_count: pattern_summaries.len(),
+        review_signal_day_count: review_signal_days.len(),
         notes,
     })
 }
@@ -584,10 +627,15 @@ fn normalize_key(value: &str) -> String {
 fn derivation_notes(counts: &RecordCounts) -> Vec<String> {
     vec![
         format!(
-            "Derived state rebuilt from {} workouts, {} enhanced tags, {} sessions, and {} legacy tags.",
-            counts.workouts, counts.enhanced_tags, counts.sessions, counts.tags
+            "Derived state rebuilt from {} workouts, {} enhanced tags, {} sessions, {} legacy tags, and {} review signal snapshots.",
+            counts.workouts,
+            counts.enhanced_tags,
+            counts.sessions,
+            counts.tags,
+            counts.derived_review_signal_days
         ),
         "Pattern summaries are descriptive associations only and never causal claims.".to_owned(),
+        "Review signal snapshots are deterministic feature rows rebuilt from persisted local data.".to_owned(),
         "Same-night sleep is defined as the sleep row whose closeout day is the day after the event.".to_owned(),
     ]
 }

@@ -40,6 +40,7 @@ pub mod error;
 pub mod insights;
 pub mod oura;
 pub mod refresh;
+pub mod review;
 pub mod store;
 pub mod tui;
 pub mod webhook;
@@ -50,19 +51,29 @@ use std::sync::OnceLock;
 
 use app::{build_demo_state, build_live_state, load_live_snapshot};
 use cli::{
-    AuthCommand, Cli, Command, DeriveCommand, DeriveRebuildArgs, SyncCommand, SyncOnceArgs,
+    AuthCommand, Cli, Command, DeriveCommand, DeriveRebuildArgs, ReviewCommand, ReviewFocusArg,
+    ReviewInvestigateArgs, ReviewTodayArgs, ReviewWeekArgs, SyncCommand, SyncOnceArgs,
     SyncWatchArgs, TuiArgs, WebhookCommand, WebhookReplayArgs, WebhookServeArgs,
     WebhookSubscriptionCommand, WebhookSubscriptionsListArgs, WebhookSubscriptionsSyncArgs,
 };
-use config::Config;
+use config::{AppPaths, Config};
 use error::{Result, RingmasterError};
 use refresh::{SyncFamily, WatchOptions};
+use review::{
+    InvestigationReport, ReviewCard, ReviewDeck, ReviewFocus, ReviewInputs, ReviewMode,
+    build_investigation_report, build_review_deck,
+};
 use store::Store;
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 static LOGGING_INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+
+#[derive(Debug)]
+struct TempRootGuard {
+    path: PathBuf,
+}
 
 pub async fn run_from<I, T>(args: I) -> Result<Option<String>>
 where
@@ -112,6 +123,11 @@ pub async fn run_cli(cli: Cli) -> Result<Option<String>> {
         },
         Command::Derive { command } => match command {
             DeriveCommand::Rebuild(args) => run_derive_rebuild(&config, args).await,
+        },
+        Command::Review { command } => match command {
+            ReviewCommand::Today(args) => run_review_today(&config, args).await,
+            ReviewCommand::Week(args) => run_review_week(&config, args).await,
+            ReviewCommand::Investigate(args) => run_review_investigate(&config, args).await,
         },
     }
 }
@@ -188,7 +204,7 @@ fn run_doctor(config: &Config) -> Result<Option<String>> {
         .demo_fixture_dir
         .as_ref()
         .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "tests/fixtures/phase3".to_owned());
+        .unwrap_or_else(|| "tests/fixtures/phase5".to_owned());
     let record_counts = &snapshot.record_counts;
     let webhook_desired_enabled = snapshot
         .webhook
@@ -309,6 +325,7 @@ record_counts:
   sessions: {}
   derived_context_events: {}
   derived_pattern_summaries: {}
+  derived_review_signal_days: {}
   raw_payloads: {}
 ",
         config.app_name,
@@ -403,6 +420,7 @@ record_counts:
         record_counts.sessions,
         record_counts.derived_context_events,
         record_counts.derived_pattern_summaries,
+        record_counts.derived_review_signal_days,
         record_counts.raw_payloads,
     );
 
@@ -1076,13 +1094,293 @@ ringmaster derive rebuild
 database_path: {}
 derived_context_events: {}
 derived_pattern_summaries: {}
+derived_review_signal_days: {}
 notes:
 {}
 ",
-        report.database_path, report.context_event_count, report.pattern_summary_count, notes,
+        report.database_path,
+        report.context_event_count,
+        report.pattern_summary_count,
+        report.review_signal_day_count,
+        notes,
     );
 
     Ok(Some(output))
+}
+
+#[derive(Debug, Clone)]
+struct ReviewStoreSnapshot {
+    auth_status: oura::models::AuthStatus,
+    signal_days: Vec<store::queries::ReviewSignalDayRecord>,
+    context_events: Vec<store::queries::ContextEventRecord>,
+    pattern_summaries: Vec<store::queries::PatternSummaryRecord>,
+    sleep_time: Vec<store::queries::SleepTimeRecord>,
+    rest_mode_periods: Vec<store::queries::RestModePeriodRecord>,
+}
+
+async fn run_review_today(config: &Config, args: ReviewTodayArgs) -> Result<Option<String>> {
+    let (_guard, snapshot) =
+        load_review_store_snapshot(config, args.demo, args.fixture_dir).await?;
+    let anchor_day = args
+        .day
+        .unwrap_or_else(|| latest_review_day(&snapshot).unwrap_or_else(|| "unknown".to_owned()));
+    let deck = build_review_deck(ReviewMode::Today, &anchor_day, &review_inputs(&snapshot))?;
+    if args.json {
+        return Ok(Some(serde_json::to_string_pretty(&deck)?));
+    }
+
+    Ok(Some(render_review_deck("ringmaster review today", &deck)))
+}
+
+async fn run_review_week(config: &Config, args: ReviewWeekArgs) -> Result<Option<String>> {
+    let (_guard, snapshot) =
+        load_review_store_snapshot(config, args.demo, args.fixture_dir).await?;
+    let anchor_day = args
+        .end_day
+        .unwrap_or_else(|| latest_review_day(&snapshot).unwrap_or_else(|| "unknown".to_owned()));
+    let deck = build_review_deck(ReviewMode::Week, &anchor_day, &review_inputs(&snapshot))?;
+    if args.json {
+        return Ok(Some(serde_json::to_string_pretty(&deck)?));
+    }
+
+    Ok(Some(render_review_deck("ringmaster review week", &deck)))
+}
+
+async fn run_review_investigate(
+    config: &Config,
+    args: ReviewInvestigateArgs,
+) -> Result<Option<String>> {
+    let (_guard, snapshot) =
+        load_review_store_snapshot(config, args.demo, args.fixture_dir).await?;
+    let anchor_day = args
+        .anchor_day
+        .unwrap_or_else(|| latest_review_day(&snapshot).unwrap_or_else(|| "unknown".to_owned()));
+    let focus = map_review_focus(args.focus);
+    let report = build_investigation_report(focus, &anchor_day, &review_inputs(&snapshot))?;
+    if args.json {
+        return Ok(Some(serde_json::to_string_pretty(&report)?));
+    }
+
+    Ok(Some(render_investigation_report(&report)))
+}
+
+async fn load_review_store_snapshot(
+    config: &Config,
+    demo: bool,
+    fixture_dir: Option<PathBuf>,
+) -> Result<(Option<TempRootGuard>, ReviewStoreSnapshot)> {
+    if demo {
+        let fixture_dir = fixture_dir
+            .or_else(|| config.refresh.demo_fixture_dir.clone())
+            .unwrap_or_else(|| PathBuf::from("tests/fixtures/phase5"));
+        let temp_root = TempRootGuard::new("review");
+        let mut temp_config = config.clone();
+        temp_config.paths = AppPaths::from_roots(
+            config.paths.home_dir.clone(),
+            temp_root.path().join("config"),
+            temp_root.path().join("state"),
+            temp_root.path().join("cache"),
+        )?;
+        let store = Store::open(&temp_config)?;
+        oura::sync::sync_once(
+            &temp_config,
+            &store,
+            oura::sync::SyncOptions {
+                dry_run: false,
+                fixture_dir: Some(fixture_dir.clone()),
+                families: SyncFamily::ALL.to_vec(),
+                trigger_source: Some("review_demo".to_owned()),
+                trigger_detail: Some("review seed sync".to_owned()),
+            },
+        )
+        .await?;
+        derive::rebuild_store(&store)?;
+        let auth_status = oura::auth::inspect_auth(&temp_config, &store)?;
+        let snapshot = load_review_snapshot_from_store(&store, &auth_status)?;
+        return Ok((Some(temp_root), snapshot));
+    }
+
+    let store = Store::open(config)?;
+    let _ = derive::rebuild_recent_store(&store, config)?;
+    let auth_status = oura::auth::inspect_auth(config, &store)?;
+    let snapshot = load_review_snapshot_from_store(&store, &auth_status)?;
+    Ok((None, snapshot))
+}
+
+fn load_review_snapshot_from_store(
+    store: &Store,
+    auth_status: &oura::models::AuthStatus,
+) -> Result<ReviewStoreSnapshot> {
+    Ok(ReviewStoreSnapshot {
+        auth_status: auth_status.clone(),
+        signal_days: store
+            .views()
+            .review_signal_days_between_days("0000-01-01", "9999-12-31")?,
+        context_events: store
+            .views()
+            .context_events_between_days("0000-01-01", "9999-12-31")?,
+        pattern_summaries: store.views().pattern_summaries(None, None)?,
+        sleep_time: store
+            .views()
+            .sleep_time_between_days("0000-01-01", "9999-12-31")?,
+        rest_mode_periods: store
+            .views()
+            .rest_mode_periods_between_days("0000-01-01", "9999-12-31")?,
+    })
+}
+
+fn latest_review_day(snapshot: &ReviewStoreSnapshot) -> Option<String> {
+    snapshot
+        .signal_days
+        .iter()
+        .map(|row| row.day.clone())
+        .max()
+        .or_else(|| snapshot.sleep_time.iter().map(|row| row.day.clone()).max())
+        .or_else(|| {
+            snapshot
+                .rest_mode_periods
+                .iter()
+                .map(|row| row.start_day.clone())
+                .max()
+        })
+}
+
+fn review_inputs(snapshot: &ReviewStoreSnapshot) -> ReviewInputs<'_> {
+    ReviewInputs {
+        auth_status: &snapshot.auth_status,
+        signal_days: &snapshot.signal_days,
+        context_events: &snapshot.context_events,
+        pattern_summaries: &snapshot.pattern_summaries,
+        sleep_time: &snapshot.sleep_time,
+        rest_mode_periods: &snapshot.rest_mode_periods,
+    }
+}
+
+fn map_review_focus(focus: ReviewFocusArg) -> ReviewFocus {
+    match focus {
+        ReviewFocusArg::Readiness => ReviewFocus::Readiness,
+        ReviewFocusArg::Sleep => ReviewFocus::Sleep,
+        ReviewFocusArg::Recovery => ReviewFocus::Recovery,
+        ReviewFocusArg::Stress => ReviewFocus::Stress,
+        ReviewFocusArg::Activity => ReviewFocus::Activity,
+    }
+}
+
+fn render_review_deck(title: &str, deck: &ReviewDeck) -> String {
+    let mut lines = vec![
+        title.to_owned(),
+        String::new(),
+        format!("anchor_day: {}", deck.anchor_day),
+    ];
+    if !deck.warnings.is_empty() {
+        lines.push("warnings:".to_owned());
+        lines.extend(deck.warnings.iter().map(|warning| format!("  - {warning}")));
+    }
+    lines.push("top_observations:".to_owned());
+    lines.extend(render_review_cards(&deck.observations));
+    if !deck.positive_changes.is_empty() {
+        lines.push("positive_changes:".to_owned());
+        lines.extend(render_review_cards(&deck.positive_changes));
+    }
+    if !deck.negative_drifts.is_empty() {
+        lines.push("negative_drifts:".to_owned());
+        lines.extend(render_review_cards(&deck.negative_drifts));
+    }
+    if !deck.unresolved_anomalies.is_empty() {
+        lines.push("unresolved_anomalies:".to_owned());
+        lines.extend(render_review_cards(&deck.unresolved_anomalies));
+    }
+    lines.join("\n")
+}
+
+fn render_review_cards(cards: &[ReviewCard]) -> Vec<String> {
+    cards
+        .iter()
+        .enumerate()
+        .flat_map(render_review_card)
+        .collect()
+}
+
+fn render_review_card(index: (usize, &ReviewCard)) -> Vec<String> {
+    let (index, card) = index;
+    let mut lines = vec![
+        format!("  {}. {}", index + 1, card.headline),
+        format!("     {}", card.confidence_label),
+        format!("     {}", card.summary),
+        format!("     {}", card.why_this_is_shown),
+    ];
+    if !card.evidence.is_empty() {
+        lines.push("     evidence:".to_owned());
+        lines.extend(card.evidence.iter().map(|line| format!("       - {line}")));
+    }
+    if !card.counterevidence.is_empty() {
+        lines.push("     counterevidence:".to_owned());
+        lines.extend(
+            card.counterevidence
+                .iter()
+                .map(|line| format!("       - {line}")),
+        );
+    }
+    if !card.warnings.is_empty() {
+        lines.push("     warnings:".to_owned());
+        lines.extend(card.warnings.iter().map(|line| format!("       - {line}")));
+    }
+    lines
+}
+
+fn render_investigation_report(report: &InvestigationReport) -> String {
+    let mut lines = vec![
+        "ringmaster review investigate".to_owned(),
+        String::new(),
+        format!("focus: {}", report.focus.as_str()),
+        format!("anchor_day: {}", report.anchor_day),
+        format!("headline: {}", report.headline),
+        format!(
+            "confidence: {} / {} data",
+            report.confidence.label(),
+            report.sufficiency.label()
+        ),
+        format!("summary: {}", report.summary),
+    ];
+    if !report.evidence.is_empty() {
+        lines.push("evidence:".to_owned());
+        lines.extend(report.evidence.iter().map(|line| format!("  - {line}")));
+    }
+    if !report.counterevidence.is_empty() {
+        lines.push("counterevidence:".to_owned());
+        lines.extend(
+            report
+                .counterevidence
+                .iter()
+                .map(|line| format!("  - {line}")),
+        );
+    }
+    if !report.warnings.is_empty() {
+        lines.push("warnings:".to_owned());
+        lines.extend(report.warnings.iter().map(|line| format!("  - {line}")));
+    }
+    lines.push("look_at:".to_owned());
+    lines.extend(report.look_at.iter().map(|line| format!("  - {line}")));
+    lines.join("\n")
+}
+
+impl TempRootGuard {
+    fn new(prefix: &str) -> Self {
+        let timestamp = OffsetDateTime::now_utc().unix_timestamp_nanos().to_string();
+        let path = std::env::temp_dir().join(format!("ringmaster-{prefix}-{timestamp}"));
+        let _ = std::fs::create_dir_all(&path);
+        Self { path }
+    }
+
+    fn path(&self) -> &PathBuf {
+        &self.path
+    }
+}
+
+impl Drop for TempRootGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }
 
 fn init_logging(filter: &str) -> Result<()> {

@@ -1,0 +1,873 @@
+use serde::Serialize;
+use time::Date;
+
+use crate::error::{Result, RingmasterError};
+use crate::oura::models::{AuthStatus, CapabilityKind};
+use crate::review::features::ReviewSufficiency;
+use crate::review::registry::{
+    EvidenceKind, ReviewFocus, SignalDefinition, SignalDirectionality, WeeklyAggregation,
+    signal_definition, signal_definitions,
+};
+use crate::review::templates::{
+    confidence_badge, headline_for_signal, sufficiency_line, summary_for_signal, why_this_is_shown,
+};
+use crate::store::queries::{
+    ContextEventFamily, ContextEventRecord, PatternMetric, PatternSummaryRecord,
+    RestModePeriodRecord, ReviewSignalDayRecord, SleepTimeRecord,
+};
+
+const DEVIATION_THRESHOLD: f64 = 0.5;
+const MAX_TOP_ITEMS: usize = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ReviewMode {
+    Today,
+    Week,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ReviewSection {
+    Observation,
+    PositiveChange,
+    NegativeDrift,
+    UnresolvedAnomaly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ReviewConfidence {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ReviewCard {
+    pub id: String,
+    pub signal_key: String,
+    pub headline: String,
+    pub summary: String,
+    pub why_this_is_shown: String,
+    pub confidence: ReviewConfidence,
+    pub sufficiency: ReviewSufficiency,
+    pub confidence_label: String,
+    pub section: ReviewSection,
+    pub score: i32,
+    pub anchor_day: String,
+    pub evidence: Vec<String>,
+    pub counterevidence: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ReviewDeck {
+    pub mode: ReviewMode,
+    pub anchor_day: String,
+    pub observations: Vec<ReviewCard>,
+    pub positive_changes: Vec<ReviewCard>,
+    pub negative_drifts: Vec<ReviewCard>,
+    pub unresolved_anomalies: Vec<ReviewCard>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReviewInputs<'a> {
+    pub auth_status: &'a AuthStatus,
+    pub signal_days: &'a [ReviewSignalDayRecord],
+    pub context_events: &'a [ContextEventRecord],
+    pub pattern_summaries: &'a [PatternSummaryRecord],
+    pub sleep_time: &'a [SleepTimeRecord],
+    pub rest_mode_periods: &'a [RestModePeriodRecord],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct AggregateMeasurement<'a> {
+    definition: &'a SignalDefinition,
+    anchor_day: String,
+    numeric_value: Option<f64>,
+    baseline_mean: Option<f64>,
+    baseline_stddev: Option<f64>,
+    delta: Option<f64>,
+    z_score: Option<f64>,
+    persistence_days: u32,
+    sufficiency: ReviewSufficiency,
+    stale_days: u32,
+    week_day_count: usize,
+}
+
+pub fn build_review_deck(
+    mode: ReviewMode,
+    anchor_day: &str,
+    inputs: &ReviewInputs<'_>,
+) -> Result<ReviewDeck> {
+    let measurements = match mode {
+        ReviewMode::Today => build_today_measurements(anchor_day, inputs),
+        ReviewMode::Week => build_week_measurements(anchor_day, inputs)?,
+    };
+    let warnings = capability_warnings(inputs.auth_status);
+    let mut cards = measurements
+        .into_iter()
+        .filter_map(|measurement| build_card(mode, measurement, inputs))
+        .collect::<Vec<_>>();
+    sort_cards(&mut cards);
+
+    let observations = cards
+        .iter()
+        .take(MAX_TOP_ITEMS)
+        .cloned()
+        .collect::<Vec<_>>();
+    let positive_changes = cards
+        .iter()
+        .filter(|card| card.section == ReviewSection::PositiveChange)
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>();
+    let negative_drifts = cards
+        .iter()
+        .filter(|card| card.section == ReviewSection::NegativeDrift)
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>();
+    let unresolved_anomalies = cards
+        .iter()
+        .filter(|card| card.section == ReviewSection::UnresolvedAnomaly)
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Ok(ReviewDeck {
+        mode,
+        anchor_day: anchor_day.to_owned(),
+        observations,
+        positive_changes,
+        negative_drifts,
+        unresolved_anomalies,
+        warnings,
+    })
+}
+
+pub fn focus_cards(focus: ReviewFocus, cards: &[ReviewCard]) -> Vec<&ReviewCard> {
+    let focus_keys = focus.primary_signal_keys();
+    cards
+        .iter()
+        .filter(|card| focus_keys.contains(&card.signal_key.as_str()))
+        .collect()
+}
+
+fn build_today_measurements<'a>(
+    anchor_day: &str,
+    inputs: &'a ReviewInputs<'a>,
+) -> Vec<AggregateMeasurement<'a>> {
+    signal_definitions()
+        .iter()
+        .filter(|definition| definition.evidence_kind == EvidenceKind::Direct)
+        .filter(|definition| {
+            definition
+                .suitable_surfaces
+                .contains(&crate::review::registry::ReviewSurface::Today)
+        })
+        .filter_map(|definition| {
+            inputs
+                .signal_days
+                .iter()
+                .find(|row| row.signal_key == definition.key && row.day == anchor_day)
+                .and_then(|row| {
+                    row.numeric_value.map(|numeric_value| AggregateMeasurement {
+                        definition,
+                        anchor_day: anchor_day.to_owned(),
+                        numeric_value: Some(numeric_value),
+                        baseline_mean: row.baseline_mean,
+                        baseline_stddev: row.baseline_stddev,
+                        delta: row.delta,
+                        z_score: row.z_score,
+                        persistence_days: row.persistence_days,
+                        sufficiency: row.sufficiency,
+                        stale_days: row.stale_days,
+                        week_day_count: 1,
+                    })
+                })
+        })
+        .collect()
+}
+
+fn build_week_measurements<'a>(
+    anchor_day: &str,
+    inputs: &'a ReviewInputs<'a>,
+) -> Result<Vec<AggregateMeasurement<'a>>> {
+    let anchor_date = parse_day(anchor_day)?;
+    let week_start = anchor_date
+        .checked_sub(time::Duration::days(6))
+        .ok_or_else(|| {
+            RingmasterError::Config("weekly review underflowed anchor day".to_owned())
+        })?;
+    let baseline_start = week_start
+        .checked_sub(time::Duration::days(28))
+        .ok_or_else(|| {
+            RingmasterError::Config("weekly baseline underflowed anchor day".to_owned())
+        })?;
+
+    let mut measurements = Vec::new();
+    for definition in signal_definitions()
+        .iter()
+        .filter(|definition| definition.evidence_kind == EvidenceKind::Direct)
+        .filter(|definition| {
+            definition
+                .suitable_surfaces
+                .contains(&crate::review::registry::ReviewSurface::Week)
+        })
+    {
+        let current_values = inputs
+            .signal_days
+            .iter()
+            .filter(|row| row.signal_key == definition.key)
+            .filter_map(|row| parse_day(&row.day).ok().map(|day| (day, row)))
+            .filter(|(day, _)| *day >= week_start && *day <= anchor_date)
+            .collect::<Vec<_>>();
+        let baseline_values = inputs
+            .signal_days
+            .iter()
+            .filter(|row| row.signal_key == definition.key)
+            .filter_map(|row| parse_day(&row.day).ok().map(|day| (day, row)))
+            .filter(|(day, _)| *day >= baseline_start && *day < week_start)
+            .collect::<Vec<_>>();
+
+        let current_numeric = current_values
+            .iter()
+            .filter_map(|(_, row)| row.numeric_value)
+            .collect::<Vec<_>>();
+        let baseline_numeric = baseline_values
+            .iter()
+            .filter_map(|(_, row)| row.numeric_value)
+            .collect::<Vec<_>>();
+        if current_numeric.is_empty() {
+            continue;
+        }
+
+        let numeric_value = aggregate_values(definition.weekly_aggregation, &current_numeric);
+        let baseline_mean = aggregate_values(definition.weekly_aggregation, &baseline_numeric);
+        let baseline_stddev = standard_deviation(&baseline_numeric);
+        let delta = match (numeric_value, baseline_mean) {
+            (Some(current_value), Some(mean_value)) => Some(current_value - mean_value),
+            _ => None,
+        };
+        let z_score = match (delta, baseline_stddev) {
+            (Some(delta_value), Some(stddev)) if stddev >= 0.01 => Some(delta_value / stddev),
+            _ => None,
+        };
+        let persistence_days = current_values
+            .iter()
+            .filter_map(|(_, row)| row.z_score)
+            .filter(|value| value.abs() >= DEVIATION_THRESHOLD)
+            .count();
+        let stale_days = current_values
+            .iter()
+            .map(|(_, row)| row.stale_days)
+            .min()
+            .unwrap_or_default();
+        let sufficiency = ReviewSufficiency::from_comparable_days(baseline_numeric.len());
+
+        measurements.push(AggregateMeasurement {
+            definition,
+            anchor_day: anchor_day.to_owned(),
+            numeric_value,
+            baseline_mean,
+            baseline_stddev,
+            delta,
+            z_score,
+            persistence_days: u32::try_from(persistence_days).map_err(|error| {
+                RingmasterError::Config(format!(
+                    "weekly persistence overflowed u32 for {}: {error}",
+                    definition.key
+                ))
+            })?,
+            sufficiency,
+            stale_days,
+            week_day_count: current_numeric.len(),
+        });
+    }
+
+    Ok(measurements)
+}
+
+fn build_card(
+    mode: ReviewMode,
+    measurement: AggregateMeasurement<'_>,
+    inputs: &ReviewInputs<'_>,
+) -> Option<ReviewCard> {
+    let deviation_bucket = deviation_bucket(measurement.z_score, measurement.delta);
+    if deviation_bucket == 0 {
+        return None;
+    }
+
+    let persistence_bucket = persistence_bucket(measurement.persistence_days);
+    let recency = recency_points(mode, measurement.stale_days);
+    let corroboration_points =
+        corroboration_points(measurement.definition, &measurement.anchor_day, inputs);
+    let counterevidence = counterevidence_lines(&measurement, inputs);
+    let counterevidence_penalty = i32::try_from(counterevidence.len()).ok()?.min(2);
+    let freshness_penalty = freshness_penalty(measurement.stale_days);
+    let sufficiency_penalty = sufficiency_penalty(measurement.sufficiency);
+    let score = deviation_bucket * 3 + persistence_bucket * 2 + recency + corroboration_points
+        - counterevidence_penalty
+        - freshness_penalty
+        - sufficiency_penalty;
+    if score <= 0 {
+        return None;
+    }
+
+    let confidence = classify_confidence(
+        measurement.sufficiency,
+        freshness_penalty,
+        counterevidence_penalty,
+        corroboration_points,
+    );
+    let evidence = evidence_lines(mode, &measurement, corroboration_points, inputs);
+    let mut warnings = Vec::new();
+    if measurement.sufficiency != ReviewSufficiency::Strong {
+        warnings.push(sufficiency_line(measurement.sufficiency));
+    }
+    if freshness_penalty > 0 {
+        warnings.push(format!(
+            "Freshness is reduced because the latest supporting data is {} day(s) old.",
+            measurement.stale_days
+        ));
+    }
+
+    let section = classify_section(
+        measurement.definition.directionality,
+        measurement.delta,
+        measurement.z_score,
+    );
+    Some(ReviewCard {
+        id: format!("{}:{}", measurement.definition.key, measurement.anchor_day),
+        signal_key: measurement.definition.key.to_owned(),
+        headline: headline_for_signal(
+            measurement.definition,
+            mode,
+            measurement.delta,
+            measurement.z_score,
+        ),
+        summary: summary_for_signal(
+            measurement.definition,
+            mode,
+            measurement.definition.baseline_window_days,
+            measurement.persistence_days,
+        ),
+        why_this_is_shown: why_this_is_shown(
+            measurement.definition.baseline_window_days,
+            deviation_bucket,
+            persistence_bucket,
+            corroboration_points,
+        ),
+        confidence,
+        sufficiency: measurement.sufficiency,
+        confidence_label: confidence_badge(confidence, measurement.sufficiency),
+        section,
+        score,
+        anchor_day: measurement.anchor_day,
+        evidence,
+        counterevidence,
+        warnings,
+    })
+}
+
+fn sort_cards(cards: &mut [ReviewCard]) {
+    cards.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then(right.confidence.rank().cmp(&left.confidence.rank()))
+            .then(left.signal_key.cmp(&right.signal_key))
+    });
+}
+
+fn evidence_lines(
+    mode: ReviewMode,
+    measurement: &AggregateMeasurement<'_>,
+    corroboration_points: i32,
+    inputs: &ReviewInputs<'_>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let (Some(numeric_value), Some(baseline_mean)) =
+        (measurement.numeric_value, measurement.baseline_mean)
+    {
+        lines.push(format!(
+            "{} is {:.1} versus a {:.1} recent baseline.",
+            measurement.definition.label, numeric_value, baseline_mean
+        ));
+    }
+    if let Some(z_score) = measurement.z_score {
+        lines.push(format!(
+            "Deviation strength is {:.1} standard deviations from baseline.",
+            z_score
+        ));
+    }
+    if measurement.persistence_days > 1 {
+        lines.push(format!(
+            "This pattern has persisted for {} recent days.",
+            measurement.persistence_days
+        ));
+    }
+    lines.extend(context_support_lines(
+        measurement.definition,
+        &measurement.anchor_day,
+        inputs,
+    ));
+    if corroboration_points == 0 {
+        lines.push(match mode {
+            ReviewMode::Today => {
+                "No strong contextual corroboration was found for today.".to_owned()
+            }
+            ReviewMode::Week => {
+                "No strong contextual corroboration was found for this week.".to_owned()
+            }
+        });
+    }
+    lines
+}
+
+fn counterevidence_lines(
+    measurement: &AggregateMeasurement<'_>,
+    inputs: &ReviewInputs<'_>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let sibling_keys = sibling_keys(measurement.definition.key);
+    for sibling_key in sibling_keys {
+        if let Some(sibling) = inputs
+            .signal_days
+            .iter()
+            .find(|row| row.signal_key == *sibling_key && row.day == measurement.anchor_day)
+            && sibling
+                .z_score
+                .is_none_or(|value| value.abs() < DEVIATION_THRESHOLD)
+            && let Some(definition) = signal_definition(sibling_key)
+        {
+            lines.push(format!(
+                "{} stayed near baseline, so the signal is mixed.",
+                definition.label
+            ));
+        }
+    }
+
+    if measurement.sufficiency == ReviewSufficiency::Missing {
+        lines.push(
+            "Evidence is limited because no comparable baseline days are available.".to_owned(),
+        );
+    }
+
+    lines
+}
+
+fn context_support_lines(
+    definition: &SignalDefinition,
+    anchor_day: &str,
+    inputs: &ReviewInputs<'_>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let related_events = inputs
+        .context_events
+        .iter()
+        .filter(|event| event.anchor_day == anchor_day)
+        .take(2)
+        .collect::<Vec<_>>();
+    for event in related_events {
+        lines.push(format!(
+            "{} context nearby: {}.",
+            event_family_label(event.family),
+            event.title
+        ));
+    }
+
+    if matches!(
+        definition.key,
+        "sleep_score" | "readiness_score" | "stress_high" | "recovery_high"
+    ) && let Some(record) = inputs
+        .sleep_time
+        .iter()
+        .find(|record| record.day == anchor_day)
+        && let Some(status) = &record.status
+    {
+        lines.push(format!(
+            "Sleep timing status on the anchor day was {}.",
+            status.replace('_', " ")
+        ));
+    }
+
+    if matches!(
+        definition.key,
+        "readiness_score" | "stress_high" | "recovery_high" | "resilience_level"
+    ) {
+        let rest_mode_days = overlapping_rest_mode_days(anchor_day, inputs.rest_mode_periods);
+        if rest_mode_days > 0 {
+            lines.push(format!(
+                "Rest mode overlapped {} day(s) in the current review window.",
+                rest_mode_days
+            ));
+        }
+    }
+
+    if let Some(metric) = pattern_metric_for_signal(definition.key)
+        && let Some(pattern) = inputs
+            .pattern_summaries
+            .iter()
+            .find(|summary| summary.metric == metric)
+    {
+        lines.push(format!(
+            "Historical pattern support exists for {} events and {}.",
+            event_family_label(pattern.family),
+            metric.label()
+        ));
+    }
+
+    lines
+}
+
+fn corroboration_points(
+    definition: &SignalDefinition,
+    anchor_day: &str,
+    inputs: &ReviewInputs<'_>,
+) -> i32 {
+    let context_match = i32::from(
+        inputs
+            .context_events
+            .iter()
+            .any(|event| event.anchor_day == anchor_day),
+    );
+    let pattern_match = i32::from(
+        pattern_metric_for_signal(definition.key)
+            .and_then(|metric| {
+                inputs
+                    .pattern_summaries
+                    .iter()
+                    .find(|summary| summary.metric == metric)
+            })
+            .is_some(),
+    );
+    let rest_mode_match = i32::from(
+        matches!(
+            definition.key,
+            "readiness_score" | "stress_high" | "recovery_high" | "resilience_level"
+        ) && overlapping_rest_mode_days(anchor_day, inputs.rest_mode_periods) > 0,
+    );
+    (context_match + pattern_match + rest_mode_match).min(2)
+}
+
+fn classify_confidence(
+    sufficiency: ReviewSufficiency,
+    freshness_penalty: i32,
+    counterevidence_penalty: i32,
+    corroboration_points: i32,
+) -> ReviewConfidence {
+    if matches!(
+        sufficiency,
+        ReviewSufficiency::Missing | ReviewSufficiency::Thin
+    ) || freshness_penalty >= 2
+    {
+        ReviewConfidence::Low
+    } else if sufficiency == ReviewSufficiency::Strong
+        && freshness_penalty == 0
+        && counterevidence_penalty == 0
+        && corroboration_points >= 1
+    {
+        ReviewConfidence::High
+    } else {
+        ReviewConfidence::Medium
+    }
+}
+
+fn classify_section(
+    directionality: SignalDirectionality,
+    delta: Option<f64>,
+    z_score: Option<f64>,
+) -> ReviewSection {
+    let comparator = z_score.or(delta).unwrap_or_default();
+    match directionality {
+        SignalDirectionality::HigherBetter => {
+            if comparator.is_sign_positive() {
+                ReviewSection::PositiveChange
+            } else {
+                ReviewSection::NegativeDrift
+            }
+        }
+        SignalDirectionality::LowerBetter => {
+            if comparator.is_sign_negative() {
+                ReviewSection::PositiveChange
+            } else {
+                ReviewSection::NegativeDrift
+            }
+        }
+        SignalDirectionality::Neutral | SignalDirectionality::Contextual => {
+            ReviewSection::UnresolvedAnomaly
+        }
+    }
+}
+
+fn aggregate_values(aggregation: WeeklyAggregation, values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+
+    match aggregation {
+        WeeklyAggregation::Mean => Some(values.iter().sum::<f64>() / values.len() as f64),
+        WeeklyAggregation::Sum | WeeklyAggregation::Count => Some(values.iter().sum()),
+        WeeklyAggregation::Latest => values.last().copied(),
+    }
+}
+
+fn standard_deviation(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mean_value = values.iter().sum::<f64>() / values.len() as f64;
+    let variance = values
+        .iter()
+        .map(|value| (*value - mean_value).powi(2))
+        .sum::<f64>()
+        / values.len() as f64;
+    Some(variance.sqrt())
+}
+
+fn deviation_bucket(z_score: Option<f64>, delta: Option<f64>) -> i32 {
+    let absolute = z_score
+        .map(f64::abs)
+        .or_else(|| delta.map(f64::abs))
+        .unwrap_or_default();
+    if absolute >= 2.0 {
+        4
+    } else if absolute >= 1.5 {
+        3
+    } else if absolute >= 1.0 {
+        2
+    } else {
+        i32::from(absolute >= DEVIATION_THRESHOLD)
+    }
+}
+
+fn persistence_bucket(persistence_days: u32) -> i32 {
+    match persistence_days {
+        0 | 1 => 0,
+        2 => 1,
+        3 => 2,
+        _ => 3,
+    }
+}
+
+fn recency_points(mode: ReviewMode, stale_days: u32) -> i32 {
+    match mode {
+        ReviewMode::Today => 2,
+        ReviewMode::Week if stale_days <= 3 => 1,
+        ReviewMode::Week => 0,
+    }
+}
+
+fn freshness_penalty(stale_days: u32) -> i32 {
+    if stale_days >= 3 {
+        2
+    } else {
+        i32::from(stale_days >= 2)
+    }
+}
+
+fn sufficiency_penalty(sufficiency: ReviewSufficiency) -> i32 {
+    match sufficiency {
+        ReviewSufficiency::Missing => 2,
+        ReviewSufficiency::Thin => 1,
+        ReviewSufficiency::Medium | ReviewSufficiency::Strong => 0,
+    }
+}
+
+fn sibling_keys(signal_key: &str) -> &'static [&'static str] {
+    match signal_key {
+        "sleep_score" => &["readiness_score"],
+        "readiness_score" => &["sleep_score", "activity_score"],
+        "activity_score" => &["readiness_score", "steps"],
+        "stress_high" => &["recovery_high", "resilience_level"],
+        "recovery_high" => &["stress_high", "resilience_level"],
+        _ => &[],
+    }
+}
+
+fn pattern_metric_for_signal(signal_key: &str) -> Option<PatternMetric> {
+    match signal_key {
+        "sleep_score" => Some(PatternMetric::SleepScore),
+        "readiness_score" => Some(PatternMetric::ReadinessScore),
+        "activity_score" | "active_calories" | "steps" => Some(PatternMetric::ActivityScore),
+        _ => None,
+    }
+}
+
+fn overlapping_rest_mode_days(
+    anchor_day: &str,
+    rest_mode_periods: &[RestModePeriodRecord],
+) -> usize {
+    rest_mode_periods
+        .iter()
+        .filter(|period| {
+            period.start_day == anchor_day || period.end_day.as_deref() == Some(anchor_day)
+        })
+        .count()
+}
+
+fn event_family_label(family: ContextEventFamily) -> &'static str {
+    match family {
+        ContextEventFamily::Workout => "Workout",
+        ContextEventFamily::Tag => "Tag",
+        ContextEventFamily::EnhancedTag => "Enhanced tag",
+        ContextEventFamily::Session => "Session",
+    }
+}
+
+fn capability_warnings(auth_status: &AuthStatus) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if !auth_status
+        .capability_report
+        .is_granted(CapabilityKind::Daily)
+    {
+        warnings.push("Daily scope is missing, so review evidence may be incomplete.".to_owned());
+    }
+    warnings
+}
+
+fn parse_day(day: &str) -> Result<Date> {
+    Date::parse(
+        day,
+        &time::macros::format_description!("[year]-[month]-[day]"),
+    )
+    .map_err(|error| {
+        RingmasterError::Config(format!("failed to parse review day `{day}`: {error}"))
+    })
+}
+
+impl ReviewConfidence {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+        }
+    }
+
+    fn rank(self) -> i32 {
+        match self {
+            Self::Low => 1,
+            Self::Medium => 2,
+            Self::High => 3,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::oura::models::CapabilityReport;
+    use crate::review::engine::{ReviewInputs, ReviewMode, build_review_deck};
+    use crate::review::features::ReviewSufficiency;
+    use crate::store::queries::{
+        ContextEventFamily, ContextEventRecord, PatternMetric, PatternRelationWindow,
+        PatternSummaryRecord, ReviewSignalDayRecord,
+    };
+
+    #[test]
+    fn today_review_ranks_negative_drift_before_weaker_items() {
+        let auth_status = crate::oura::models::AuthStatus {
+            configured: true,
+            callback_url: "http://localhost".to_owned(),
+            requested_scopes: vec!["daily".to_owned()],
+            granted_scopes: vec!["daily".to_owned()],
+            missing_fields: Vec::new(),
+            capability_report: CapabilityReport::demo(),
+            auth_timeout_secs: 30,
+            secret_backend: "memory".to_owned(),
+            access_token_stored: true,
+            refresh_token_stored: true,
+            access_token_expires_at: None,
+            last_authenticated_at: None,
+            last_refresh_at: None,
+            account_id: None,
+            account_email: None,
+            last_error: None,
+        };
+        let signal_days = vec![
+            ReviewSignalDayRecord {
+                signal_key: "readiness_score".to_owned(),
+                day: "2026-04-08".to_owned(),
+                numeric_value: Some(64.0),
+                text_value: None,
+                baseline_mean: Some(81.0),
+                baseline_stddev: Some(6.0),
+                delta: Some(-17.0),
+                z_score: Some(-2.8),
+                persistence_days: 4,
+                sufficiency: ReviewSufficiency::Strong,
+                stale_days: 0,
+                metadata_json: "{}".to_owned(),
+                updated_at: "2026-04-08T12:00:00Z".to_owned(),
+            },
+            ReviewSignalDayRecord {
+                signal_key: "activity_score".to_owned(),
+                day: "2026-04-08".to_owned(),
+                numeric_value: Some(76.0),
+                text_value: None,
+                baseline_mean: Some(78.0),
+                baseline_stddev: Some(4.0),
+                delta: Some(-2.0),
+                z_score: Some(-0.5),
+                persistence_days: 1,
+                sufficiency: ReviewSufficiency::Strong,
+                stale_days: 0,
+                metadata_json: "{}".to_owned(),
+                updated_at: "2026-04-08T12:00:00Z".to_owned(),
+            },
+        ];
+
+        let deck = build_review_deck(
+            ReviewMode::Today,
+            "2026-04-08",
+            &ReviewInputs {
+                auth_status: &auth_status,
+                signal_days: &signal_days,
+                context_events: &[ContextEventRecord {
+                    context_event_id: "workout:1".to_owned(),
+                    family: ContextEventFamily::Workout,
+                    source_id: "1".to_owned(),
+                    anchor_day: "2026-04-08".to_owned(),
+                    start_at: "2026-04-08T18:00:00Z".to_owned(),
+                    end_at: Some("2026-04-08T19:00:00Z".to_owned()),
+                    time_semantics: crate::store::queries::TimeSemantics::Interval,
+                    title: "Late workout".to_owned(),
+                    subtype: Some("running".to_owned()),
+                    notes: None,
+                    intensity: Some("high".to_owned()),
+                    metadata_json: "{}".to_owned(),
+                    updated_at: "2026-04-08T20:00:00Z".to_owned(),
+                }],
+                pattern_summaries: &[PatternSummaryRecord {
+                    summary_id: "summary-1".to_owned(),
+                    family: ContextEventFamily::Workout,
+                    normalized_key: "sport:running".to_owned(),
+                    relation_window: PatternRelationWindow::NextDayReadiness,
+                    metric: PatternMetric::ReadinessScore,
+                    sample_count: 6,
+                    median_delta: -4.0,
+                    effect_direction: crate::store::queries::EffectDirection::Lower,
+                    confidence: crate::store::queries::DataSufficiency::Strong,
+                    metadata_json: "{}".to_owned(),
+                    updated_at: "2026-04-08T20:00:00Z".to_owned(),
+                }],
+                sleep_time: &[],
+                rest_mode_periods: &[],
+            },
+        )
+        .unwrap_or_else(|error| panic!("today review should build: {error}"));
+
+        assert_eq!(
+            deck.observations
+                .first()
+                .map(|card| card.signal_key.as_str()),
+            Some("readiness_score")
+        );
+        assert!(
+            deck.observations
+                .first()
+                .is_some_and(|card| card.headline.contains("below your baseline"))
+        );
+    }
+}

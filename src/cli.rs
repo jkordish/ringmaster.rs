@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 
 use crate::error::{Result, RingmasterError};
 
@@ -43,6 +43,11 @@ pub enum Command {
         #[command(subcommand)]
         command: DeriveCommand,
     },
+    /// Deterministic review and investigation commands.
+    Review {
+        #[command(subcommand)]
+        command: ReviewCommand,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
@@ -63,6 +68,16 @@ pub enum SyncCommand {
 pub enum DeriveCommand {
     /// Rebuild derived context events and pattern summaries from persisted data.
     Rebuild(DeriveRebuildArgs),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum ReviewCommand {
+    /// Print a ranked daily brief for the selected or latest day.
+    Today(ReviewTodayArgs),
+    /// Print a ranked weekly review ending on the selected or latest day.
+    Week(ReviewWeekArgs),
+    /// Run a bounded evidence-backed investigation for a fixed focus.
+    Investigate(ReviewInvestigateArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
@@ -129,6 +144,66 @@ pub struct DeriveRebuildArgs {
     pub fixture_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct ReviewTodayArgs {
+    /// Review a specific closeout day instead of the latest available day.
+    #[arg(long)]
+    pub day: Option<String>,
+    /// Render JSON instead of terminal text.
+    #[arg(long)]
+    pub json: bool,
+    /// Seed a temporary review store from deterministic fixture data.
+    #[arg(long)]
+    pub demo: bool,
+    /// Load Oura payloads from a fixture directory when running in demo mode.
+    #[arg(long)]
+    pub fixture_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct ReviewWeekArgs {
+    /// End the weekly review on a specific closeout day instead of the latest available day.
+    #[arg(long)]
+    pub end_day: Option<String>,
+    /// Render JSON instead of terminal text.
+    #[arg(long)]
+    pub json: bool,
+    /// Seed a temporary review store from deterministic fixture data.
+    #[arg(long)]
+    pub demo: bool,
+    /// Load Oura payloads from a fixture directory when running in demo mode.
+    #[arg(long)]
+    pub fixture_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ReviewFocusArg {
+    Readiness,
+    Sleep,
+    Recovery,
+    Stress,
+    Activity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct ReviewInvestigateArgs {
+    /// Investigation focus. This pass supports only bounded deterministic focuses.
+    #[arg(long, value_enum)]
+    pub focus: ReviewFocusArg,
+    /// Anchor the investigation on a specific closeout day instead of the latest available day.
+    #[arg(long)]
+    pub anchor_day: Option<String>,
+    /// Render JSON instead of terminal text.
+    #[arg(long)]
+    pub json: bool,
+    /// Seed a temporary review store from deterministic fixture data.
+    #[arg(long)]
+    pub demo: bool,
+    /// Load Oura payloads from a fixture directory when running in demo mode.
+    #[arg(long)]
+    pub fixture_dir: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Args, Default)]
 pub struct WebhookServeArgs {}
 
@@ -188,8 +263,9 @@ impl Cli {
 #[allow(clippy::panic)]
 mod tests {
     use super::{
-        AuthCommand, Cli, Command, DeriveCommand, DeriveRebuildArgs, SyncCommand, SyncOnceArgs,
-        SyncWatchArgs, WebhookCommand, WebhookReplayArgs, WebhookSubscriptionCommand,
+        AuthCommand, Cli, Command, DeriveCommand, DeriveRebuildArgs, ReviewCommand, ReviewFocusArg,
+        ReviewInvestigateArgs, ReviewTodayArgs, SyncCommand, SyncOnceArgs, SyncWatchArgs,
+        WebhookCommand, WebhookReplayArgs, WebhookSubscriptionCommand,
         WebhookSubscriptionsSyncArgs,
     };
 
@@ -229,7 +305,9 @@ mod tests {
     fn help_text_mentions_required_commands() {
         let help = Cli::help_text();
 
-        for command in ["tui", "doctor", "auth", "sync", "webhook", "derive", "demo"] {
+        for command in [
+            "tui", "doctor", "auth", "sync", "webhook", "derive", "review", "demo",
+        ] {
             assert!(
                 help.contains(command),
                 "help text should mention `{command}`"
@@ -336,6 +414,56 @@ mod tests {
                                 fixture_dir: None,
                             }),
                     },
+            }) => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_review_investigate_focus() {
+        let cli = Cli::parse_from([
+            "ringmaster",
+            "review",
+            "investigate",
+            "--focus",
+            "readiness",
+            "--demo",
+        ])
+        .unwrap_or_else(|error| {
+            panic!("expected clap parsing to succeed in test: {error}");
+        });
+
+        match cli.command {
+            Some(Command::Review {
+                command:
+                    ReviewCommand::Investigate(ReviewInvestigateArgs {
+                        focus: ReviewFocusArg::Readiness,
+                        anchor_day: None,
+                        json: false,
+                        demo: true,
+                        fixture_dir: None,
+                    }),
+            }) => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_review_today_json() {
+        let cli =
+            Cli::parse_from(["ringmaster", "review", "today", "--json"]).unwrap_or_else(|error| {
+                panic!("expected clap parsing to succeed in test: {error}");
+            });
+
+        match cli.command {
+            Some(Command::Review {
+                command:
+                    ReviewCommand::Today(ReviewTodayArgs {
+                        day: None,
+                        json: true,
+                        demo: false,
+                        fixture_dir: None,
+                    }),
             }) => {}
             other => panic!("unexpected command: {other:?}"),
         }

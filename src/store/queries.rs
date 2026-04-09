@@ -5,6 +5,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::error::{OuraProblem, Result, RingmasterError};
 use crate::oura::models::{TagRecord, TagSource};
+use crate::review::features::ReviewSufficiency;
 use crate::store::migrations;
 
 pub const OURA_PROVIDER: &str = "oura";
@@ -88,6 +89,73 @@ pub struct DailyActivityRecord {
     pub active_calories: i64,
     pub steps: i64,
     pub total_calories: i64,
+    pub raw_cache_key: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SleepTimeRecord {
+    pub oura_id: Option<String>,
+    pub day: String,
+    pub status: Option<String>,
+    pub recommendation: Option<String>,
+    pub optimal_bedtime_start_offset: Option<i64>,
+    pub optimal_bedtime_end_offset: Option<i64>,
+    pub optimal_bedtime_day_tz: Option<i64>,
+    pub raw_cache_key: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailyStressRecord {
+    pub oura_id: Option<String>,
+    pub day: String,
+    pub stress_high: Option<i64>,
+    pub recovery_high: Option<i64>,
+    pub day_summary: Option<String>,
+    pub raw_cache_key: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DailyResilienceRecord {
+    pub oura_id: Option<String>,
+    pub day: String,
+    pub level: String,
+    pub sleep_recovery: f64,
+    pub daytime_recovery: f64,
+    pub stress: f64,
+    pub raw_cache_key: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailyCardiovascularAgeRecord {
+    pub day: String,
+    pub vascular_age: Option<i64>,
+    pub raw_cache_key: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Vo2MaxRecord {
+    pub oura_id: Option<String>,
+    pub day: String,
+    pub recorded_at: String,
+    pub vo2_max: Option<f64>,
+    pub raw_cache_key: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestModePeriodRecord {
+    pub period_id: String,
+    pub start_day: String,
+    pub start_time: Option<String>,
+    pub end_day: Option<String>,
+    pub end_time: Option<String>,
+    pub episode_count: u32,
+    pub tags_json: String,
     pub raw_cache_key: Option<String>,
     pub updated_at: String,
 }
@@ -222,6 +290,23 @@ pub struct PatternSummaryRecord {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct ReviewSignalDayRecord {
+    pub signal_key: String,
+    pub day: String,
+    pub numeric_value: Option<f64>,
+    pub text_value: Option<String>,
+    pub baseline_mean: Option<f64>,
+    pub baseline_stddev: Option<f64>,
+    pub delta: Option<f64>,
+    pub z_score: Option<f64>,
+    pub persistence_days: u32,
+    pub sufficiency: ReviewSufficiency,
+    pub stale_days: u32,
+    pub metadata_json: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RawPayloadRecord {
     pub cache_key: String,
     pub endpoint: String,
@@ -238,6 +323,12 @@ pub struct RecordCounts {
     pub daily_sleep: u64,
     pub daily_readiness: u64,
     pub daily_activity: u64,
+    pub sleep_time: u64,
+    pub daily_stress: u64,
+    pub daily_resilience: u64,
+    pub daily_cardiovascular_age: u64,
+    pub vo2_max: u64,
+    pub rest_mode_periods: u64,
     pub heartrate_samples: u64,
     pub workouts: u64,
     pub tags: u64,
@@ -245,6 +336,7 @@ pub struct RecordCounts {
     pub sessions: u64,
     pub derived_context_events: u64,
     pub derived_pattern_summaries: u64,
+    pub derived_review_signal_days: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -906,6 +998,204 @@ impl<'connection> ImportStore<'connection> {
         Ok(())
     }
 
+    pub fn upsert_sleep_time(&self, record: &SleepTimeRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO sleep_time (
+                oura_id,
+                day,
+                status,
+                recommendation,
+                optimal_bedtime_start_offset,
+                optimal_bedtime_end_offset,
+                optimal_bedtime_day_tz,
+                raw_cache_key,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(day) DO UPDATE SET
+                oura_id = excluded.oura_id,
+                status = excluded.status,
+                recommendation = excluded.recommendation,
+                optimal_bedtime_start_offset = excluded.optimal_bedtime_start_offset,
+                optimal_bedtime_end_offset = excluded.optimal_bedtime_end_offset,
+                optimal_bedtime_day_tz = excluded.optimal_bedtime_day_tz,
+                raw_cache_key = excluded.raw_cache_key,
+                updated_at = excluded.updated_at",
+            params![
+                record.oura_id,
+                record.day,
+                record.status,
+                record.recommendation,
+                record.optimal_bedtime_start_offset,
+                record.optimal_bedtime_end_offset,
+                record.optimal_bedtime_day_tz,
+                record.raw_cache_key,
+                record.updated_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn upsert_daily_stress(&self, record: &DailyStressRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO daily_stress (
+                oura_id,
+                day,
+                stress_high,
+                recovery_high,
+                day_summary,
+                raw_cache_key,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(day) DO UPDATE SET
+                oura_id = excluded.oura_id,
+                stress_high = excluded.stress_high,
+                recovery_high = excluded.recovery_high,
+                day_summary = excluded.day_summary,
+                raw_cache_key = excluded.raw_cache_key,
+                updated_at = excluded.updated_at",
+            params![
+                record.oura_id,
+                record.day,
+                record.stress_high,
+                record.recovery_high,
+                record.day_summary,
+                record.raw_cache_key,
+                record.updated_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn upsert_daily_resilience(&self, record: &DailyResilienceRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO daily_resilience (
+                oura_id,
+                day,
+                level,
+                sleep_recovery,
+                daytime_recovery,
+                stress,
+                raw_cache_key,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(day) DO UPDATE SET
+                oura_id = excluded.oura_id,
+                level = excluded.level,
+                sleep_recovery = excluded.sleep_recovery,
+                daytime_recovery = excluded.daytime_recovery,
+                stress = excluded.stress,
+                raw_cache_key = excluded.raw_cache_key,
+                updated_at = excluded.updated_at",
+            params![
+                record.oura_id,
+                record.day,
+                record.level,
+                record.sleep_recovery,
+                record.daytime_recovery,
+                record.stress,
+                record.raw_cache_key,
+                record.updated_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn upsert_daily_cardiovascular_age(
+        &self,
+        record: &DailyCardiovascularAgeRecord,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO daily_cardiovascular_age (
+                day,
+                vascular_age,
+                raw_cache_key,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(day) DO UPDATE SET
+                vascular_age = excluded.vascular_age,
+                raw_cache_key = excluded.raw_cache_key,
+                updated_at = excluded.updated_at",
+            params![
+                record.day,
+                record.vascular_age,
+                record.raw_cache_key,
+                record.updated_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn upsert_vo2_max(&self, record: &Vo2MaxRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO vo2_max (
+                oura_id,
+                day,
+                recorded_at,
+                vo2_max,
+                raw_cache_key,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(day) DO UPDATE SET
+                oura_id = excluded.oura_id,
+                recorded_at = excluded.recorded_at,
+                vo2_max = excluded.vo2_max,
+                raw_cache_key = excluded.raw_cache_key,
+                updated_at = excluded.updated_at",
+            params![
+                record.oura_id,
+                record.day,
+                record.recorded_at,
+                record.vo2_max,
+                record.raw_cache_key,
+                record.updated_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn upsert_rest_mode_period(&self, record: &RestModePeriodRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO rest_mode_periods (
+                period_id,
+                start_day,
+                start_time,
+                end_day,
+                end_time,
+                episode_count,
+                tags_json,
+                raw_cache_key,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(period_id) DO UPDATE SET
+                start_day = excluded.start_day,
+                start_time = excluded.start_time,
+                end_day = excluded.end_day,
+                end_time = excluded.end_time,
+                episode_count = excluded.episode_count,
+                tags_json = excluded.tags_json,
+                raw_cache_key = excluded.raw_cache_key,
+                updated_at = excluded.updated_at",
+            params![
+                record.period_id,
+                record.start_day,
+                record.start_time,
+                record.end_day,
+                record.end_time,
+                i64::from(record.episode_count),
+                record.tags_json,
+                record.raw_cache_key,
+                record.updated_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
     pub fn upsert_heartrate_sample(&self, record: &HeartrateSampleRecord) -> Result<()> {
         self.connection.execute(
             "INSERT INTO heartrate_samples (
@@ -1205,6 +1495,64 @@ impl<'connection> DerivedStore<'connection> {
             }
         }
     }
+
+    pub fn replace_review_signal_days(&self, records: &[ReviewSignalDayRecord]) -> Result<()> {
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE TRANSACTION")?;
+
+        let result = (|| -> Result<()> {
+            self.connection
+                .execute("DELETE FROM derived_review_signal_days", [])?;
+            let mut statement = self.connection.prepare(
+                "INSERT INTO derived_review_signal_days (
+                    signal_key,
+                    day,
+                    numeric_value,
+                    text_value,
+                    baseline_mean,
+                    baseline_stddev,
+                    delta,
+                    z_score,
+                    persistence_days,
+                    sufficiency,
+                    stale_days,
+                    metadata_json,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            )?;
+
+            for record in records {
+                statement.execute(params![
+                    record.signal_key,
+                    record.day,
+                    record.numeric_value,
+                    record.text_value,
+                    record.baseline_mean,
+                    record.baseline_stddev,
+                    record.delta,
+                    record.z_score,
+                    i64::from(record.persistence_days),
+                    record.sufficiency.as_str(),
+                    i64::from(record.stale_days),
+                    record.metadata_json,
+                    record.updated_at,
+                ])?;
+            }
+
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                self.connection.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
 }
 
 impl<'connection> ViewStore<'connection> {
@@ -1407,6 +1755,16 @@ impl<'connection> ViewStore<'connection> {
                     UNION ALL
                     SELECT day FROM daily_activity
                     UNION ALL
+                    SELECT day FROM sleep_time
+                    UNION ALL
+                    SELECT day FROM daily_stress
+                    UNION ALL
+                    SELECT day FROM daily_resilience
+                    UNION ALL
+                    SELECT day FROM daily_cardiovascular_age
+                    UNION ALL
+                    SELECT day FROM vo2_max
+                    UNION ALL
                     SELECT day FROM workouts
                     UNION ALL
                     SELECT day FROM tags
@@ -1414,6 +1772,8 @@ impl<'connection> ViewStore<'connection> {
                     SELECT day FROM enhanced_tags
                     UNION ALL
                     SELECT day FROM sessions
+                    UNION ALL
+                    SELECT start_day AS day FROM rest_mode_periods
                 )",
                 [],
                 |row| row.get::<_, Option<String>>(0),
@@ -1554,6 +1914,307 @@ impl<'connection> ViewStore<'connection> {
              ORDER BY day ASC, started_at ASC",
         )?;
         let rows = statement.query_map(params![start_day, end_day], read_workout_row)?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
+    pub fn daily_activity_between_days(
+        &self,
+        start_day: &str,
+        end_day: &str,
+    ) -> Result<Vec<DailyActivityRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                oura_id,
+                day,
+                activity_score,
+                active_calories,
+                steps,
+                total_calories,
+                raw_cache_key,
+                updated_at
+             FROM daily_activity
+             WHERE day >= ?1 AND day <= ?2
+             ORDER BY day ASC",
+        )?;
+        let rows = statement.query_map(params![start_day, end_day], |row| {
+            Ok(DailyActivityRecord {
+                oura_id: row.get(0)?,
+                day: row.get(1)?,
+                activity_score: parse_optional_score(row.get(2)?),
+                active_calories: row.get(3)?,
+                steps: row.get(4)?,
+                total_calories: row.get(5)?,
+                raw_cache_key: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
+    pub fn daily_readiness_between_days(
+        &self,
+        start_day: &str,
+        end_day: &str,
+    ) -> Result<Vec<DailyReadinessRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                oura_id,
+                day,
+                readiness_score,
+                temperature_deviation,
+                temperature_trend_deviation,
+                raw_cache_key,
+                updated_at
+             FROM daily_readiness
+             WHERE day >= ?1 AND day <= ?2
+             ORDER BY day ASC",
+        )?;
+        let rows = statement.query_map(params![start_day, end_day], |row| {
+            Ok(DailyReadinessRecord {
+                oura_id: row.get(0)?,
+                day: row.get(1)?,
+                readiness_score: parse_optional_score(row.get(2)?),
+                temperature_deviation: row.get(3)?,
+                temperature_trend_deviation: row.get(4)?,
+                raw_cache_key: row.get(5)?,
+                updated_at: row.get(6)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
+    pub fn sleep_time_between_days(
+        &self,
+        start_day: &str,
+        end_day: &str,
+    ) -> Result<Vec<SleepTimeRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                oura_id,
+                day,
+                status,
+                recommendation,
+                optimal_bedtime_start_offset,
+                optimal_bedtime_end_offset,
+                optimal_bedtime_day_tz,
+                raw_cache_key,
+                updated_at
+             FROM sleep_time
+             WHERE day >= ?1 AND day <= ?2
+             ORDER BY day ASC",
+        )?;
+        let rows = statement.query_map(params![start_day, end_day], |row| {
+            Ok(SleepTimeRecord {
+                oura_id: row.get(0)?,
+                day: row.get(1)?,
+                status: row.get(2)?,
+                recommendation: row.get(3)?,
+                optimal_bedtime_start_offset: row.get(4)?,
+                optimal_bedtime_end_offset: row.get(5)?,
+                optimal_bedtime_day_tz: row.get(6)?,
+                raw_cache_key: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
+    pub fn daily_stress_between_days(
+        &self,
+        start_day: &str,
+        end_day: &str,
+    ) -> Result<Vec<DailyStressRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                oura_id,
+                day,
+                stress_high,
+                recovery_high,
+                day_summary,
+                raw_cache_key,
+                updated_at
+             FROM daily_stress
+             WHERE day >= ?1 AND day <= ?2
+             ORDER BY day ASC",
+        )?;
+        let rows = statement.query_map(params![start_day, end_day], |row| {
+            Ok(DailyStressRecord {
+                oura_id: row.get(0)?,
+                day: row.get(1)?,
+                stress_high: row.get(2)?,
+                recovery_high: row.get(3)?,
+                day_summary: row.get(4)?,
+                raw_cache_key: row.get(5)?,
+                updated_at: row.get(6)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
+    pub fn daily_resilience_between_days(
+        &self,
+        start_day: &str,
+        end_day: &str,
+    ) -> Result<Vec<DailyResilienceRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                oura_id,
+                day,
+                level,
+                sleep_recovery,
+                daytime_recovery,
+                stress,
+                raw_cache_key,
+                updated_at
+             FROM daily_resilience
+             WHERE day >= ?1 AND day <= ?2
+             ORDER BY day ASC",
+        )?;
+        let rows = statement.query_map(params![start_day, end_day], |row| {
+            Ok(DailyResilienceRecord {
+                oura_id: row.get(0)?,
+                day: row.get(1)?,
+                level: row.get(2)?,
+                sleep_recovery: row.get(3)?,
+                daytime_recovery: row.get(4)?,
+                stress: row.get(5)?,
+                raw_cache_key: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
+    pub fn daily_cardiovascular_age_between_days(
+        &self,
+        start_day: &str,
+        end_day: &str,
+    ) -> Result<Vec<DailyCardiovascularAgeRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                day,
+                vascular_age,
+                raw_cache_key,
+                updated_at
+             FROM daily_cardiovascular_age
+             WHERE day >= ?1 AND day <= ?2
+             ORDER BY day ASC",
+        )?;
+        let rows = statement.query_map(params![start_day, end_day], |row| {
+            Ok(DailyCardiovascularAgeRecord {
+                day: row.get(0)?,
+                vascular_age: row.get(1)?,
+                raw_cache_key: row.get(2)?,
+                updated_at: row.get(3)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
+    pub fn vo2_max_between_days(
+        &self,
+        start_day: &str,
+        end_day: &str,
+    ) -> Result<Vec<Vo2MaxRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                oura_id,
+                day,
+                recorded_at,
+                vo2_max,
+                raw_cache_key,
+                updated_at
+             FROM vo2_max
+             WHERE day >= ?1 AND day <= ?2
+             ORDER BY day ASC, recorded_at ASC",
+        )?;
+        let rows = statement.query_map(params![start_day, end_day], |row| {
+            Ok(Vo2MaxRecord {
+                oura_id: row.get(0)?,
+                day: row.get(1)?,
+                recorded_at: row.get(2)?,
+                vo2_max: row.get(3)?,
+                raw_cache_key: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
+    pub fn rest_mode_periods_between_days(
+        &self,
+        start_day: &str,
+        end_day: &str,
+    ) -> Result<Vec<RestModePeriodRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                period_id,
+                start_day,
+                start_time,
+                end_day,
+                end_time,
+                episode_count,
+                tags_json,
+                raw_cache_key,
+                updated_at
+             FROM rest_mode_periods
+             WHERE start_day <= ?2
+               AND COALESCE(end_day, start_day) >= ?1
+             ORDER BY start_day ASC, COALESCE(start_time, start_day) ASC, period_id ASC",
+        )?;
+        let rows = statement.query_map(params![start_day, end_day], |row| {
+            Ok(RestModePeriodRecord {
+                period_id: row.get(0)?,
+                start_day: row.get(1)?,
+                start_time: row.get(2)?,
+                end_day: row.get(3)?,
+                end_time: row.get(4)?,
+                episode_count: parse_u32(row.get::<_, i64>(5)?, 5)?,
+                tags_json: row.get(6)?,
+                raw_cache_key: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })?;
         let mut records = Vec::new();
         for row in rows {
             records.push(row?);
@@ -1759,6 +2420,39 @@ impl<'connection> ViewStore<'connection> {
         Ok(records)
     }
 
+    pub fn review_signal_days_between_days(
+        &self,
+        start_day: &str,
+        end_day: &str,
+    ) -> Result<Vec<ReviewSignalDayRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                signal_key,
+                day,
+                numeric_value,
+                text_value,
+                baseline_mean,
+                baseline_stddev,
+                delta,
+                z_score,
+                persistence_days,
+                sufficiency,
+                stale_days,
+                metadata_json,
+                updated_at
+             FROM derived_review_signal_days
+             WHERE day >= ?1 AND day <= ?2
+             ORDER BY day ASC, signal_key ASC",
+        )?;
+        let rows = statement.query_map(params![start_day, end_day], read_review_signal_day_row)?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
     pub fn record_counts(&self) -> Result<RecordCounts> {
         Ok(RecordCounts {
             raw_payloads: row_count(self.connection, "raw_payload_cache")?,
@@ -1766,6 +2460,12 @@ impl<'connection> ViewStore<'connection> {
             daily_sleep: row_count(self.connection, "daily_sleep")?,
             daily_readiness: row_count(self.connection, "daily_readiness")?,
             daily_activity: row_count(self.connection, "daily_activity")?,
+            sleep_time: row_count(self.connection, "sleep_time")?,
+            daily_stress: row_count(self.connection, "daily_stress")?,
+            daily_resilience: row_count(self.connection, "daily_resilience")?,
+            daily_cardiovascular_age: row_count(self.connection, "daily_cardiovascular_age")?,
+            vo2_max: row_count(self.connection, "vo2_max")?,
+            rest_mode_periods: row_count(self.connection, "rest_mode_periods")?,
             heartrate_samples: row_count(self.connection, "heartrate_samples")?,
             workouts: row_count(self.connection, "workouts")?,
             tags: row_count(self.connection, "tags")?,
@@ -1773,6 +2473,7 @@ impl<'connection> ViewStore<'connection> {
             sessions: row_count(self.connection, "sessions")?,
             derived_context_events: row_count(self.connection, "derived_context_events")?,
             derived_pattern_summaries: row_count(self.connection, "derived_pattern_summaries")?,
+            derived_review_signal_days: row_count(self.connection, "derived_review_signal_days")?,
         })
     }
 }
@@ -1920,6 +2621,24 @@ fn read_pattern_summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Pattern
     })
 }
 
+fn read_review_signal_day_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewSignalDayRecord> {
+    Ok(ReviewSignalDayRecord {
+        signal_key: row.get(0)?,
+        day: row.get(1)?,
+        numeric_value: row.get(2)?,
+        text_value: row.get(3)?,
+        baseline_mean: row.get(4)?,
+        baseline_stddev: row.get(5)?,
+        delta: row.get(6)?,
+        z_score: row.get(7)?,
+        persistence_days: parse_u32(row.get::<_, i64>(8)?, 8)?,
+        sufficiency: parse_review_sufficiency(&row.get::<_, String>(9)?, 9)?,
+        stale_days: parse_u32(row.get::<_, i64>(10)?, 10)?,
+        metadata_json: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
+}
+
 fn parse_context_event_family(value: &str, column: usize) -> rusqlite::Result<ContextEventFamily> {
     ContextEventFamily::parse(value).ok_or_else(|| invalid_text_enum(column, value))
 }
@@ -1945,6 +2664,16 @@ fn parse_data_sufficiency(value: &str, column: usize) -> rusqlite::Result<DataSu
 
 fn parse_effect_direction(value: &str, column: usize) -> rusqlite::Result<EffectDirection> {
     EffectDirection::parse(value).ok_or_else(|| invalid_text_enum(column, value))
+}
+
+fn parse_review_sufficiency(value: &str, column: usize) -> rusqlite::Result<ReviewSufficiency> {
+    match value {
+        "missing" => Ok(ReviewSufficiency::Missing),
+        "thin" => Ok(ReviewSufficiency::Thin),
+        "medium" => Ok(ReviewSufficiency::Medium),
+        "strong" => Ok(ReviewSufficiency::Strong),
+        _ => Err(invalid_text_enum(column, value)),
+    }
 }
 
 fn invalid_text_enum(column: usize, value: &str) -> rusqlite::Error {

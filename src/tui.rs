@@ -19,7 +19,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::action::Action;
 use crate::app::{AppState, RunMode, Screen, load_live_snapshot};
-use crate::components::{dashboard, explain, ops, patterns, timeline, trends};
+use crate::components::{dashboard, explain, ops, patterns, review, timeline, trends};
 use crate::config::Config;
 use crate::error::{Result, RingmasterError};
 use crate::oura::{auth, sync::SyncOptions, sync::SyncReport, sync::sync_selected};
@@ -153,6 +153,7 @@ fn draw_active_screen(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState
         Screen::Explain => explain::draw(frame, area, &app.model.explain),
         Screen::Patterns => patterns::draw(frame, area, &app.model.patterns),
         Screen::Ops => ops::draw(frame, area, &app.model.ops),
+        Screen::Review => review::draw(frame, area, &app.model.review),
     }
 }
 
@@ -169,13 +170,18 @@ fn map_event(active_screen: Screen, event: Event) -> Option<Action> {
             KeyCode::Char('4') => Some(Action::ShowScreen(Screen::Explain)),
             KeyCode::Char('5') => Some(Action::ShowScreen(Screen::Patterns)),
             KeyCode::Char('6') => Some(Action::ShowScreen(Screen::Ops)),
+            KeyCode::Char('7') => Some(Action::ShowScreen(Screen::Review)),
             KeyCode::Char('[') => match active_screen {
-                Screen::Dashboard | Screen::Timeline | Screen::Explain => Some(Action::PreviousDay),
+                Screen::Dashboard | Screen::Timeline | Screen::Explain | Screen::Review => {
+                    Some(Action::PreviousDay)
+                }
                 Screen::Trends => Some(Action::PreviousTrendWindow),
                 _ => None,
             },
             KeyCode::Char(']') => match active_screen {
-                Screen::Dashboard | Screen::Timeline | Screen::Explain => Some(Action::NextDay),
+                Screen::Dashboard | Screen::Timeline | Screen::Explain | Screen::Review => {
+                    Some(Action::NextDay)
+                }
                 Screen::Trends => Some(Action::NextTrendWindow),
                 _ => None,
             },
@@ -189,12 +195,16 @@ fn map_event(active_screen: Screen, event: Event) -> Option<Action> {
                 Some(Action::TimelineZoomOut)
             }
             KeyCode::Char('=') if active_screen == Screen::Timeline => Some(Action::TimelineZoomIn),
-            KeyCode::Char('j') if matches!(active_screen, Screen::Timeline | Screen::Explain) => {
-                Some(Action::NextEvent)
-            }
-            KeyCode::Char('k') if matches!(active_screen, Screen::Timeline | Screen::Explain) => {
-                Some(Action::PreviousEvent)
-            }
+            KeyCode::Char('j') => match active_screen {
+                Screen::Timeline | Screen::Explain => Some(Action::NextEvent),
+                Screen::Review => Some(Action::NextReviewCard),
+                _ => None,
+            },
+            KeyCode::Char('k') => match active_screen {
+                Screen::Timeline | Screen::Explain => Some(Action::PreviousEvent),
+                Screen::Review => Some(Action::PreviousReviewCard),
+                _ => None,
+            },
             KeyCode::Char('w')
                 if matches!(
                     active_screen,
@@ -222,6 +232,8 @@ fn map_event(active_screen: Screen, event: Event) -> Option<Action> {
             KeyCode::Char('m') if active_screen == Screen::Patterns => {
                 Some(Action::CyclePatternMetric)
             }
+            KeyCode::Char('v') if active_screen == Screen::Review => Some(Action::CycleReviewMode),
+            KeyCode::Char('f') if active_screen == Screen::Review => Some(Action::CycleReviewFocus),
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(Action::Quit)
             }
@@ -837,6 +849,20 @@ mod tests {
     }
 
     #[test]
+    fn renders_review_screen_with_ranked_cards() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Review;
+
+        let output = render_snapshot(&app, 120, 40)
+            .unwrap_or_else(|error| panic!("review snapshot should render: {error}"));
+
+        assert!(output.contains("Ranked Cards"));
+        assert!(output.contains("Investigation Focus"));
+        assert!(output.contains("Readiness score"));
+    }
+
+    #[test]
     fn renders_ops_auth_and_sync_metadata() {
         let config = test_config();
         let store =
@@ -920,6 +946,22 @@ mod tests {
         assert_eq!(
             super::map_event(Screen::Explain, press(KeyCode::Char('j'))),
             Some(Action::NextEvent)
+        );
+        assert_eq!(
+            super::map_event(Screen::Review, press(KeyCode::Char('7'))),
+            Some(Action::ShowScreen(Screen::Review))
+        );
+        assert_eq!(
+            super::map_event(Screen::Review, press(KeyCode::Char('v'))),
+            Some(Action::CycleReviewMode)
+        );
+        assert_eq!(
+            super::map_event(Screen::Review, press(KeyCode::Char('f'))),
+            Some(Action::CycleReviewFocus)
+        );
+        assert_eq!(
+            super::map_event(Screen::Review, press(KeyCode::Char('j'))),
+            Some(Action::NextReviewCard)
         );
     }
 

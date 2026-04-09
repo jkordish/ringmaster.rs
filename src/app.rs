@@ -5,11 +5,16 @@ use crate::config::Config;
 use crate::insights::{InsightConfidence, MetricInsight, MetricPoint, build_metric_insight};
 use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
 use crate::refresh::SyncFamily;
+use crate::review::{
+    InvestigationReport, ReviewCard, ReviewDeck, ReviewFocus, ReviewInputs, ReviewMode,
+    build_investigation_report, build_review_deck,
+};
 use crate::store::Store;
 use crate::store::queries::{
     ContextEventFamily, ContextEventRecord, DailyOverviewRow, EffectDirection, HeartRatePoint,
     PatternMetric, PatternRelationWindow, PatternSummaryRecord, PersonalInfoRecord, RecordCounts,
-    SyncRunStatus, SyncStateRecord, TimeSemantics,
+    RestModePeriodRecord, ReviewSignalDayRecord, SleepTimeRecord, SyncRunStatus, SyncStateRecord,
+    TimeSemantics,
 };
 use crate::store::webhook_store::{
     AcceptedWebhookDeliveryRecord, DesiredWebhookSubscriptionRecord, InvalidationRecord,
@@ -61,6 +66,9 @@ pub struct LiveSnapshot {
     pub heartrate_daily_averages: Vec<MetricPoint>,
     pub context_events: Vec<ContextEventRecord>,
     pub pattern_summaries: Vec<PatternSummaryRecord>,
+    pub review_signal_days: Vec<ReviewSignalDayRecord>,
+    pub sleep_time: Vec<SleepTimeRecord>,
+    pub rest_mode_periods: Vec<RestModePeriodRecord>,
     pub sync_states: Vec<SyncStateRecord>,
     pub record_counts: RecordCounts,
     pub schema_version: u32,
@@ -122,6 +130,7 @@ pub enum Screen {
     Explain,
     Patterns,
     Ops,
+    Review,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +146,13 @@ pub enum PatternMetricFilter {
     Activity,
     Readiness,
     Sleep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewScreenMode {
+    Today,
+    Week,
+    Investigate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,8 +177,11 @@ pub struct AppState {
     timeline_window_hours: u16,
     trends_window: TrendWindowKind,
     selected_event_id: Option<String>,
+    selected_review_card_index: usize,
     overlay_filters: OverlayFilterState,
     pattern_metric_filter: PatternMetricFilter,
+    review_mode: ReviewScreenMode,
+    review_focus: ReviewFocus,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,6 +193,7 @@ pub struct AppModel {
     pub explain: ExplainModel,
     pub patterns: PatternsModel,
     pub ops: OpsModel,
+    pub review: ReviewModel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,6 +260,34 @@ pub struct OpsModel {
     pub family_statuses: Vec<FamilyStatusView>,
     pub items: Vec<OpsItem>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewModel {
+    pub selected_day_label: String,
+    pub mode_tabs: Vec<ReviewTab>,
+    pub selected_mode_index: usize,
+    pub focus_tabs: Vec<ReviewTab>,
+    pub selected_focus_index: usize,
+    pub cards: Vec<ReviewCardView>,
+    pub selected_card_index: Option<usize>,
+    pub detail_lines: Vec<String>,
+    pub warning_lines: Vec<String>,
+    pub empty_message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewTab {
+    pub label: String,
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewCardView {
+    pub headline: String,
+    pub confidence_label: String,
+    pub section_label: String,
+    pub selected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -353,6 +401,9 @@ struct LiveModelOptions {
     trends_window: TrendWindowKind,
     pattern_metric_filter: PatternMetricFilter,
     refresh_in_flight: bool,
+    review_mode: ReviewScreenMode,
+    review_focus: ReviewFocus,
+    selected_review_card_index: usize,
 }
 
 impl AppState {
@@ -408,6 +459,7 @@ impl AppState {
                 if self.selected_day_index > 0 {
                     self.selected_day_index -= 1;
                     self.selected_timeline_point = 0;
+                    self.selected_review_card_index = 0;
                     self.select_default_event_for_selected_day();
                     self.align_point_to_selected_event();
                     self.status_line = format!(
@@ -422,6 +474,7 @@ impl AppState {
                 if self.selected_day_index + 1 < self.available_day_count() {
                     self.selected_day_index += 1;
                     self.selected_timeline_point = 0;
+                    self.selected_review_card_index = 0;
                     self.select_default_event_for_selected_day();
                     self.align_point_to_selected_event();
                     self.status_line = format!(
@@ -544,18 +597,49 @@ impl AppState {
                 );
                 self.rebuild_live_model();
             }
+            Action::CycleReviewMode => {
+                self.review_mode = self.review_mode.next();
+                self.selected_review_card_index = 0;
+                self.status_line = format!("Review mode changed to {}.", self.review_mode.label());
+                self.rebuild_live_model();
+            }
+            Action::CycleReviewFocus => {
+                self.review_focus = self.review_focus.next();
+                self.selected_review_card_index = 0;
+                self.status_line = format!(
+                    "Investigation focus changed to {}.",
+                    self.review_focus.label()
+                );
+                self.rebuild_live_model();
+            }
+            Action::PreviousReviewCard => {
+                if self.selected_review_card_index > 0 {
+                    self.selected_review_card_index -= 1;
+                    "Moved to an earlier review card.".clone_into(&mut self.status_line);
+                    self.rebuild_live_model();
+                }
+            }
+            Action::NextReviewCard => {
+                let max_index = self.current_review_card_count().saturating_sub(1);
+                if self.selected_review_card_index < max_index {
+                    self.selected_review_card_index += 1;
+                    "Moved to a later review card.".clone_into(&mut self.status_line);
+                    self.rebuild_live_model();
+                }
+            }
         }
     }
 
     pub fn footer(&self) -> String {
         let spinner = ["·", "o", "O", "o"][(self.tick_count % 4) as usize];
         let screen_hint = match self.active_screen {
-            Screen::Dashboard => "[ ] day | 1-6 jump",
+            Screen::Dashboard => "[ ] day | 1-7 jump",
             Screen::Timeline => "[ ] day | , . hr | j k event | -/= zoom | w/t/s filters",
             Screen::Trends => "[ ] window",
             Screen::Explain => "[ ] day | j k event | w/t/s filters",
             Screen::Patterns => "w/t/s family | m metric",
-            Screen::Ops => "1-6 jump",
+            Screen::Ops => "1-7 jump",
+            Screen::Review => "[ ] day | v mode | f focus | j k cards",
         };
         let refresh_hint = if self.refresh_in_flight {
             "refreshing"
@@ -611,6 +695,9 @@ impl AppState {
                     trends_window: self.trends_window,
                     pattern_metric_filter: self.pattern_metric_filter,
                     refresh_in_flight: self.refresh_in_flight,
+                    review_mode: self.review_mode,
+                    review_focus: self.review_focus,
+                    selected_review_card_index: self.selected_review_card_index,
                 },
             );
         }
@@ -643,6 +730,10 @@ impl AppState {
                 })
             })
             .unwrap_or(0)
+    }
+
+    fn current_review_card_count(&self) -> usize {
+        self.model.review.cards.len()
     }
 
     fn normalize_event_selection(&mut self) {
@@ -773,13 +864,14 @@ impl AppState {
 }
 
 impl Screen {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Dashboard,
         Self::Timeline,
         Self::Trends,
         Self::Explain,
         Self::Patterns,
         Self::Ops,
+        Self::Review,
     ];
 
     pub fn title(self) -> &'static str {
@@ -790,6 +882,7 @@ impl Screen {
             Self::Explain => "Explain",
             Self::Patterns => "Patterns",
             Self::Ops => "Ops",
+            Self::Review => "Review",
         }
     }
 
@@ -801,6 +894,7 @@ impl Screen {
             Self::Explain => 3,
             Self::Patterns => 4,
             Self::Ops => 5,
+            Self::Review => 6,
         }
     }
 
@@ -811,18 +905,46 @@ impl Screen {
             Self::Trends => Self::Explain,
             Self::Explain => Self::Patterns,
             Self::Patterns => Self::Ops,
-            Self::Ops => Self::Dashboard,
+            Self::Ops => Self::Review,
+            Self::Review => Self::Dashboard,
         }
     }
 
     fn previous(self) -> Self {
         match self {
-            Self::Dashboard => Self::Ops,
+            Self::Dashboard => Self::Review,
             Self::Timeline => Self::Dashboard,
             Self::Trends => Self::Timeline,
             Self::Explain => Self::Trends,
             Self::Patterns => Self::Explain,
             Self::Ops => Self::Patterns,
+            Self::Review => Self::Ops,
+        }
+    }
+}
+
+impl ReviewScreenMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Today => "Today",
+            Self::Week => "Week",
+            Self::Investigate => "Investigate",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::Today => Self::Week,
+            Self::Week => Self::Investigate,
+            Self::Investigate => Self::Today,
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Today => 0,
+            Self::Week => 1,
+            Self::Investigate => 2,
         }
     }
 }
@@ -938,8 +1060,11 @@ pub fn build_live_state(
         timeline_window_hours: 24,
         trends_window: TrendWindowKind::Days7,
         selected_event_id: None,
+        selected_review_card_index: 0,
         overlay_filters: OverlayFilterState::all(),
         pattern_metric_filter: PatternMetricFilter::All,
+        review_mode: ReviewScreenMode::Today,
+        review_focus: ReviewFocus::Readiness,
     };
     app.select_default_event_for_selected_day();
     app.align_point_to_selected_event();
@@ -988,6 +1113,15 @@ pub fn load_live_snapshot(
         heartrate_daily_averages,
         context_events,
         pattern_summaries,
+        review_signal_days: store
+            .views()
+            .review_signal_days_between_days("0000-01-01", "9999-12-31")?,
+        sleep_time: store
+            .views()
+            .sleep_time_between_days("0000-01-01", "9999-12-31")?,
+        rest_mode_periods: store
+            .views()
+            .rest_mode_periods_between_days("0000-01-01", "9999-12-31")?,
         sync_states: store.sync_state().list()?,
         record_counts: store.views().record_counts()?,
         schema_version: store.metadata().schema_version()?,
@@ -1013,8 +1147,11 @@ pub fn build_demo_state(config: &Config) -> AppState {
         timeline_window_hours: 24,
         trends_window: TrendWindowKind::Days7,
         selected_event_id: None,
+        selected_review_card_index: 0,
         overlay_filters: OverlayFilterState::all(),
         pattern_metric_filter: PatternMetricFilter::All,
+        review_mode: ReviewScreenMode::Today,
+        review_focus: ReviewFocus::Readiness,
     };
     app.select_default_event_for_selected_day();
     app.align_point_to_selected_event();
@@ -1023,12 +1160,33 @@ pub fn build_demo_state(config: &Config) -> AppState {
 }
 
 fn build_live_model(snapshot: &LiveSnapshot, options: &LiveModelOptions) -> AppModel {
+    let selected_day = selected_day_label(snapshot, options.selected_day_index)
+        .unwrap_or_else(|| latest_review_anchor_day(snapshot));
+    let review_inputs = ReviewInputs {
+        auth_status: &snapshot.auth_status,
+        signal_days: &snapshot.review_signal_days,
+        context_events: &snapshot.context_events,
+        pattern_summaries: &snapshot.pattern_summaries,
+        sleep_time: &snapshot.sleep_time,
+        rest_mode_periods: &snapshot.rest_mode_periods,
+    };
+    let today_review = build_review_deck(ReviewMode::Today, &selected_day, &review_inputs)
+        .unwrap_or_else(|error| empty_review_deck(ReviewMode::Today, &selected_day, error));
+    let week_review = build_review_deck(ReviewMode::Week, &selected_day, &review_inputs)
+        .unwrap_or_else(|error| empty_review_deck(ReviewMode::Week, &selected_day, error));
+    let investigation =
+        build_investigation_report(options.review_focus, &selected_day, &review_inputs)
+            .unwrap_or_else(|error| {
+                empty_investigation_report(options.review_focus, &selected_day, error)
+            });
+
     AppModel {
         title: "ringmaster".to_owned(),
         dashboard: build_dashboard_model(
             snapshot,
             options.selected_day_index,
             options.refresh_in_flight,
+            &today_review,
         ),
         timeline: build_timeline_model(
             snapshot,
@@ -1038,12 +1196,13 @@ fn build_live_model(snapshot: &LiveSnapshot, options: &LiveModelOptions) -> AppM
             &options.overlay_filters,
             options.window_hours,
         ),
-        trends: build_trends_model(snapshot, options.trends_window),
+        trends: build_trends_model(snapshot, options.trends_window, &week_review),
         explain: build_explain_model(
             snapshot,
             options.selected_day_index,
             options.selected_event_id.as_deref(),
             &options.overlay_filters,
+            &today_review,
         ),
         patterns: build_patterns_model(
             snapshot,
@@ -1051,6 +1210,15 @@ fn build_live_model(snapshot: &LiveSnapshot, options: &LiveModelOptions) -> AppM
             options.pattern_metric_filter,
         ),
         ops: build_ops_model(snapshot, options.refresh_in_flight),
+        review: build_review_model(
+            &selected_day,
+            &today_review,
+            &week_review,
+            &investigation,
+            options.review_mode,
+            options.review_focus,
+            options.selected_review_card_index,
+        ),
     }
 }
 
@@ -1058,6 +1226,7 @@ fn build_dashboard_model(
     snapshot: &LiveSnapshot,
     selected_day_index: usize,
     refresh_in_flight: bool,
+    today_review: &ReviewDeck,
 ) -> DashboardModel {
     let selected_day = selected_day_label(snapshot, selected_day_index)
         .unwrap_or_else(|| "no selected day".to_owned());
@@ -1097,12 +1266,17 @@ fn build_dashboard_model(
     ]
     .join(" | ");
 
-    let change_summary = [
-        short_baseline_phrase("sleep", &sleep_insight),
-        short_baseline_phrase("readiness", &readiness_insight),
-        short_baseline_phrase("activity", &activity_insight),
-    ]
-    .join(" ");
+    let change_summary = today_review.observations.first().map_or_else(
+        || {
+            [
+                short_baseline_phrase("sleep", &sleep_insight),
+                short_baseline_phrase("readiness", &readiness_insight),
+                short_baseline_phrase("activity", &activity_insight),
+            ]
+            .join(" ")
+        },
+        |card| format!("{} {}", card.headline, card.confidence_label),
+    );
 
     let mut highlights = vec![
         selected_day_baseline_sentence("Sleep", &selected_day, &sleep_insight),
@@ -1114,6 +1288,13 @@ fn build_dashboard_model(
             .into_iter()
             .take(2)
             .map(|event| format!("{} {}.", event.family_label, event.headline)),
+    );
+    highlights.extend(
+        today_review
+            .observations
+            .iter()
+            .take(2)
+            .map(|card| format!("Review: {}", card.headline)),
     );
     if snapshot.heartrate_daily_averages.is_empty() {
         highlights.push(family_freshness(snapshot, DataFamily::Heartrate).detail);
@@ -1256,7 +1437,11 @@ fn build_timeline_model(
     }
 }
 
-fn build_trends_model(snapshot: &LiveSnapshot, trends_window: TrendWindowKind) -> TrendsModel {
+fn build_trends_model(
+    snapshot: &LiveSnapshot,
+    trends_window: TrendWindowKind,
+    week_review: &ReviewDeck,
+) -> TrendsModel {
     let sleep_points = metric_points_from_daily(&snapshot.daily_history, |row| {
         row.sleep_score.map(f64::from)
     });
@@ -1312,15 +1497,21 @@ fn build_trends_model(snapshot: &LiveSnapshot, trends_window: TrendWindowKind) -
                 trends_window,
             ),
         ],
-        notes: trend_notes(
-            trends_window,
-            [
-                &sleep_insight,
-                &readiness_insight,
-                &activity_insight,
-                &heartrate_insight,
-            ],
-        ),
+        notes: {
+            let mut notes = trend_notes(
+                trends_window,
+                [
+                    &sleep_insight,
+                    &readiness_insight,
+                    &activity_insight,
+                    &heartrate_insight,
+                ],
+            );
+            if let Some(card) = week_review.negative_drifts.first() {
+                notes.insert(0, format!("Weekly review: {}", card.headline));
+            }
+            notes
+        },
     }
 }
 
@@ -1329,6 +1520,7 @@ fn build_explain_model(
     selected_day_index: usize,
     selected_event_id: Option<&str>,
     overlay_filters: &OverlayFilterState,
+    today_review: &ReviewDeck,
 ) -> ExplainModel {
     let selected_day = selected_day_label(snapshot, selected_day_index)
         .unwrap_or_else(|| "no selected day".to_owned());
@@ -1370,6 +1562,13 @@ fn build_explain_model(
             "No persisted workouts, enhanced tags, or sessions were recorded around this day."
                 .to_owned(),
         );
+    }
+    if let Some(card) = today_review
+        .observations
+        .iter()
+        .find(|card| card.anchor_day == selected_day)
+    {
+        caveat_lines.push(format!("Review hint: {}", card.headline));
     }
 
     ExplainModel {
@@ -1667,6 +1866,300 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
             ),
         ],
         warnings,
+    }
+}
+
+fn build_review_model(
+    selected_day: &str,
+    today_review: &ReviewDeck,
+    week_review: &ReviewDeck,
+    investigation: &InvestigationReport,
+    review_mode: ReviewScreenMode,
+    review_focus: ReviewFocus,
+    selected_review_card_index: usize,
+) -> ReviewModel {
+    let cards = review_cards_for_mode(review_mode, today_review, week_review, investigation);
+    let selected_card_index = if cards.is_empty() {
+        None
+    } else {
+        Some(usize::min(
+            selected_review_card_index,
+            cards.len().saturating_sub(1),
+        ))
+    };
+
+    let card_views = cards
+        .iter()
+        .enumerate()
+        .map(|(index, card)| ReviewCardView {
+            headline: card.headline.clone(),
+            confidence_label: card.confidence_label.clone(),
+            section_label: review_section_label(card),
+            selected: selected_card_index == Some(index),
+        })
+        .collect::<Vec<_>>();
+
+    ReviewModel {
+        selected_day_label: selected_day.to_owned(),
+        mode_tabs: [
+            ReviewScreenMode::Today,
+            ReviewScreenMode::Week,
+            ReviewScreenMode::Investigate,
+        ]
+        .into_iter()
+        .map(|mode| ReviewTab {
+            label: mode.label().to_owned(),
+            selected: mode == review_mode,
+        })
+        .collect(),
+        selected_mode_index: review_mode.index(),
+        focus_tabs: ReviewFocus::ALL
+            .into_iter()
+            .map(|focus| ReviewTab {
+                label: focus.label().to_owned(),
+                selected: focus == review_focus,
+            })
+            .collect(),
+        selected_focus_index: ReviewFocus::ALL
+            .iter()
+            .position(|focus| *focus == review_focus)
+            .unwrap_or_default(),
+        cards: card_views,
+        selected_card_index,
+        detail_lines: review_detail_lines(
+            review_mode,
+            selected_card_index.and_then(|index| cards.get(index).copied()),
+            investigation,
+        ),
+        warning_lines: review_warning_lines(review_mode, today_review, week_review, investigation),
+        empty_message: review_empty_message(review_mode, review_focus),
+    }
+}
+
+fn review_cards_for_mode<'a>(
+    review_mode: ReviewScreenMode,
+    today_review: &'a ReviewDeck,
+    week_review: &'a ReviewDeck,
+    investigation: &'a InvestigationReport,
+) -> Vec<&'a ReviewCard> {
+    match review_mode {
+        ReviewScreenMode::Today => review_cards_from_deck(today_review),
+        ReviewScreenMode::Week => review_cards_from_deck(week_review),
+        ReviewScreenMode::Investigate => {
+            let mut cards = Vec::new();
+            cards.extend(today_review.observations.iter().filter(|card| {
+                investigation
+                    .focus
+                    .primary_signal_keys()
+                    .contains(&card.signal_key.as_str())
+            }));
+            cards.extend(week_review.observations.iter().filter(|card| {
+                investigation
+                    .focus
+                    .primary_signal_keys()
+                    .contains(&card.signal_key.as_str())
+            }));
+            cards.sort_by(|left, right| right.score.cmp(&left.score));
+            cards
+        }
+    }
+}
+
+fn review_cards_from_deck(deck: &ReviewDeck) -> Vec<&ReviewCard> {
+    let mut seen = BTreeSet::new();
+    let mut cards = Vec::new();
+
+    for collection in [
+        &deck.observations,
+        &deck.positive_changes,
+        &deck.negative_drifts,
+        &deck.unresolved_anomalies,
+    ] {
+        for card in collection {
+            if seen.insert(card.id.as_str()) {
+                cards.push(card);
+            }
+        }
+    }
+
+    cards
+}
+
+fn review_detail_lines(
+    review_mode: ReviewScreenMode,
+    selected_card: Option<&ReviewCard>,
+    investigation: &InvestigationReport,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    if matches!(review_mode, ReviewScreenMode::Investigate) {
+        lines.push(investigation.headline.clone());
+        lines.push(format!(
+            "{} confidence / {} data",
+            investigation.confidence.label(),
+            investigation.sufficiency.label()
+        ));
+        lines.push(investigation.summary.clone());
+        if !investigation.evidence.is_empty() {
+            lines.push("Evidence:".to_owned());
+            lines.extend(
+                investigation
+                    .evidence
+                    .iter()
+                    .map(|line| format!("  - {line}")),
+            );
+        }
+        if !investigation.counterevidence.is_empty() {
+            lines.push("Counterevidence:".to_owned());
+            lines.extend(
+                investigation
+                    .counterevidence
+                    .iter()
+                    .map(|line| format!("  - {line}")),
+            );
+        }
+    }
+
+    if let Some(card) = selected_card {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(card.headline.clone());
+        lines.push(card.confidence_label.clone());
+        lines.push(card.summary.clone());
+        lines.push(card.why_this_is_shown.clone());
+        if !card.evidence.is_empty() {
+            lines.push("Card evidence:".to_owned());
+            lines.extend(card.evidence.iter().map(|line| format!("  - {line}")));
+        }
+        if !card.counterevidence.is_empty() {
+            lines.push("Card uncertainty:".to_owned());
+            lines.extend(
+                card.counterevidence
+                    .iter()
+                    .map(|line| format!("  - {line}")),
+            );
+        }
+        if !card.warnings.is_empty() {
+            lines.push("Card warnings:".to_owned());
+            lines.extend(card.warnings.iter().map(|line| format!("  - {line}")));
+        }
+    }
+
+    if matches!(review_mode, ReviewScreenMode::Investigate) && !investigation.look_at.is_empty() {
+        lines.push(String::new());
+        lines.push("Look next:".to_owned());
+        lines.extend(
+            investigation
+                .look_at
+                .iter()
+                .map(|line| format!("  - {line}")),
+        );
+    }
+
+    lines
+}
+
+fn review_warning_lines(
+    review_mode: ReviewScreenMode,
+    today_review: &ReviewDeck,
+    week_review: &ReviewDeck,
+    investigation: &InvestigationReport,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    match review_mode {
+        ReviewScreenMode::Today => warnings.extend(today_review.warnings.iter().cloned()),
+        ReviewScreenMode::Week => warnings.extend(week_review.warnings.iter().cloned()),
+        ReviewScreenMode::Investigate => warnings.extend(investigation.warnings.iter().cloned()),
+    }
+    if warnings.is_empty() {
+        warnings.push("Review outputs are built from local persisted data only.".to_owned());
+    }
+    warnings
+}
+
+fn review_empty_message(review_mode: ReviewScreenMode, review_focus: ReviewFocus) -> String {
+    match review_mode {
+        ReviewScreenMode::Today => {
+            "No ranked review cards are available for this day yet.".to_owned()
+        }
+        ReviewScreenMode::Week => {
+            "No weekly review cards are available for this anchor day yet.".to_owned()
+        }
+        ReviewScreenMode::Investigate => format!(
+            "No {} investigation cards are available for this anchor day yet.",
+            review_focus.as_str()
+        ),
+    }
+}
+
+fn review_section_label(card: &ReviewCard) -> String {
+    match card.section {
+        crate::review::engine::ReviewSection::Observation => "Observation".to_owned(),
+        crate::review::engine::ReviewSection::PositiveChange => "Positive".to_owned(),
+        crate::review::engine::ReviewSection::NegativeDrift => "Drift".to_owned(),
+        crate::review::engine::ReviewSection::UnresolvedAnomaly => "Anomaly".to_owned(),
+    }
+}
+
+fn latest_review_anchor_day(snapshot: &LiveSnapshot) -> String {
+    let mut days = available_days(snapshot);
+    days.extend(
+        snapshot
+            .review_signal_days
+            .iter()
+            .map(|row| row.day.clone()),
+    );
+    days.extend(snapshot.sleep_time.iter().map(|row| row.day.clone()));
+    for period in &snapshot.rest_mode_periods {
+        days.push(period.start_day.clone());
+        if let Some(end_day) = &period.end_day {
+            days.push(end_day.clone());
+        }
+    }
+    days.into_iter()
+        .max()
+        .unwrap_or_else(current_local_day_string)
+}
+
+fn empty_review_deck(mode: ReviewMode, anchor_day: &str, error: impl ToString) -> ReviewDeck {
+    ReviewDeck {
+        mode,
+        anchor_day: anchor_day.to_owned(),
+        observations: Vec::new(),
+        positive_changes: Vec::new(),
+        negative_drifts: Vec::new(),
+        unresolved_anomalies: Vec::new(),
+        warnings: vec![format!(
+            "Review generation fell back to an empty deck: {}",
+            error.to_string()
+        )],
+    }
+}
+
+fn empty_investigation_report(
+    focus: ReviewFocus,
+    anchor_day: &str,
+    error: impl ToString,
+) -> InvestigationReport {
+    InvestigationReport {
+        focus,
+        anchor_day: anchor_day.to_owned(),
+        headline: format!("{} investigation is unavailable right now.", focus.label()),
+        summary: "Evidence is limited because the investigation engine could not build a complete report from the current local snapshot."
+            .to_owned(),
+        confidence: crate::review::engine::ReviewConfidence::Low,
+        sufficiency: crate::review::features::ReviewSufficiency::Missing,
+        evidence: Vec::new(),
+        counterevidence: Vec::new(),
+        warnings: vec![format!(
+            "Investigation generation fell back to an empty report: {}",
+            error.to_string()
+        )],
+        look_at: vec![
+            "Open Ops to confirm sync freshness and granted capabilities.".to_owned(),
+            "Run derive rebuild after syncing more history.".to_owned(),
+        ],
     }
 }
 
@@ -2855,6 +3348,18 @@ fn available_days(snapshot: &LiveSnapshot) -> Vec<String> {
     for event in &snapshot.context_events {
         days.insert(event.anchor_day.clone());
     }
+    for row in &snapshot.review_signal_days {
+        days.insert(row.day.clone());
+    }
+    for row in &snapshot.sleep_time {
+        days.insert(row.day.clone());
+    }
+    for period in &snapshot.rest_mode_periods {
+        days.insert(period.start_day.clone());
+        if let Some(end_day) = &period.end_day {
+            days.insert(end_day.clone());
+        }
+    }
     days.into_iter().collect()
 }
 
@@ -3269,6 +3774,18 @@ impl AppModel {
                 items: Vec::new(),
                 warnings: Vec::new(),
             },
+            review: ReviewModel {
+                selected_day_label: String::new(),
+                mode_tabs: Vec::new(),
+                selected_mode_index: 0,
+                focus_tabs: Vec::new(),
+                selected_focus_index: 0,
+                cards: Vec::new(),
+                selected_card_index: None,
+                detail_lines: Vec::new(),
+                warning_lines: Vec::new(),
+                empty_message: String::new(),
+            },
         }
     }
 }
@@ -3474,6 +3991,90 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
             updated_at: "2026-04-08T22:00:00Z".to_owned(),
         },
     ];
+    let review_signal_days = vec![
+        ReviewSignalDayRecord {
+            signal_key: "sleep_score".to_owned(),
+            day: "2026-04-08".to_owned(),
+            numeric_value: Some(76.0),
+            text_value: None,
+            baseline_mean: Some(82.0),
+            baseline_stddev: Some(2.5),
+            delta: Some(-6.0),
+            z_score: Some(-2.4),
+            persistence_days: 2,
+            sufficiency: crate::review::features::ReviewSufficiency::Strong,
+            stale_days: 0,
+            metadata_json: "{}".to_owned(),
+            updated_at: "2026-04-08T22:30:00Z".to_owned(),
+        },
+        ReviewSignalDayRecord {
+            signal_key: "readiness_score".to_owned(),
+            day: "2026-04-08".to_owned(),
+            numeric_value: Some(74.0),
+            text_value: None,
+            baseline_mean: Some(80.0),
+            baseline_stddev: Some(2.0),
+            delta: Some(-6.0),
+            z_score: Some(-3.0),
+            persistence_days: 2,
+            sufficiency: crate::review::features::ReviewSufficiency::Strong,
+            stale_days: 0,
+            metadata_json: "{}".to_owned(),
+            updated_at: "2026-04-08T22:30:00Z".to_owned(),
+        },
+        ReviewSignalDayRecord {
+            signal_key: "activity_score".to_owned(),
+            day: "2026-04-08".to_owned(),
+            numeric_value: Some(88.0),
+            text_value: None,
+            baseline_mean: Some(74.0),
+            baseline_stddev: Some(4.0),
+            delta: Some(14.0),
+            z_score: Some(3.5),
+            persistence_days: 1,
+            sufficiency: crate::review::features::ReviewSufficiency::Medium,
+            stale_days: 0,
+            metadata_json: "{}".to_owned(),
+            updated_at: "2026-04-08T22:30:00Z".to_owned(),
+        },
+        ReviewSignalDayRecord {
+            signal_key: "stress_high".to_owned(),
+            day: "2026-04-08".to_owned(),
+            numeric_value: Some(170.0),
+            text_value: None,
+            baseline_mean: Some(85.0),
+            baseline_stddev: Some(20.0),
+            delta: Some(85.0),
+            z_score: Some(4.25),
+            persistence_days: 3,
+            sufficiency: crate::review::features::ReviewSufficiency::Medium,
+            stale_days: 0,
+            metadata_json: "{}".to_owned(),
+            updated_at: "2026-04-08T22:30:00Z".to_owned(),
+        },
+    ];
+    let sleep_time = vec![SleepTimeRecord {
+        oura_id: Some("demo-sleep-time".to_owned()),
+        day: "2026-04-08".to_owned(),
+        status: Some("late".to_owned()),
+        recommendation: Some("earlier_bedtime".to_owned()),
+        optimal_bedtime_start_offset: Some(77400),
+        optimal_bedtime_end_offset: Some(81000),
+        optimal_bedtime_day_tz: Some(0),
+        raw_cache_key: None,
+        updated_at: "2026-04-08T22:00:00Z".to_owned(),
+    }];
+    let rest_mode_periods = vec![RestModePeriodRecord {
+        period_id: "demo-rest-mode".to_owned(),
+        start_day: "2026-04-07".to_owned(),
+        start_time: Some("2026-04-07T00:00:00Z".to_owned()),
+        end_day: Some("2026-04-08".to_owned()),
+        end_time: Some("2026-04-08T08:00:00Z".to_owned()),
+        episode_count: 1,
+        tags_json: "[]".to_owned(),
+        raw_cache_key: None,
+        updated_at: "2026-04-08T08:00:00Z".to_owned(),
+    }];
 
     LiveSnapshot {
         captured_at: "2026-04-08T22:30:00Z".to_owned(),
@@ -3510,6 +4111,9 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
         heartrate_daily_averages,
         context_events,
         pattern_summaries,
+        review_signal_days,
+        sleep_time,
+        rest_mode_periods,
         sync_states: vec![
             demo_sync_state(
                 SyncFamily::Personal,
@@ -3555,8 +4159,13 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
             sessions: 1,
             derived_context_events: 3,
             derived_pattern_summaries: 2,
+            sleep_time: 1,
+            daily_stress: 1,
+            rest_mode_periods: 1,
+            derived_review_signal_days: 4,
+            ..RecordCounts::default()
         },
-        schema_version: 9,
+        schema_version: 11,
         database_path: config.paths.database_file.display().to_string(),
         config_path: config.paths.config_file.display().to_string(),
     }
@@ -3584,12 +4193,13 @@ fn demo_sync_state(family: SyncFamily, message: &str, status: SyncRunStatus) -> 
 mod tests {
     use super::{
         AppState, DataFamily, HeartRateDay, LiveModelOptions, LiveSnapshot, OverlayFilterState,
-        PatternMetricFilter, RefreshPolicySnapshot, RunMode, Screen, TrendWindowKind,
-        WebhookOpsSnapshot, build_live_model, newest_day_index,
+        PatternMetricFilter, RefreshPolicySnapshot, ReviewScreenMode, RunMode, Screen,
+        TrendWindowKind, WebhookOpsSnapshot, build_live_model, newest_day_index,
     };
     use crate::action::Action;
     use crate::insights::MetricPoint;
     use crate::oura::models::{AuthStatus, CapabilityReport};
+    use crate::review::ReviewFocus;
     use crate::store::queries::{
         ContextEventFamily, ContextEventRecord, HeartRatePoint, RecordCounts, TimeSemantics,
     };
@@ -3692,12 +4302,15 @@ mod tests {
                 updated_at: "2026-04-08T06:40:00Z".to_owned(),
             }],
             pattern_summaries: Vec::new(),
+            review_signal_days: Vec::new(),
+            sleep_time: Vec::new(),
+            rest_mode_periods: Vec::new(),
             sync_states: Vec::new(),
             record_counts: RecordCounts {
                 workouts: 1,
                 ..RecordCounts::default()
             },
-            schema_version: 9,
+            schema_version: 11,
             database_path: ":memory:".to_owned(),
             config_path: "config.toml".to_owned(),
         }
@@ -3719,8 +4332,11 @@ mod tests {
             timeline_window_hours: 24,
             trends_window: TrendWindowKind::Days7,
             selected_event_id: None,
+            selected_review_card_index: 0,
             overlay_filters: OverlayFilterState::all(),
             pattern_metric_filter: PatternMetricFilter::All,
+            review_mode: ReviewScreenMode::Today,
+            review_focus: ReviewFocus::Readiness,
         };
         app.select_default_event_for_selected_day();
         app.rebuild_live_model();
@@ -3864,6 +4480,9 @@ mod tests {
                 trends_window: TrendWindowKind::Days7,
                 pattern_metric_filter: PatternMetricFilter::All,
                 refresh_in_flight: false,
+                review_mode: ReviewScreenMode::Today,
+                review_focus: ReviewFocus::Readiness,
+                selected_review_card_index: 0,
             },
         );
         assert!(model.patterns.empty_message.contains("Not enough data yet"));

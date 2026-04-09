@@ -442,6 +442,122 @@ pub const MIGRATIONS: &[Migration] = &[
             ON daily_activity(oura_id);
         ",
     },
+    Migration {
+        version: 10,
+        name: "phase5_review_family_tables",
+        sql: r"
+        CREATE TABLE IF NOT EXISTS sleep_time (
+            day TEXT PRIMARY KEY,
+            oura_id TEXT,
+            status TEXT,
+            recommendation TEXT,
+            optimal_bedtime_start_offset INTEGER,
+            optimal_bedtime_end_offset INTEGER,
+            optimal_bedtime_day_tz INTEGER,
+            raw_cache_key TEXT,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS daily_stress (
+            day TEXT PRIMARY KEY,
+            oura_id TEXT,
+            stress_high INTEGER,
+            recovery_high INTEGER,
+            day_summary TEXT,
+            raw_cache_key TEXT,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS daily_resilience (
+            day TEXT PRIMARY KEY,
+            oura_id TEXT,
+            level TEXT NOT NULL,
+            sleep_recovery REAL NOT NULL,
+            daytime_recovery REAL NOT NULL,
+            stress REAL NOT NULL,
+            raw_cache_key TEXT,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS daily_cardiovascular_age (
+            day TEXT PRIMARY KEY,
+            vascular_age INTEGER,
+            raw_cache_key TEXT,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS vo2_max (
+            day TEXT PRIMARY KEY,
+            oura_id TEXT,
+            recorded_at TEXT NOT NULL,
+            vo2_max REAL,
+            raw_cache_key TEXT,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS rest_mode_periods (
+            period_id TEXT PRIMARY KEY,
+            start_day TEXT NOT NULL,
+            start_time TEXT,
+            end_day TEXT,
+            end_time TEXT,
+            episode_count INTEGER NOT NULL,
+            tags_json TEXT NOT NULL,
+            raw_cache_key TEXT,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sleep_time_oura_id
+            ON sleep_time(oura_id);
+        CREATE INDEX IF NOT EXISTS idx_sleep_time_day
+            ON sleep_time(day);
+        CREATE INDEX IF NOT EXISTS idx_daily_stress_oura_id
+            ON daily_stress(oura_id);
+        CREATE INDEX IF NOT EXISTS idx_daily_stress_day
+            ON daily_stress(day);
+        CREATE INDEX IF NOT EXISTS idx_daily_resilience_oura_id
+            ON daily_resilience(oura_id);
+        CREATE INDEX IF NOT EXISTS idx_daily_resilience_day
+            ON daily_resilience(day);
+        CREATE INDEX IF NOT EXISTS idx_daily_cardiovascular_age_day
+            ON daily_cardiovascular_age(day);
+        CREATE INDEX IF NOT EXISTS idx_vo2_max_oura_id
+            ON vo2_max(oura_id);
+        CREATE INDEX IF NOT EXISTS idx_vo2_max_day
+            ON vo2_max(day);
+        CREATE INDEX IF NOT EXISTS idx_rest_mode_periods_start_day
+            ON rest_mode_periods(start_day);
+        CREATE INDEX IF NOT EXISTS idx_rest_mode_periods_end_day
+            ON rest_mode_periods(end_day);
+        ",
+    },
+    Migration {
+        version: 11,
+        name: "phase5_review_signal_days",
+        sql: r"
+        CREATE TABLE IF NOT EXISTS derived_review_signal_days (
+            signal_key TEXT NOT NULL,
+            day TEXT NOT NULL,
+            numeric_value REAL,
+            text_value TEXT,
+            baseline_mean REAL,
+            baseline_stddev REAL,
+            delta REAL,
+            z_score REAL,
+            persistence_days INTEGER NOT NULL,
+            sufficiency TEXT NOT NULL,
+            stale_days INTEGER NOT NULL,
+            metadata_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (signal_key, day)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_review_signal_days_day
+            ON derived_review_signal_days(day);
+        CREATE INDEX IF NOT EXISTS idx_review_signal_days_signal
+            ON derived_review_signal_days(signal_key, day);
+        ",
+    },
 ];
 
 pub fn run_migrations(connection: &mut rusqlite::Connection) -> Result<MigrationReport> {
@@ -521,7 +637,10 @@ mod tests {
             .unwrap_or_else(|error| panic!("migrations should succeed: {error}"));
 
         assert_eq!(report.current_version, current_version());
-        assert_eq!(report.applied_versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(
+            report.applied_versions,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        );
     }
 
     #[test]
@@ -593,7 +712,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("phase-3 migrations should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![5, 6, 7, 8, 9]);
+        assert_eq!(report.applied_versions, vec![5, 6, 7, 8, 9, 10, 11]);
 
         let (workout_day, workout_title): (String, String) = connection
             .query_row(
@@ -665,7 +784,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("phase4 migrations should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![7, 8, 9]);
+        assert_eq!(report.applied_versions, vec![7, 8, 9, 10, 11]);
 
         let row: (String, String, String) = connection
             .query_row(
@@ -682,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn phase5_migration_adds_daily_summary_oura_ids() {
+    fn phase4_migration_adds_daily_summary_oura_ids() {
         let mut connection = Connection::open_in_memory()
             .unwrap_or_else(|error| panic!("in-memory db should open: {error}"));
         connection
@@ -709,7 +828,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("phase5 migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![9]);
+        assert_eq!(report.applied_versions, vec![9, 10, 11]);
 
         let daily_sleep_columns: Vec<String> = {
             let mut statement = connection
@@ -722,5 +841,123 @@ mod tests {
                 .unwrap_or_else(|error| panic!("daily_sleep columns should load: {error}"))
         };
         assert!(daily_sleep_columns.iter().any(|column| column == "oura_id"));
+    }
+
+    #[test]
+    fn phase5_migration_creates_review_family_tables() {
+        let mut connection = Connection::open_in_memory()
+            .unwrap_or_else(|error| panic!("in-memory db should open: {error}"));
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );",
+            )
+            .unwrap_or_else(|error| panic!("schema migrations table should exist: {error}"));
+
+        for migration in &MIGRATIONS[..9] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| panic!("pre-phase5 migration should apply: {error}"));
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+                    params![migration.version, migration.name, "2026-04-09T00:00:00Z"],
+                )
+                .unwrap_or_else(|error| panic!("migration marker should insert: {error}"));
+        }
+
+        let report = run_migrations(&mut connection)
+            .unwrap_or_else(|error| panic!("phase5 migration should succeed: {error}"));
+        assert_eq!(report.applied_versions, vec![10, 11]);
+
+        let table_names: Vec<String> = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT name
+                     FROM sqlite_master
+                     WHERE type = 'table'
+                       AND name IN (
+                           'sleep_time',
+                           'daily_stress',
+                           'daily_resilience',
+                           'daily_cardiovascular_age',
+                           'vo2_max',
+                           'rest_mode_periods'
+                       )
+                     ORDER BY name ASC",
+                )
+                .unwrap_or_else(|error| panic!("schema query should prepare: {error}"));
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap_or_else(|error| panic!("schema query should run: {error}"));
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap_or_else(|error| panic!("table names should load: {error}"))
+        };
+
+        assert_eq!(
+            table_names,
+            vec![
+                "daily_cardiovascular_age".to_owned(),
+                "daily_resilience".to_owned(),
+                "daily_stress".to_owned(),
+                "rest_mode_periods".to_owned(),
+                "sleep_time".to_owned(),
+                "vo2_max".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn phase5_review_signal_migration_creates_snapshot_table() {
+        let mut connection = Connection::open_in_memory()
+            .unwrap_or_else(|error| panic!("in-memory db should open: {error}"));
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );",
+            )
+            .unwrap_or_else(|error| panic!("schema migrations table should exist: {error}"));
+
+        for migration in &MIGRATIONS[..10] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| {
+                    panic!("pre-review-signal migration should apply: {error}")
+                });
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+                    params![migration.version, migration.name, "2026-04-09T00:00:00Z"],
+                )
+                .unwrap_or_else(|error| panic!("migration marker should insert: {error}"));
+        }
+
+        let report = run_migrations(&mut connection)
+            .unwrap_or_else(|error| panic!("review signal migration should succeed: {error}"));
+        assert_eq!(report.applied_versions, vec![11]);
+
+        let table_names: Vec<String> = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT name
+                     FROM sqlite_master
+                     WHERE type = 'table'
+                       AND name = 'derived_review_signal_days'",
+                )
+                .unwrap_or_else(|error| panic!("schema query should prepare: {error}"));
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap_or_else(|error| panic!("schema query should run: {error}"));
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap_or_else(|error| panic!("table names should load: {error}"))
+        };
+
+        assert_eq!(table_names, vec!["derived_review_signal_days".to_owned()]);
     }
 }
