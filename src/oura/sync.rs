@@ -1059,11 +1059,12 @@ fn overlap_day_window(
     overlap_days: i64,
 ) -> Result<String> {
     let fallback = OffsetDateTime::now_utc().date() - Duration::days(initial_days - 1);
-    let Some(sync_state) = store
-        .sync_state()
-        .get(sync_key)?
-        .filter(|record| record.status == SyncRunStatus::Success)
-    else {
+    let Some(sync_state) = store.sync_state().get(sync_key)?.filter(|record| {
+        matches!(
+            record.status,
+            SyncRunStatus::Success | SyncRunStatus::Partial
+        )
+    }) else {
         return Ok(fallback.to_string());
     };
     let Some(cursor) = sync_state.cursor.as_deref() else {
@@ -1258,7 +1259,7 @@ mod tests {
     };
     use crate::refresh::SyncFamily;
     use crate::store::Store;
-    use crate::store::queries::SyncRunStatus;
+    use crate::store::queries::{SyncRunStatus, SyncStateRecord};
     use crate::webhook::default_desired_subscriptions;
 
     fn phase3_fixture_dir() -> PathBuf {
@@ -1510,5 +1511,32 @@ mod tests {
             last_error: None,
             next_attempt_after: None,
         }]));
+    }
+
+    #[test]
+    fn overlap_day_window_reuses_partial_daily_cursor() {
+        let store = Store::open_in_memory().expect("store should open");
+        store
+            .sync_state()
+            .upsert(&SyncStateRecord {
+                sync_key: "oura.daily".to_owned(),
+                status: SyncRunStatus::Partial,
+                cursor: Some("2026-04-08".to_owned()),
+                last_attempted_at: "2026-04-08T06:00:00Z".to_owned(),
+                last_completed_at: Some("2026-04-08T06:00:05Z".to_owned()),
+                message: Some("optional endpoint degraded".to_owned()),
+                granted_scopes: vec!["daily".to_owned()],
+                last_error: None,
+                failure_count: 0,
+                next_attempt_after: None,
+                last_trigger_source: Some("periodic_reconcile".to_owned()),
+                last_trigger_detail: Some("test overlap reuse".to_owned()),
+            })
+            .expect("partial sync state should persist");
+
+        let start_day =
+            super::overlap_day_window(&store, "oura.daily", 30, 2).expect("window should build");
+
+        assert_eq!(start_day, "2026-04-06");
     }
 }

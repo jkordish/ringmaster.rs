@@ -64,7 +64,7 @@ use review::{
     build_investigation_report, build_review_deck,
 };
 use store::Store;
-use time::{Date, Duration, OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{Date, Duration, OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -1337,6 +1337,7 @@ fn load_review_snapshot_from_artifacts(
 }
 
 fn latest_review_day(snapshot: &ReviewStoreSnapshot) -> Option<String> {
+    let current_day = current_local_day_string();
     snapshot
         .signal_days
         .iter()
@@ -1347,9 +1348,17 @@ fn latest_review_day(snapshot: &ReviewStoreSnapshot) -> Option<String> {
             snapshot
                 .rest_mode_periods
                 .iter()
-                .map(|row| row.end_day.clone().unwrap_or_else(|| row.start_day.clone()))
+                .map(|row| row.end_day.clone().unwrap_or_else(|| current_day.clone()))
                 .max()
         })
+}
+
+fn current_local_day_string() -> String {
+    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    OffsetDateTime::now_utc()
+        .to_offset(local_offset)
+        .date()
+        .to_string()
 }
 
 fn resolve_review_anchor_day(
@@ -1612,7 +1621,9 @@ mod tests {
         AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
     };
     use crate::store::Store;
-    use crate::store::queries::{DailyActivityRecord, DailyReadinessRecord, DailySleepRecord};
+    use crate::store::queries::{
+        DailyActivityRecord, DailyReadinessRecord, DailySleepRecord, RestModePeriodRecord,
+    };
     use crate::store::webhook_store::{
         AcceptedWebhookDeliveryInput, DesiredWebhookSubscriptionRecord, InvalidationInput,
         RemoteWebhookSubscriptionRecord, RuntimeHeartbeatRecord, now_rfc3339,
@@ -2117,6 +2128,51 @@ mod tests {
             counts_before.derived_review_signal_days
         );
         assert_eq!(latest_review_after, latest_review_before);
+    }
+
+    #[test]
+    fn latest_review_day_treats_open_rest_mode_as_current() {
+        let current_day = super::current_local_day_string();
+        let snapshot = super::ReviewStoreSnapshot {
+            auth_status: crate::oura::models::AuthStatus {
+                configured: false,
+                callback_url: "http://localhost/callback".to_owned(),
+                requested_scopes: Vec::new(),
+                granted_scopes: Vec::new(),
+                missing_fields: Vec::new(),
+                capability_report: crate::oura::models::CapabilityReport::from_scopes(&[], &[]),
+                auth_timeout_secs: 300,
+                secret_backend: "test".to_owned(),
+                access_token_stored: false,
+                refresh_token_stored: false,
+                access_token_expires_at: None,
+                last_authenticated_at: None,
+                last_refresh_at: None,
+                account_id: None,
+                account_email: None,
+                last_error: None,
+            },
+            signal_days: Vec::new(),
+            context_events: Vec::new(),
+            pattern_summaries: Vec::new(),
+            sleep_time: Vec::new(),
+            rest_mode_periods: vec![RestModePeriodRecord {
+                period_id: "rest-open".to_owned(),
+                start_day: "2026-04-01".to_owned(),
+                start_time: Some("2026-04-01T02:00:00+00:00".to_owned()),
+                end_day: None,
+                end_time: None,
+                episode_count: 1,
+                tags_json: "[]".to_owned(),
+                raw_cache_key: None,
+                updated_at: "2026-04-09T10:00:00Z".to_owned(),
+            }],
+        };
+
+        assert_eq!(
+            super::latest_review_day(&snapshot).as_deref(),
+            Some(current_day.as_str())
+        );
     }
 
     #[tokio::test]
