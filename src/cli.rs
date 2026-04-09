@@ -33,6 +33,11 @@ pub enum Command {
         #[command(subcommand)]
         command: SyncCommand,
     },
+    /// Webhook receiver, replay, and subscription management commands.
+    Webhook {
+        #[command(subcommand)]
+        command: WebhookCommand,
+    },
     /// Derived read-model and analytics commands.
     Derive {
         #[command(subcommand)]
@@ -58,6 +63,27 @@ pub enum SyncCommand {
 pub enum DeriveCommand {
     /// Rebuild derived context events and pattern summaries from persisted data.
     Rebuild(DeriveRebuildArgs),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum WebhookCommand {
+    /// Run the Oura webhook receiver.
+    Serve(WebhookServeArgs),
+    /// Replay fixture-backed or stored webhook deliveries locally.
+    Replay(WebhookReplayArgs),
+    /// Declarative webhook subscription lifecycle commands.
+    Subscriptions {
+        #[command(subcommand)]
+        command: WebhookSubscriptionCommand,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum WebhookSubscriptionCommand {
+    /// List desired and remote webhook subscriptions.
+    List(WebhookSubscriptionsListArgs),
+    /// Converge remote webhook subscriptions toward desired local config.
+    Sync(WebhookSubscriptionsSyncArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
@@ -103,6 +129,42 @@ pub struct DeriveRebuildArgs {
     pub fixture_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Args, Default)]
+pub struct WebhookServeArgs {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct WebhookReplayArgs {
+    /// Replay a captured webhook request fixture from disk.
+    #[arg(long)]
+    pub fixture: Option<PathBuf>,
+    /// Replay a previously accepted delivery by stored delivery id.
+    #[arg(long)]
+    pub delivery_id: Option<i64>,
+    /// Replay the most recent accepted deliveries.
+    #[arg(long)]
+    pub recent: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct WebhookSubscriptionsListArgs {
+    /// Load remote subscriptions from a fixture directory instead of the live API.
+    #[arg(long)]
+    pub fixture_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct WebhookSubscriptionsSyncArgs {
+    /// Print the subscription diff without mutating the remote service.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Delete remote subscriptions that are clearly out of the desired spec.
+    #[arg(long)]
+    pub prune: bool,
+    /// Load remote subscriptions from a fixture directory instead of the live API.
+    #[arg(long)]
+    pub fixture_dir: Option<PathBuf>,
+}
+
 impl Cli {
     pub fn parse_from<I, T>(args: I) -> Result<Self>
     where
@@ -127,7 +189,8 @@ impl Cli {
 mod tests {
     use super::{
         AuthCommand, Cli, Command, DeriveCommand, DeriveRebuildArgs, SyncCommand, SyncOnceArgs,
-        SyncWatchArgs,
+        SyncWatchArgs, WebhookCommand, WebhookReplayArgs, WebhookSubscriptionCommand,
+        WebhookSubscriptionsSyncArgs,
     };
 
     #[test]
@@ -166,7 +229,7 @@ mod tests {
     fn help_text_mentions_required_commands() {
         let help = Cli::help_text();
 
-        for command in ["tui", "doctor", "auth", "sync", "derive", "demo"] {
+        for command in ["tui", "doctor", "auth", "sync", "webhook", "derive", "demo"] {
             assert!(
                 help.contains(command),
                 "help text should mention `{command}`"
@@ -217,6 +280,62 @@ mod tests {
                         demo: true,
                         fixture_dir: None,
                     }),
+            }) => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_webhook_replay_fixture_args() {
+        let cli = Cli::parse_from([
+            "ringmaster",
+            "webhook",
+            "replay",
+            "--fixture",
+            "tests/fixtures/webhooks/sample.json",
+        ])
+        .unwrap_or_else(|error| {
+            panic!("expected clap parsing to succeed in test: {error}");
+        });
+
+        match cli.command {
+            Some(Command::Webhook {
+                command:
+                    WebhookCommand::Replay(WebhookReplayArgs {
+                        fixture: Some(path),
+                        delivery_id: None,
+                        recent: None,
+                    }),
+            }) => assert!(path.ends_with("tests/fixtures/webhooks/sample.json")),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_webhook_subscriptions_sync_args() {
+        let cli = Cli::parse_from([
+            "ringmaster",
+            "webhook",
+            "subscriptions",
+            "sync",
+            "--dry-run",
+            "--prune",
+        ])
+        .unwrap_or_else(|error| {
+            panic!("expected clap parsing to succeed in test: {error}");
+        });
+
+        match cli.command {
+            Some(Command::Webhook {
+                command:
+                    WebhookCommand::Subscriptions {
+                        command:
+                            WebhookSubscriptionCommand::Sync(WebhookSubscriptionsSyncArgs {
+                                dry_run: true,
+                                prune: true,
+                                fixture_dir: None,
+                            }),
+                    },
             }) => {}
             other => panic!("unexpected command: {other:?}"),
         }

@@ -1,0 +1,10 @@
+{
+  "method": "POST",
+  "headers": {
+    "x-oura-signature": "{{computed_hmac_sha256}}",
+    "x-oura-timestamp": "{{now_rfc3339}}",
+    "content-type": "application/json"
+  },
+  "body": "{\"data_type\":\"daily_sleep\",\"event_type\":\"create\",\"object_id\":\"sleep_fixture_001\"}",
+  "signature_secret": "fixture-secret"
+}

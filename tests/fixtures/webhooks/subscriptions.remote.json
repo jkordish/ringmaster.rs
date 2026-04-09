@@ -1,0 +1,23 @@
+[
+  {
+    "id": "remote-daily-sleep-create",
+    "callback_url": "https://fixture.example.test/webhooks/oura",
+    "event_type": "create",
+    "data_type": "daily_sleep",
+    "expiration_time": "2099-01-01T00:00:00Z"
+  },
+  {
+    "id": "remote-workout-update-expiring",
+    "callback_url": "https://fixture.example.test/webhooks/oura",
+    "event_type": "update",
+    "data_type": "workout",
+    "expiration_time": "2000-01-01T00:00:00Z"
+  },
+  {
+    "id": "remote-unexpected-session-delete",
+    "callback_url": "https://unexpected.example.test/webhooks/oura",
+    "event_type": "delete",
+    "data_type": "session",
+    "expiration_time": "2099-01-01T00:00:00Z"
+  }
+]

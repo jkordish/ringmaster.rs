@@ -11,16 +11,20 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &OpsModel) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Length(8),
+            Constraint::Length(5),
+            Constraint::Length(10),
             Constraint::Min(10),
             Constraint::Length(6),
         ])
         .split(area);
 
+    let summary = if model.summary_lines.is_empty() {
+        format!("Mode: {}", model.mode_label)
+    } else {
+        model.summary_lines.join("\n")
+    };
     frame.render_widget(
-        Paragraph::new(format!("Mode: {}", model.mode_label))
-            .block(Block::default().title("Ops Summary").borders(Borders::ALL)),
+        Paragraph::new(summary).block(Block::default().title("Ops Summary").borders(Borders::ALL)),
         layout[0],
     );
 

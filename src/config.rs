@@ -3,9 +3,14 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+use reqwest::Url;
 use serde::Deserialize;
 
 use crate::error::{Result, RingmasterError};
+use crate::webhook::{
+    DesiredWebhookSubscription, WebhookEventType, default_desired_subscriptions,
+    is_supported_data_type,
+};
 
 pub const APP_NAME: &str = "ringmaster";
 
@@ -16,6 +21,7 @@ pub struct Config {
     pub logging: LoggingConfig,
     pub oura: OuraConfig,
     pub refresh: RefreshConfig,
+    pub webhook: WebhookConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -75,11 +81,24 @@ pub struct RefreshConfig {
     pub demo_fixture_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+pub struct WebhookConfig {
+    pub bind: SocketAddr,
+    pub path: String,
+    pub public_base_url: Option<String>,
+    pub verification_token: Option<String>,
+    pub signature_tolerance_secs: u64,
+    pub heartbeat_secs: u64,
+    pub renewal_lead_secs: u64,
+    pub subscriptions: Vec<DesiredWebhookSubscription>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct FileConfig {
     logging: Option<FileLoggingConfig>,
     oura: Option<FileOuraConfig>,
     refresh: Option<FileRefreshConfig>,
+    webhook: Option<FileWebhookConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -127,6 +146,25 @@ struct FileRefreshConfig {
     demo_fixture_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct FileWebhookConfig {
+    bind: Option<String>,
+    path: Option<String>,
+    public_base_url: Option<String>,
+    verification_token: Option<String>,
+    signature_tolerance_secs: Option<u64>,
+    heartbeat_secs: Option<u64>,
+    renewal_lead_secs: Option<u64>,
+    subscriptions: Option<Vec<FileWebhookSubscription>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FileWebhookSubscription {
+    data_type: String,
+    event_types: Option<Vec<String>>,
+    enabled: Option<bool>,
+}
+
 impl Config {
     pub fn load() -> Result<Self> {
         let paths = AppPaths::detect()?;
@@ -164,6 +202,43 @@ impl Config {
                     .and_then(|oura| oura.callback_path.clone())
             })
             .unwrap_or_else(|| "/callback".to_owned());
+
+        let webhook_bind = env_string("RINGMASTER_WEBHOOK_BIND")
+            .or_else(|| {
+                file_config
+                    .webhook
+                    .as_ref()
+                    .and_then(|webhook| webhook.bind.clone())
+            })
+            .unwrap_or_else(|| "127.0.0.1:8799".to_owned());
+
+        let webhook_bind = webhook_bind.parse::<SocketAddr>().map_err(|error| {
+            RingmasterError::Config(format!(
+                "invalid webhook bind address `{webhook_bind}`: {error}"
+            ))
+        })?;
+
+        let webhook_path = env_string("RINGMASTER_WEBHOOK_PATH")
+            .or_else(|| {
+                file_config
+                    .webhook
+                    .as_ref()
+                    .and_then(|webhook| webhook.path.clone())
+            })
+            .unwrap_or_else(|| "/webhooks/oura".to_owned());
+
+        let webhook_subscriptions =
+            if let Some(value) = env_string("RINGMASTER_WEBHOOK_SUBSCRIPTIONS") {
+                parse_webhook_subscription_env(&value)?
+            } else if let Some(subscriptions) = file_config
+                .webhook
+                .as_ref()
+                .and_then(|webhook| webhook.subscriptions.as_ref())
+            {
+                parse_file_webhook_subscriptions(subscriptions)?
+            } else {
+                default_desired_subscriptions()
+            };
 
         let config = Self {
             app_name: APP_NAME,
@@ -346,11 +421,62 @@ impl Config {
                     .and_then(|refresh| refresh.demo_fixture_dir.clone())
                     .or_else(|| Some(PathBuf::from("tests/fixtures/phase3"))),
             },
+            webhook: WebhookConfig {
+                bind: webhook_bind,
+                path: webhook_path,
+                public_base_url: env_string("RINGMASTER_WEBHOOK_PUBLIC_BASE_URL").or_else(|| {
+                    file_config
+                        .webhook
+                        .as_ref()
+                        .and_then(|webhook| webhook.public_base_url.clone())
+                }),
+                verification_token: env_string("RINGMASTER_WEBHOOK_VERIFICATION_TOKEN").or_else(
+                    || {
+                        file_config
+                            .webhook
+                            .as_ref()
+                            .and_then(|webhook| webhook.verification_token.clone())
+                    },
+                ),
+                signature_tolerance_secs: env_string("RINGMASTER_WEBHOOK_SIGNATURE_TOLERANCE_SECS")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .or_else(|| {
+                        file_config
+                            .webhook
+                            .as_ref()
+                            .and_then(|webhook| webhook.signature_tolerance_secs)
+                    })
+                    .unwrap_or(300),
+                heartbeat_secs: env_string("RINGMASTER_WEBHOOK_HEARTBEAT_SECS")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .or_else(|| {
+                        file_config
+                            .webhook
+                            .as_ref()
+                            .and_then(|webhook| webhook.heartbeat_secs)
+                    })
+                    .unwrap_or(15),
+                renewal_lead_secs: env_string("RINGMASTER_WEBHOOK_RENEWAL_LEAD_SECS")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .or_else(|| {
+                        file_config
+                            .webhook
+                            .as_ref()
+                            .and_then(|webhook| webhook.renewal_lead_secs)
+                    })
+                    .unwrap_or(7 * 24 * 60 * 60),
+                subscriptions: webhook_subscriptions,
+            },
         };
 
         config.refresh.validate()?;
+        config.webhook.validate()?;
 
         Ok(config)
+    }
+
+    pub fn webhook_receiver_configured(&self) -> bool {
+        self.webhook.receiver_configured() && self.oura.client_secret.is_some()
     }
 }
 
@@ -478,6 +604,75 @@ impl OuraConfig {
     }
 }
 
+impl WebhookConfig {
+    pub fn validate(&self) -> Result<()> {
+        if !self.path.starts_with('/') {
+            return Err(RingmasterError::Config(
+                "webhook.path must start with `/`".to_owned(),
+            ));
+        }
+
+        if self.signature_tolerance_secs == 0 {
+            return Err(RingmasterError::Config(
+                "webhook.signature_tolerance_secs must be at least 1".to_owned(),
+            ));
+        }
+
+        if self.heartbeat_secs == 0 {
+            return Err(RingmasterError::Config(
+                "webhook.heartbeat_secs must be at least 1".to_owned(),
+            ));
+        }
+
+        if self.renewal_lead_secs == 0 {
+            return Err(RingmasterError::Config(
+                "webhook.renewal_lead_secs must be at least 1".to_owned(),
+            ));
+        }
+
+        if let Some(base_url) = &self.public_base_url {
+            let parsed = Url::parse(base_url).map_err(|error| {
+                RingmasterError::Config(format!(
+                    "webhook.public_base_url must be an absolute URL: {error}"
+                ))
+            })?;
+            if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                return Err(RingmasterError::Config(
+                    "webhook.public_base_url must use http or https".to_owned(),
+                ));
+            }
+        }
+
+        for subscription in &self.subscriptions {
+            if !is_supported_data_type(&subscription.data_type) {
+                return Err(RingmasterError::Config(format!(
+                    "webhook subscription `{}` is not supported by the app's webhook sync path",
+                    subscription.data_type
+                )));
+            }
+            if subscription.normalized_event_types().is_empty() {
+                return Err(RingmasterError::Config(format!(
+                    "webhook subscription `{}` must include at least one event type",
+                    subscription.data_type
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn callback_url(&self) -> Option<String> {
+        self.public_base_url.as_ref().map(|base_url| {
+            let trimmed = base_url.trim_end_matches('/');
+            format!("{trimmed}{}", self.path)
+        })
+    }
+
+    pub fn receiver_configured(&self) -> bool {
+        self.verification_token.is_some() && self.callback_url().is_some()
+    }
+}
+
 fn env_string(key: &str) -> Option<String> {
     env::var(key).ok().and_then(|value| {
         let trimmed = value.trim().to_owned();
@@ -499,6 +694,66 @@ fn split_csv(value: &str) -> Vec<String> {
         .map(str::trim)
         .filter(|item| !item.is_empty())
         .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn parse_webhook_subscription_env(value: &str) -> Result<Vec<DesiredWebhookSubscription>> {
+    let mut subscriptions = Vec::new();
+
+    for raw_spec in value
+        .split(';')
+        .map(str::trim)
+        .filter(|spec| !spec.is_empty())
+    {
+        let (data_type, events) = raw_spec.split_once(':').ok_or_else(|| {
+            RingmasterError::Config(format!(
+                "invalid webhook subscription spec `{raw_spec}`; expected `data_type:event,event`"
+            ))
+        })?;
+        let event_types = parse_webhook_event_types(events)?;
+        subscriptions.push(DesiredWebhookSubscription {
+            data_type: data_type.trim().to_owned(),
+            event_types,
+            enabled: true,
+        });
+    }
+
+    Ok(subscriptions)
+}
+
+fn parse_file_webhook_subscriptions(
+    subscriptions: &[FileWebhookSubscription],
+) -> Result<Vec<DesiredWebhookSubscription>> {
+    subscriptions
+        .iter()
+        .map(|subscription| {
+            let event_types = if let Some(event_types) = &subscription.event_types {
+                parse_webhook_event_types(&event_types.join(","))?
+            } else {
+                WebhookEventType::ALL.to_vec()
+            };
+
+            Ok(DesiredWebhookSubscription {
+                data_type: subscription.data_type.trim().to_owned(),
+                event_types,
+                enabled: subscription.enabled.unwrap_or(true),
+            })
+        })
+        .collect()
+}
+
+fn parse_webhook_event_types(value: &str) -> Result<Vec<WebhookEventType>> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|event_type| !event_type.is_empty())
+        .map(|event_type| {
+            WebhookEventType::parse(event_type).ok_or_else(|| {
+                RingmasterError::Config(format!(
+                    "invalid webhook event type `{event_type}`; expected create, update, or delete"
+                ))
+            })
+        })
         .collect()
 }
 
@@ -540,7 +795,11 @@ fn is_empty_path(path: &Path) -> bool {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{AppPaths, Config, OuraConfig, RefreshConfig, default_requested_scopes};
+    use super::{
+        AppPaths, Config, OuraConfig, RefreshConfig, WebhookConfig, default_requested_scopes,
+        parse_webhook_subscription_env,
+    };
+    use crate::webhook::{WebhookEventType, default_desired_subscriptions};
 
     #[test]
     fn builds_xdg_paths_from_roots() {
@@ -634,5 +893,52 @@ mod tests {
                 .to_string()
                 .contains("refresh.daily_history_days must be at least 1")
         );
+    }
+
+    #[test]
+    fn loads_webhook_defaults() {
+        let config = Config::load().unwrap_or_else(|error| {
+            panic!("config load should succeed with repo defaults: {error}");
+        });
+
+        assert_eq!(config.webhook.bind.to_string(), "127.0.0.1:8799");
+        assert_eq!(config.webhook.path, "/webhooks/oura");
+        assert_eq!(
+            config.webhook.subscriptions,
+            default_desired_subscriptions()
+        );
+    }
+
+    #[test]
+    fn parses_webhook_subscription_env_specs() {
+        let subscriptions =
+            parse_webhook_subscription_env("daily_sleep:create,update,delete;workout:update")
+                .unwrap_or_else(|error| panic!("webhook env parsing should succeed: {error}"));
+
+        assert_eq!(subscriptions.len(), 2);
+        assert_eq!(subscriptions[0].data_type, "daily_sleep");
+        assert_eq!(subscriptions[1].event_types, vec![WebhookEventType::Update]);
+    }
+
+    #[test]
+    fn rejects_invalid_webhook_public_base_url() {
+        let config = WebhookConfig {
+            bind: "127.0.0.1:8799"
+                .parse()
+                .unwrap_or_else(|error| panic!("test socket addr should parse: {error}")),
+            path: "/webhooks/oura".to_owned(),
+            public_base_url: Some("notaurl".to_owned()),
+            verification_token: Some("token".to_owned()),
+            signature_tolerance_secs: 300,
+            heartbeat_secs: 15,
+            renewal_lead_secs: 60,
+            subscriptions: default_desired_subscriptions(),
+        };
+
+        let error = config
+            .validate()
+            .err()
+            .unwrap_or_else(|| panic!("invalid public base url should be rejected"));
+        assert!(error.to_string().contains("webhook.public_base_url"));
     }
 }

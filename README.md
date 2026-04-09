@@ -1,24 +1,26 @@
 # ringmaster.rs
 
-`ringmaster.rs` is a local-first Rust terminal application for exploring Oura Cloud data with a Ratatui interface, SQLite-backed local storage, deterministic demo and fixture paths, and a poll-first Oura Cloud API v2 integration.
+`ringmaster.rs` is a local-first Rust terminal application for exploring Oura Cloud data with a Ratatui interface, SQLite-backed local storage, deterministic demo and fixture paths, a real Oura Cloud API v2 integration, and a near-real-time webhook-aware freshness model where the upstream API supports it.
 
 ## Status
 
-This repository now includes a context-aware, daily-drivable personal observability MVP:
+This repository now includes an operationally trustworthy personal observability MVP:
 
-- `clap` CLI with `tui`, `tui --demo`, `doctor`, `auth login`, `sync once`, `sync watch`, `derive rebuild`, and the compatibility alias `demo`
+- `clap` CLI with `tui`, `tui --demo`, `doctor`, `auth login`, `sync once`, `sync watch`, `derive rebuild`, `webhook serve`, `webhook replay`, `webhook subscriptions list`, `webhook subscriptions sync`, and the compatibility alias `demo`
 - a useful Ratatui Dashboard, Timeline, Trends, Explain, Patterns, and Ops screen backed by persisted SQLite data
 - deterministic demo data that exercises the same six-screen shell without credentials or network access
 - real loopback OAuth login with server-side code exchange, PKCE, and CSRF-safe state handling
 - persisted auth/session metadata in SQLite with token secrets stored through the OS keyring seam
-- real poll-first sync for personal info, daily summaries, heartrate, workouts, enhanced tags, and sessions into normalized tables plus raw payload cache
+- real sync for personal info, daily summaries, heartrate, workouts, enhanced tags, and sessions into normalized tables plus raw payload cache
 - persisted derived read models for canonical context events and deterministic pattern summaries, with bounded recent-window refreshes after successful syncs and full-history rebuilds via `derive rebuild`
-- family-aware background refresh while the TUI is open, plus the same scheduler exposed as `sync watch`
-- explicit freshness and availability semantics for fresh, stale, missing scope, no data yet, never synced, auth failure, and source-delayed data
-- a restrained, deterministic explainability layer with selected-day summaries, evidence bullets, thin-data notes, and pattern summaries
+- a hybrid `sync watch` engine that consumes webhook invalidations first, preserves scheduled fallback reconciliation, and keeps unsupported families honest instead of pretending they are realtime
+- a dedicated webhook receiver with explicit verification, accepted/rejected delivery audit, invalidation enqueue, and clean shutdown
+- declarative webhook subscription lifecycle management with list, diff, dry-run, create, update, renew, and optional prune flows
+- explicit freshness-source and stale-reason semantics instead of a generic “fresh/stale/error” model
+- a substantially upgraded Ops and `doctor` surface for receiver health, subscription expiry, queue lag, delivery history, and freshness debugging
 - structured logging via `tracing`
 
-The project is intentionally not feature-complete yet. The goal is a trustworthy local foundation with one real observability vertical slice, not a one-shot full product dump.
+The project is intentionally not feature-complete yet. The goal is a trustworthy local foundation with one operationally credible observability slice, not a one-shot full product dump.
 
 ## Commands
 
@@ -33,6 +35,10 @@ cargo run -- sync watch
 cargo run -- sync watch --demo --max-iterations 1
 cargo run -- derive rebuild
 cargo run -- derive rebuild --demo
+cargo run -- webhook serve
+cargo run -- webhook replay --fixture tests/fixtures/webhooks/sample.json
+cargo run -- webhook subscriptions list --fixture-dir tests/fixtures/webhooks
+cargo run -- webhook subscriptions sync --dry-run --fixture-dir tests/fixtures/webhooks
 cargo run -- demo
 ```
 
@@ -42,15 +48,15 @@ Behavior notes:
 
 - `ringmaster tui` launches the live TUI when attached to a terminal. Without a TTY it renders a snapshot of the current local app state instead.
 - `ringmaster tui --demo` launches the same UI shell in deterministic demo mode. Without a TTY it renders a text snapshot, which is useful for CI and smoke-oriented workflows.
-- `ringmaster demo` remains as a compatibility alias for `ringmaster tui --demo`.
-- `ringmaster doctor` resolves paths, initializes SQLite, applies migrations, and prints auth, capability, per-family freshness, refresh policy, record-count, and path diagnostics.
+- `ringmaster demo` remains a compatibility alias for `ringmaster tui --demo`.
+- `ringmaster doctor` resolves paths, initializes SQLite, applies migrations, and prints auth, capability, per-family freshness, receiver, subscription, queue, and record-count diagnostics.
 - `ringmaster auth login` starts a loopback OAuth flow, validates state, exchanges the code server-side, and persists auth/session metadata locally.
 - `ringmaster sync once` refreshes auth when needed, imports all supported sync families, caches raw payloads, upserts normalized SQLite rows, and refreshes the derived context/pattern tables over a bounded recent window when the underlying persisted data changes.
-- `ringmaster sync once --dry-run --fixture-dir tests/fixtures/phase3` exercises the same normalization pipeline without live credentials or database writes. This is the bounded fixture-backed equivalent of a demo sync smoke path.
-- `ringmaster sync watch` runs the same family-aware scheduler used by the live TUI, but without the UI.
-- `ringmaster sync watch --demo --max-iterations 1` is the bounded scheduler smoke path for CI and local verification. It uses the checked-in fixtures by default and exits after one scheduler iteration.
-- `ringmaster derive rebuild` deterministically rebuilds derived context events and pattern summaries from persisted SQLite data.
-- `ringmaster derive rebuild --demo` seeds a temporary store from the phase-3 fixtures, rebuilds derived state, prints a compact summary, and exits without requiring live credentials.
+- `ringmaster sync watch` is the long-running invalidation consumer and scheduler. It processes queued webhook invalidations first, then preserves periodic fallback reconciliation.
+- `ringmaster webhook serve` is the dedicated HTTP receiver. It verifies Oura webhook requests, records accepted and rejected deliveries, enqueues invalidations, and responds after durable enqueue instead of after sync work.
+- `ringmaster webhook replay --fixture tests/fixtures/webhooks/sample.json` is the canonical local debugging path for receiver and queue behavior. Fixture replay runs the same verification and enqueue path offline, then previews the bounded invalidation-processing plan without writing fixture data into the local store. Stored-delivery replay re-enqueues invalidations without auto-running a fixture-backed sync into a live store.
+- `ringmaster webhook subscriptions list` inspects desired and remote subscription state.
+- `ringmaster webhook subscriptions sync --dry-run` prints the convergence plan without mutating remote state. Add `--prune` only when you explicitly want out-of-spec remote subscriptions removed.
 
 ## Local-first layout
 
@@ -110,19 +116,53 @@ enhanced_tag_history_days = 90
 enhanced_tag_overlap_days = 2
 session_history_days = 90
 session_overlap_days = 2
+
+[webhook]
+bind = "127.0.0.1:8789"
+path = "/oura/webhook"
+public_base_url = "https://your-public-host.example.com"
+signature_tolerance_secs = 300
+heartbeat_secs = 15
+renewal_lead_secs = 86400
+
+[[webhook.subscriptions]]
+data_type = "daily_sleep"
+event_types = ["create", "update", "delete"]
+
+[[webhook.subscriptions]]
+data_type = "daily_readiness"
+event_types = ["create", "update", "delete"]
+
+[[webhook.subscriptions]]
+data_type = "daily_activity"
+event_types = ["create", "update", "delete"]
+
+[[webhook.subscriptions]]
+data_type = "workout"
+event_types = ["create", "update", "delete"]
+
+[[webhook.subscriptions]]
+data_type = "enhanced_tag"
+event_types = ["create", "update", "delete"]
+
+[[webhook.subscriptions]]
+data_type = "session"
+event_types = ["create", "update", "delete"]
 ```
 
-Set the client secret in the environment instead of the config file:
+Set secrets in the environment instead of the config file:
 
 ```bash
 export RINGMASTER_OURA_CLIENT_SECRET="your-oura-client-secret"
+export RINGMASTER_WEBHOOK_VERIFICATION_TOKEN="your-oura-webhook-verification-token"
 ```
 
 Important notes:
 
 - granted scopes are not configured in `config.toml`; they come from the persisted auth session
 - token secrets are intentionally kept out of plaintext config
-- live auth and sync are local-first only; there is no required webhook infrastructure for the first usable release
+- the receiver is local-first only; there is no hosted relay service
+- a real Oura webhook deployment requires a user-managed public HTTPS endpoint, reverse proxy, or tunnel that forwards to `webhook.bind`
 
 ## Supported families
 
@@ -135,7 +175,18 @@ The current live sync and persistence surface includes:
 - `enhanced_tag`
 - `session`
 
-Legacy `tags` remain read-compatible in the derived event layer when they already exist in the database, but the product is intentionally centered on `enhanced_tag` for this pass.
+Legacy `tags` remain read-compatible in the derived event layer when they already exist in the database, but the product is intentionally centered on `enhanced_tag` for current work.
+
+Webhook-driven freshness is intentionally limited to Oura `data_type`s the product actually supports:
+
+- `daily_sleep`
+- `daily_readiness`
+- `daily_activity`
+- `workout`
+- `enhanced_tag`
+- `session`
+
+`heartrate` remains scheduled-only because Oura does not currently expose it as a webhook `data_type`.
 
 ## Product behavior
 
@@ -143,10 +194,10 @@ What the screens now do:
 
 - Dashboard shows the shared selected day, daily metric cards, freshness badges, capability badges, a compact baseline summary, and a restrained “what likely changed?” panel.
 - Timeline shows a gap-aware intraday heartrate chart, family filter toggles, real overlay lanes for workouts, enhanced tags, and sessions, selected-event details, and the selected-day event list.
-- Trends shows 7d / 30d / 90d windows, baseline-aware trend summaries, sparklines for daily metrics, and confidence notes when history is thin.
+- Trends shows 7d / 30d / 90d windows, baseline-aware trend summaries, and confidence notes when history is thin.
 - Explain shows the selected day summary, today-vs-baseline or selected-day-vs-baseline framing, supporting evidence bullets, related context entries, and explicit caveats for thin data, missing scopes, or missing measurements.
 - Patterns shows deterministic descriptive associations by family and metric with `n`, magnitude, and sufficiency buckets.
-- Ops makes trust explicit with auth state, granted scopes, token metadata, last sync per family, database/config paths, the active refresh policy, and record counts for both normalized and derived tables.
+- Ops acts as a local operator console with auth state, granted scopes, per-family freshness source, webhook receiver status, callback configuration, subscription drift and expiry, queue depth and lag, delivery history, and current runtime mode.
 
 Shared interaction semantics:
 
@@ -193,7 +244,7 @@ The app does:
 - surface nearby workouts, enhanced tags, and sessions as possible context
 - show explicit evidence bullets and caveats
 - show data sufficiency using sample counts and buckets
-- say when a scope or measurement is missing
+- say when a scope, delivery path, or measurement is missing
 
 The app intentionally avoids:
 
@@ -210,101 +261,40 @@ Preferred wording includes:
 - `after days with`
 - `this may be relevant, but evidence is limited`
 
-## Pattern engine
-
-The pattern engine is a lightweight descriptive analytics layer. It computes deterministic associations for normalized event keys using persisted history and rolling baselines.
-
-Current surfaced relation windows include:
-
-- same-day activity deltas
-- same-night sleep deltas
-- next-day readiness deltas
-
-Current sufficiency rules:
-
-- patterns are hidden until at least `n = 3` comparable occurrences exist
-- the UI always shows `n`
-- confidence is bucketed by data sufficiency, not by significance claims
-- sparse or missing history is surfaced as “not enough data yet”
-
 ## Freshness semantics
 
-The UI does not collapse every problem into a generic error. Each data family resolves to a specific state:
+The UI no longer flattens every problem into generic stale/error state. Each data family resolves to a specific state:
 
-- `fresh`: the family has recent persisted data inside its freshness window
-- `stale`: data exists, but it is older than the configured freshness policy or the last refresh was partial
-- `no data yet`: sync ran, but there are still no persisted rows for that family
-- `never synced`: no successful sync has happened yet
-- `missing scope`: the required Oura scope was not granted
-- `auth failure`: the last failure was due to auth/session problems
-- `source delayed`: Oura has not closed out the latest daily family yet, so the app compares against the latest fully available day instead of pretending today's row exists
+- `fresh via webhook`
+- `fresh via periodic reconcile`
+- `stale: no recent delivery`
+- `stale: sync failed`
+- `stale: webhook unsupported`
+- `stale: receiver down`
+- `stale: subscription missing or expired`
+- `stale: capability missing`
+- `stale: upstream data pending`
 
-Default responsive refresh policy:
+This is the core “trustworthiness” upgrade in phase 4: the product tells you why freshness is good or bad instead of forcing you to infer it.
 
-- personal: every 3600s, stale after 72h
-- daily: every 300s, stale after 12h
-- heartrate: every 60s, stale after 15m
-- workouts: every 600s, stale after 24h
-- enhanced tags: every 300s, stale after 12h
-- sessions: every 300s, stale after 12h
+## Replay and operations workflow
 
-## What is real today
-
-- `auth login` is real for the implemented scope surface
-- `sync once` and `sync watch` are real for:
-  - `personal_info`
-  - `daily_sleep`
-  - `daily_readiness`
-  - `daily_activity`
-  - `heartrate`
-  - `workouts`
-  - `enhanced_tags`
-  - `sessions`
-- `derive rebuild` is real and rebuilds:
-  - canonical context events
-  - persisted pattern summaries
-- demo mode is deterministic and still works without network or credentials
-- fixture-backed sync and derivation are real and are used for tests and smoke coverage
-
-Still intentionally deferred:
-
-- webhook delivery and subscription lifecycle
-- broader Oura collections beyond the current context-family slice
-- packaging, installers, and release automation
-- exports, sharing, and reports
-- generalized machine learning or medical interpretation
-
-## Architecture summary
-
-The codebase stays in a single crate for now, with narrow module boundaries:
-
-- `src/cli.rs`: CLI parsing and help text
-- `src/config.rs`: config loading, XDG paths, runtime defaults
-- `src/app.rs`: app state, explicit freshness modeling, screen models, shared selected-day / selected-event semantics, and derived presentation shaping
-- `src/tui.rs`: Ratatui event loop, background refresh worker wiring, and snapshot rendering
-- `src/components/*`: pure rendering for Dashboard, Timeline, Trends, Explain, Patterns, and Ops
-- `src/store/*`: SQLite plan, migrations, typed store queries, and sync-state persistence
-- `src/oura/*`: OAuth loopback flow, token lifecycle ownership, typed client interface, and sync orchestration
-- `src/refresh.rs`: reusable scheduler core for the TUI and `sync watch`
-- `src/derive.rs`: deterministic rebuild of canonical context events and pattern summaries
-- `src/insights.rs`: deterministic daily baseline helpers used by Dashboard and Explain
-
-UI components do not perform network calls, token refresh, or database writes. The TUI reads presentation models only.
-
-More detail lives in [docs/ARCHITECTURE.md](/home/ubuntu/ringmaster.rs/docs/ARCHITECTURE.md).
-
-The storage backend choice is documented separately in [docs/decisions/20260408-storage-backend-rusqlite.md](/home/ubuntu/ringmaster.rs/docs/decisions/20260408-storage-backend-rusqlite.md).
-
-## Verification
+The preferred local debugging path is:
 
 ```bash
-cargo fmt --all --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all
-cargo run -- doctor
-cargo run -- sync once --dry-run --fixture-dir tests/fixtures/phase3
-cargo run -- derive rebuild --demo
-cargo run -- demo
+cargo run -- webhook replay --fixture tests/fixtures/webhooks/sample.json
 ```
 
-`cargo run -- sync watch --demo --max-iterations 1` remains a useful scheduler smoke path, and `cargo run -- tui --demo` remains a handy interactive non-network layout check.
+The preferred local subscription smoke path is:
+
+```bash
+cargo run -- webhook subscriptions sync --dry-run --fixture-dir tests/fixtures/webhooks
+```
+
+The preferred bounded watch smoke path is:
+
+```bash
+cargo run -- sync watch --demo --max-iterations 1
+```
+
+Together, those commands let you exercise receiver, queue, scheduler, and subscription logic without waiting for a real Oura webhook delivery.

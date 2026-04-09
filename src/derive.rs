@@ -84,6 +84,8 @@ pub async fn rebuild(config: &Config, options: DeriveOptions) -> Result<DeriveRe
                 dry_run: false,
                 fixture_dir: Some(fixture_dir.clone()),
                 families: SyncFamily::ALL.to_vec(),
+                trigger_source: Some("periodic_reconcile".to_owned()),
+                trigger_detail: Some("derive seed sync".to_owned()),
             },
         )
         .await?;
@@ -884,6 +886,7 @@ mod tests {
     ) {
         imports
             .upsert_daily_sleep(&DailySleepRecord {
+                oura_id: None,
                 day: day.to_owned(),
                 sleep_score: Some(sleep),
                 raw_cache_key: None,
@@ -892,6 +895,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("sleep row should insert: {error}"));
         imports
             .upsert_daily_readiness(&DailyReadinessRecord {
+                oura_id: None,
                 day: day.to_owned(),
                 readiness_score: Some(readiness),
                 temperature_deviation: None,
@@ -902,6 +906,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("readiness row should insert: {error}"));
         imports
             .upsert_daily_activity(&DailyActivityRecord {
+                oura_id: None,
                 day: day.to_owned(),
                 activity_score: Some(activity),
                 active_calories: 0,
