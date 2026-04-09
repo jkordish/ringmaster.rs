@@ -956,6 +956,61 @@ mod tests {
     }
 
     #[test]
+    fn compact_status_snapshot_keeps_auth_and_queue_diagnostics_visible() {
+        let config = test_config();
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        seed_live_rows(&store);
+        seed_sync_state(
+            &store,
+            "oura.personal",
+            SyncRunStatus::Success,
+            "Imported personal info for profile user_123.",
+            &["personal", "daily", "heartrate"],
+            None,
+        );
+        seed_sync_state(
+            &store,
+            "oura.daily",
+            SyncRunStatus::Success,
+            "Imported 3 daily summary rows from fixture history.",
+            &["personal", "daily", "heartrate"],
+            None,
+        );
+        seed_sync_state(
+            &store,
+            "oura.heartrate",
+            SyncRunStatus::Failed,
+            "Heartrate sync failed after a partial import.",
+            &["personal", "daily", "heartrate"],
+            Some(OuraProblem::new(
+                Some(429),
+                "rate limit reached",
+                Some("retry after the minute window resets".to_owned()),
+            )),
+        );
+        let auth_status = test_auth_status(
+            &config,
+            vec![
+                "personal".to_owned(),
+                "daily".to_owned(),
+                "heartrate".to_owned(),
+            ],
+        );
+        let mut app = build_live_state(&config, &store, &auth_status)
+            .unwrap_or_else(|error| panic!("live state should build: {error}"));
+        app.active_screen = Screen::Ops;
+
+        let output = render_snapshot(&app, 90, 28)
+            .unwrap_or_else(|error| panic!("compact status snapshot should render: {error}"));
+
+        assert!(output.contains("Auth state: authenticated"));
+        assert!(output.contains("Granted scopes: personal, daily, heartrate"));
+        assert!(output.contains("Receiver heartbeat: missing"));
+        assert!(output.contains("Invalidation queue: pending=0"));
+    }
+
+    #[test]
     fn dashboard_compact_and_wide_snapshots_have_distinct_reading_paths() {
         let config = test_config();
         let mut app = build_demo_state(&config);
@@ -981,6 +1036,21 @@ mod tests {
 
         assert!(output.contains("> #1"));
         assert!(output.contains("Warnings and caveats"));
+    }
+
+    #[test]
+    fn compact_review_snapshot_keeps_tabs_and_multiple_cards_visible() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Review;
+
+        let output = render_snapshot(&app, 90, 28)
+            .unwrap_or_else(|error| panic!("compact review snapshot should render: {error}"));
+
+        assert!(output.contains("Today   Week   Investigate"));
+        assert!(output.contains("Readiness   Sleep   Recovery"));
+        assert!(output.contains("> #1"));
+        assert!(output.contains("#2"));
     }
 
     #[tokio::test]

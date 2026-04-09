@@ -14,18 +14,77 @@ use crate::ui::{
 };
 
 pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, ui: &UiContext, theme: &Theme) {
+    if ui.viewport.is_compact() {
+        draw_compact(frame, area, model, theme);
+    } else {
+        draw_wide(frame, area, model, theme);
+    }
+}
+
+fn draw_wide(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, theme: &Theme) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(if ui.viewport.is_compact() { 4 } else { 5 }),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Min(if ui.viewport.is_compact() { 7 } else { 14 }),
-            Constraint::Length(if ui.viewport.is_compact() { 4 } else { 7 }),
+            Constraint::Length(5),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(14),
+            Constraint::Length(7),
         ])
         .split(area);
 
-    let intro = if ui.viewport.is_compact() {
+    draw_intro(frame, layout[0], model, theme, false);
+    draw_mode_tabs(frame, layout[1], model, theme);
+    draw_focus_tabs(frame, layout[2], model, theme);
+
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .split(layout[3]);
+
+    draw_cards(frame, body[0], model, theme);
+    draw_details(frame, body[1], model, theme);
+    draw_warnings(frame, layout[4], model, theme);
+}
+
+fn draw_compact(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, theme: &Theme) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(4),
+        ])
+        .split(area);
+
+    draw_intro(frame, layout[0], model, theme, true);
+
+    let controls = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(layout[1]);
+    draw_mode_tabs(frame, controls[0], model, theme);
+    draw_focus_tabs(frame, controls[1], model, theme);
+
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .split(layout[2]);
+    draw_cards(frame, body[0], model, theme);
+    draw_details(frame, body[1], model, theme);
+
+    draw_warnings(frame, layout[3], model, theme);
+}
+
+fn draw_intro(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &ReviewModel,
+    theme: &Theme,
+    compact: bool,
+) {
+    let intro = if compact {
         format!("{}\n{}", model.selected_day_label, model.breadcrumb)
     } else {
         format!(
@@ -46,9 +105,11 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, ui: &UiConte
                 ),
                 PanelKind::Hero,
             )),
-        layout[0],
+        area,
     );
+}
 
+fn draw_mode_tabs(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, theme: &Theme) {
     frame.render_widget(
         Tabs::new(model.mode_tabs.iter().map(|tab| tab.label.as_str()))
             .block(chrome::panel(
@@ -65,9 +126,11 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, ui: &UiConte
             .highlight_style(theme.emphasis(Tone::Focus))
             .divider(" ")
             .select(model.selected_mode_index),
-        layout[1],
+        area,
     );
+}
 
+fn draw_focus_tabs(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, theme: &Theme) {
     frame.render_widget(
         Tabs::new(model.focus_tabs.iter().map(|tab| tab.label.as_str()))
             .block(chrome::panel(
@@ -84,22 +147,11 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, ui: &UiConte
             .highlight_style(theme.emphasis(Tone::Focus))
             .divider(" ")
             .select(model.selected_focus_index),
-        layout[2],
+        area,
     );
+}
 
-    let body = Layout::default()
-        .direction(if ui.viewport.is_compact() {
-            Direction::Vertical
-        } else {
-            Direction::Horizontal
-        })
-        .constraints(if ui.viewport.is_compact() {
-            vec![Constraint::Length(3), Constraint::Min(4)]
-        } else {
-            vec![Constraint::Percentage(42), Constraint::Percentage(58)]
-        })
-        .split(layout[3]);
-
+fn draw_cards(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, theme: &Theme) {
     let cards = if model.cards.is_empty() {
         vec![ListItem::new(chrome::badge_label(
             "EMPTY",
@@ -126,9 +178,11 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, ui: &UiConte
             chrome::title_with_badge(theme, "Ranked observations", "scan top-down", Tone::Focus),
             PanelKind::Section,
         )),
-        body[0],
+        area,
     );
+}
 
+fn draw_details(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, theme: &Theme) {
     let details = if model.detail_lines.is_empty() {
         vec![ListItem::new(
             "[pending] Review evidence appears after enough local history accumulates.",
@@ -155,9 +209,11 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, ui: &UiConte
             Line::from("Briefing detail"),
             PanelKind::Hero,
         )),
-        body[1],
+        area,
     );
+}
 
+fn draw_warnings(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, theme: &Theme) {
     let warnings = if model.warning_lines.is_empty() {
         vec![ListItem::new("[quiet] No active briefing warnings.")]
     } else {
@@ -178,6 +234,6 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, ui: &UiConte
             ),
             PanelKind::Section,
         )),
-        layout[4],
+        area,
     );
 }

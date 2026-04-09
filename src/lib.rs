@@ -818,7 +818,7 @@ async fn load_fixture_snapshot(config: &Config, fixture_dir: PathBuf) -> Result<
         &store,
         oura::sync::SyncOptions {
             dry_run: false,
-            fixture_dir: Some(fixture_dir),
+            fixture_dir: Some(fixture_dir.clone()),
             families: SyncFamily::ALL.to_vec(),
             trigger_source: Some("periodic_reconcile".to_owned()),
             trigger_detail: Some("ui snapshot fixture seed".to_owned()),
@@ -827,7 +827,9 @@ async fn load_fixture_snapshot(config: &Config, fixture_dir: PathBuf) -> Result<
     .await?;
     derive::rebuild_store(&store)?;
     let auth_status = oura::auth::inspect_auth(&temp_config, &store)?;
-    load_live_snapshot(&temp_config, &store, &auth_status)
+    let mut snapshot = load_live_snapshot(&temp_config, &store, &auth_status)?;
+    apply_fixture_snapshot_overlay(&mut snapshot, &fixture_dir);
+    Ok(snapshot)
 }
 
 async fn build_phase7_snapshot_states(
@@ -882,14 +884,41 @@ fn phase7_fixture_seed_dir(
     fixture_root.join(fixture_label)
 }
 
+fn apply_fixture_snapshot_overlay(snapshot: &mut app::LiveSnapshot, fixture_dir: &std::path::Path) {
+    let fixture_display_path = fixture_snapshot_display_path(fixture_dir);
+
+    "2026-04-09T12:00:00Z".clone_into(&mut snapshot.captured_at);
+    snapshot.config_path = format!("{fixture_display_path}/config.toml");
+    snapshot.database_path = format!("{fixture_display_path}/ringmaster.db");
+    PHASE7_WEBHOOK_BIND_ADDRESS.clone_into(&mut snapshot.webhook.bind_address);
+    PHASE7_WEBHOOK_PATH.clone_into(&mut snapshot.webhook.path);
+    snapshot.webhook.callback_url = Some(PHASE7_WEBHOOK_CALLBACK_URL.to_owned());
+    snapshot.webhook.verification_token_configured = true;
+    snapshot.webhook.signature_tolerance_secs = 300;
+    snapshot.webhook.heartbeat_secs = 15;
+    snapshot.webhook.renewal_lead_secs = 7 * 24 * 60 * 60;
+    snapshot.webhook.desired_subscriptions = phase7_desired_subscription_records();
+    snapshot.webhook.remote_subscriptions = phase7_remote_subscription_records(
+        &snapshot.webhook.desired_subscriptions,
+        "matched",
+        "2026-04-15T12:00:00Z",
+        "2026-04-09T11:55:00Z",
+    );
+    normalize_phase7_sync_state_timestamps(
+        &mut snapshot.sync_states,
+        PHASE7_SYNC_ATTEMPTED_AT,
+        PHASE7_SYNC_COMPLETED_AT,
+    );
+}
+
 fn apply_phase7_snapshot_overlay(
     snapshot: &mut app::LiveSnapshot,
     scenario: ui::snapshot::SnapshotScenario,
 ) {
     snapshot.config_path = phase7_config_path(scenario);
     snapshot.database_path = phase7_database_path(scenario);
-    snapshot.webhook.bind_address = PHASE7_WEBHOOK_BIND_ADDRESS.to_owned();
-    snapshot.webhook.path = PHASE7_WEBHOOK_PATH.to_owned();
+    PHASE7_WEBHOOK_BIND_ADDRESS.clone_into(&mut snapshot.webhook.bind_address);
+    PHASE7_WEBHOOK_PATH.clone_into(&mut snapshot.webhook.path);
     snapshot.webhook.callback_url = Some(PHASE7_WEBHOOK_CALLBACK_URL.to_owned());
     snapshot.webhook.verification_token_configured = true;
     snapshot.webhook.signature_tolerance_secs = 300;
@@ -1179,6 +1208,16 @@ fn phase7_config_path(scenario: ui::snapshot::SnapshotScenario) -> String {
 
 fn phase7_database_path(scenario: ui::snapshot::SnapshotScenario) -> String {
     format!("tests/fixtures/phase7/{}/ringmaster.db", scenario.label())
+}
+
+fn fixture_snapshot_display_path(fixture_dir: &std::path::Path) -> String {
+    let current_dir = std::env::current_dir().ok();
+    current_dir
+        .as_ref()
+        .and_then(|cwd| fixture_dir.strip_prefix(cwd).ok())
+        .unwrap_or(fixture_dir)
+        .display()
+        .to_string()
 }
 
 fn normalize_phase7_sync_state_timestamps(
@@ -2981,5 +3020,46 @@ mod tests {
         assert!(first_snapshot.contains(super::PHASE7_WEBHOOK_CALLBACK_URL));
         assert!(first_snapshot.contains(super::PHASE7_STALE_SYNC_COMPLETED_AT));
         assert!(first_snapshot.contains("tests/fixtures/phase7/stale/ringmaster.db"));
+    }
+
+    #[tokio::test]
+    async fn single_fixture_status_snapshots_are_stable_across_host_config_and_temp_roots() {
+        let fixture_dir = std::path::PathBuf::from("tests/fixtures/phase3");
+        let (_first_tempdir, first_config) =
+            test_config(Some("https://host-one.example.test"), Some("verify-one"));
+        let (_second_tempdir, second_config) = test_config(None, None);
+
+        let mut first_app = super::build_fixture_snapshot_app(
+            &first_config,
+            fixture_dir.clone(),
+            "Fixture-backed status snapshot.",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("first single-fixture app should build: {error}"));
+        let mut second_app = super::build_fixture_snapshot_app(
+            &second_config,
+            fixture_dir,
+            "Fixture-backed status snapshot.",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("second single-fixture app should build: {error}"));
+
+        first_app.active_screen = crate::app::Screen::Ops;
+        second_app.active_screen = crate::app::Screen::Ops;
+
+        let first_snapshot = crate::tui::render_snapshot(&first_app, 160, 44)
+            .unwrap_or_else(|error| panic!("first single-fixture snapshot should render: {error}"));
+        let second_snapshot =
+            crate::tui::render_snapshot(&second_app, 160, 44).unwrap_or_else(|error| {
+                panic!("second single-fixture snapshot should render: {error}")
+            });
+
+        assert_eq!(
+            first_snapshot, second_snapshot,
+            "single-fixture Status snapshots should not vary with host webhook config or temp paths"
+        );
+        assert!(first_snapshot.contains(super::PHASE7_WEBHOOK_CALLBACK_URL));
+        assert!(first_snapshot.contains(super::PHASE7_SYNC_COMPLETED_AT));
+        assert!(first_snapshot.contains("tests/fixtures/phase3/ringmaster.db"));
     }
 }

@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Cell, List, ListItem, Paragraph, Row, Table},
 };
 
-use crate::app::OpsModel;
+use crate::app::{OpsItem, OpsModel};
 use crate::ui::{
     chrome::{self, PanelKind},
     layout::UiContext,
@@ -39,7 +39,7 @@ fn draw_wide(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &Theme)
         .split(layout[1]);
 
     draw_family_table(frame, body[0], model, theme);
-    draw_diagnostics_list(frame, body[1], model, theme, None);
+    draw_diagnostics_list(frame, body[1], &model.items, theme, None);
     draw_warnings(frame, layout[2], model, theme);
 }
 
@@ -48,28 +48,22 @@ fn draw_compact(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &The
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(4),
-            Constraint::Min(10),
-            Constraint::Length(4),
+            Constraint::Min(12),
+            Constraint::Length(3),
         ])
         .split(area);
 
     draw_summary(frame, layout[0], model, theme, true);
 
     let body = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(6)])
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
         .split(layout[1]);
 
     let family_items = model
         .family_statuses
         .iter()
-        .take(4)
-        .map(|status| {
-            ListItem::new(format!(
-                "[{}] {} | {}",
-                status.state_label, status.label, status.scope_label
-            ))
-        })
+        .map(|status| ListItem::new(format!("[{}] {}", status.state_label, status.label)))
         .collect::<Vec<_>>();
     frame.render_widget(
         List::new(family_items).block(chrome::panel(
@@ -80,7 +74,8 @@ fn draw_compact(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &The
         body[0],
     );
 
-    draw_diagnostics_list(frame, body[1], model, theme, Some(6));
+    let diagnostics = compact_diagnostic_items(model);
+    draw_diagnostics_list(frame, body[1], &diagnostics, theme, None);
     draw_warnings(frame, layout[2], model, theme);
 }
 
@@ -145,14 +140,13 @@ fn draw_family_table(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme:
 fn draw_diagnostics_list(
     frame: &mut Frame<'_>,
     area: Rect,
-    model: &OpsModel,
+    items: &[OpsItem],
     theme: &Theme,
     max_items: Option<usize>,
 ) {
-    let diagnostics = model
-        .items
+    let diagnostics = items
         .iter()
-        .take(max_items.unwrap_or(model.items.len()))
+        .take(max_items.unwrap_or(items.len()))
         .map(|item| ListItem::new(format!("{}: {}", item.label, item.value)))
         .collect::<Vec<_>>();
     frame.render_widget(
@@ -163,6 +157,37 @@ fn draw_diagnostics_list(
         )),
         area,
     );
+}
+
+fn compact_diagnostic_items(model: &OpsModel) -> Vec<OpsItem> {
+    const PRIORITY_LABELS: [&str; 10] = [
+        "Auth state",
+        "Granted scopes",
+        "Access token expiry",
+        "Receiver heartbeat",
+        "Watch heartbeat",
+        "Subscriptions",
+        "Last accepted delivery",
+        "Last rejected delivery",
+        "Invalidation queue",
+        "Last periodic sync",
+    ];
+
+    let mut diagnostics = PRIORITY_LABELS
+        .into_iter()
+        .filter_map(|label| model.items.iter().find(|item| item.label == label).cloned())
+        .collect::<Vec<_>>();
+
+    for item in &model.items {
+        if diagnostics
+            .iter()
+            .all(|selected| selected.label != item.label)
+        {
+            diagnostics.push(item.clone());
+        }
+    }
+
+    diagnostics
 }
 
 fn draw_warnings(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &Theme) {
