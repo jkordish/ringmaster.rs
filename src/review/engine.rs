@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde::Serialize;
 use time::Date;
 
@@ -153,6 +155,26 @@ pub fn focus_cards(focus: ReviewFocus, cards: &[ReviewCard]) -> Vec<&ReviewCard>
         .collect()
 }
 
+pub fn ranked_cards(deck: &ReviewDeck) -> Vec<&ReviewCard> {
+    let mut seen = BTreeSet::new();
+    let mut cards = Vec::new();
+
+    for collection in [
+        &deck.observations,
+        &deck.positive_changes,
+        &deck.negative_drifts,
+        &deck.unresolved_anomalies,
+    ] {
+        for card in collection {
+            if seen.insert(card.id.as_str()) {
+                cards.push(card);
+            }
+        }
+    }
+
+    cards
+}
+
 fn build_today_measurements<'a>(
     anchor_day: &str,
     inputs: &'a ReviewInputs<'a>,
@@ -234,17 +256,18 @@ fn build_week_measurements<'a>(
             .iter()
             .filter_map(|(_, row)| row.numeric_value)
             .collect::<Vec<_>>();
-        let baseline_numeric = baseline_values
-            .iter()
-            .filter_map(|(_, row)| row.numeric_value)
-            .collect::<Vec<_>>();
         if current_numeric.is_empty() {
             continue;
         }
 
         let numeric_value = aggregate_values(definition.weekly_aggregation, &current_numeric);
-        let baseline_mean = aggregate_values(definition.weekly_aggregation, &baseline_numeric);
-        let baseline_stddev = standard_deviation(&baseline_numeric);
+        let baseline_aggregates = aggregate_baseline_weeks(
+            definition.weekly_aggregation,
+            &baseline_values,
+            baseline_start,
+        )?;
+        let baseline_mean = mean_value(&baseline_aggregates);
+        let baseline_stddev = standard_deviation(&baseline_aggregates);
         let delta = match (numeric_value, baseline_mean) {
             (Some(current_value), Some(mean_value)) => Some(current_value - mean_value),
             _ => None,
@@ -263,7 +286,12 @@ fn build_week_measurements<'a>(
             .map(|(_, row)| row.stale_days)
             .min()
             .unwrap_or_default();
-        let sufficiency = ReviewSufficiency::from_comparable_days(baseline_numeric.len());
+        let sufficiency = ReviewSufficiency::from_comparable_days(
+            baseline_values
+                .iter()
+                .filter_map(|(_, row)| row.numeric_value)
+                .count(),
+        );
 
         measurements.push(AggregateMeasurement {
             definition,
@@ -613,6 +641,49 @@ fn aggregate_values(aggregation: WeeklyAggregation, values: &[f64]) -> Option<f6
     }
 }
 
+fn aggregate_baseline_weeks(
+    aggregation: WeeklyAggregation,
+    baseline_values: &[(Date, &ReviewSignalDayRecord)],
+    baseline_start: Date,
+) -> Result<Vec<f64>> {
+    let mut weekly_aggregates = Vec::new();
+
+    for week_offset in 0_i64..4_i64 {
+        let window_start = baseline_start
+            .checked_add(time::Duration::days(week_offset * 7))
+            .ok_or_else(|| {
+                RingmasterError::Config(
+                    "weekly baseline window overflowed supported date range".to_owned(),
+                )
+            })?;
+        let window_end = window_start
+            .checked_add(time::Duration::days(6))
+            .ok_or_else(|| {
+                RingmasterError::Config(
+                    "weekly baseline window exceeded supported date range".to_owned(),
+                )
+            })?;
+        let window_values = baseline_values
+            .iter()
+            .filter(|(day, _)| *day >= window_start && *day <= window_end)
+            .filter_map(|(_, row)| row.numeric_value)
+            .collect::<Vec<_>>();
+        if let Some(aggregate) = aggregate_values(aggregation, &window_values) {
+            weekly_aggregates.push(aggregate);
+        }
+    }
+
+    Ok(weekly_aggregates)
+}
+
+fn mean_value(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.iter().sum::<f64>() / values.len() as f64)
+    }
+}
+
 fn standard_deviation(values: &[f64]) -> Option<f64> {
     if values.is_empty() {
         return None;
@@ -699,10 +770,22 @@ fn overlapping_rest_mode_days(
     anchor_day: &str,
     rest_mode_periods: &[RestModePeriodRecord],
 ) -> usize {
+    let Ok(anchor_date) = parse_day(anchor_day) else {
+        return 0;
+    };
     rest_mode_periods
         .iter()
         .filter(|period| {
-            period.start_day == anchor_day || period.end_day.as_deref() == Some(anchor_day)
+            let Some(start_day) = parse_day(&period.start_day).ok() else {
+                return false;
+            };
+            let end_day = period
+                .end_day
+                .as_deref()
+                .and_then(|day| parse_day(day).ok())
+                .unwrap_or(start_day);
+
+            anchor_date >= start_day && anchor_date <= end_day
         })
         .count()
 }
@@ -757,17 +840,20 @@ impl ReviewConfidence {
 
 #[cfg(test)]
 mod tests {
+    use time::Month;
+
     use crate::oura::models::CapabilityReport;
-    use crate::review::engine::{ReviewInputs, ReviewMode, build_review_deck};
+    use crate::review::engine::{
+        ReviewInputs, ReviewMode, build_review_deck, overlapping_rest_mode_days, ranked_cards,
+    };
     use crate::review::features::ReviewSufficiency;
     use crate::store::queries::{
         ContextEventFamily, ContextEventRecord, PatternMetric, PatternRelationWindow,
-        PatternSummaryRecord, ReviewSignalDayRecord,
+        PatternSummaryRecord, RestModePeriodRecord, ReviewSignalDayRecord,
     };
 
-    #[test]
-    fn today_review_ranks_negative_drift_before_weaker_items() {
-        let auth_status = crate::oura::models::AuthStatus {
+    fn auth_status() -> crate::oura::models::AuthStatus {
+        crate::oura::models::AuthStatus {
             configured: true,
             callback_url: "http://localhost".to_owned(),
             requested_scopes: vec!["daily".to_owned()],
@@ -784,7 +870,12 @@ mod tests {
             account_id: None,
             account_email: None,
             last_error: None,
-        };
+        }
+    }
+
+    #[test]
+    fn today_review_ranks_negative_drift_before_weaker_items() {
+        let auth_status = auth_status();
         let signal_days = vec![
             ReviewSignalDayRecord {
                 signal_key: "readiness_score".to_owned(),
@@ -869,5 +960,75 @@ mod tests {
                 .first()
                 .is_some_and(|card| card.headline.contains("below your baseline"))
         );
+    }
+
+    #[test]
+    fn weekly_sum_metrics_compare_against_prior_weekly_windows() {
+        let auth_status = auth_status();
+        let start_day = time::Date::from_calendar_date(2026, Month::March, 5)
+            .unwrap_or_else(|error| panic!("test start day should be valid: {error}"));
+        let signal_days = (0_i64..35_i64)
+            .map(|offset| {
+                let day = start_day
+                    .checked_add(time::Duration::days(offset))
+                    .unwrap_or_else(|| panic!("test day should stay in range"));
+                let day = day
+                    .format(&time::macros::format_description!("[year]-[month]-[day]"))
+                    .unwrap_or_else(|error| panic!("test day should format: {error}"));
+                ReviewSignalDayRecord {
+                    signal_key: "steps".to_owned(),
+                    day,
+                    numeric_value: Some(100.0),
+                    text_value: None,
+                    baseline_mean: Some(100.0),
+                    baseline_stddev: Some(10.0),
+                    delta: Some(0.0),
+                    z_score: Some(0.0),
+                    persistence_days: 0,
+                    sufficiency: ReviewSufficiency::Strong,
+                    stale_days: 0,
+                    metadata_json: "{}".to_owned(),
+                    updated_at: "2026-04-08T12:00:00Z".to_owned(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let deck = build_review_deck(
+            ReviewMode::Week,
+            "2026-04-08",
+            &ReviewInputs {
+                auth_status: &auth_status,
+                signal_days: &signal_days,
+                context_events: &[],
+                pattern_summaries: &[],
+                sleep_time: &[],
+                rest_mode_periods: &[],
+            },
+        )
+        .unwrap_or_else(|error| panic!("weekly review should build: {error}"));
+
+        assert!(
+            ranked_cards(&deck)
+                .iter()
+                .all(|card| card.signal_key.as_str() != "steps"),
+            "equal weekly step totals should not be ranked as a drift"
+        );
+    }
+
+    #[test]
+    fn overlapping_rest_mode_days_counts_interior_anchor_days() {
+        let periods = vec![RestModePeriodRecord {
+            period_id: "rest-mode-1".to_owned(),
+            start_day: "2026-04-01".to_owned(),
+            start_time: Some("2026-04-01T00:00:00Z".to_owned()),
+            end_day: Some("2026-04-05".to_owned()),
+            end_time: Some("2026-04-05T23:59:59Z".to_owned()),
+            episode_count: 1,
+            tags_json: "[]".to_owned(),
+            raw_cache_key: None,
+            updated_at: "2026-04-05T23:59:59Z".to_owned(),
+        }];
+
+        assert_eq!(overlapping_rest_mode_days("2026-04-03", &periods), 1);
     }
 }

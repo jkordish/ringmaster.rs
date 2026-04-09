@@ -2,7 +2,7 @@ use serde::Serialize;
 
 use crate::error::Result;
 use crate::review::engine::{
-    ReviewConfidence, ReviewDeck, ReviewInputs, ReviewMode, build_review_deck, focus_cards,
+    ReviewConfidence, ReviewDeck, ReviewInputs, ReviewMode, build_review_deck, ranked_cards,
 };
 use crate::review::features::ReviewSufficiency;
 use crate::review::registry::ReviewFocus;
@@ -37,8 +37,16 @@ fn report_from_decks(
     today: &ReviewDeck,
     week: &ReviewDeck,
 ) -> InvestigationReport {
-    let mut related_cards = focus_cards(focus, &today.observations);
-    related_cards.extend(focus_cards(focus, &week.observations));
+    let focus_keys = focus.primary_signal_keys();
+    let mut related_cards = ranked_cards(today)
+        .into_iter()
+        .filter(|card| focus_keys.contains(&card.signal_key.as_str()))
+        .collect::<Vec<_>>();
+    related_cards.extend(
+        ranked_cards(week)
+            .into_iter()
+            .filter(|card| focus_keys.contains(&card.signal_key.as_str())),
+    );
     related_cards.sort_by(|left, right| right.score.cmp(&left.score));
 
     let headline = related_cards.first().map_or_else(
@@ -120,9 +128,31 @@ fn look_at_lines(focus: ReviewFocus) -> Vec<String> {
 mod tests {
     use crate::oura::models::CapabilityReport;
     use crate::review::engine::ReviewInputs;
+    use crate::review::engine::{
+        ReviewCard, ReviewConfidence, ReviewDeck, ReviewMode, ReviewSection,
+    };
     use crate::review::features::ReviewSufficiency;
     use crate::review::registry::ReviewFocus;
     use crate::store::queries::ReviewSignalDayRecord;
+
+    fn make_card(id: &str, signal_key: &str, score: i32) -> ReviewCard {
+        ReviewCard {
+            id: id.to_owned(),
+            signal_key: signal_key.to_owned(),
+            headline: format!("{signal_key} changed"),
+            summary: format!("{signal_key} summary"),
+            why_this_is_shown: "why".to_owned(),
+            confidence: ReviewConfidence::Medium,
+            sufficiency: ReviewSufficiency::Medium,
+            confidence_label: "Medium confidence / Medium data".to_owned(),
+            section: ReviewSection::NegativeDrift,
+            score,
+            anchor_day: "2026-04-08".to_owned(),
+            evidence: vec![format!("{signal_key} evidence")],
+            counterevidence: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
 
     #[test]
     fn investigation_focuses_on_related_signal_keys() {
@@ -176,5 +206,49 @@ mod tests {
 
         assert!(report.headline.contains("Stress"));
         assert!(report.summary.contains("stress") || report.summary.contains("Stress"));
+    }
+
+    #[test]
+    fn investigation_uses_all_ranked_cards_not_just_top_observations() {
+        let today = ReviewDeck {
+            mode: ReviewMode::Today,
+            anchor_day: "2026-04-08".to_owned(),
+            observations: vec![
+                make_card("1", "sleep_score", 10),
+                make_card("2", "readiness_score", 9),
+                make_card("3", "activity_score", 8),
+                make_card("4", "active_calories", 7),
+                make_card("5", "steps", 6),
+            ],
+            positive_changes: Vec::new(),
+            negative_drifts: vec![make_card("6", "stress_high", 5)],
+            unresolved_anomalies: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let week = ReviewDeck {
+            mode: ReviewMode::Week,
+            anchor_day: "2026-04-08".to_owned(),
+            observations: Vec::new(),
+            positive_changes: Vec::new(),
+            negative_drifts: Vec::new(),
+            unresolved_anomalies: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        let report = super::report_from_decks(ReviewFocus::Stress, "2026-04-08", &today, &week);
+
+        assert!(report.headline.contains("stress_high changed"));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("No ranked stress observations"))
+        );
+        assert!(
+            report
+                .evidence
+                .iter()
+                .any(|line| line.contains("stress_high"))
+        );
     }
 }

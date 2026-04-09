@@ -6,7 +6,7 @@ pub mod templates;
 
 pub use engine::{
     ReviewCard, ReviewConfidence, ReviewDeck, ReviewInputs, ReviewMode, ReviewSection,
-    build_review_deck,
+    build_review_deck, ranked_cards,
 };
 pub use features::{FeatureInputs, ReviewSufficiency, build_review_signal_days};
 pub use investigate::{InvestigationReport, build_investigation_report};

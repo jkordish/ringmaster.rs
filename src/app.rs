@@ -7,7 +7,7 @@ use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
 use crate::refresh::SyncFamily;
 use crate::review::{
     InvestigationReport, ReviewCard, ReviewDeck, ReviewFocus, ReviewInputs, ReviewMode,
-    build_investigation_report, build_review_deck,
+    build_investigation_report, build_review_deck, ranked_cards,
 };
 use crate::store::Store;
 use crate::store::queries::{
@@ -1943,46 +1943,23 @@ fn review_cards_for_mode<'a>(
     investigation: &'a InvestigationReport,
 ) -> Vec<&'a ReviewCard> {
     match review_mode {
-        ReviewScreenMode::Today => review_cards_from_deck(today_review),
-        ReviewScreenMode::Week => review_cards_from_deck(week_review),
+        ReviewScreenMode::Today => ranked_cards(today_review),
+        ReviewScreenMode::Week => ranked_cards(week_review),
         ReviewScreenMode::Investigate => {
-            let mut cards = Vec::new();
-            cards.extend(today_review.observations.iter().filter(|card| {
-                investigation
-                    .focus
-                    .primary_signal_keys()
-                    .contains(&card.signal_key.as_str())
-            }));
-            cards.extend(week_review.observations.iter().filter(|card| {
-                investigation
-                    .focus
-                    .primary_signal_keys()
-                    .contains(&card.signal_key.as_str())
-            }));
+            let focus_keys = investigation.focus.primary_signal_keys();
+            let mut cards = ranked_cards(today_review)
+                .into_iter()
+                .filter(|card| focus_keys.contains(&card.signal_key.as_str()))
+                .collect::<Vec<_>>();
+            cards.extend(
+                ranked_cards(week_review)
+                    .into_iter()
+                    .filter(|card| focus_keys.contains(&card.signal_key.as_str())),
+            );
             cards.sort_by(|left, right| right.score.cmp(&left.score));
             cards
         }
     }
-}
-
-fn review_cards_from_deck(deck: &ReviewDeck) -> Vec<&ReviewCard> {
-    let mut seen = BTreeSet::new();
-    let mut cards = Vec::new();
-
-    for collection in [
-        &deck.observations,
-        &deck.positive_changes,
-        &deck.negative_drifts,
-        &deck.unresolved_anomalies,
-    ] {
-        for card in collection {
-            if seen.insert(card.id.as_str()) {
-                cards.push(card);
-            }
-        }
-    }
-
-    cards
 }
 
 fn review_detail_lines(
@@ -4199,10 +4176,32 @@ mod tests {
     use crate::action::Action;
     use crate::insights::MetricPoint;
     use crate::oura::models::{AuthStatus, CapabilityReport};
-    use crate::review::ReviewFocus;
+    use crate::review::{
+        InvestigationReport, ReviewCard, ReviewConfidence, ReviewDeck, ReviewFocus, ReviewMode,
+        ReviewSection, ReviewSufficiency,
+    };
     use crate::store::queries::{
         ContextEventFamily, ContextEventRecord, HeartRatePoint, RecordCounts, TimeSemantics,
     };
+
+    fn make_review_card(id: &str, signal_key: &str, score: i32) -> ReviewCard {
+        ReviewCard {
+            id: id.to_owned(),
+            signal_key: signal_key.to_owned(),
+            headline: format!("{signal_key} changed"),
+            summary: format!("{signal_key} summary"),
+            why_this_is_shown: "why".to_owned(),
+            confidence: ReviewConfidence::Medium,
+            sufficiency: ReviewSufficiency::Medium,
+            confidence_label: "Medium confidence / Medium data".to_owned(),
+            section: ReviewSection::NegativeDrift,
+            score,
+            anchor_day: "2026-04-08".to_owned(),
+            evidence: vec![format!("{signal_key} evidence")],
+            counterevidence: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
 
     fn make_snapshot(days: &[&str]) -> LiveSnapshot {
         let heartrate_days = days
@@ -4486,5 +4485,55 @@ mod tests {
             },
         );
         assert!(model.patterns.empty_message.contains("Not enough data yet"));
+    }
+
+    #[test]
+    fn investigate_mode_includes_focus_cards_outside_top_observations() {
+        let today = ReviewDeck {
+            mode: ReviewMode::Today,
+            anchor_day: "2026-04-08".to_owned(),
+            observations: vec![
+                make_review_card("1", "sleep_score", 10),
+                make_review_card("2", "readiness_score", 9),
+                make_review_card("3", "activity_score", 8),
+                make_review_card("4", "active_calories", 7),
+                make_review_card("5", "steps", 6),
+            ],
+            positive_changes: Vec::new(),
+            negative_drifts: vec![make_review_card("6", "stress_high", 5)],
+            unresolved_anomalies: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let week = ReviewDeck {
+            mode: ReviewMode::Week,
+            anchor_day: "2026-04-08".to_owned(),
+            observations: Vec::new(),
+            positive_changes: Vec::new(),
+            negative_drifts: Vec::new(),
+            unresolved_anomalies: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let investigation = InvestigationReport {
+            focus: ReviewFocus::Stress,
+            anchor_day: "2026-04-08".to_owned(),
+            headline: "Stress: stress_high changed".to_owned(),
+            summary: "stress summary".to_owned(),
+            confidence: ReviewConfidence::Medium,
+            sufficiency: ReviewSufficiency::Medium,
+            evidence: vec!["stress_high evidence".to_owned()],
+            counterevidence: Vec::new(),
+            warnings: Vec::new(),
+            look_at: Vec::new(),
+        };
+
+        let cards = super::review_cards_for_mode(
+            ReviewScreenMode::Investigate,
+            &today,
+            &week,
+            &investigation,
+        );
+
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].signal_key, "stress_high");
     }
 }
