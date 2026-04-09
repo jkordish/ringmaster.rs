@@ -860,7 +860,7 @@ mod tests {
         for migration in &MIGRATIONS[..8] {
             connection
                 .execute_batch(migration.sql)
-                .unwrap_or_else(|error| panic!("pre-phase5 migration should apply: {error}"));
+                .unwrap_or_else(|error| panic!("pre-phase4 migration should apply: {error}"));
             connection
                 .execute(
                     "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
@@ -870,7 +870,7 @@ mod tests {
         }
 
         let report = run_migrations(&mut connection)
-            .unwrap_or_else(|error| panic!("phase5 migration should succeed: {error}"));
+            .unwrap_or_else(|error| panic!("phase4 migration should succeed: {error}"));
         assert_eq!(report.applied_versions, vec![9, 10, 11, 12]);
 
         let daily_sleep_columns: Vec<String> = {

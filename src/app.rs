@@ -23,6 +23,12 @@ use crate::store::webhook_store::{
 };
 use time::{Date, OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
+const LIVE_REVIEW_SIGNAL_LOOKBACK_DAYS: i64 = 60;
+const LIVE_REVIEW_SLEEP_LOOKBACK_DAYS: i64 = 60;
+const LIVE_REVIEW_CONTEXT_LOOKBACK_DAYS: i64 = 90;
+const LIVE_REVIEW_REST_MODE_LOOKBACK_DAYS: i64 = 180;
+const LIVE_REVIEW_CONTEXT_FORWARD_DAYS: i64 = 7;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DataFamily {
     Personal,
@@ -1082,10 +1088,34 @@ pub fn load_live_snapshot(
         .daily_history(usize::from(config.refresh.daily_history_days))?;
     let heartrate_days = load_heartrate_days(store, 14)?;
     let heartrate_daily_averages = load_heartrate_daily_averages(store, 90)?;
-    let context_events = store
-        .views()
-        .context_events_between_days("0000-01-01", "9999-12-31")?;
     let pattern_summaries = store.views().pattern_summaries(None, None)?;
+    let latest_review_day = store.views().latest_review_day()?;
+    let review_load_bounds = live_review_load_bounds(
+        &daily_history,
+        &heartrate_days,
+        latest_review_day.as_deref(),
+    )?;
+
+    let (review_signal_days, sleep_time, context_events, rest_mode_periods) = if let Some(bounds) =
+        review_load_bounds
+    {
+        (
+            store
+                .views()
+                .review_signal_days_between_days(&bounds.signal_start, &bounds.signal_end)?,
+            store
+                .views()
+                .sleep_time_between_days(&bounds.sleep_start, &bounds.sleep_end)?,
+            store
+                .views()
+                .context_events_between_days(&bounds.context_start, &bounds.context_end)?,
+            store
+                .views()
+                .rest_mode_periods_between_days(&bounds.rest_mode_start, &bounds.rest_mode_end)?,
+        )
+    } else {
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    };
 
     Ok(LiveSnapshot {
         captured_at: now_rfc3339(),
@@ -1113,15 +1143,9 @@ pub fn load_live_snapshot(
         heartrate_daily_averages,
         context_events,
         pattern_summaries,
-        review_signal_days: store
-            .views()
-            .review_signal_days_between_days("0000-01-01", "9999-12-31")?,
-        sleep_time: store
-            .views()
-            .sleep_time_between_days("0000-01-01", "9999-12-31")?,
-        rest_mode_periods: store
-            .views()
-            .rest_mode_periods_between_days("0000-01-01", "9999-12-31")?,
+        review_signal_days,
+        sleep_time,
+        rest_mode_periods,
         sync_states: store.sync_state().list()?,
         record_counts: store.views().record_counts()?,
         schema_version: store.metadata().schema_version()?,
@@ -1956,7 +1980,14 @@ fn review_cards_for_mode<'a>(
                     .into_iter()
                     .filter(|card| focus_keys.contains(&card.signal_key.as_str())),
             );
-            cards.sort_by(|left, right| right.score.cmp(&left.score));
+            cards.sort_by(|left, right| {
+                right
+                    .score
+                    .cmp(&left.score)
+                    .then_with(|| right.confidence.cmp(&left.confidence))
+                    .then_with(|| left.signal_key.cmp(&right.signal_key))
+                    .then_with(|| left.id.cmp(&right.id))
+            });
             cards
         }
     }
@@ -2097,6 +2128,103 @@ fn latest_review_anchor_day(snapshot: &LiveSnapshot) -> String {
     days.into_iter()
         .max()
         .unwrap_or_else(current_local_day_string)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveReviewLoadBounds {
+    signal_start: String,
+    signal_end: String,
+    sleep_start: String,
+    sleep_end: String,
+    context_start: String,
+    context_end: String,
+    rest_mode_start: String,
+    rest_mode_end: String,
+}
+
+fn live_review_load_bounds(
+    daily_history: &[DailyOverviewRow],
+    heartrate_days: &[HeartRateDay],
+    latest_review_day: Option<&str>,
+) -> crate::error::Result<Option<LiveReviewLoadBounds>> {
+    let mut anchor_days = daily_history
+        .iter()
+        .map(|row| row.day.as_str())
+        .chain(heartrate_days.iter().map(|day| day.day.as_str()))
+        .collect::<Vec<_>>();
+    if let Some(latest_review_day) = latest_review_day {
+        anchor_days.push(latest_review_day);
+    }
+
+    let Some(oldest_anchor) = anchor_days.iter().min().copied() else {
+        return Ok(None);
+    };
+    let newest_anchor = anchor_days.iter().max().copied().unwrap_or(oldest_anchor);
+
+    let (signal_start_day, signal_end_day) = bounded_day_range(
+        oldest_anchor,
+        newest_anchor,
+        LIVE_REVIEW_SIGNAL_LOOKBACK_DAYS,
+        0,
+    )?;
+    let (sleep_start_day, sleep_end_day) = bounded_day_range(
+        oldest_anchor,
+        newest_anchor,
+        LIVE_REVIEW_SLEEP_LOOKBACK_DAYS,
+        0,
+    )?;
+    let (context_start_day, context_end_day) = bounded_day_range(
+        oldest_anchor,
+        newest_anchor,
+        LIVE_REVIEW_CONTEXT_LOOKBACK_DAYS,
+        LIVE_REVIEW_CONTEXT_FORWARD_DAYS,
+    )?;
+    let (rest_mode_start_day, rest_mode_end_day) = bounded_day_range(
+        oldest_anchor,
+        newest_anchor,
+        LIVE_REVIEW_REST_MODE_LOOKBACK_DAYS,
+        LIVE_REVIEW_CONTEXT_FORWARD_DAYS,
+    )?;
+
+    Ok(Some(LiveReviewLoadBounds {
+        signal_start: signal_start_day,
+        signal_end: signal_end_day,
+        sleep_start: sleep_start_day,
+        sleep_end: sleep_end_day,
+        context_start: context_start_day,
+        context_end: context_end_day,
+        rest_mode_start: rest_mode_start_day,
+        rest_mode_end: rest_mode_end_day,
+    }))
+}
+
+fn bounded_day_range(
+    oldest_anchor: &str,
+    newest_anchor: &str,
+    lookback_days: i64,
+    forward_days: i64,
+) -> crate::error::Result<(String, String)> {
+    let oldest_anchor = parse_app_day(oldest_anchor)?;
+    let newest_anchor = parse_app_day(newest_anchor)?;
+    let start_day = oldest_anchor
+        .checked_sub(time::Duration::days(lookback_days))
+        .unwrap_or(oldest_anchor);
+    let end_day = newest_anchor
+        .checked_add(time::Duration::days(forward_days))
+        .unwrap_or(newest_anchor);
+    Ok((start_day.to_string(), end_day.to_string()))
+}
+
+fn parse_app_day(day: &str) -> crate::error::Result<Date> {
+    Date::parse(
+        day,
+        &time::macros::format_description!("[year]-[month]-[day]"),
+    )
+    .map_err(|error| {
+        crate::error::RingmasterError::Config(format!(
+            "failed to parse app review day `{day}`: {error}"
+        ))
+    })
 }
 
 fn empty_review_deck(mode: ReviewMode, anchor_day: &str, error: impl ToString) -> ReviewDeck {
@@ -4142,7 +4270,7 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
             derived_review_signal_days: 4,
             ..RecordCounts::default()
         },
-        schema_version: 11,
+        schema_version: crate::store::migrations::current_version(),
         database_path: config.paths.database_file.display().to_string(),
         config_path: config.paths.config_file.display().to_string(),
     }
@@ -4309,7 +4437,7 @@ mod tests {
                 workouts: 1,
                 ..RecordCounts::default()
             },
-            schema_version: 11,
+            schema_version: crate::store::migrations::current_version(),
             database_path: ":memory:".to_owned(),
             config_path: "config.toml".to_owned(),
         }
@@ -4535,5 +4663,84 @@ mod tests {
 
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].signal_key, "stress_high");
+    }
+
+    #[test]
+    fn investigate_mode_sorts_equal_scores_deterministically() {
+        let today = ReviewDeck {
+            mode: ReviewMode::Today,
+            anchor_day: "2026-04-08".to_owned(),
+            observations: vec![
+                make_review_card("today-b", "stress_high", 5),
+                make_review_card("today-a", "recovery_high", 5),
+            ],
+            positive_changes: Vec::new(),
+            negative_drifts: Vec::new(),
+            unresolved_anomalies: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let week = ReviewDeck {
+            mode: ReviewMode::Week,
+            anchor_day: "2026-04-08".to_owned(),
+            observations: vec![make_review_card("week-a", "stress_high", 5)],
+            positive_changes: Vec::new(),
+            negative_drifts: Vec::new(),
+            unresolved_anomalies: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let investigation = InvestigationReport {
+            focus: ReviewFocus::Stress,
+            anchor_day: "2026-04-08".to_owned(),
+            headline: "Stress investigation".to_owned(),
+            summary: "stress summary".to_owned(),
+            confidence: ReviewConfidence::Medium,
+            sufficiency: ReviewSufficiency::Medium,
+            evidence: Vec::new(),
+            counterevidence: Vec::new(),
+            warnings: Vec::new(),
+            look_at: Vec::new(),
+        };
+
+        let cards = super::review_cards_for_mode(
+            ReviewScreenMode::Investigate,
+            &today,
+            &week,
+            &investigation,
+        );
+
+        assert_eq!(
+            cards
+                .iter()
+                .map(|card| card.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["today-a", "today-b", "week-a"]
+        );
+    }
+
+    #[test]
+    fn live_review_load_bounds_stay_bounded_to_visible_anchor_span() {
+        let daily_history = vec![crate::store::queries::DailyOverviewRow {
+            day: "2026-04-08".to_owned(),
+            sleep_score: Some(80),
+            readiness_score: Some(81),
+            activity_score: Some(79),
+            updated_at: "2026-04-08T12:00:00Z".to_owned(),
+        }];
+        let heartrate_days = vec![HeartRateDay {
+            day: "2026-04-10".to_owned(),
+            points: Vec::new(),
+        }];
+
+        let bounds =
+            super::live_review_load_bounds(&daily_history, &heartrate_days, Some("2026-04-12"))
+                .unwrap_or_else(|error| panic!("load bounds should build: {error}"))
+                .unwrap_or_else(|| panic!("load bounds should exist"));
+
+        assert_eq!(bounds.signal_start, "2026-02-07");
+        assert_eq!(bounds.signal_end, "2026-04-12");
+        assert_eq!(bounds.context_start, "2026-01-08");
+        assert_eq!(bounds.context_end, "2026-04-19");
+        assert_eq!(bounds.rest_mode_start, "2025-10-10");
+        assert_eq!(bounds.rest_mode_end, "2026-04-19");
     }
 }

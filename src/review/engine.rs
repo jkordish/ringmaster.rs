@@ -221,11 +221,6 @@ fn build_week_measurements<'a>(
         .ok_or_else(|| {
             RingmasterError::Config("weekly review underflowed anchor day".to_owned())
         })?;
-    let baseline_start = week_start
-        .checked_sub(time::Duration::days(28))
-        .ok_or_else(|| {
-            RingmasterError::Config("weekly baseline underflowed anchor day".to_owned())
-        })?;
 
     let mut measurements = Vec::new();
     for definition in signal_definitions()
@@ -237,6 +232,21 @@ fn build_week_measurements<'a>(
                 .contains(&crate::review::registry::ReviewSurface::Week)
         })
     {
+        let baseline_window_days =
+            i64::try_from(definition.baseline_window_days).map_err(|error| {
+                RingmasterError::Config(format!(
+                    "baseline window overflowed i64 for {}: {error}",
+                    definition.key
+                ))
+            })?;
+        let baseline_start = week_start
+            .checked_sub(time::Duration::days(baseline_window_days))
+            .ok_or_else(|| {
+                RingmasterError::Config(format!(
+                    "weekly baseline underflowed anchor day for {}",
+                    definition.key
+                ))
+            })?;
         let current_values = inputs
             .signal_days
             .iter()
@@ -265,6 +275,7 @@ fn build_week_measurements<'a>(
             definition.weekly_aggregation,
             &baseline_values,
             baseline_start,
+            definition.baseline_window_days,
         )?;
         let baseline_mean = mean_value(&baseline_aggregates);
         let baseline_stddev = standard_deviation(&baseline_aggregates);
@@ -286,12 +297,7 @@ fn build_week_measurements<'a>(
             .map(|(_, row)| row.stale_days)
             .min()
             .unwrap_or_default();
-        let sufficiency = ReviewSufficiency::from_comparable_days(
-            baseline_values
-                .iter()
-                .filter_map(|(_, row)| row.numeric_value)
-                .count(),
-        );
+        let sufficiency = ReviewSufficiency::from_comparable_days(baseline_aggregates.len());
 
         measurements.push(AggregateMeasurement {
             definition,
@@ -670,10 +676,17 @@ fn aggregate_baseline_weeks(
     aggregation: WeeklyAggregation,
     baseline_values: &[(Date, &ReviewSignalDayRecord)],
     baseline_start: Date,
+    baseline_window_days: usize,
 ) -> Result<Vec<f64>> {
     let mut weekly_aggregates = Vec::new();
+    let week_count = baseline_window_days.div_ceil(7);
 
-    for week_offset in 0_i64..4_i64 {
+    for week_offset in 0..week_count {
+        let week_offset = i64::try_from(week_offset).map_err(|error| {
+            RingmasterError::Config(format!(
+                "weekly baseline week offset overflowed i64: {error}"
+            ))
+        })?;
         let window_start = baseline_start
             .checked_add(time::Duration::days(week_offset * 7))
             .ok_or_else(|| {
@@ -1087,6 +1100,124 @@ mod tests {
                 .all(|card| card.signal_key.as_str() != "steps"),
             "equal weekly step totals should not be ranked as a drift"
         );
+    }
+
+    #[test]
+    fn weekly_measurements_respect_signal_baseline_window() {
+        let auth_status = auth_status();
+        let start_day = time::Date::from_calendar_date(2026, Month::March, 5)
+            .unwrap_or_else(|error| panic!("test start day should be valid: {error}"));
+        let signal_days = (0_i64..35_i64)
+            .map(|offset| {
+                let day = start_day
+                    .checked_add(time::Duration::days(offset))
+                    .unwrap_or_else(|| panic!("test day should stay in range"));
+                let day = day
+                    .format(&time::macros::format_description!("[year]-[month]-[day]"))
+                    .unwrap_or_else(|error| panic!("test day should format: {error}"));
+                let baseline_value = match offset {
+                    0..=6 => 200.0,
+                    7..=27 => 100.0,
+                    28..=34 => 150.0,
+                    _ => 0.0,
+                };
+                ReviewSignalDayRecord {
+                    signal_key: "steps".to_owned(),
+                    day,
+                    numeric_value: Some(baseline_value),
+                    text_value: None,
+                    baseline_mean: Some(baseline_value),
+                    baseline_stddev: Some(10.0),
+                    delta: Some(0.0),
+                    z_score: Some(0.0),
+                    persistence_days: 0,
+                    sufficiency: ReviewSufficiency::Strong,
+                    stale_days: 0,
+                    metadata_json: "{}".to_owned(),
+                    updated_at: "2026-04-08T12:00:00Z".to_owned(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let deck = build_review_deck(
+            ReviewMode::Week,
+            "2026-04-08",
+            &ReviewInputs {
+                auth_status: &auth_status,
+                signal_days: &signal_days,
+                context_events: &[],
+                pattern_summaries: &[],
+                sleep_time: &[],
+                rest_mode_periods: &[],
+            },
+        )
+        .unwrap_or_else(|error| panic!("weekly review should build: {error}"));
+
+        let steps_card = ranked_cards(&deck)
+            .into_iter()
+            .find(|card| card.signal_key == "steps")
+            .unwrap_or_else(|| panic!("steps card should be ranked"));
+
+        assert!(
+            steps_card
+                .evidence
+                .iter()
+                .any(|line| line.contains("700.0 recent baseline")),
+            "steps should compare against the configured 21-day baseline, not an older fourth week"
+        );
+    }
+
+    #[test]
+    fn weekly_sufficiency_uses_comparable_weekly_aggregates() {
+        let auth_status = auth_status();
+        let start_day = time::Date::from_calendar_date(2026, Month::March, 5)
+            .unwrap_or_else(|error| panic!("test start day should be valid: {error}"));
+        let signal_days = [(0_i64, 40.0), (8_i64, 41.0), (16_i64, 42.0), (28_i64, 43.0)]
+            .into_iter()
+            .map(|(offset, value)| {
+                let day = start_day
+                    .checked_add(time::Duration::days(offset))
+                    .unwrap_or_else(|| panic!("test day should stay in range"))
+                    .format(&time::macros::format_description!("[year]-[month]-[day]"))
+                    .unwrap_or_else(|error| panic!("test day should format: {error}"));
+                ReviewSignalDayRecord {
+                    signal_key: "vo2_max".to_owned(),
+                    day,
+                    numeric_value: Some(value),
+                    text_value: None,
+                    baseline_mean: Some(value),
+                    baseline_stddev: Some(1.0),
+                    delta: Some(0.0),
+                    z_score: Some(0.0),
+                    persistence_days: 0,
+                    sufficiency: ReviewSufficiency::Strong,
+                    stale_days: 0,
+                    metadata_json: "{}".to_owned(),
+                    updated_at: "2026-04-08T12:00:00Z".to_owned(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let deck = build_review_deck(
+            ReviewMode::Week,
+            "2026-04-08",
+            &ReviewInputs {
+                auth_status: &auth_status,
+                signal_days: &signal_days,
+                context_events: &[],
+                pattern_summaries: &[],
+                sleep_time: &[],
+                rest_mode_periods: &[],
+            },
+        )
+        .unwrap_or_else(|error| panic!("weekly review should build: {error}"));
+
+        let vo2_card = ranked_cards(&deck)
+            .into_iter()
+            .find(|card| card.signal_key == "vo2_max")
+            .unwrap_or_else(|| panic!("vo2 max card should be ranked"));
+
+        assert_eq!(vo2_card.sufficiency, ReviewSufficiency::Thin);
     }
 
     #[test]
