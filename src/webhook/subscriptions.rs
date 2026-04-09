@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use reqwest::Client as HttpClient;
@@ -574,11 +574,15 @@ fn desired_targets(
     };
 
     let mut desired = Vec::new();
+    let mut seen = BTreeSet::new();
     for subscription in &config.webhook.subscriptions {
         if !subscription.enabled {
             continue;
         }
         for event_type in subscription.normalized_event_types() {
+            if !seen.insert((subscription.data_type.clone(), event_type)) {
+                continue;
+            }
             desired.push(DesiredWebhookSubscriptionTarget {
                 data_type: subscription.data_type.clone(),
                 event_type,
@@ -907,6 +911,64 @@ mod tests {
                 .list_remote_subscriptions()
                 .unwrap_or_else(|error| panic!("remote snapshot should load: {error}"))
                 .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn fixture_backed_sync_dedupes_repeated_desired_targets_before_snapshot_persistence() {
+        let fixture_dir =
+            tempdir().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        std::fs::write(
+            fixture_dir.path().join("subscriptions.context.json"),
+            r#"{"callback_url":"https://fixture.test/webhooks/oura","verification_token":"fixture-token"}"#,
+        )
+        .unwrap_or_else(|error| panic!("context fixture write should succeed: {error}"));
+        std::fs::write(fixture_dir.path().join("subscriptions.remote.json"), r"[]")
+            .unwrap_or_else(|error| panic!("remote fixture write should succeed: {error}"));
+
+        let mut config =
+            Config::load().unwrap_or_else(|error| panic!("config should load: {error}"));
+        config
+            .webhook
+            .subscriptions
+            .push(crate::webhook::DesiredWebhookSubscription {
+                data_type: "daily_sleep".to_owned(),
+                event_types: vec![WebhookEventType::Create, WebhookEventType::Update],
+                enabled: true,
+            });
+
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let report = sync_subscriptions(
+            &config,
+            &store,
+            SubscriptionSyncOptions {
+                dry_run: true,
+                prune: false,
+                fixture_dir: Some(fixture_dir.path().to_path_buf()),
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("fixture sync should succeed: {error}"));
+
+        let desired = store
+            .webhook()
+            .list_desired_subscriptions()
+            .unwrap_or_else(|error| panic!("desired snapshot should load: {error}"));
+        let unique_keys = desired
+            .iter()
+            .map(|record| (record.data_type.clone(), record.event_type))
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(report.dry_run);
+        assert_eq!(desired.len(), unique_keys.len());
+        assert_eq!(
+            desired
+                .iter()
+                .filter(|record| record.data_type == "daily_sleep"
+                    && record.event_type == WebhookEventType::Create)
+                .count(),
             1
         );
     }

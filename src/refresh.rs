@@ -170,16 +170,33 @@ pub fn next_wake_duration(
 
 pub async fn run_watch(config: &Config, options: WatchOptions) -> Result<WatchReport> {
     let store = Store::open(config)?;
-    let fixture_dir = resolve_fixture_dir(config, &options);
-    let dry_run = options.dry_run || options.demo;
     upsert_watch_heartbeat(
         &store,
         config,
         watch_mode_label(config),
         Some("watch loop starting".to_owned()),
     )?;
+    let result = run_watch_inner(config, &store, options).await;
+    match &result {
+        Ok(report) => write_stopped_watch_heartbeat(&store, config, report)?,
+        Err(error) => write_stopped_watch_heartbeat_detail(
+            &store,
+            config,
+            format!("watch loop stopped after error: {error}"),
+        )?,
+    }
+    result
+}
+
+async fn run_watch_inner(
+    config: &Config,
+    store: &Store,
+    options: WatchOptions,
+) -> Result<WatchReport> {
+    let fixture_dir = resolve_fixture_dir(config, &options);
+    let dry_run = options.dry_run || options.demo;
     if options.max_iterations == Some(0) {
-        let report = WatchReport {
+        return Ok(WatchReport {
             iterations: 0,
             dry_run,
             demo: options.demo,
@@ -188,9 +205,7 @@ pub async fn run_watch(config: &Config, options: WatchOptions) -> Result<WatchRe
             notes: vec![
                 "watch loop stopped before syncing because max_iterations was set to 0".to_owned(),
             ],
-        };
-        write_stopped_watch_heartbeat(&store, config, &report)?;
-        return Ok(report);
+        });
     }
     let mut simulated_sync_states = if dry_run {
         Some(store.sync_state().list()?)
@@ -203,7 +218,7 @@ pub async fn run_watch(config: &Config, options: WatchOptions) -> Result<WatchRe
 
     loop {
         upsert_watch_heartbeat(
-            &store,
+            store,
             config,
             watch_mode_label(config),
             Some("watch loop idle".to_owned()),
@@ -211,7 +226,7 @@ pub async fn run_watch(config: &Config, options: WatchOptions) -> Result<WatchRe
 
         let (invalidation_report, interrupted_during_invalidation) =
             await_non_cancelable_sync_or_interrupt(
-                process_pending_invalidations_once(config, &store, dry_run, fixture_dir.clone()),
+                process_pending_invalidations_once(config, store, dry_run, fixture_dir.clone()),
                 tokio::signal::ctrl_c(),
             )
             .await?;
@@ -298,7 +313,7 @@ pub async fn run_watch(config: &Config, options: WatchOptions) -> Result<WatchRe
         let report = match await_sync_or_interrupt(
             sync_selected(
                 config,
-                &store,
+                store,
                 SyncOptions {
                     dry_run,
                     fixture_dir: fixture_dir.clone(),
@@ -349,7 +364,6 @@ pub async fn run_watch(config: &Config, options: WatchOptions) -> Result<WatchRe
         last_report,
         notes,
     };
-    write_stopped_watch_heartbeat(&store, config, &report)?;
     Ok(report)
 }
 
@@ -847,6 +861,14 @@ fn write_stopped_watch_heartbeat(
             report.iterations
         )
     });
+    write_stopped_watch_heartbeat_detail(store, config, detail)
+}
+
+fn write_stopped_watch_heartbeat_detail(
+    store: &Store,
+    config: &Config,
+    detail: String,
+) -> Result<()> {
     upsert_watch_heartbeat(store, config, "stopped", Some(detail))
 }
 
@@ -1350,6 +1372,74 @@ mod tests {
             vec![
                 "watch loop stopped before syncing because max_iterations was set to 0".to_owned()
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_error_still_records_stopped_heartbeat() {
+        let config = test_config();
+        let store = Store::open(&config)
+            .unwrap_or_else(|error| panic!("store should open before watch error: {error}"));
+        let queued_at = crate::store::webhook_store::now_rfc3339()
+            .unwrap_or_else(|error| panic!("timestamp should render: {error}"));
+        let delivery_id = seed_delivery(
+            &store,
+            "daily_sleep",
+            crate::webhook::WebhookEventType::Create,
+            "sleep_2026-04-08",
+        );
+        let invalidation = store
+            .webhook()
+            .enqueue_invalidation(&crate::store::webhook_store::InvalidationInput {
+                queue_key: "daily_sleep:create:sleep_2026-04-08".to_owned(),
+                data_type: "daily_sleep".to_owned(),
+                event_type: crate::webhook::WebhookEventType::Create,
+                object_id: Some("sleep_2026-04-08".to_owned()),
+                delivery_id,
+                queued_at: queued_at.clone(),
+                available_at: queued_at,
+            })
+            .unwrap_or_else(|error| {
+                panic!("invalidation should queue before watch error: {error}")
+            });
+        store
+            .webhook()
+            .overwrite_invalidation_available_at(invalidation.invalidation_id, "not-a-timestamp")
+            .unwrap_or_else(|error| {
+                panic!("invalidation timestamp should corrupt before watch error: {error}")
+            });
+        let error = run_watch(
+            &config,
+            WatchOptions {
+                dry_run: true,
+                demo: false,
+                fixture_dir: None,
+                max_iterations: Some(1),
+            },
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("watch should fail when invalidation timestamps are malformed"));
+
+        assert!(error.to_string().contains("invalid"));
+        let heartbeat = Store::open(&config)
+            .unwrap_or_else(|open_error| {
+                panic!("store should reopen after watch error: {open_error}")
+            })
+            .webhook()
+            .list_runtime_heartbeats()
+            .unwrap_or_else(|load_error| {
+                panic!("heartbeats should load after watch error: {load_error}")
+            })
+            .into_iter()
+            .find(|record| record.component == "sync.watch")
+            .unwrap_or_else(|| panic!("sync.watch heartbeat should exist after watch error"));
+        assert_eq!(heartbeat.mode, "stopped");
+        assert!(
+            heartbeat
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("watch loop stopped after error"))
         );
     }
 

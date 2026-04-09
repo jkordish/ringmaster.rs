@@ -605,6 +605,21 @@ impl<'connection> WebhookStore<'connection> {
         Ok(records)
     }
 
+    #[cfg(test)]
+    pub fn overwrite_invalidation_available_at(
+        &self,
+        invalidation_id: i64,
+        available_at: &str,
+    ) -> Result<()> {
+        self.connection.execute(
+            "UPDATE webhook_invalidations
+             SET available_at = ?1
+             WHERE invalidation_id = ?2",
+            params![available_at, invalidation_id],
+        )?;
+        Ok(())
+    }
+
     pub fn claim_available_invalidations(
         &self,
         lease_owner: &str,
