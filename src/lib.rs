@@ -77,6 +77,14 @@ struct TempRootGuard {
 const FIXTURE_SNAPSHOT_WEBHOOK_BIND_ADDRESS: &str = "127.0.0.1:8799";
 const FIXTURE_SNAPSHOT_WEBHOOK_PATH: &str = "/webhooks/oura";
 const FIXTURE_SNAPSHOT_WEBHOOK_CALLBACK_URL: &str = "https://fixture.example.test/webhooks/oura";
+const FIXTURE_SNAPSHOT_AUTH_CALLBACK_URL: &str = "http://127.0.0.1:8788/callback";
+const FIXTURE_SNAPSHOT_AUTH_TIMEOUT_SECS: u64 = 120;
+const FIXTURE_SNAPSHOT_SECRET_BACKEND: &str = "fixture-memory";
+const FIXTURE_SNAPSHOT_ACCESS_TOKEN_EXPIRES_AT: &str = "2026-04-09T12:45:00Z";
+const FIXTURE_SNAPSHOT_LAST_AUTHENTICATED_AT: &str = "2026-04-09T08:45:00Z";
+const FIXTURE_SNAPSHOT_LAST_REFRESH_AT: &str = "2026-04-09T11:45:00Z";
+const FIXTURE_SNAPSHOT_ACCOUNT_ID: &str = "fixture-user";
+const FIXTURE_SNAPSHOT_ACCOUNT_EMAIL: &str = "fixture@example.com";
 const FIXTURE_SNAPSHOT_BASE_SYNC_ATTEMPTED_AT: &str = "2026-04-09T11:58:00Z";
 const FIXTURE_SNAPSHOT_BASE_SYNC_COMPLETED_AT: &str = "2026-04-09T11:59:00Z";
 const FIXTURE_SNAPSHOT_STALE_SYNC_ATTEMPTED_AT: &str = "2026-04-09T05:00:00Z";
@@ -894,6 +902,7 @@ fn apply_fixture_snapshot_overlay(snapshot: &mut app::LiveSnapshot, fixture_dir:
     "2026-04-09T12:00:00Z".clone_into(&mut snapshot.captured_at);
     snapshot.config_path = format!("{fixture_display_path}/config.toml");
     snapshot.database_path = format!("{fixture_display_path}/ringmaster.db");
+    normalize_fixture_snapshot_auth_status(&mut snapshot.auth_status, fixture_dir);
     FIXTURE_SNAPSHOT_WEBHOOK_BIND_ADDRESS.clone_into(&mut snapshot.webhook.bind_address);
     FIXTURE_SNAPSHOT_WEBHOOK_PATH.clone_into(&mut snapshot.webhook.path);
     snapshot.webhook.callback_url = Some(FIXTURE_SNAPSHOT_WEBHOOK_CALLBACK_URL.to_owned());
@@ -913,6 +922,65 @@ fn apply_fixture_snapshot_overlay(snapshot: &mut app::LiveSnapshot, fixture_dir:
         FIXTURE_SNAPSHOT_BASE_SYNC_ATTEMPTED_AT,
         FIXTURE_SNAPSHOT_BASE_SYNC_COMPLETED_AT,
     );
+}
+
+fn normalize_fixture_snapshot_auth_status(
+    auth_status: &mut crate::oura::models::AuthStatus,
+    fixture_dir: &std::path::Path,
+) {
+    let granted_scopes = fixture_snapshot_granted_scopes(fixture_dir);
+    auth_status.configured = true;
+    FIXTURE_SNAPSHOT_AUTH_CALLBACK_URL.clone_into(&mut auth_status.callback_url);
+    auth_status.requested_scopes.clone_from(&granted_scopes);
+    auth_status.granted_scopes.clone_from(&granted_scopes);
+    auth_status.missing_fields.clear();
+    auth_status.capability_report =
+        crate::oura::models::CapabilityReport::from_scopes(&granted_scopes, &granted_scopes);
+    auth_status.auth_timeout_secs = FIXTURE_SNAPSHOT_AUTH_TIMEOUT_SECS;
+    FIXTURE_SNAPSHOT_SECRET_BACKEND.clone_into(&mut auth_status.secret_backend);
+    auth_status.access_token_stored = true;
+    auth_status.refresh_token_stored = true;
+    auth_status.access_token_expires_at = Some(FIXTURE_SNAPSHOT_ACCESS_TOKEN_EXPIRES_AT.to_owned());
+    auth_status.last_authenticated_at = Some(FIXTURE_SNAPSHOT_LAST_AUTHENTICATED_AT.to_owned());
+    auth_status.last_refresh_at = Some(FIXTURE_SNAPSHOT_LAST_REFRESH_AT.to_owned());
+    auth_status.account_id = Some(FIXTURE_SNAPSHOT_ACCOUNT_ID.to_owned());
+    auth_status.account_email = Some(FIXTURE_SNAPSHOT_ACCOUNT_EMAIL.to_owned());
+    auth_status.last_error = None;
+}
+
+fn fixture_snapshot_granted_scopes(fixture_dir: &std::path::Path) -> Vec<String> {
+    let mut scopes = Vec::new();
+    if fixture_dir.join("personal_info.json").is_file() {
+        scopes.push("personal".to_owned());
+    }
+    let daily_files = [
+        fixture_dir.join("daily_sleep.json"),
+        fixture_dir.join("daily_readiness.json"),
+        fixture_dir.join("daily_activity.json"),
+        fixture_dir.join("sleep_time.json"),
+        fixture_dir.join("rest_mode_periods.json"),
+        fixture_dir.join("daily_stress.json"),
+        fixture_dir.join("daily_resilience.json"),
+        fixture_dir.join("daily_cardiovascular_age.json"),
+        fixture_dir.join("vo2_max.json"),
+    ];
+    if daily_files.iter().any(|path| path.is_file()) {
+        scopes.push("daily".to_owned());
+    }
+    if fixture_dir.join("heartrate.json").is_file() {
+        scopes.push("heartrate".to_owned());
+    }
+    if fixture_dir.join("workouts.json").is_file() {
+        scopes.push("workout".to_owned());
+    }
+    if fixture_dir.join("enhanced_tags.json").is_file() {
+        scopes.push("enhanced_tag".to_owned());
+    }
+    if fixture_dir.join("sessions.json").is_file() {
+        scopes.push("session".to_owned());
+    }
+
+    scopes
 }
 
 fn apply_scenario_fixture_snapshot_overlay(
@@ -3102,9 +3170,23 @@ mod tests {
     #[tokio::test]
     async fn single_fixture_status_snapshots_are_stable_across_host_config_and_temp_roots() {
         let fixture_dir = std::path::PathBuf::from("tests/fixtures/phase3");
-        let (_first_tempdir, first_config) =
+        let (_first_tempdir, mut first_config) =
             test_config(Some("https://host-one.example.test"), Some("verify-one"));
-        let (_second_tempdir, second_config) = test_config(None, None);
+        let (_second_tempdir, mut second_config) = test_config(None, None);
+        first_config.oura.client_secret = None;
+        first_config.oura.callback_bind = "127.0.0.1:9999"
+            .parse()
+            .unwrap_or_else(|error| panic!("test callback bind should parse: {error}"));
+        first_config.oura.callback_path = "/custom-callback".to_owned();
+        first_config.oura.requested_scopes = vec!["personal".to_owned()];
+        second_config.oura.requested_scopes = vec![
+            "personal".to_owned(),
+            "daily".to_owned(),
+            "heartrate".to_owned(),
+            "workout".to_owned(),
+            "enhanced_tag".to_owned(),
+            "session".to_owned(),
+        ];
 
         let mut first_app = super::build_fixture_snapshot_app(
             &first_config,
@@ -3137,6 +3219,76 @@ mod tests {
         );
         assert!(first_snapshot.contains(super::FIXTURE_SNAPSHOT_WEBHOOK_CALLBACK_URL));
         assert!(first_snapshot.contains(super::FIXTURE_SNAPSHOT_BASE_SYNC_COMPLETED_AT));
+        assert!(first_snapshot.contains("Auth state: authenticated"));
+        assert!(first_snapshot.contains(
+            "Granted scopes: personal, daily, heartrate, workout, enhanced_tag, session"
+        ));
+        assert!(first_snapshot.contains("Secret backend: fixture-memory"));
         assert!(first_snapshot.contains("tests/fixtures/phase3/ringmaster.db"));
+    }
+
+    #[tokio::test]
+    async fn single_fixture_snapshots_normalize_auth_state_from_fixture_data() {
+        let fixture_dir = std::path::PathBuf::from("tests/fixtures/phase3");
+        let (_tempdir, mut config) = test_config(None, None);
+        config.oura.client_secret = None;
+        config.oura.callback_bind = "127.0.0.1:9999"
+            .parse()
+            .unwrap_or_else(|error| panic!("test callback bind should parse: {error}"));
+        config.oura.callback_path = "/custom-callback".to_owned();
+        config.oura.requested_scopes = vec!["personal".to_owned()];
+
+        let snapshot = super::load_fixture_snapshot(&config, fixture_dir)
+            .await
+            .unwrap_or_else(|error| panic!("single-fixture snapshot should load: {error}"));
+
+        assert!(snapshot.auth_status.configured);
+        assert_eq!(
+            snapshot.auth_status.callback_url,
+            super::FIXTURE_SNAPSHOT_AUTH_CALLBACK_URL
+        );
+        assert_eq!(
+            snapshot.auth_status.requested_scopes,
+            vec![
+                "personal".to_owned(),
+                "daily".to_owned(),
+                "heartrate".to_owned(),
+                "workout".to_owned(),
+                "enhanced_tag".to_owned(),
+                "session".to_owned(),
+            ]
+        );
+        assert_eq!(
+            snapshot.auth_status.granted_scopes,
+            snapshot.auth_status.requested_scopes
+        );
+        assert!(snapshot.auth_status.missing_fields.is_empty());
+        assert_eq!(
+            snapshot.auth_status.secret_backend,
+            super::FIXTURE_SNAPSHOT_SECRET_BACKEND
+        );
+        assert!(snapshot.auth_status.access_token_stored);
+        assert!(snapshot.auth_status.refresh_token_stored);
+        assert_eq!(
+            snapshot.auth_status.access_token_expires_at.as_deref(),
+            Some(super::FIXTURE_SNAPSHOT_ACCESS_TOKEN_EXPIRES_AT)
+        );
+        assert_eq!(
+            snapshot.auth_status.last_authenticated_at.as_deref(),
+            Some(super::FIXTURE_SNAPSHOT_LAST_AUTHENTICATED_AT)
+        );
+        assert_eq!(
+            snapshot.auth_status.last_refresh_at.as_deref(),
+            Some(super::FIXTURE_SNAPSHOT_LAST_REFRESH_AT)
+        );
+        assert_eq!(
+            snapshot.auth_status.account_id.as_deref(),
+            Some(super::FIXTURE_SNAPSHOT_ACCOUNT_ID)
+        );
+        assert_eq!(
+            snapshot.auth_status.account_email.as_deref(),
+            Some(super::FIXTURE_SNAPSHOT_ACCOUNT_EMAIL)
+        );
+        assert!(snapshot.auth_status.last_error.is_none());
     }
 }
