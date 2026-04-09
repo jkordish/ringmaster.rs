@@ -1772,7 +1772,11 @@ impl<'connection> ViewStore<'connection> {
                     UNION ALL
                     SELECT day FROM sessions
                     UNION ALL
-                    SELECT COALESCE(end_day, start_day) AS day FROM rest_mode_periods
+                    SELECT CASE
+                        WHEN end_day IS NULL THEN MAX(start_day, DATE('now'))
+                        ELSE end_day
+                    END AS day
+                    FROM rest_mode_periods
                 )",
                 [],
                 |row| row.get::<_, Option<String>>(0),
@@ -1788,7 +1792,11 @@ impl<'connection> ViewStore<'connection> {
                     UNION ALL
                     SELECT day FROM sleep_time
                     UNION ALL
-                    SELECT COALESCE(end_day, start_day) AS day FROM rest_mode_periods
+                    SELECT CASE
+                        WHEN end_day IS NULL THEN MAX(start_day, DATE('now'))
+                        ELSE end_day
+                    END AS day
+                    FROM rest_mode_periods
                 )",
                 [],
                 |row| row.get::<_, Option<String>>(0),
@@ -2776,6 +2784,8 @@ fn now_rfc3339() -> Result<String> {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
+    use time::OffsetDateTime;
+
     use crate::error::OuraProblem;
     use crate::review::features::ReviewSufficiency;
     use crate::store::Store;
@@ -2961,6 +2971,36 @@ mod tests {
     }
 
     #[test]
+    fn latest_source_day_treats_open_rest_mode_as_current() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let current_day = OffsetDateTime::now_utc().date().to_string();
+        store
+            .imports()
+            .upsert_rest_mode_period(&RestModePeriodRecord {
+                period_id: "rest-open".to_owned(),
+                start_day: "2026-04-01".to_owned(),
+                start_time: Some("2026-04-01T00:00:00Z".to_owned()),
+                end_day: None,
+                end_time: None,
+                episode_count: 1,
+                tags_json: "[]".to_owned(),
+                raw_cache_key: None,
+                updated_at: "2026-04-01T00:00:00Z".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("rest mode period should seed: {error}"));
+
+        assert_eq!(
+            store
+                .views()
+                .latest_source_day()
+                .unwrap_or_else(|error| panic!("latest day should load: {error}"))
+                .as_deref(),
+            Some(current_day.as_str())
+        );
+    }
+
+    #[test]
     fn latest_review_day_prefers_reviewable_sources() {
         let store =
             Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
@@ -3005,6 +3045,36 @@ mod tests {
                 .unwrap_or_else(|error| panic!("latest review day should load: {error}"))
                 .as_deref(),
             Some("2026-04-10")
+        );
+    }
+
+    #[test]
+    fn latest_review_day_treats_open_rest_mode_as_current() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let current_day = OffsetDateTime::now_utc().date().to_string();
+        store
+            .imports()
+            .upsert_rest_mode_period(&RestModePeriodRecord {
+                period_id: "rest-open".to_owned(),
+                start_day: "2026-04-01".to_owned(),
+                start_time: Some("2026-04-01T00:00:00Z".to_owned()),
+                end_day: None,
+                end_time: None,
+                episode_count: 1,
+                tags_json: "[]".to_owned(),
+                raw_cache_key: None,
+                updated_at: "2026-04-01T00:00:00Z".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("rest mode period should seed: {error}"));
+
+        assert_eq!(
+            store
+                .views()
+                .latest_review_day()
+                .unwrap_or_else(|error| panic!("latest review day should load: {error}"))
+                .as_deref(),
+            Some(current_day.as_str())
         );
     }
 
