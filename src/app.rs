@@ -3551,7 +3551,7 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
             derived_context_events: 3,
             derived_pattern_summaries: 2,
         },
-        schema_version: 8,
+        schema_version: 9,
         database_path: config.paths.database_file.display().to_string(),
         config_path: config.paths.config_file.display().to_string(),
     }
@@ -3692,7 +3692,7 @@ mod tests {
                 workouts: 1,
                 ..RecordCounts::default()
             },
-            schema_version: 8,
+            schema_version: 9,
             database_path: ":memory:".to_owned(),
             config_path: "config.toml".to_owned(),
         }

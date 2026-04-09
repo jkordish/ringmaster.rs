@@ -144,11 +144,6 @@ pub async fn serve(config: &Config) -> Result<WebhookServeReport> {
         config: config.clone(),
         security,
     };
-    write_heartbeat(
-        config,
-        "running",
-        Some(format!("listening on {}", bind_address)),
-    )?;
 
     let app = Router::new()
         .route(
@@ -162,6 +157,11 @@ pub async fn serve(config: &Config) -> Result<WebhookServeReport> {
     let listener = TcpListener::bind(bind_address)
         .await
         .map_err(|error| RingmasterError::io("binding webhook receiver listener", error))?;
+    write_heartbeat(
+        config,
+        "running",
+        Some(format!("listening on {}", bind_address)),
+    )?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let heartbeat_task = tokio::spawn(heartbeat_loop(config.clone(), bind_address, shutdown_rx));
 
@@ -939,13 +939,17 @@ async fn heartbeat_loop(
 #[allow(clippy::panic)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::net::TcpListener as StdTcpListener;
 
     use super::{
         InboundWebhookRequest, ReceiverOutcome, ReceiverSecurityConfig, ReplayFixture,
-        fixture_into_request, process_inbound_request, replay,
+        fixture_into_request, process_inbound_request, replay, serve,
     };
-    use crate::config::Config;
+    use crate::config::{
+        APP_NAME, AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
+    };
     use crate::store::Store;
+    use crate::webhook::default_desired_subscriptions;
     use crate::webhook::receiver::{WebhookReplayOptions, delivery_fingerprint};
     use axum::http::StatusCode;
     use hmac::{Hmac, Mac};
@@ -970,6 +974,76 @@ mod tests {
             signature_secret: "fixture-secret".to_owned(),
             signature_tolerance_secs: 300,
         }
+    }
+
+    fn test_config(bind: std::net::SocketAddr) -> (tempfile::TempDir, Config) {
+        let tempdir = tempdir().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let root = tempdir.path();
+        let config_root = root.join("config");
+        let state_root = root.join("state");
+        let cache_root = root.join("cache");
+        let paths = AppPaths::from_roots(root.to_path_buf(), config_root, state_root, cache_root)
+            .unwrap_or_else(|error| panic!("paths should resolve: {error}"));
+
+        (
+            tempdir,
+            Config {
+                app_name: APP_NAME,
+                paths,
+                logging: LoggingConfig {
+                    filter: "ringmaster=info".to_owned(),
+                },
+                oura: OuraConfig {
+                    client_id: Some("test-client".to_owned()),
+                    client_secret: Some("fixture-secret".to_owned()),
+                    authorize_url: "https://example.invalid/auth".to_owned(),
+                    token_url: "https://example.invalid/token".to_owned(),
+                    api_base_url: "https://example.invalid/api".to_owned(),
+                    callback_bind: "127.0.0.1:8788"
+                        .parse()
+                        .unwrap_or_else(|error| panic!("callback bind should parse: {error}")),
+                    callback_path: "/callback".to_owned(),
+                    requested_scopes: vec!["daily".to_owned()],
+                    auth_timeout_secs: 120,
+                },
+                refresh: RefreshConfig {
+                    personal_interval_secs: 3_600,
+                    daily_interval_secs: 300,
+                    heartrate_interval_secs: 60,
+                    workout_interval_secs: 600,
+                    enhanced_tag_interval_secs: 300,
+                    session_interval_secs: 300,
+                    personal_stale_after_secs: 72 * 60 * 60,
+                    daily_stale_after_secs: 12 * 60 * 60,
+                    heartrate_stale_after_secs: 15 * 60,
+                    workout_stale_after_secs: 24 * 60 * 60,
+                    enhanced_tag_stale_after_secs: 12 * 60 * 60,
+                    session_stale_after_secs: 12 * 60 * 60,
+                    daily_history_days: 90,
+                    daily_overlap_days: 2,
+                    heartrate_history_days: 7,
+                    heartrate_overlap_minutes: 60,
+                    workout_history_days: 90,
+                    workout_overlap_days: 2,
+                    enhanced_tag_history_days: 90,
+                    enhanced_tag_overlap_days: 2,
+                    session_history_days: 90,
+                    session_overlap_days: 2,
+                    max_backoff_secs: 60 * 60,
+                    demo_fixture_dir: None,
+                },
+                webhook: WebhookConfig {
+                    bind,
+                    path: "/webhooks/oura".to_owned(),
+                    public_base_url: Some("https://example.test".to_owned()),
+                    verification_token: Some("fixture-verification-token".to_owned()),
+                    signature_tolerance_secs: 300,
+                    heartbeat_secs: 15,
+                    renewal_lead_secs: 7 * 24 * 60 * 60,
+                    subscriptions: default_desired_subscriptions(),
+                },
+            },
+        )
     }
 
     #[test]
@@ -1465,5 +1539,34 @@ mod tests {
 
         assert_eq!(report.entries.len(), 1);
         assert_eq!(report.entries[0].status, "accepted");
+    }
+
+    #[tokio::test]
+    async fn serve_does_not_write_running_heartbeat_when_bind_fails() {
+        let occupied = StdTcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|error| panic!("listener should bind in test: {error}"));
+        let bind = occupied
+            .local_addr()
+            .unwrap_or_else(|error| panic!("listener addr should load: {error}"));
+        let (_tempdir, config) = test_config(bind);
+
+        let error = serve(&config)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("serve should fail when bind address is occupied"));
+        let message = error.to_string();
+        assert!(message.contains("binding webhook receiver listener"));
+
+        let store = Store::open(&config)
+            .unwrap_or_else(|open_error| panic!("store should open: {open_error}"));
+        let heartbeats = store
+            .webhook()
+            .list_runtime_heartbeats()
+            .unwrap_or_else(|load_error| panic!("heartbeats should load: {load_error}"));
+        assert!(
+            heartbeats
+                .iter()
+                .all(|record| record.component != "webhook.receiver")
+        );
     }
 }

@@ -1536,6 +1536,7 @@ mod tests {
         store
             .imports()
             .upsert_daily_sleep(&DailySleepRecord {
+                oura_id: Some("sleep_document_2026-04-08".to_owned()),
                 day: "2026-04-08".to_owned(),
                 sleep_score: Some(88),
                 raw_cache_key: Some("raw_daily_sleep".to_owned()),
@@ -1553,7 +1554,7 @@ mod tests {
                 signature_timestamp: Some(queued_at.clone()),
                 data_type: Some("daily_sleep".to_owned()),
                 event_type: Some(WebhookEventType::Delete),
-                object_id: Some("2026-04-08".to_owned()),
+                object_id: Some("sleep_document_2026-04-08".to_owned()),
                 payload_json: "{}".to_owned(),
                 headers_json: "{}".to_owned(),
                 query_json: "{}".to_owned(),
@@ -1568,10 +1569,10 @@ mod tests {
         store
             .webhook()
             .enqueue_invalidation(&InvalidationInput {
-                queue_key: "daily_sleep:delete:2026-04-08".to_owned(),
+                queue_key: "daily_sleep:delete:sleep_document_2026-04-08".to_owned(),
                 data_type: "daily_sleep".to_owned(),
                 event_type: WebhookEventType::Delete,
-                object_id: Some("2026-04-08".to_owned()),
+                object_id: Some("sleep_document_2026-04-08".to_owned()),
                 delivery_id,
                 queued_at: queued_at.clone(),
                 available_at: queued_at,

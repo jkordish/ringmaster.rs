@@ -426,6 +426,22 @@ pub const MIGRATIONS: &[Migration] = &[
             ON webhook_invalidations(completed_at, available_at ASC, invalidation_id ASC);
         ",
     },
+    Migration {
+        version: 9,
+        name: "daily_summary_oura_id_mapping",
+        sql: r"
+        ALTER TABLE daily_sleep ADD COLUMN oura_id TEXT;
+        ALTER TABLE daily_readiness ADD COLUMN oura_id TEXT;
+        ALTER TABLE daily_activity ADD COLUMN oura_id TEXT;
+
+        CREATE INDEX IF NOT EXISTS idx_daily_sleep_oura_id
+            ON daily_sleep(oura_id);
+        CREATE INDEX IF NOT EXISTS idx_daily_readiness_oura_id
+            ON daily_readiness(oura_id);
+        CREATE INDEX IF NOT EXISTS idx_daily_activity_oura_id
+            ON daily_activity(oura_id);
+        ",
+    },
 ];
 
 pub fn run_migrations(connection: &mut rusqlite::Connection) -> Result<MigrationReport> {
@@ -505,7 +521,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("migrations should succeed: {error}"));
 
         assert_eq!(report.current_version, current_version());
-        assert_eq!(report.applied_versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(report.applied_versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
 
     #[test]
@@ -577,7 +593,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("phase-3 migrations should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![5, 6, 7, 8]);
+        assert_eq!(report.applied_versions, vec![5, 6, 7, 8, 9]);
 
         let (workout_day, workout_title): (String, String) = connection
             .query_row(
@@ -649,7 +665,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("phase4 migrations should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![7, 8]);
+        assert_eq!(report.applied_versions, vec![7, 8, 9]);
 
         let row: (String, String, String) = connection
             .query_row(
@@ -663,5 +679,48 @@ mod tests {
         assert_eq!(row.0, "legacy-subscription");
         assert_eq!(row.1, "https://example.test/webhooks/oura");
         assert_eq!(row.2, "active");
+    }
+
+    #[test]
+    fn phase5_migration_adds_daily_summary_oura_ids() {
+        let mut connection = Connection::open_in_memory()
+            .unwrap_or_else(|error| panic!("in-memory db should open: {error}"));
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );",
+            )
+            .unwrap_or_else(|error| panic!("schema migrations table should exist: {error}"));
+
+        for migration in &MIGRATIONS[..8] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| panic!("pre-phase5 migration should apply: {error}"));
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+                    params![migration.version, migration.name, "2026-04-08T00:00:00Z"],
+                )
+                .unwrap_or_else(|error| panic!("migration marker should insert: {error}"));
+        }
+
+        let report = run_migrations(&mut connection)
+            .unwrap_or_else(|error| panic!("phase5 migration should succeed: {error}"));
+        assert_eq!(report.applied_versions, vec![9]);
+
+        let daily_sleep_columns: Vec<String> = {
+            let mut statement = connection
+                .prepare("PRAGMA table_info(daily_sleep)")
+                .unwrap_or_else(|error| panic!("daily_sleep schema should prepare: {error}"));
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap_or_else(|error| panic!("daily_sleep schema should query: {error}"));
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap_or_else(|error| panic!("daily_sleep columns should load: {error}"))
+        };
+        assert!(daily_sleep_columns.iter().any(|column| column == "oura_id"));
     }
 }

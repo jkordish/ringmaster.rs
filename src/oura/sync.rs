@@ -375,6 +375,7 @@ async fn sync_daily(
             store.imports().upsert_raw_payload(&page.raw_payload)?;
             for document in &page.documents {
                 store.imports().upsert_daily_sleep(&DailySleepRecord {
+                    oura_id: Some(document.id.clone()),
                     day: document.day.clone(),
                     sleep_score: document.score,
                     raw_cache_key: Some(page.raw_payload.cache_key.clone()),
@@ -388,6 +389,7 @@ async fn sync_daily(
                 store
                     .imports()
                     .upsert_daily_readiness(&DailyReadinessRecord {
+                        oura_id: Some(document.id.clone()),
                         day: document.day.clone(),
                         readiness_score: document.score,
                         temperature_deviation: document.temperature_deviation,
@@ -403,6 +405,7 @@ async fn sync_daily(
                 store
                     .imports()
                     .upsert_daily_activity(&DailyActivityRecord {
+                        oura_id: Some(document.id.clone()),
                         day: document.day.clone(),
                         activity_score: document.score,
                         active_calories: document.active_calories,

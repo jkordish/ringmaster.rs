@@ -638,6 +638,7 @@ mod tests {
         store
             .imports()
             .upsert_daily_sleep(&DailySleepRecord {
+                oura_id: None,
                 day: "2026-04-08".to_owned(),
                 sleep_score: Some(86),
                 raw_cache_key: Some("daily_sleep|fixture".to_owned()),
@@ -647,6 +648,7 @@ mod tests {
         store
             .imports()
             .upsert_daily_readiness(&DailyReadinessRecord {
+                oura_id: None,
                 day: "2026-04-08".to_owned(),
                 readiness_score: Some(83),
                 temperature_deviation: Some(0.11),
@@ -658,6 +660,7 @@ mod tests {
         store
             .imports()
             .upsert_daily_activity(&DailyActivityRecord {
+                oura_id: None,
                 day: "2026-04-08".to_owned(),
                 activity_score: Some(78),
                 active_calories: 601,

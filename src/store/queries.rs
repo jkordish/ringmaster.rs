@@ -62,6 +62,7 @@ pub struct PersonalInfoRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DailySleepRecord {
+    pub oura_id: Option<String>,
     pub day: String,
     pub sleep_score: Option<u8>,
     pub raw_cache_key: Option<String>,
@@ -70,6 +71,7 @@ pub struct DailySleepRecord {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DailyReadinessRecord {
+    pub oura_id: Option<String>,
     pub day: String,
     pub readiness_score: Option<u8>,
     pub temperature_deviation: Option<f64>,
@@ -80,6 +82,7 @@ pub struct DailyReadinessRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DailyActivityRecord {
+    pub oura_id: Option<String>,
     pub day: String,
     pub activity_score: Option<u8>,
     pub active_calories: i64,
@@ -763,13 +766,15 @@ impl<'connection> ImportStore<'connection> {
 
     pub fn upsert_daily_sleep(&self, record: &DailySleepRecord) -> Result<()> {
         self.connection.execute(
-            "INSERT INTO daily_sleep (day, sleep_score, raw_cache_key, updated_at)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO daily_sleep (oura_id, day, sleep_score, raw_cache_key, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(day) DO UPDATE SET
+                oura_id = excluded.oura_id,
                 sleep_score = excluded.sleep_score,
                 raw_cache_key = excluded.raw_cache_key,
                 updated_at = excluded.updated_at",
             params![
+                record.oura_id,
                 record.day,
                 record.sleep_score.map(i64::from),
                 record.raw_cache_key,
@@ -781,28 +786,43 @@ impl<'connection> ImportStore<'connection> {
     }
 
     pub fn delete_daily_sleep(&self, day: &str) -> Result<()> {
-        self.connection
-            .execute("DELETE FROM daily_sleep WHERE day = ?1", params![day])?;
+        if let Some(day_candidate) = extract_day_suffix(day) {
+            self.connection.execute(
+                "DELETE FROM daily_sleep
+                 WHERE day = ?1
+                    OR oura_id = ?1
+                    OR day = ?2",
+                params![day, day_candidate],
+            )?;
+        } else {
+            self.connection.execute(
+                "DELETE FROM daily_sleep WHERE day = ?1 OR oura_id = ?1",
+                params![day],
+            )?;
+        }
         Ok(())
     }
 
     pub fn upsert_daily_readiness(&self, record: &DailyReadinessRecord) -> Result<()> {
         self.connection.execute(
             "INSERT INTO daily_readiness (
+                oura_id,
                 day,
                 readiness_score,
                 temperature_deviation,
                 temperature_trend_deviation,
                 raw_cache_key,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             ON CONFLICT(day) DO UPDATE SET
+                oura_id = excluded.oura_id,
                 readiness_score = excluded.readiness_score,
                 temperature_deviation = excluded.temperature_deviation,
                 temperature_trend_deviation = excluded.temperature_trend_deviation,
                 raw_cache_key = excluded.raw_cache_key,
                 updated_at = excluded.updated_at",
             params![
+                record.oura_id,
                 record.day,
                 record.readiness_score.map(i64::from),
                 record.temperature_deviation,
@@ -816,14 +836,27 @@ impl<'connection> ImportStore<'connection> {
     }
 
     pub fn delete_daily_readiness(&self, day: &str) -> Result<()> {
-        self.connection
-            .execute("DELETE FROM daily_readiness WHERE day = ?1", params![day])?;
+        if let Some(day_candidate) = extract_day_suffix(day) {
+            self.connection.execute(
+                "DELETE FROM daily_readiness
+                 WHERE day = ?1
+                    OR oura_id = ?1
+                    OR day = ?2",
+                params![day, day_candidate],
+            )?;
+        } else {
+            self.connection.execute(
+                "DELETE FROM daily_readiness WHERE day = ?1 OR oura_id = ?1",
+                params![day],
+            )?;
+        }
         Ok(())
     }
 
     pub fn upsert_daily_activity(&self, record: &DailyActivityRecord) -> Result<()> {
         self.connection.execute(
             "INSERT INTO daily_activity (
+                oura_id,
                 day,
                 activity_score,
                 active_calories,
@@ -831,8 +864,9 @@ impl<'connection> ImportStore<'connection> {
                 total_calories,
                 raw_cache_key,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             ON CONFLICT(day) DO UPDATE SET
+                oura_id = excluded.oura_id,
                 activity_score = excluded.activity_score,
                 active_calories = excluded.active_calories,
                 steps = excluded.steps,
@@ -840,6 +874,7 @@ impl<'connection> ImportStore<'connection> {
                 raw_cache_key = excluded.raw_cache_key,
                 updated_at = excluded.updated_at",
             params![
+                record.oura_id,
                 record.day,
                 record.activity_score.map(i64::from),
                 record.active_calories,
@@ -854,8 +889,20 @@ impl<'connection> ImportStore<'connection> {
     }
 
     pub fn delete_daily_activity(&self, day: &str) -> Result<()> {
-        self.connection
-            .execute("DELETE FROM daily_activity WHERE day = ?1", params![day])?;
+        if let Some(day_candidate) = extract_day_suffix(day) {
+            self.connection.execute(
+                "DELETE FROM daily_activity
+                 WHERE day = ?1
+                    OR oura_id = ?1
+                    OR day = ?2",
+                params![day, day_candidate],
+            )?;
+        } else {
+            self.connection.execute(
+                "DELETE FROM daily_activity WHERE day = ?1 OR oura_id = ?1",
+                params![day],
+            )?;
+        }
         Ok(())
     }
 
@@ -1921,6 +1968,27 @@ fn row_count(connection: &Connection, table: &str) -> Result<u64> {
     })
 }
 
+fn extract_day_suffix(identifier: &str) -> Option<&str> {
+    let candidate = identifier.get(identifier.len().checked_sub(10)?..)?;
+    let bytes = candidate.as_bytes();
+    if bytes.len() == 10
+        && bytes[0].is_ascii_digit()
+        && bytes[1].is_ascii_digit()
+        && bytes[2].is_ascii_digit()
+        && bytes[3].is_ascii_digit()
+        && bytes[4] == b'-'
+        && bytes[5].is_ascii_digit()
+        && bytes[6].is_ascii_digit()
+        && bytes[7] == b'-'
+        && bytes[8].is_ascii_digit()
+        && bytes[9].is_ascii_digit()
+    {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
 fn join_scopes(scopes: &[String]) -> String {
     scopes.join(",")
 }
@@ -1980,6 +2048,7 @@ mod tests {
             store
                 .imports()
                 .upsert_daily_sleep(&DailySleepRecord {
+                    oura_id: None,
                     day: day.to_owned(),
                     sleep_score: Some(sleep),
                     raw_cache_key: None,
@@ -1989,6 +2058,7 @@ mod tests {
             store
                 .imports()
                 .upsert_daily_readiness(&DailyReadinessRecord {
+                    oura_id: None,
                     day: day.to_owned(),
                     readiness_score: Some(readiness),
                     temperature_deviation: None,
@@ -2000,6 +2070,7 @@ mod tests {
             store
                 .imports()
                 .upsert_daily_activity(&DailyActivityRecord {
+                    oura_id: None,
                     day: day.to_owned(),
                     activity_score: Some(activity),
                     active_calories: 400,
@@ -2159,5 +2230,35 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].context_event_id, "workout:late-offset");
+    }
+
+    #[test]
+    fn daily_delete_accepts_object_id_suffix_for_legacy_rows() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        store
+            .imports()
+            .upsert_daily_sleep(&DailySleepRecord {
+                oura_id: None,
+                day: "2026-04-08".to_owned(),
+                sleep_score: Some(88),
+                raw_cache_key: None,
+                updated_at: "2026-04-08T00:00:00Z".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("legacy daily sleep row should seed: {error}"));
+
+        store
+            .imports()
+            .delete_daily_sleep("daily_sleep_2026-04-08")
+            .unwrap_or_else(|error| panic!("legacy delete should resolve by day suffix: {error}"));
+
+        assert_eq!(
+            store
+                .views()
+                .record_counts()
+                .unwrap_or_else(|error| panic!("counts should load: {error}"))
+                .daily_sleep,
+            0
+        );
     }
 }
