@@ -64,7 +64,7 @@ use review::{
     build_investigation_report, build_review_deck,
 };
 use store::Store;
-use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{Date, Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -1118,12 +1118,32 @@ struct ReviewStoreSnapshot {
     rest_mode_periods: Vec<store::queries::RestModePeriodRecord>,
 }
 
+const REVIEW_SIGNAL_LOOKBACK_DAYS: i64 = 60;
+const REVIEW_CONTEXT_LOOKBACK_DAYS: i64 = 90;
+const REVIEW_SLEEP_LOOKBACK_DAYS: i64 = 60;
+const REVIEW_REST_MODE_LOOKBACK_DAYS: i64 = 180;
+const REVIEW_CONTEXT_FORWARD_DAYS: i64 = 7;
+const EMPTY_REVIEW_ANCHOR_DAY: &str = "none";
+
 async fn run_review_today(config: &Config, args: ReviewTodayArgs) -> Result<Option<String>> {
-    let (_guard, snapshot) =
-        load_review_store_snapshot(config, args.demo, args.fixture_dir).await?;
-    let anchor_day = args
-        .day
-        .unwrap_or_else(|| latest_review_day(&snapshot).unwrap_or_else(|| "unknown".to_owned()));
+    let requested_day = args.day.clone();
+    let (_guard, snapshot) = load_review_store_snapshot(
+        config,
+        args.demo,
+        args.fixture_dir,
+        requested_day.as_deref(),
+    )
+    .await?;
+    let Some(anchor_day) = requested_day.or_else(|| latest_review_day(&snapshot)) else {
+        let deck = empty_review_deck(
+            ReviewMode::Today,
+            "No reviewable days are available yet. Sync data or use --demo to seed a bounded review snapshot.",
+        );
+        if args.json {
+            return Ok(Some(serde_json::to_string_pretty(&deck)?));
+        }
+        return Ok(Some(render_review_deck("ringmaster review today", &deck)));
+    };
     let deck = build_review_deck(ReviewMode::Today, &anchor_day, &review_inputs(&snapshot))?;
     if args.json {
         return Ok(Some(serde_json::to_string_pretty(&deck)?));
@@ -1133,11 +1153,24 @@ async fn run_review_today(config: &Config, args: ReviewTodayArgs) -> Result<Opti
 }
 
 async fn run_review_week(config: &Config, args: ReviewWeekArgs) -> Result<Option<String>> {
-    let (_guard, snapshot) =
-        load_review_store_snapshot(config, args.demo, args.fixture_dir).await?;
-    let anchor_day = args
-        .end_day
-        .unwrap_or_else(|| latest_review_day(&snapshot).unwrap_or_else(|| "unknown".to_owned()));
+    let requested_day = args.end_day.clone();
+    let (_guard, snapshot) = load_review_store_snapshot(
+        config,
+        args.demo,
+        args.fixture_dir,
+        requested_day.as_deref(),
+    )
+    .await?;
+    let Some(anchor_day) = requested_day.or_else(|| latest_review_day(&snapshot)) else {
+        let deck = empty_review_deck(
+            ReviewMode::Week,
+            "No reviewable days are available yet. Sync data or use --demo to seed a bounded review snapshot.",
+        );
+        if args.json {
+            return Ok(Some(serde_json::to_string_pretty(&deck)?));
+        }
+        return Ok(Some(render_review_deck("ringmaster review week", &deck)));
+    };
     let deck = build_review_deck(ReviewMode::Week, &anchor_day, &review_inputs(&snapshot))?;
     if args.json {
         return Ok(Some(serde_json::to_string_pretty(&deck)?));
@@ -1150,12 +1183,25 @@ async fn run_review_investigate(
     config: &Config,
     args: ReviewInvestigateArgs,
 ) -> Result<Option<String>> {
-    let (_guard, snapshot) =
-        load_review_store_snapshot(config, args.demo, args.fixture_dir).await?;
-    let anchor_day = args
-        .anchor_day
-        .unwrap_or_else(|| latest_review_day(&snapshot).unwrap_or_else(|| "unknown".to_owned()));
+    let requested_day = args.anchor_day.clone();
+    let (_guard, snapshot) = load_review_store_snapshot(
+        config,
+        args.demo,
+        args.fixture_dir,
+        requested_day.as_deref(),
+    )
+    .await?;
     let focus = map_review_focus(args.focus);
+    let Some(anchor_day) = requested_day.or_else(|| latest_review_day(&snapshot)) else {
+        let report = empty_investigation_report(
+            focus,
+            "No reviewable days are available yet. Sync data or use --demo before running investigations.",
+        );
+        if args.json {
+            return Ok(Some(serde_json::to_string_pretty(&report)?));
+        }
+        return Ok(Some(render_investigation_report(&report)));
+    };
     let report = build_investigation_report(focus, &anchor_day, &review_inputs(&snapshot))?;
     if args.json {
         return Ok(Some(serde_json::to_string_pretty(&report)?));
@@ -1168,6 +1214,7 @@ async fn load_review_store_snapshot(
     config: &Config,
     demo: bool,
     fixture_dir: Option<PathBuf>,
+    requested_anchor_day: Option<&str>,
 ) -> Result<(Option<TempRootGuard>, ReviewStoreSnapshot)> {
     if demo {
         let fixture_dir = fixture_dir
@@ -1196,36 +1243,64 @@ async fn load_review_store_snapshot(
         .await?;
         derive::rebuild_store(&store)?;
         let auth_status = oura::auth::inspect_auth(&temp_config, &store)?;
-        let snapshot = load_review_snapshot_from_store(&store, &auth_status)?;
+        let snapshot = load_review_snapshot_from_store(&store, &auth_status, requested_anchor_day)?;
         return Ok((Some(temp_root), snapshot));
     }
 
     let store = Store::open(config)?;
     let _ = derive::rebuild_recent_store(&store, config)?;
     let auth_status = oura::auth::inspect_auth(config, &store)?;
-    let snapshot = load_review_snapshot_from_store(&store, &auth_status)?;
+    let snapshot = load_review_snapshot_from_store(&store, &auth_status, requested_anchor_day)?;
     Ok((None, snapshot))
 }
 
 fn load_review_snapshot_from_store(
     store: &Store,
     auth_status: &oura::models::AuthStatus,
+    requested_anchor_day: Option<&str>,
 ) -> Result<ReviewStoreSnapshot> {
+    let pattern_summaries = store.views().pattern_summaries(None, None)?;
+    let Some(anchor_day) = resolve_review_anchor_day(store, requested_anchor_day)? else {
+        return Ok(ReviewStoreSnapshot {
+            auth_status: auth_status.clone(),
+            signal_days: Vec::new(),
+            context_events: Vec::new(),
+            pattern_summaries,
+            sleep_time: Vec::new(),
+            rest_mode_periods: Vec::new(),
+        });
+    };
+
+    let (signal_start_day, signal_end_day) =
+        review_day_range(&anchor_day, REVIEW_SIGNAL_LOOKBACK_DAYS, 0)?;
+    let (context_start_day, context_end_day) = review_day_range(
+        &anchor_day,
+        REVIEW_CONTEXT_LOOKBACK_DAYS,
+        REVIEW_CONTEXT_FORWARD_DAYS,
+    )?;
+    let (sleep_start_day, sleep_end_day) =
+        review_day_range(&anchor_day, REVIEW_SLEEP_LOOKBACK_DAYS, 0)?;
+    let (rest_mode_start_day, rest_mode_end_day) = review_day_range(
+        &anchor_day,
+        REVIEW_REST_MODE_LOOKBACK_DAYS,
+        REVIEW_CONTEXT_FORWARD_DAYS,
+    )?;
+
     Ok(ReviewStoreSnapshot {
         auth_status: auth_status.clone(),
         signal_days: store
             .views()
-            .review_signal_days_between_days("0000-01-01", "9999-12-31")?,
+            .review_signal_days_between_days(&signal_start_day, &signal_end_day)?,
         context_events: store
             .views()
-            .context_events_between_days("0000-01-01", "9999-12-31")?,
-        pattern_summaries: store.views().pattern_summaries(None, None)?,
+            .context_events_between_days(&context_start_day, &context_end_day)?,
+        pattern_summaries,
         sleep_time: store
             .views()
-            .sleep_time_between_days("0000-01-01", "9999-12-31")?,
+            .sleep_time_between_days(&sleep_start_day, &sleep_end_day)?,
         rest_mode_periods: store
             .views()
-            .rest_mode_periods_between_days("0000-01-01", "9999-12-31")?,
+            .rest_mode_periods_between_days(&rest_mode_start_day, &rest_mode_end_day)?,
     })
 }
 
@@ -1240,9 +1315,80 @@ fn latest_review_day(snapshot: &ReviewStoreSnapshot) -> Option<String> {
             snapshot
                 .rest_mode_periods
                 .iter()
-                .map(|row| row.start_day.clone())
+                .map(|row| row.end_day.clone().unwrap_or_else(|| row.start_day.clone()))
                 .max()
         })
+}
+
+fn resolve_review_anchor_day(
+    store: &Store,
+    requested_anchor_day: Option<&str>,
+) -> Result<Option<String>> {
+    match requested_anchor_day {
+        Some(day) => {
+            let _ = parse_review_day(day)?;
+            Ok(Some(day.to_owned()))
+        }
+        None => store.views().latest_review_day(),
+    }
+}
+
+fn review_day_range(
+    anchor_day: &str,
+    lookback_days: i64,
+    forward_days: i64,
+) -> Result<(String, String)> {
+    let anchor_date = parse_review_day(anchor_day)?;
+    let start_day = anchor_date
+        .checked_sub(Duration::days(lookback_days))
+        .unwrap_or(anchor_date);
+    let end_day = anchor_date
+        .checked_add(Duration::days(forward_days))
+        .unwrap_or(anchor_date);
+    Ok((start_day.to_string(), end_day.to_string()))
+}
+
+fn parse_review_day(day: &str) -> Result<Date> {
+    Date::parse(
+        day,
+        &time::macros::format_description!("[year]-[month]-[day]"),
+    )
+    .map_err(|error| {
+        RingmasterError::Config(format!("failed to parse review day `{day}`: {error}"))
+    })
+}
+
+fn empty_review_deck(mode: ReviewMode, warning: &str) -> ReviewDeck {
+    ReviewDeck {
+        mode,
+        anchor_day: EMPTY_REVIEW_ANCHOR_DAY.to_owned(),
+        observations: Vec::new(),
+        positive_changes: Vec::new(),
+        negative_drifts: Vec::new(),
+        unresolved_anomalies: Vec::new(),
+        warnings: vec![warning.to_owned()],
+    }
+}
+
+fn empty_investigation_report(focus: ReviewFocus, warning: &str) -> InvestigationReport {
+    InvestigationReport {
+        focus,
+        anchor_day: EMPTY_REVIEW_ANCHOR_DAY.to_owned(),
+        headline: format!(
+            "{} investigation has limited direct evidence.",
+            focus.label()
+        ),
+        summary: warning.to_owned(),
+        confidence: review::ReviewConfidence::Low,
+        sufficiency: review::features::ReviewSufficiency::Missing,
+        evidence: Vec::new(),
+        counterevidence: Vec::new(),
+        warnings: vec![warning.to_owned()],
+        look_at: vec![
+            "Run sync once or use --demo to seed reviewable data.".to_owned(),
+            "Open Doctor to confirm local auth, sync, and freshness state.".to_owned(),
+        ],
+    }
 }
 
 fn review_inputs(snapshot: &ReviewStoreSnapshot) -> ReviewInputs<'_> {
@@ -1410,8 +1556,8 @@ fn interactive_terminal_available() -> bool {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::{run_doctor, run_webhook_replay};
-    use crate::cli::WebhookReplayArgs;
+    use super::{run_doctor, run_review_investigate, run_review_week, run_webhook_replay};
+    use crate::cli::{ReviewFocusArg, ReviewInvestigateArgs, ReviewWeekArgs, WebhookReplayArgs};
     use crate::config::{
         AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
     };
@@ -1705,6 +1851,53 @@ mod tests {
 
         assert!(report.contains("webhook_remote_subscriptions: 2"));
         assert!(report.contains("webhook_remote_healthy: 1"));
+    }
+
+    #[tokio::test]
+    async fn review_week_handles_empty_store_without_unknown_anchor() {
+        let (_tempdir, config) = test_config(Some("https://example.test"), Some("verify-token"));
+
+        let output = run_review_week(
+            &config,
+            ReviewWeekArgs {
+                end_day: None,
+                json: false,
+                demo: false,
+                fixture_dir: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("review week should not fail on an empty store: {error}"))
+        .unwrap_or_else(|| panic!("review week should render text output"));
+
+        assert!(output.contains("ringmaster review week"));
+        assert!(output.contains("No reviewable days are available yet"));
+        assert!(!output.contains("unknown"));
+    }
+
+    #[tokio::test]
+    async fn review_investigate_handles_empty_store_without_unknown_anchor() {
+        let (_tempdir, config) = test_config(Some("https://example.test"), Some("verify-token"));
+
+        let output = run_review_investigate(
+            &config,
+            ReviewInvestigateArgs {
+                focus: ReviewFocusArg::Readiness,
+                anchor_day: None,
+                json: false,
+                demo: false,
+                fixture_dir: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("review investigate should not fail on an empty store: {error}")
+        })
+        .unwrap_or_else(|| panic!("review investigate should render text output"));
+
+        assert!(output.contains("ringmaster review investigate"));
+        assert!(output.contains("No reviewable days are available yet"));
+        assert!(!output.contains("unknown"));
     }
 
     #[tokio::test]

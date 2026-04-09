@@ -1139,9 +1139,8 @@ impl<'connection> ImportStore<'connection> {
                 raw_cache_key,
                 updated_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            ON CONFLICT(day) DO UPDATE SET
+            ON CONFLICT(day, recorded_at) DO UPDATE SET
                 oura_id = excluded.oura_id,
-                recorded_at = excluded.recorded_at,
                 vo2_max = excluded.vo2_max,
                 raw_cache_key = excluded.raw_cache_key,
                 updated_at = excluded.updated_at",
@@ -1773,7 +1772,23 @@ impl<'connection> ViewStore<'connection> {
                     UNION ALL
                     SELECT day FROM sessions
                     UNION ALL
-                    SELECT start_day AS day FROM rest_mode_periods
+                    SELECT COALESCE(end_day, start_day) AS day FROM rest_mode_periods
+                )",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn latest_review_day(&self) -> Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT MAX(day) FROM (
+                    SELECT day FROM derived_review_signal_days
+                    UNION ALL
+                    SELECT day FROM sleep_time
+                    UNION ALL
+                    SELECT COALESCE(end_day, start_day) AS day FROM rest_mode_periods
                 )",
                 [],
                 |row| row.get::<_, Option<String>>(0),
@@ -2762,10 +2777,12 @@ fn now_rfc3339() -> Result<String> {
 #[allow(clippy::panic)]
 mod tests {
     use crate::error::OuraProblem;
+    use crate::review::features::ReviewSufficiency;
     use crate::store::Store;
     use crate::store::queries::{
         ContextEventFamily, ContextEventRecord, DailyActivityRecord, DailyReadinessRecord,
-        DailySleepRecord, HeartrateSampleRecord, SyncRunStatus, SyncStateRecord, TimeSemantics,
+        DailySleepRecord, HeartrateSampleRecord, RestModePeriodRecord, ReviewSignalDayRecord,
+        SyncRunStatus, SyncStateRecord, TimeSemantics, Vo2MaxRecord,
     };
 
     fn seed_daily_history(store: &Store) {
@@ -2918,6 +2935,20 @@ mod tests {
         let store =
             Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
         seed_daily_history(&store);
+        store
+            .imports()
+            .upsert_rest_mode_period(&RestModePeriodRecord {
+                period_id: "rest-1".to_owned(),
+                start_day: "2026-04-07".to_owned(),
+                start_time: Some("2026-04-07T00:00:00Z".to_owned()),
+                end_day: Some("2026-04-09".to_owned()),
+                end_time: Some("2026-04-09T23:59:59Z".to_owned()),
+                episode_count: 1,
+                tags_json: "[]".to_owned(),
+                raw_cache_key: None,
+                updated_at: "2026-04-09T23:59:59Z".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("rest mode period should seed: {error}"));
 
         assert_eq!(
             store
@@ -2925,8 +2956,88 @@ mod tests {
                 .latest_source_day()
                 .unwrap_or_else(|error| panic!("latest day should load: {error}"))
                 .as_deref(),
-            Some("2026-04-08")
+            Some("2026-04-09")
         );
+    }
+
+    #[test]
+    fn latest_review_day_prefers_reviewable_sources() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+
+        store
+            .derived()
+            .replace_review_signal_days(&[ReviewSignalDayRecord {
+                signal_key: "sleep_score".to_owned(),
+                day: "2026-04-08".to_owned(),
+                numeric_value: Some(82.0),
+                text_value: None,
+                baseline_mean: Some(80.0),
+                baseline_stddev: Some(4.0),
+                delta: Some(2.0),
+                z_score: Some(0.5),
+                persistence_days: 1,
+                sufficiency: ReviewSufficiency::Medium,
+                stale_days: 0,
+                metadata_json: "{}".to_owned(),
+                updated_at: "2026-04-08T12:00:00Z".to_owned(),
+            }])
+            .unwrap_or_else(|error| panic!("review signal day should seed: {error}"));
+        store
+            .imports()
+            .upsert_rest_mode_period(&RestModePeriodRecord {
+                period_id: "rest-1".to_owned(),
+                start_day: "2026-04-07".to_owned(),
+                start_time: Some("2026-04-07T00:00:00Z".to_owned()),
+                end_day: Some("2026-04-10".to_owned()),
+                end_time: Some("2026-04-10T23:59:59Z".to_owned()),
+                episode_count: 1,
+                tags_json: "[]".to_owned(),
+                raw_cache_key: None,
+                updated_at: "2026-04-10T23:59:59Z".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("rest mode period should seed: {error}"));
+
+        assert_eq!(
+            store
+                .views()
+                .latest_review_day()
+                .unwrap_or_else(|error| panic!("latest review day should load: {error}"))
+                .as_deref(),
+            Some("2026-04-10")
+        );
+    }
+
+    #[test]
+    fn vo2_max_queries_preserve_multiple_measurements_per_day() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+
+        for (oura_id, recorded_at, vo2_max) in [
+            ("vo2-1", "2026-04-08T08:00:00Z", 41.5),
+            ("vo2-2", "2026-04-08T12:00:00Z", 42.0),
+        ] {
+            store
+                .imports()
+                .upsert_vo2_max(&Vo2MaxRecord {
+                    oura_id: Some(oura_id.to_owned()),
+                    day: "2026-04-08".to_owned(),
+                    recorded_at: recorded_at.to_owned(),
+                    vo2_max: Some(vo2_max),
+                    raw_cache_key: None,
+                    updated_at: recorded_at.to_owned(),
+                })
+                .unwrap_or_else(|error| panic!("vo2 max row should seed: {error}"));
+        }
+
+        let records = store
+            .views()
+            .vo2_max_between_days("2026-04-08", "2026-04-08")
+            .unwrap_or_else(|error| panic!("vo2 max rows should load: {error}"));
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].recorded_at, "2026-04-08T08:00:00Z");
+        assert_eq!(records[1].recorded_at, "2026-04-08T12:00:00Z");
     }
 
     #[test]

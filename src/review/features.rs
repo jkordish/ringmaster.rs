@@ -274,6 +274,7 @@ pub fn build_review_signal_days(inputs: &FeatureInputs<'_>) -> Result<Vec<Review
                 &seed.day,
                 z_score,
                 definition.directionality,
+                definition.baseline_window_days,
             )?;
             let metadata_json = serde_json::to_string(&json!({
                 "comparable_days": comparable_values.len(),
@@ -321,12 +322,13 @@ fn insert_numeric_seed(
     numeric_value: Option<f64>,
     metadata: serde_json::Value,
 ) -> Result<()> {
-    series.entry(signal_key).or_default().push(SeedPoint {
+    let seed_point = SeedPoint {
         day: day.to_owned(),
         numeric_value,
         text_value: None,
         metadata_json: serde_json::to_string(&metadata)?,
-    });
+    };
+    upsert_seed_point(series.entry(signal_key).or_default(), seed_point);
     Ok(())
 }
 
@@ -337,13 +339,25 @@ fn insert_text_seed(
     text_value: Option<String>,
     metadata: serde_json::Value,
 ) -> Result<()> {
-    series.entry(signal_key).or_default().push(SeedPoint {
+    let seed_point = SeedPoint {
         day: day.to_owned(),
         numeric_value: None,
         text_value,
         metadata_json: serde_json::to_string(&metadata)?,
-    });
+    };
+    upsert_seed_point(series.entry(signal_key).or_default(), seed_point);
     Ok(())
+}
+
+fn upsert_seed_point(seed_points: &mut Vec<SeedPoint>, seed_point: SeedPoint) {
+    if let Some(existing) = seed_points
+        .iter_mut()
+        .find(|existing| existing.day == seed_point.day)
+    {
+        *existing = seed_point;
+    } else {
+        seed_points.push(seed_point);
+    }
 }
 
 fn numeric_series(seed_points: &[SeedPoint]) -> Vec<(String, f64)> {
@@ -395,6 +409,7 @@ fn persistence_days(
     anchor_day: &str,
     z_score: Option<f64>,
     directionality: SignalDirectionality,
+    baseline_window_days: usize,
 ) -> Result<u32> {
     let Some(anchor_sign) = signal_sign(z_score, directionality) else {
         return Ok(0);
@@ -410,7 +425,8 @@ fn persistence_days(
         else {
             break;
         };
-        let comparable_values = prior_numeric_values(numeric_series, &day_label, 30);
+        let comparable_values =
+            prior_numeric_values(numeric_series, &day_label, baseline_window_days);
         let comparable_mean = mean(&comparable_values);
         let comparable_stddev = standard_deviation(&comparable_values);
         let day_z_score = match (comparable_mean, comparable_stddev) {
@@ -514,7 +530,10 @@ fn parse_day(day: &str) -> Result<Date> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FeatureInputs, ReviewSufficiency, build_review_signal_days};
+    use super::{
+        FeatureInputs, ReviewSufficiency, build_review_signal_days, persistence_days, signal_sign,
+    };
+    use crate::review::registry::SignalDirectionality;
     use crate::review::registry::signal_definition;
     use crate::store::queries::{
         DailyActivityRecord, DailyCardiovascularAgeRecord, DailyOverviewRow, DailyReadinessRecord,
@@ -660,5 +679,93 @@ mod tests {
                 "{key} should exist in the registry"
             );
         }
+    }
+
+    #[test]
+    fn feature_builder_keeps_latest_vo2_max_per_day() {
+        let rows = build_review_signal_days(&FeatureInputs {
+            daily_history: &[],
+            daily_activity: &[],
+            daily_readiness: &[],
+            daily_stress: &[],
+            daily_resilience: &[],
+            daily_cardiovascular_age: &[],
+            vo2_max: &[
+                Vo2MaxRecord {
+                    oura_id: Some("vo2-1".to_owned()),
+                    day: "2026-04-02".to_owned(),
+                    recorded_at: "2026-04-02T08:00:00Z".to_owned(),
+                    vo2_max: Some(41.5),
+                    raw_cache_key: None,
+                    updated_at: "2026-04-02T08:00:00Z".to_owned(),
+                },
+                Vo2MaxRecord {
+                    oura_id: Some("vo2-2".to_owned()),
+                    day: "2026-04-02".to_owned(),
+                    recorded_at: "2026-04-02T12:00:00Z".to_owned(),
+                    vo2_max: Some(42.0),
+                    raw_cache_key: None,
+                    updated_at: "2026-04-02T12:00:00Z".to_owned(),
+                },
+            ],
+            sleep_time: &[],
+            rest_mode_periods: &[],
+            captured_at: "2026-04-03T10:00:00Z",
+        })
+        .unwrap_or_else(|error| panic!("feature build should succeed: {error}"));
+
+        let vo2_rows = rows
+            .iter()
+            .filter(|row| row.signal_key == "vo2_max" && row.day == "2026-04-02")
+            .collect::<Vec<_>>();
+
+        assert_eq!(vo2_rows.len(), 1);
+        assert_eq!(vo2_rows[0].numeric_value, Some(42.0));
+    }
+
+    #[test]
+    fn persistence_uses_signal_baseline_window() {
+        let start_day = time::Date::from_calendar_date(2026, time::Month::March, 1)
+            .unwrap_or_else(|error| panic!("test start day should be valid: {error}"));
+        let numeric_series = (0_i64..35_i64)
+            .map(|offset| {
+                let day = start_day
+                    .checked_add(time::Duration::days(offset))
+                    .unwrap_or_else(|| panic!("test day should stay in range"));
+                let value = match offset {
+                    0..=15 if offset % 2 == 0 => 50.0,
+                    0..=15 => 150.0,
+                    16..=30 => 100.0,
+                    _ => 110.0,
+                };
+                (day.to_string(), value)
+            })
+            .collect::<Vec<_>>();
+
+        let z_score = Some(1.0);
+        assert_eq!(
+            signal_sign(z_score, SignalDirectionality::HigherBetter),
+            Some(1)
+        );
+
+        let short_window = persistence_days(
+            &numeric_series,
+            "2026-04-04",
+            z_score,
+            SignalDirectionality::HigherBetter,
+            14,
+        )
+        .unwrap_or_else(|error| panic!("short baseline persistence should build: {error}"));
+        let long_window = persistence_days(
+            &numeric_series,
+            "2026-04-04",
+            z_score,
+            SignalDirectionality::HigherBetter,
+            30,
+        )
+        .unwrap_or_else(|error| panic!("long baseline persistence should build: {error}"));
+
+        assert!(short_window >= 3);
+        assert_eq!(long_window, 0);
     }
 }

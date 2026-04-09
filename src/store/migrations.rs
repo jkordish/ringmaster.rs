@@ -558,6 +558,49 @@ pub const MIGRATIONS: &[Migration] = &[
             ON derived_review_signal_days(signal_key, day);
         ",
     },
+    Migration {
+        version: 12,
+        name: "phase5_vo2_max_history_and_keys",
+        sql: r"
+        ALTER TABLE vo2_max RENAME TO vo2_max_legacy;
+
+        CREATE TABLE vo2_max (
+            day TEXT NOT NULL,
+            oura_id TEXT,
+            recorded_at TEXT NOT NULL,
+            vo2_max REAL,
+            raw_cache_key TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (day, recorded_at)
+        );
+
+        INSERT INTO vo2_max (
+            day,
+            oura_id,
+            recorded_at,
+            vo2_max,
+            raw_cache_key,
+            updated_at
+        )
+        SELECT
+            day,
+            oura_id,
+            recorded_at,
+            vo2_max,
+            raw_cache_key,
+            updated_at
+        FROM vo2_max_legacy;
+
+        DROP TABLE vo2_max_legacy;
+
+        CREATE INDEX IF NOT EXISTS idx_vo2_max_oura_id
+            ON vo2_max(oura_id);
+        CREATE INDEX IF NOT EXISTS idx_vo2_max_day
+            ON vo2_max(day);
+        CREATE INDEX IF NOT EXISTS idx_vo2_max_recorded_at
+            ON vo2_max(recorded_at);
+        ",
+    },
 ];
 
 pub fn run_migrations(connection: &mut rusqlite::Connection) -> Result<MigrationReport> {
@@ -639,7 +682,7 @@ mod tests {
         assert_eq!(report.current_version, current_version());
         assert_eq!(
             report.applied_versions,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
         );
     }
 
@@ -712,7 +755,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("phase-3 migrations should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(report.applied_versions, vec![5, 6, 7, 8, 9, 10, 11, 12]);
 
         let (workout_day, workout_title): (String, String) = connection
             .query_row(
@@ -784,7 +827,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("phase4 migrations should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![7, 8, 9, 10, 11]);
+        assert_eq!(report.applied_versions, vec![7, 8, 9, 10, 11, 12]);
 
         let row: (String, String, String) = connection
             .query_row(
@@ -828,7 +871,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("phase5 migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![9, 10, 11]);
+        assert_eq!(report.applied_versions, vec![9, 10, 11, 12]);
 
         let daily_sleep_columns: Vec<String> = {
             let mut statement = connection
@@ -871,7 +914,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("phase5 migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![10, 11]);
+        assert_eq!(report.applied_versions, vec![10, 11, 12]);
 
         let table_names: Vec<String> = {
             let mut statement = connection
@@ -940,7 +983,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("review signal migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![11]);
+        assert_eq!(report.applied_versions, vec![11, 12]);
 
         let table_names: Vec<String> = {
             let mut statement = connection
@@ -959,5 +1002,86 @@ mod tests {
         };
 
         assert_eq!(table_names, vec!["derived_review_signal_days".to_owned()]);
+    }
+
+    #[test]
+    fn phase5_vo2_max_history_migration_preserves_rows_and_composite_key() {
+        let mut connection = Connection::open_in_memory()
+            .unwrap_or_else(|error| panic!("in-memory db should open: {error}"));
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );",
+            )
+            .unwrap_or_else(|error| panic!("schema migrations table should exist: {error}"));
+
+        for migration in &MIGRATIONS[..11] {
+            connection
+                .execute_batch(migration.sql)
+                .unwrap_or_else(|error| panic!("pre-vo2 history migration should apply: {error}"));
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+                    params![migration.version, migration.name, "2026-04-09T00:00:00Z"],
+                )
+                .unwrap_or_else(|error| panic!("migration marker should insert: {error}"));
+        }
+
+        connection
+            .execute(
+                "INSERT INTO vo2_max (
+                    oura_id,
+                    day,
+                    recorded_at,
+                    vo2_max,
+                    raw_cache_key,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    "vo2-1",
+                    "2026-04-08",
+                    "2026-04-08T08:00:00Z",
+                    42.5_f64,
+                    "raw-1",
+                    "2026-04-08T09:00:00Z"
+                ],
+            )
+            .unwrap_or_else(|error| panic!("legacy vo2 row should seed: {error}"));
+
+        let report = run_migrations(&mut connection)
+            .unwrap_or_else(|error| panic!("vo2 history migration should succeed: {error}"));
+        assert_eq!(report.applied_versions, vec![12]);
+
+        let primary_key_columns: Vec<String> = {
+            let mut statement = connection
+                .prepare("PRAGMA table_info(vo2_max)")
+                .unwrap_or_else(|error| panic!("vo2_max schema should prepare: {error}"));
+            let rows = statement
+                .query_map([], |row| {
+                    let name = row.get::<_, String>(1)?;
+                    let pk_position = row.get::<_, i64>(5)?;
+                    Ok((name, pk_position))
+                })
+                .unwrap_or_else(|error| panic!("vo2_max schema should query: {error}"));
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap_or_else(|error| panic!("vo2_max columns should load: {error}"))
+                .into_iter()
+                .filter(|(_, pk_position)| *pk_position > 0)
+                .map(|(name, _)| name)
+                .collect()
+        };
+
+        assert_eq!(
+            primary_key_columns,
+            vec!["day".to_owned(), "recorded_at".to_owned()]
+        );
+
+        let row_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM vo2_max", [], |row| row.get(0))
+            .unwrap_or_else(|error| panic!("migrated vo2 rows should count: {error}"));
+        assert_eq!(row_count, 1);
     }
 }

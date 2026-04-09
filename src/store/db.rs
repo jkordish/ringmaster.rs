@@ -134,6 +134,6 @@ mod tests {
         let store =
             Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
 
-        assert_eq!(store.migration_report().current_version, 11);
+        assert_eq!(store.migration_report().current_version, 12);
     }
 }

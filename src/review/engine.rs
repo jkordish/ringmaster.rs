@@ -328,8 +328,12 @@ fn build_card(
 
     let persistence_bucket = persistence_bucket(measurement.persistence_days);
     let recency = recency_points(mode, measurement.stale_days);
-    let corroboration_points =
-        corroboration_points(measurement.definition, &measurement.anchor_day, inputs);
+    let corroboration_points = corroboration_points(
+        mode,
+        measurement.definition,
+        &measurement.anchor_day,
+        inputs,
+    );
     let counterevidence = counterevidence_lines(&measurement, inputs);
     let counterevidence_penalty = i32::try_from(counterevidence.len()).ok()?.min(2);
     let freshness_penalty = freshness_penalty(measurement.stale_days);
@@ -436,6 +440,7 @@ fn evidence_lines(
         ));
     }
     lines.extend(context_support_lines(
+        mode,
         measurement.definition,
         &measurement.anchor_day,
         inputs,
@@ -486,6 +491,7 @@ fn counterevidence_lines(
 }
 
 fn context_support_lines(
+    mode: ReviewMode,
     definition: &SignalDefinition,
     anchor_day: &str,
     inputs: &ReviewInputs<'_>,
@@ -524,7 +530,7 @@ fn context_support_lines(
         definition.key,
         "readiness_score" | "stress_high" | "recovery_high" | "resilience_level"
     ) {
-        let rest_mode_days = overlapping_rest_mode_days(anchor_day, inputs.rest_mode_periods);
+        let rest_mode_days = overlapping_rest_mode_days(mode, anchor_day, inputs.rest_mode_periods);
         if rest_mode_days > 0 {
             lines.push(format!(
                 "Rest mode overlapped {} day(s) in the current review window.",
@@ -550,6 +556,7 @@ fn context_support_lines(
 }
 
 fn corroboration_points(
+    mode: ReviewMode,
     definition: &SignalDefinition,
     anchor_day: &str,
     inputs: &ReviewInputs<'_>,
@@ -574,7 +581,7 @@ fn corroboration_points(
         matches!(
             definition.key,
             "readiness_score" | "stress_high" | "recovery_high" | "resilience_level"
-        ) && overlapping_rest_mode_days(anchor_day, inputs.rest_mode_periods) > 0,
+        ) && overlapping_rest_mode_days(mode, anchor_day, inputs.rest_mode_periods) > 0,
     );
     (context_match + pattern_match + rest_mode_match).min(2)
 }
@@ -767,27 +774,51 @@ fn pattern_metric_for_signal(signal_key: &str) -> Option<PatternMetric> {
 }
 
 fn overlapping_rest_mode_days(
+    mode: ReviewMode,
     anchor_day: &str,
     rest_mode_periods: &[RestModePeriodRecord],
 ) -> usize {
     let Ok(anchor_date) = parse_day(anchor_day) else {
         return 0;
     };
-    rest_mode_periods
-        .iter()
-        .filter(|period| {
-            let Some(start_day) = parse_day(&period.start_day).ok() else {
-                return false;
-            };
-            let end_day = period
-                .end_day
-                .as_deref()
-                .and_then(|day| parse_day(day).ok())
-                .unwrap_or(start_day);
+    let window_start = match mode {
+        ReviewMode::Today => anchor_date,
+        ReviewMode::Week => anchor_date
+            .checked_sub(time::Duration::days(6))
+            .unwrap_or(anchor_date),
+    };
+    let mut overlapped_days = BTreeSet::new();
 
-            anchor_date >= start_day && anchor_date <= end_day
-        })
-        .count()
+    for period in rest_mode_periods {
+        let Some(start_day) = parse_day(&period.start_day).ok() else {
+            continue;
+        };
+        let end_day = period
+            .end_day
+            .as_deref()
+            .and_then(|day| parse_day(day).ok())
+            .unwrap_or(start_day);
+
+        let overlap_start = start_day.max(window_start);
+        let overlap_end = end_day.min(anchor_date);
+        if overlap_start > overlap_end {
+            continue;
+        }
+
+        let mut day = overlap_start;
+        loop {
+            overlapped_days.insert(day);
+            if day >= overlap_end {
+                break;
+            }
+            let Some(next_day) = day.next_day() else {
+                break;
+            };
+            day = next_day;
+        }
+    }
+
+    overlapped_days.len()
 }
 
 fn event_family_label(family: ContextEventFamily) -> &'static str {
@@ -1029,6 +1060,29 @@ mod tests {
             updated_at: "2026-04-05T23:59:59Z".to_owned(),
         }];
 
-        assert_eq!(overlapping_rest_mode_days("2026-04-03", &periods), 1);
+        assert_eq!(
+            overlapping_rest_mode_days(ReviewMode::Today, "2026-04-03", &periods),
+            1
+        );
+    }
+
+    #[test]
+    fn overlapping_rest_mode_days_counts_week_window_overlap() {
+        let periods = vec![RestModePeriodRecord {
+            period_id: "rest-mode-1".to_owned(),
+            start_day: "2026-04-01".to_owned(),
+            start_time: Some("2026-04-01T00:00:00Z".to_owned()),
+            end_day: Some("2026-04-03".to_owned()),
+            end_time: Some("2026-04-03T23:59:59Z".to_owned()),
+            episode_count: 1,
+            tags_json: "[]".to_owned(),
+            raw_cache_key: None,
+            updated_at: "2026-04-03T23:59:59Z".to_owned(),
+        }];
+
+        assert_eq!(
+            overlapping_rest_mode_days(ReviewMode::Week, "2026-04-05", &periods),
+            3
+        );
     }
 }

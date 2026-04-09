@@ -59,7 +59,7 @@ async fn demo_output_mentions_dashboard() {
     assert!(output.contains("Capabilities"));
     assert!(output.contains("What Changed"));
     assert!(output.contains("Review:"));
-    assert!(output.contains("Stress high time is lower than usual."));
+    assert!(output.contains("Stress high time is higher than usual."));
 }
 
 #[tokio::test]

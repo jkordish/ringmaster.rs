@@ -16,10 +16,10 @@ pub fn headline_for_signal(
             format!("{} is below your baseline.", definition.label)
         }
         (SignalDirectionality::LowerBetter, Some(1)) => {
-            format!("{} is lower than usual.", definition.label)
+            format!("{} is higher than usual.", definition.label)
         }
         (SignalDirectionality::LowerBetter, Some(-1)) => {
-            format!("{} is higher than usual.", definition.label)
+            format!("{} is lower than usual.", definition.label)
         }
         (SignalDirectionality::Neutral | SignalDirectionality::Contextual, Some(1)) => {
             format!("{} is above its recent range.", definition.label)
@@ -146,6 +146,19 @@ mod tests {
         assert!(!headline.contains("AI"));
         assert!(!headline.contains("caused"));
         assert!(!headline.contains("should"));
+    }
+
+    #[test]
+    fn lower_better_templates_match_delta_direction() {
+        let definition = sample_definition(SignalDirectionality::LowerBetter);
+
+        let higher_headline =
+            headline_for_signal(&definition, ReviewMode::Today, Some(5.0), Some(1.2));
+        let lower_headline =
+            headline_for_signal(&definition, ReviewMode::Today, Some(-5.0), Some(-1.2));
+
+        assert!(higher_headline.contains("higher than usual"));
+        assert!(lower_headline.contains("lower than usual"));
     }
 
     #[test]
