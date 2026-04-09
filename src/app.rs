@@ -3303,8 +3303,8 @@ fn explain_supporting_event(
         .collect::<Vec<_>>()
         .join(" | "),
         selected: selected_event_id.is_some_and(|event_id| event.context_event_id == event_id),
-        source_day: display_day.to_owned(),
-        carried_forward: display_day != selected_day,
+        source_day: event.anchor_day.clone(),
+        carried_forward: event.anchor_day != selected_day,
     }
 }
 
@@ -4881,6 +4881,52 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("carryover from 2026-04-07"))
         );
+        assert!(
+            model
+                .explain
+                .context_lines
+                .iter()
+                .any(|line| line.contains("Carryover from 2026-04-07"))
+        );
+        assert!(model.explain.breadcrumb.contains("carryover"));
+    }
+
+    #[test]
+    fn explain_marks_cross_midnight_events_as_carryover_on_the_selected_day() {
+        let mut snapshot = make_snapshot(&["2026-04-07", "2026-04-08"]);
+        snapshot.context_events.push(ContextEventRecord {
+            context_event_id: "workout:overnight".to_owned(),
+            family: ContextEventFamily::Workout,
+            source_id: "overnight-workout".to_owned(),
+            anchor_day: "2026-04-07".to_owned(),
+            start_at: "2026-04-07T23:30:00Z".to_owned(),
+            end_at: Some("2026-04-08T00:30:00Z".to_owned()),
+            time_semantics: TimeSemantics::Interval,
+            title: "Overnight workout".to_owned(),
+            subtype: Some("run".to_owned()),
+            notes: Some("crosses midnight".to_owned()),
+            intensity: Some("moderate".to_owned()),
+            metadata_json: "{}".to_owned(),
+            updated_at: "2026-04-08T00:35:00Z".to_owned(),
+        });
+
+        let model = build_live_model(
+            &snapshot,
+            &LiveModelOptions {
+                selected_day_index: 1,
+                selected_point_index: 0,
+                selected_event_id: None,
+                overlay_filters: OverlayFilterState::all(),
+                window_hours: 24,
+                trends_window: TrendWindowKind::Days7,
+                pattern_metric_filter: PatternMetricFilter::All,
+                refresh_in_flight: false,
+                review_mode: ReviewScreenMode::Today,
+                review_focus: ReviewFocus::Readiness,
+                selected_review_card_index: 0,
+            },
+        );
+
         assert!(
             model
                 .explain
