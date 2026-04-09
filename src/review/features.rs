@@ -47,6 +47,28 @@ struct SeedPoint {
     metadata_json: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct NumericPoint {
+    day: String,
+    date: Date,
+    value: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+struct ComparableStats {
+    count: usize,
+    mean: Option<f64>,
+    stddev: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+struct NumericSeriesIndex {
+    points: Vec<NumericPoint>,
+    day_to_index: BTreeMap<String, usize>,
+    prefix_sums: Vec<f64>,
+    prefix_squared_sums: Vec<f64>,
+}
+
 impl ReviewSufficiency {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -249,16 +271,16 @@ pub fn build_review_signal_days(inputs: &FeatureInputs<'_>) -> Result<Vec<Review
         let Some(seed_points) = series.get(definition.key) else {
             continue;
         };
-        let numeric_series = numeric_series(seed_points);
+        let numeric_series = NumericSeriesIndex::build(seed_points)?;
 
         for seed in seed_points {
             let day = parse_day(&seed.day)?;
             let stale_days = (captured_day - day).whole_days().max(0);
-            let comparable_values =
-                prior_numeric_values(&numeric_series, &seed.day, definition.baseline_window_days);
-            let sufficiency = ReviewSufficiency::from_comparable_days(comparable_values.len());
-            let baseline_mean = mean(&comparable_values);
-            let baseline_stddev = standard_deviation(&comparable_values);
+            let comparable_stats =
+                numeric_series.comparable_stats(&seed.day, definition.baseline_window_days);
+            let sufficiency = ReviewSufficiency::from_comparable_days(comparable_stats.count);
+            let baseline_mean = comparable_stats.mean;
+            let baseline_stddev = comparable_stats.stddev;
             let delta = match (seed.numeric_value, baseline_mean) {
                 (Some(numeric_value), Some(mean_value)) => Some(numeric_value - mean_value),
                 _ => None,
@@ -277,7 +299,7 @@ pub fn build_review_signal_days(inputs: &FeatureInputs<'_>) -> Result<Vec<Review
                 definition.baseline_window_days,
             )?;
             let metadata_json = serde_json::to_string(&json!({
-                "comparable_days": comparable_values.len(),
+                "comparable_days": comparable_stats.count,
                 "source_family": definition.family,
                 "seed_metadata": serde_json::from_str::<serde_json::Value>(&seed.metadata_json)
                     .unwrap_or_else(|_| json!({})),
@@ -360,52 +382,8 @@ fn upsert_seed_point(seed_points: &mut Vec<SeedPoint>, seed_point: SeedPoint) {
     }
 }
 
-fn numeric_series(seed_points: &[SeedPoint]) -> Vec<(String, f64)> {
-    seed_points
-        .iter()
-        .filter_map(|seed| seed.numeric_value.map(|value| (seed.day.clone(), value)))
-        .collect()
-}
-
-fn prior_numeric_values(
-    numeric_series: &[(String, f64)],
-    day: &str,
-    baseline_window_days: usize,
-) -> Vec<f64> {
-    let mut values = numeric_series
-        .iter()
-        .filter(|(series_day, _)| series_day.as_str() < day)
-        .map(|(_, value)| *value)
-        .collect::<Vec<_>>();
-
-    if values.len() > baseline_window_days {
-        let drain_count = values.len().saturating_sub(baseline_window_days);
-        values.drain(..drain_count);
-    }
-
-    values
-}
-
-fn mean(values: &[f64]) -> Option<f64> {
-    if values.is_empty() {
-        None
-    } else {
-        Some(values.iter().sum::<f64>() / values.len() as f64)
-    }
-}
-
-fn standard_deviation(values: &[f64]) -> Option<f64> {
-    let mean_value = mean(values)?;
-    let variance = values
-        .iter()
-        .map(|value| (*value - mean_value).powi(2))
-        .sum::<f64>()
-        / values.len() as f64;
-    Some(variance.sqrt())
-}
-
 fn persistence_days(
-    numeric_series: &[(String, f64)],
+    numeric_series: &NumericSeriesIndex,
     anchor_day: &str,
     z_score: Option<f64>,
     directionality: SignalDirectionality,
@@ -419,19 +397,14 @@ fn persistence_days(
 
     loop {
         let day_label = current_day.to_string();
-        let Some((_, value)) = numeric_series
-            .iter()
-            .find(|(series_day, _)| series_day == &day_label)
+        let Some((value, comparable_stats)) =
+            numeric_series.value_and_comparable_stats(&day_label, baseline_window_days)
         else {
             break;
         };
-        let comparable_values =
-            prior_numeric_values(numeric_series, &day_label, baseline_window_days);
-        let comparable_mean = mean(&comparable_values);
-        let comparable_stddev = standard_deviation(&comparable_values);
-        let day_z_score = match (comparable_mean, comparable_stddev) {
+        let day_z_score = match (comparable_stats.mean, comparable_stats.stddev) {
             (Some(mean_value), Some(stddev)) if stddev >= MIN_STDDEV => {
-                Some((*value - mean_value) / stddev)
+                Some((value - mean_value) / stddev)
             }
             _ => None,
         };
@@ -451,6 +424,94 @@ fn persistence_days(
     }
 
     Ok(streak)
+}
+
+impl NumericSeriesIndex {
+    fn build(seed_points: &[SeedPoint]) -> Result<Self> {
+        let mut points = seed_points
+            .iter()
+            .filter_map(|seed| seed.numeric_value.map(|value| (seed, value)))
+            .map(|(seed, value)| {
+                Ok(NumericPoint {
+                    day: seed.day.clone(),
+                    date: parse_day(&seed.day)?,
+                    value,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        points.sort_by(|left, right| left.date.cmp(&right.date).then(left.day.cmp(&right.day)));
+
+        let day_to_index = points
+            .iter()
+            .enumerate()
+            .map(|(index, point)| (point.day.clone(), index))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut prefix_sums = Vec::with_capacity(points.len().saturating_add(1));
+        let mut prefix_squared_sums = Vec::with_capacity(points.len().saturating_add(1));
+        prefix_sums.push(0.0);
+        prefix_squared_sums.push(0.0);
+
+        let mut running_sum = 0.0;
+        let mut running_squared_sum = 0.0;
+        for point in &points {
+            running_sum += point.value;
+            running_squared_sum += point.value.powi(2);
+            prefix_sums.push(running_sum);
+            prefix_squared_sums.push(running_squared_sum);
+        }
+
+        Ok(Self {
+            points,
+            day_to_index,
+            prefix_sums,
+            prefix_squared_sums,
+        })
+    }
+
+    fn comparable_stats(&self, day: &str, baseline_window_days: usize) -> ComparableStats {
+        self.day_to_index
+            .get(day)
+            .copied()
+            .map(|index| self.comparable_stats_for_index(index, baseline_window_days))
+            .unwrap_or_default()
+    }
+
+    fn value_and_comparable_stats(
+        &self,
+        day: &str,
+        baseline_window_days: usize,
+    ) -> Option<(f64, ComparableStats)> {
+        let index = self.day_to_index.get(day).copied()?;
+        Some((
+            self.points.get(index)?.value,
+            self.comparable_stats_for_index(index, baseline_window_days),
+        ))
+    }
+
+    fn comparable_stats_for_index(
+        &self,
+        target_index: usize,
+        baseline_window_days: usize,
+    ) -> ComparableStats {
+        let start_index = target_index.saturating_sub(baseline_window_days);
+        let count = target_index.saturating_sub(start_index);
+        if count == 0 {
+            return ComparableStats::default();
+        }
+
+        let sum = self.prefix_sums[target_index] - self.prefix_sums[start_index];
+        let mean = sum / count as f64;
+        let squared_sum =
+            self.prefix_squared_sums[target_index] - self.prefix_squared_sums[start_index];
+        let variance = mean.mul_add(-mean, squared_sum / count as f64);
+
+        ComparableStats {
+            count,
+            mean: Some(mean),
+            stddev: Some(variance.max(0.0).sqrt()),
+        }
+    }
 }
 
 fn signal_sign(z_score: Option<f64>, directionality: SignalDirectionality) -> Option<i8> {
@@ -531,7 +592,8 @@ fn parse_day(day: &str) -> Result<Date> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FeatureInputs, ReviewSufficiency, build_review_signal_days, persistence_days, signal_sign,
+        FeatureInputs, NumericSeriesIndex, ReviewSufficiency, SeedPoint, build_review_signal_days,
+        persistence_days, signal_sign,
     };
     use crate::review::registry::SignalDirectionality;
     use crate::review::registry::signal_definition;
@@ -727,7 +789,7 @@ mod tests {
     fn persistence_uses_signal_baseline_window() {
         let start_day = time::Date::from_calendar_date(2026, time::Month::March, 1)
             .unwrap_or_else(|error| panic!("test start day should be valid: {error}"));
-        let numeric_series = (0_i64..35_i64)
+        let seed_points = (0_i64..35_i64)
             .map(|offset| {
                 let day = start_day
                     .checked_add(time::Duration::days(offset))
@@ -738,9 +800,16 @@ mod tests {
                     16..=30 => 100.0,
                     _ => 110.0,
                 };
-                (day.to_string(), value)
+                SeedPoint {
+                    day: day.to_string(),
+                    numeric_value: Some(value),
+                    text_value: None,
+                    metadata_json: "{}".to_owned(),
+                }
             })
             .collect::<Vec<_>>();
+        let numeric_series = NumericSeriesIndex::build(&seed_points)
+            .unwrap_or_else(|error| panic!("numeric series index should build: {error}"));
 
         let z_score = Some(1.0);
         assert_eq!(

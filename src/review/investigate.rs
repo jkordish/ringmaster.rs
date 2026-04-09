@@ -47,7 +47,14 @@ fn report_from_decks(
             .into_iter()
             .filter(|card| focus_keys.contains(&card.signal_key.as_str())),
     );
-    related_cards.sort_by(|left, right| right.score.cmp(&left.score));
+    related_cards.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| right.confidence.cmp(&left.confidence))
+            .then_with(|| left.signal_key.cmp(&right.signal_key))
+            .then_with(|| left.id.cmp(&right.id))
+    });
 
     let headline = related_cards.first().map_or_else(
         || {
@@ -250,5 +257,39 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("stress_high"))
         );
+    }
+
+    #[test]
+    fn investigation_breaks_equal_scores_deterministically() {
+        let mut lower_confidence = make_card("stress-low", "stress_high", 8);
+        lower_confidence.confidence = ReviewConfidence::Low;
+        lower_confidence.headline = "stress low confidence".to_owned();
+        let mut higher_confidence = make_card("stress-high", "stress_high", 8);
+        higher_confidence.confidence = ReviewConfidence::High;
+        higher_confidence.headline = "stress high confidence".to_owned();
+
+        let today = ReviewDeck {
+            mode: ReviewMode::Today,
+            anchor_day: "2026-04-08".to_owned(),
+            observations: vec![lower_confidence],
+            positive_changes: Vec::new(),
+            negative_drifts: Vec::new(),
+            unresolved_anomalies: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let week = ReviewDeck {
+            mode: ReviewMode::Week,
+            anchor_day: "2026-04-08".to_owned(),
+            observations: vec![higher_confidence],
+            positive_changes: Vec::new(),
+            negative_drifts: Vec::new(),
+            unresolved_anomalies: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        let report = super::report_from_decks(ReviewFocus::Stress, "2026-04-08", &today, &week);
+
+        assert!(report.headline.contains("stress high confidence"));
+        assert_eq!(report.confidence, ReviewConfidence::High);
     }
 }

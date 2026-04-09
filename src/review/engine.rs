@@ -35,7 +35,7 @@ pub enum ReviewSection {
     UnresolvedAnomaly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum ReviewConfidence {
     Low,
     Medium,
