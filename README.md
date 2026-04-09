@@ -1,18 +1,20 @@
 # ringmaster.rs
 
-`ringmaster.rs` is a local-first Rust terminal application for exploring Oura Cloud data with a Ratatui interface, SQLite-backed local storage, deterministic demo and fixture paths, a real Oura Cloud API v2 integration, and a near-real-time webhook-aware freshness model where the upstream API supports it.
+`ringmaster.rs` is a local-first Rust terminal application for exploring Oura Cloud data with a Ratatui interface, SQLite-backed local storage, deterministic demo and fixture paths, a real Oura Cloud API v2 integration, a near-real-time webhook-aware freshness model where the upstream API supports it, and a deterministic review layer for daily briefs, weekly drift, and bounded investigations.
 
 ## Status
 
 This repository now includes an operationally trustworthy personal observability MVP:
 
-- `clap` CLI with `tui`, `tui --demo`, `doctor`, `auth login`, `sync once`, `sync watch`, `derive rebuild`, `webhook serve`, `webhook replay`, `webhook subscriptions list`, `webhook subscriptions sync`, and the compatibility alias `demo`
-- a useful Ratatui Dashboard, Timeline, Trends, Explain, Patterns, and Ops screen backed by persisted SQLite data
-- deterministic demo data that exercises the same six-screen shell without credentials or network access
+- `clap` CLI with `tui`, `tui --demo`, `doctor`, `auth login`, `sync once`, `sync watch`, `derive rebuild`, `review today`, `review week`, `review investigate`, `webhook serve`, `webhook replay`, `webhook subscriptions list`, `webhook subscriptions sync`, and the compatibility alias `demo`
+- a useful Ratatui Dashboard, Timeline, Trends, Explain, Patterns, Ops, and Review screen backed by persisted SQLite data
+- deterministic demo data that exercises the same seven-screen shell without credentials or network access
 - real loopback OAuth login with server-side code exchange, PKCE, and CSRF-safe state handling
 - persisted auth/session metadata in SQLite with token secrets stored through the OS keyring seam
-- real sync for personal info, daily summaries, heartrate, workouts, enhanced tags, and sessions into normalized tables plus raw payload cache
-- persisted derived read models for canonical context events and deterministic pattern summaries, with bounded recent-window refreshes after successful syncs and full-history rebuilds via `derive rebuild`
+- real sync for personal info, daily summaries, heartrate, workouts, enhanced tags, sessions, daily stress, daily resilience, sleep time, cardiovascular age, VO2 max, and rest mode periods into normalized tables plus raw payload cache
+- persisted derived read models for canonical context events, deterministic pattern summaries, and review signal snapshots, with bounded recent-window refreshes after successful syncs and full-history rebuilds via `derive rebuild`
+- deterministic daily and weekly review ranking plus bounded investigations with explicit evidence, counterevidence, confidence, and sufficiency
+- a deliberately non-chatty smart layer: no freeform assistant, no hosted AI service, and no hidden text generation
 - a hybrid `sync watch` engine that consumes webhook invalidations first, preserves scheduled fallback reconciliation, and keeps unsupported families honest instead of pretending they are realtime
 - a dedicated webhook receiver with explicit verification, accepted/rejected delivery audit, invalidation enqueue, and clean shutdown
 - declarative webhook subscription lifecycle management with list, diff, dry-run, create, update, renew, and optional prune flows
@@ -35,6 +37,9 @@ cargo run -- sync watch
 cargo run -- sync watch --demo --max-iterations 1
 cargo run -- derive rebuild
 cargo run -- derive rebuild --demo
+cargo run -- review today --demo
+cargo run -- review week --demo
+cargo run -- review investigate --focus readiness --demo
 cargo run -- webhook serve
 cargo run -- webhook replay --fixture tests/fixtures/webhooks/sample.json
 cargo run -- webhook subscriptions list --fixture-dir tests/fixtures/webhooks
@@ -53,6 +58,9 @@ Behavior notes:
 - `ringmaster auth login` starts a loopback OAuth flow, validates state, exchanges the code server-side, and persists auth/session metadata locally.
 - `ringmaster sync once` refreshes auth when needed, imports all supported sync families, caches raw payloads, upserts normalized SQLite rows, and refreshes the derived context/pattern tables over a bounded recent window when the underlying persisted data changes.
 - `ringmaster sync watch` is the long-running invalidation consumer and scheduler. It processes queued webhook invalidations first, then preserves periodic fallback reconciliation.
+- `ringmaster review today` prints a ranked daily brief with evidence, uncertainty, confidence, and sufficiency labels.
+- `ringmaster review week` prints a ranked weekly review using the same persisted local data and deterministic templates.
+- `ringmaster review investigate --focus <readiness|sleep|recovery|stress|activity>` prints a bounded investigation with evidence bundles, counterevidence, and “look next” pointers.
 - `ringmaster webhook serve` is the dedicated HTTP receiver. It verifies Oura webhook requests, records accepted and rejected deliveries, enqueues invalidations, and responds after durable enqueue instead of after sync work.
 - `ringmaster webhook replay --fixture tests/fixtures/webhooks/sample.json` is the canonical local debugging path for receiver and queue behavior. Fixture replay runs the same verification and enqueue path offline, then previews the bounded invalidation-processing plan without writing fixture data into the local store. Stored-delivery replay re-enqueues invalidations without auto-running a fixture-backed sync into a live store.
 - `ringmaster webhook subscriptions list` inspects desired and remote subscription state.
@@ -174,6 +182,12 @@ The current live sync and persistence surface includes:
 - `workout`
 - `enhanced_tag`
 - `session`
+- `daily_stress`
+- `daily_resilience`
+- `sleep_time`
+- `daily_cardiovascular_age`
+- `vo2_max`
+- `rest_mode_period`
 
 Legacy `tags` remain read-compatible in the derived event layer when they already exist in the database, but the product is intentionally centered on `enhanced_tag` for current work.
 
@@ -193,26 +207,32 @@ Webhook-driven freshness is intentionally limited to Oura `data_type`s the produ
 What the screens now do:
 
 - Dashboard shows the shared selected day, daily metric cards, freshness badges, capability badges, a compact baseline summary, and a restrained “what likely changed?” panel.
+- Dashboard also reuses the strongest Today review items so the smart layer is visible without leaving the landing screen.
 - Timeline shows a gap-aware intraday heartrate chart, family filter toggles, real overlay lanes for workouts, enhanced tags, and sessions, selected-event details, and the selected-day event list.
-- Trends shows 7d / 30d / 90d windows, baseline-aware trend summaries, and confidence notes when history is thin.
+- Trends shows 7d / 30d / 90d windows, baseline-aware trend summaries, confidence notes when history is thin, and a weekly review drift banner when the local evidence is strong enough to justify one.
 - Explain shows the selected day summary, today-vs-baseline or selected-day-vs-baseline framing, supporting evidence bullets, related context entries, and explicit caveats for thin data, missing scopes, or missing measurements.
+- Explain also surfaces a concise Review hint when the selected day is part of the ranked brief.
 - Patterns shows deterministic descriptive associations by family and metric with `n`, magnitude, and sufficiency buckets.
+- Review is the canonical smart surface. It has Today, Week, and Investigate modes, ranked review cards, explicit evidence and counterevidence, confidence and sufficiency labels, and bounded focus-driven investigations instead of freeform chat.
 - Ops acts as a local operator console with auth state, granted scopes, per-family freshness source, webhook receiver status, callback configuration, subscription drift and expiry, queue depth and lag, delivery history, and current runtime mode.
 
 Shared interaction semantics:
 
-- Dashboard, Timeline, and Explain all share one selected day
+- Dashboard, Timeline, Explain, and Review all share one selected day
 - Timeline and Explain share the same selected event where relevant
 - Timeline, Explain, and Patterns share the same family filter toggles for workouts, tags, and sessions
 
 Key navigation defaults:
 
-- `1-6`: Dashboard, Timeline, Trends, Explain, Patterns, Ops
-- `[` / `]`: move the shared selected day on Dashboard, Timeline, and Explain
+- `1-7`: Dashboard, Timeline, Trends, Explain, Patterns, Ops, Review
+- `[` / `]`: move the shared selected day on Dashboard, Timeline, Explain, and Review
 - `,` / `.`: move the selected heartrate point on Timeline
 - `j` / `k`: move the selected event on Timeline and Explain
+- `j` / `k` on Review: move the selected review card
 - `w` / `t` / `s`: toggle workouts, tags, and sessions on Timeline, Explain, and Patterns
 - `m`: cycle the metric filter on Patterns
+- `v`: cycle Today, Week, and Investigate on Review
+- `f`: cycle investigation focus on Review
 
 ## Canonical event model
 
@@ -234,6 +254,31 @@ Context overlays and explainability are powered by a persisted derived read mode
 
 This model is rebuilt from persisted normalized data and then queried by the app layer for Timeline, Explain, and Patterns.
 
+## Smart review model
+
+The smart layer is deterministic and capability-aware. It is intentionally not a chat assistant.
+
+- Reviewable signals are defined in a canonical registry with metadata for baseline window, directionality, evidence kind, safe wording, and surface suitability.
+- `derive rebuild` persists `derived_review_signal_days`, which are normalized per-signal daily feature snapshots rebuilt from local stored data.
+- `review today` ranks anchor-day observations using deviation from baseline, persistence, recency, corroboration, counterevidence penalties, freshness penalties, and data-sufficiency penalties.
+- `review week` ranks weekly drift using a 7-day anchor window against a prior 28-day comparison window.
+- `review investigate` is bounded to fixed focuses: readiness, sleep, recovery, stress, and activity.
+- Every observation is rendered from deterministic templates with:
+  - a headline
+  - a “why this is shown” explanation
+  - evidence
+  - counterevidence or uncertainty
+  - confidence
+  - sufficiency
+
+The review layer avoids:
+
+- freeform prompts
+- causal claims
+- medical interpretation
+- “AI says” wording
+- certainty theater
+
 ## Explainability rules
 
 Explain and Patterns intentionally stay honest and deterministic.
@@ -253,11 +298,14 @@ The app intentionally avoids:
 - “AI says” language
 - faux significance claims
 - certainty theater
+- chat-assistant framing
 
 Preferred wording includes:
 
 - `associated with`
 - `co-occurred with`
+- `below your baseline`
+- `evidence is limited because...`
 - `after days with`
 - `this may be relevant, but evidence is limited`
 

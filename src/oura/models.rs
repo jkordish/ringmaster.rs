@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use time::{OffsetDateTime, UtcOffset};
 
 use crate::error::OuraProblem;
 
@@ -128,6 +129,111 @@ pub struct DailyActivityDocument {
     pub steps: i64,
     pub total_calories: i64,
     pub timestamp: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SleepTimeWindow {
+    pub day_tz: i32,
+    pub end_offset: i32,
+    pub start_offset: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SleepTimeRecommendation {
+    ImproveEfficiency,
+    EarlierBedtime,
+    LaterBedtime,
+    EarlierWakeUpTime,
+    LaterWakeUpTime,
+    FollowOptimalBedtime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SleepTimeStatus {
+    NotEnoughNights,
+    NotEnoughRecentNights,
+    BadSleepQuality,
+    OnlyRecommendedFound,
+    OptimalFound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SleepTimeDocument {
+    pub id: String,
+    pub day: String,
+    #[serde(default)]
+    pub optimal_bedtime: Option<SleepTimeWindow>,
+    #[serde(default)]
+    pub recommendation: Option<SleepTimeRecommendation>,
+    #[serde(default)]
+    pub status: Option<SleepTimeStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DailyStressDocument {
+    pub id: String,
+    pub day: String,
+    pub stress_high: Option<i64>,
+    pub recovery_high: Option<i64>,
+    #[serde(default)]
+    pub day_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResilienceContributors {
+    pub sleep_recovery: f64,
+    pub daytime_recovery: f64,
+    pub stress: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LongTermResilienceLevel {
+    Limited,
+    Adequate,
+    Solid,
+    Strong,
+    Exceptional,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DailyResilienceDocument {
+    pub id: String,
+    pub day: String,
+    pub contributors: ResilienceContributors,
+    pub level: LongTermResilienceLevel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DailyCardiovascularAgeDocument {
+    pub day: String,
+    pub vascular_age: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Vo2MaxDocument {
+    pub id: String,
+    pub day: String,
+    pub timestamp: String,
+    pub vo2_max: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestModeEpisodeDocument {
+    pub tags: Vec<String>,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestModePeriodDocument {
+    pub id: String,
+    pub episodes: Vec<RestModeEpisodeDocument>,
+    pub start_day: String,
+    pub start_time: Option<String>,
+    pub end_day: Option<String>,
+    pub end_time: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -374,5 +480,91 @@ impl SessionDocument {
             .clone()
             .or_else(|| self.kind.clone())
             .unwrap_or_else(|| "Session".to_owned())
+    }
+}
+
+impl SleepTimeRecommendation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ImproveEfficiency => "improve_efficiency",
+            Self::EarlierBedtime => "earlier_bedtime",
+            Self::LaterBedtime => "later_bedtime",
+            Self::EarlierWakeUpTime => "earlier_wake_up_time",
+            Self::LaterWakeUpTime => "later_wake_up_time",
+            Self::FollowOptimalBedtime => "follow_optimal_bedtime",
+        }
+    }
+}
+
+impl SleepTimeStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotEnoughNights => "not_enough_nights",
+            Self::NotEnoughRecentNights => "not_enough_recent_nights",
+            Self::BadSleepQuality => "bad_sleep_quality",
+            Self::OnlyRecommendedFound => "only_recommended_found",
+            Self::OptimalFound => "optimal_found",
+        }
+    }
+}
+
+impl LongTermResilienceLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Limited => "limited",
+            Self::Adequate => "adequate",
+            Self::Solid => "solid",
+            Self::Strong => "strong",
+            Self::Exceptional => "exceptional",
+        }
+    }
+}
+
+impl RestModePeriodDocument {
+    pub fn overlaps_day_window(&self, start_day: &str, end_day: &str) -> bool {
+        let current_day = current_local_day_string();
+        let effective_end_day = self.end_day.as_deref().unwrap_or(current_day.as_str());
+        self.start_day.as_str() <= end_day && effective_end_day >= start_day
+    }
+
+    pub fn tags_json(&self) -> Result<String, serde_json::Error> {
+        let tags = self
+            .episodes
+            .iter()
+            .map(|episode| episode.tags.clone())
+            .collect::<Vec<_>>();
+        serde_json::to_string(&tags)
+    }
+}
+
+fn current_local_day_string() -> String {
+    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    OffsetDateTime::now_utc()
+        .to_offset(local_offset)
+        .date()
+        .to_string()
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod tests {
+    use super::{RestModeEpisodeDocument, RestModePeriodDocument, current_local_day_string};
+
+    #[test]
+    fn open_rest_mode_period_overlaps_windows_after_start_day() {
+        let current_day = current_local_day_string();
+        let period = RestModePeriodDocument {
+            id: "rest-open".to_owned(),
+            episodes: vec![RestModeEpisodeDocument {
+                tags: vec!["rest_mode".to_owned()],
+                timestamp: "2026-04-02T00:00:00Z".to_owned(),
+            }],
+            start_day: "2026-04-02".to_owned(),
+            start_time: Some("2026-04-02T00:00:00Z".to_owned()),
+            end_day: None,
+            end_time: None,
+        };
+
+        assert!(period.overlaps_day_window("2026-04-03", &current_day));
     }
 }

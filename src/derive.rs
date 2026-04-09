@@ -9,11 +9,12 @@ use crate::error::{AuthError, Result, RingmasterError};
 use crate::oura::models::TagRecord;
 use crate::oura::sync::{SyncOptions, sync_once};
 use crate::refresh::SyncFamily;
+use crate::review::{FeatureInputs, build_review_signal_days};
 use crate::store::Store;
 use crate::store::queries::{
     ContextEventFamily, ContextEventRecord, DailyOverviewRow, DataSufficiency, EffectDirection,
-    PatternMetric, PatternRelationWindow, PatternSummaryRecord, RecordCounts, SessionRecord,
-    TimeSemantics, WorkoutRecord,
+    PatternMetric, PatternRelationWindow, PatternSummaryRecord, RecordCounts,
+    ReviewSignalDayRecord, SessionRecord, TimeSemantics, WorkoutRecord,
 };
 
 const MIN_PATTERN_SAMPLES: usize = 3;
@@ -31,7 +32,15 @@ pub struct DeriveReport {
     pub database_path: String,
     pub context_event_count: usize,
     pub pattern_summary_count: usize,
+    pub review_signal_day_count: usize,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DerivedReviewArtifacts {
+    pub context_events: Vec<ContextEventRecord>,
+    pub pattern_summaries: Vec<PatternSummaryRecord>,
+    pub review_signal_days: Vec<ReviewSignalDayRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,7 +75,7 @@ pub async fn rebuild(config: &Config, options: DeriveOptions) -> Result<DeriveRe
             .fixture_dir
             .clone()
             .or_else(|| config.refresh.demo_fixture_dir.clone())
-            .unwrap_or_else(|| PathBuf::from("tests/fixtures/phase3"));
+            .unwrap_or_else(|| PathBuf::from("tests/fixtures/phase5"));
         let temp_root = TempRootGuard::new("derive");
         let mut temp_config = config.clone();
         temp_config.paths = AppPaths::from_roots(
@@ -110,14 +119,97 @@ pub fn rebuild_store(store: &Store) -> Result<DeriveReport> {
 }
 
 pub fn rebuild_recent_store(store: &Store, config: &Config) -> Result<DeriveReport> {
-    let latest_source_day = store.views().latest_source_day()?;
+    rebuild_store_for_anchor_day(store, config, None)
+}
+
+pub fn rebuild_store_for_anchor_day(
+    store: &Store,
+    config: &Config,
+    anchor_day: Option<&str>,
+) -> Result<DeriveReport> {
+    let resolved_anchor_day = match anchor_day {
+        Some(day) => {
+            Date::parse(
+                day,
+                &time::macros::format_description!("[year]-[month]-[day]"),
+            )
+            .map_err(|error| {
+                RingmasterError::Config(format!(
+                    "failed to parse derive anchor day `{day}`: {error}"
+                ))
+            })?;
+            Some(day.to_owned())
+        }
+        None => store.views().latest_source_day()?,
+    };
     rebuild_store_with_bounds(
         store,
-        DeriveBounds::bounded_refresh(&config.refresh, latest_source_day.as_deref()),
+        DeriveBounds::bounded_refresh(&config.refresh, resolved_anchor_day.as_deref()),
     )
 }
 
+pub fn derive_review_artifacts_for_anchor_day(
+    store: &Store,
+    config: &Config,
+    anchor_day: Option<&str>,
+) -> Result<Option<DerivedReviewArtifacts>> {
+    let resolved_anchor_day = match anchor_day {
+        Some(day) => {
+            Date::parse(
+                day,
+                &time::macros::format_description!("[year]-[month]-[day]"),
+            )
+            .map_err(|error| {
+                RingmasterError::Config(format!(
+                    "failed to parse derive anchor day `{day}`: {error}"
+                ))
+            })?;
+            Some(day.to_owned())
+        }
+        None => store.views().latest_source_day()?,
+    };
+
+    resolved_anchor_day
+        .as_deref()
+        .map(|resolved_anchor_day| {
+            derive_review_artifacts_with_bounds(
+                store,
+                DeriveBounds::bounded_refresh(&config.refresh, Some(resolved_anchor_day)),
+            )
+        })
+        .transpose()
+}
+
 fn rebuild_store_with_bounds(store: &Store, bounds: DeriveBounds) -> Result<DeriveReport> {
+    let derived = derive_review_artifacts_with_bounds(store, bounds.clone())?;
+    store
+        .derived()
+        .replace_context_events(&derived.context_events)?;
+    store
+        .derived()
+        .replace_pattern_summaries(&derived.pattern_summaries)?;
+    store
+        .derived()
+        .replace_review_signal_days(&derived.review_signal_days)?;
+
+    let counts = store.views().record_counts()?;
+    let mut notes = derivation_notes(&counts);
+    if let Some(note) = bounds.note {
+        notes.insert(0, note);
+    }
+    Ok(DeriveReport {
+        database_path: store.plan().db_path.display().to_string(),
+        context_event_count: derived.context_events.len(),
+        pattern_summary_count: derived.pattern_summaries.len(),
+        review_signal_day_count: derived.review_signal_days.len(),
+        notes,
+    })
+}
+
+fn derive_review_artifacts_with_bounds(
+    store: &Store,
+    bounds: DeriveBounds,
+) -> Result<DerivedReviewArtifacts> {
     let daily_history = store
         .views()
         .daily_history_between_days(&bounds.start_day, &bounds.end_day)?;
@@ -133,25 +225,51 @@ fn rebuild_store_with_bounds(store: &Store, bounds: DeriveBounds) -> Result<Deri
     let sessions = store
         .views()
         .sessions_between_days(&bounds.start_day, &bounds.end_day)?;
+    let daily_activity = store
+        .views()
+        .daily_activity_between_days(&bounds.start_day, &bounds.end_day)?;
+    let daily_readiness = store
+        .views()
+        .daily_readiness_between_days(&bounds.start_day, &bounds.end_day)?;
+    let daily_stress = store
+        .views()
+        .daily_stress_between_days(&bounds.start_day, &bounds.end_day)?;
+    let daily_resilience = store
+        .views()
+        .daily_resilience_between_days(&bounds.start_day, &bounds.end_day)?;
+    let daily_cardiovascular_age = store
+        .views()
+        .daily_cardiovascular_age_between_days(&bounds.start_day, &bounds.end_day)?;
+    let vo2_max = store
+        .views()
+        .vo2_max_between_days(&bounds.start_day, &bounds.end_day)?;
+    let sleep_time = store
+        .views()
+        .sleep_time_between_days(&bounds.start_day, &bounds.end_day)?;
+    let rest_mode_periods = store
+        .views()
+        .rest_mode_periods_between_days(&bounds.start_day, &bounds.end_day)?;
 
     let context_events = build_context_events(&workouts, &tags, &enhanced_tags, &sessions)?;
     let pattern_summaries = build_pattern_summaries(&daily_history, &context_events)?;
+    let review_updated_at = bounds.review_captured_at()?;
+    let review_signal_days = build_review_signal_days(&FeatureInputs {
+        daily_history: &daily_history,
+        daily_activity: &daily_activity,
+        daily_readiness: &daily_readiness,
+        daily_stress: &daily_stress,
+        daily_resilience: &daily_resilience,
+        daily_cardiovascular_age: &daily_cardiovascular_age,
+        vo2_max: &vo2_max,
+        sleep_time: &sleep_time,
+        rest_mode_periods: &rest_mode_periods,
+        captured_at: &review_updated_at,
+    })?;
 
-    store.derived().replace_context_events(&context_events)?;
-    store
-        .derived()
-        .replace_pattern_summaries(&pattern_summaries)?;
-
-    let counts = store.views().record_counts()?;
-    let mut notes = derivation_notes(&counts);
-    if let Some(note) = bounds.note {
-        notes.insert(0, note);
-    }
-    Ok(DeriveReport {
-        database_path: store.plan().db_path.display().to_string(),
-        context_event_count: context_events.len(),
-        pattern_summary_count: pattern_summaries.len(),
-        notes,
+    Ok(DerivedReviewArtifacts {
+        context_events,
+        pattern_summaries,
+        review_signal_days,
     })
 }
 
@@ -584,10 +702,15 @@ fn normalize_key(value: &str) -> String {
 fn derivation_notes(counts: &RecordCounts) -> Vec<String> {
     vec![
         format!(
-            "Derived state rebuilt from {} workouts, {} enhanced tags, {} sessions, and {} legacy tags.",
-            counts.workouts, counts.enhanced_tags, counts.sessions, counts.tags
+            "Derived state rebuilt from {} workouts, {} enhanced tags, {} sessions, {} legacy tags, and {} review signal snapshots.",
+            counts.workouts,
+            counts.enhanced_tags,
+            counts.sessions,
+            counts.tags,
+            counts.derived_review_signal_days
         ),
         "Pattern summaries are descriptive associations only and never causal claims.".to_owned(),
+        "Review signal snapshots are deterministic feature rows rebuilt from persisted local data.".to_owned(),
         "Same-night sleep is defined as the sleep row whose closeout day is the day after the event.".to_owned(),
     ]
 }
@@ -632,6 +755,25 @@ impl DeriveBounds {
             )),
         }
     }
+
+    fn review_captured_at(&self) -> Result<String> {
+        if self.start_day == "0000-01-01" && self.end_day == "9999-12-31" {
+            return now_rfc3339();
+        }
+
+        let end_day = Date::parse(
+            &self.end_day,
+            &time::macros::format_description!("[year]-[month]-[day]"),
+        )
+        .map_err(|error| {
+            RingmasterError::Config(format!(
+                "failed to parse bounded derive end_day `{}`: {error}",
+                self.end_day
+            ))
+        })?;
+        let anchor_day = end_day - Duration::days(1);
+        Ok(format!("{anchor_day}T12:00:00Z"))
+    }
 }
 
 impl TempRootGuard {
@@ -671,7 +813,8 @@ fn now_rfc3339() -> Result<String> {
 #[allow(clippy::panic)]
 mod tests {
     use super::{
-        DeriveBounds, TempRootGuard, build_context_events, build_pattern_summaries, rebuild_store,
+        DeriveBounds, TempRootGuard, build_context_events, build_pattern_summaries,
+        derive_review_artifacts_with_bounds, rebuild_store,
     };
     use crate::config::RefreshConfig;
     use crate::store::Store;
@@ -876,6 +1019,35 @@ mod tests {
         }
     }
 
+    fn review_refresh_config() -> RefreshConfig {
+        RefreshConfig {
+            personal_interval_secs: 3_600,
+            daily_interval_secs: 300,
+            heartrate_interval_secs: 60,
+            workout_interval_secs: 600,
+            enhanced_tag_interval_secs: 300,
+            session_interval_secs: 300,
+            personal_stale_after_secs: 72 * 60 * 60,
+            daily_stale_after_secs: 12 * 60 * 60,
+            heartrate_stale_after_secs: 15 * 60,
+            workout_stale_after_secs: 24 * 60 * 60,
+            enhanced_tag_stale_after_secs: 12 * 60 * 60,
+            session_stale_after_secs: 12 * 60 * 60,
+            daily_history_days: 14,
+            daily_overlap_days: 2,
+            heartrate_history_days: 7,
+            heartrate_overlap_minutes: 60,
+            workout_history_days: 90,
+            workout_overlap_days: 2,
+            enhanced_tag_history_days: 45,
+            enhanced_tag_overlap_days: 2,
+            session_history_days: 30,
+            session_overlap_days: 2,
+            max_backoff_secs: 60 * 60,
+            demo_fixture_dir: None,
+        }
+    }
+
     fn upsert_daily_rows(
         imports: &ImportStore<'_>,
         day: &str,
@@ -1012,32 +1184,7 @@ mod tests {
 
     #[test]
     fn bounded_refresh_extends_window_for_baseline_history() {
-        let refresh = RefreshConfig {
-            personal_interval_secs: 3_600,
-            daily_interval_secs: 300,
-            heartrate_interval_secs: 60,
-            workout_interval_secs: 600,
-            enhanced_tag_interval_secs: 300,
-            session_interval_secs: 300,
-            personal_stale_after_secs: 72 * 60 * 60,
-            daily_stale_after_secs: 12 * 60 * 60,
-            heartrate_stale_after_secs: 15 * 60,
-            workout_stale_after_secs: 24 * 60 * 60,
-            enhanced_tag_stale_after_secs: 12 * 60 * 60,
-            session_stale_after_secs: 12 * 60 * 60,
-            daily_history_days: 14,
-            daily_overlap_days: 2,
-            heartrate_history_days: 7,
-            heartrate_overlap_minutes: 60,
-            workout_history_days: 90,
-            workout_overlap_days: 2,
-            enhanced_tag_history_days: 45,
-            enhanced_tag_overlap_days: 2,
-            session_history_days: 30,
-            session_overlap_days: 2,
-            max_backoff_secs: 60 * 60,
-            demo_fixture_dir: None,
-        };
+        let refresh = review_refresh_config();
 
         let bounds = DeriveBounds::bounded_refresh(&refresh, Some("2026-04-08"));
         let start = Date::parse(
@@ -1062,6 +1209,29 @@ mod tests {
                 .as_deref()
                 .is_some_and(|note| note.contains("bounded recent window"))
         );
+    }
+
+    #[test]
+    fn bounded_refresh_uses_anchor_day_for_review_freshness() {
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| panic!("store should open in memory: {error}"));
+        populate_history(&store);
+
+        let artifacts = derive_review_artifacts_with_bounds(
+            &store,
+            DeriveBounds::bounded_refresh(&review_refresh_config(), Some("2026-04-08")),
+        )
+        .unwrap_or_else(|error| {
+            panic!("bounded derive should build review artifacts for freshness test: {error}")
+        });
+
+        let anchored_row = artifacts
+            .review_signal_days
+            .iter()
+            .find(|row| row.signal_key == "sleep_score" && row.day == "2026-04-08")
+            .unwrap_or_else(|| panic!("anchored sleep score row should exist"));
+
+        assert_eq!(anchored_row.stale_days, 0);
     }
 
     #[test]
