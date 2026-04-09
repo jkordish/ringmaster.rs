@@ -252,7 +252,7 @@ fn derive_review_artifacts_with_bounds(
 
     let context_events = build_context_events(&workouts, &tags, &enhanced_tags, &sessions)?;
     let pattern_summaries = build_pattern_summaries(&daily_history, &context_events)?;
-    let review_updated_at = now_rfc3339()?;
+    let review_updated_at = bounds.review_captured_at()?;
     let review_signal_days = build_review_signal_days(&FeatureInputs {
         daily_history: &daily_history,
         daily_activity: &daily_activity,
@@ -755,6 +755,25 @@ impl DeriveBounds {
             )),
         }
     }
+
+    fn review_captured_at(&self) -> Result<String> {
+        if self.start_day == "0000-01-01" && self.end_day == "9999-12-31" {
+            return now_rfc3339();
+        }
+
+        let end_day = Date::parse(
+            &self.end_day,
+            &time::macros::format_description!("[year]-[month]-[day]"),
+        )
+        .map_err(|error| {
+            RingmasterError::Config(format!(
+                "failed to parse bounded derive end_day `{}`: {error}",
+                self.end_day
+            ))
+        })?;
+        let anchor_day = end_day - Duration::days(1);
+        Ok(format!("{anchor_day}T12:00:00Z"))
+    }
 }
 
 impl TempRootGuard {
@@ -794,7 +813,8 @@ fn now_rfc3339() -> Result<String> {
 #[allow(clippy::panic)]
 mod tests {
     use super::{
-        DeriveBounds, TempRootGuard, build_context_events, build_pattern_summaries, rebuild_store,
+        DeriveBounds, TempRootGuard, build_context_events, build_pattern_summaries,
+        derive_review_artifacts_with_bounds, rebuild_store,
     };
     use crate::config::RefreshConfig;
     use crate::store::Store;
@@ -999,6 +1019,35 @@ mod tests {
         }
     }
 
+    fn review_refresh_config() -> RefreshConfig {
+        RefreshConfig {
+            personal_interval_secs: 3_600,
+            daily_interval_secs: 300,
+            heartrate_interval_secs: 60,
+            workout_interval_secs: 600,
+            enhanced_tag_interval_secs: 300,
+            session_interval_secs: 300,
+            personal_stale_after_secs: 72 * 60 * 60,
+            daily_stale_after_secs: 12 * 60 * 60,
+            heartrate_stale_after_secs: 15 * 60,
+            workout_stale_after_secs: 24 * 60 * 60,
+            enhanced_tag_stale_after_secs: 12 * 60 * 60,
+            session_stale_after_secs: 12 * 60 * 60,
+            daily_history_days: 14,
+            daily_overlap_days: 2,
+            heartrate_history_days: 7,
+            heartrate_overlap_minutes: 60,
+            workout_history_days: 90,
+            workout_overlap_days: 2,
+            enhanced_tag_history_days: 45,
+            enhanced_tag_overlap_days: 2,
+            session_history_days: 30,
+            session_overlap_days: 2,
+            max_backoff_secs: 60 * 60,
+            demo_fixture_dir: None,
+        }
+    }
+
     fn upsert_daily_rows(
         imports: &ImportStore<'_>,
         day: &str,
@@ -1135,32 +1184,7 @@ mod tests {
 
     #[test]
     fn bounded_refresh_extends_window_for_baseline_history() {
-        let refresh = RefreshConfig {
-            personal_interval_secs: 3_600,
-            daily_interval_secs: 300,
-            heartrate_interval_secs: 60,
-            workout_interval_secs: 600,
-            enhanced_tag_interval_secs: 300,
-            session_interval_secs: 300,
-            personal_stale_after_secs: 72 * 60 * 60,
-            daily_stale_after_secs: 12 * 60 * 60,
-            heartrate_stale_after_secs: 15 * 60,
-            workout_stale_after_secs: 24 * 60 * 60,
-            enhanced_tag_stale_after_secs: 12 * 60 * 60,
-            session_stale_after_secs: 12 * 60 * 60,
-            daily_history_days: 14,
-            daily_overlap_days: 2,
-            heartrate_history_days: 7,
-            heartrate_overlap_minutes: 60,
-            workout_history_days: 90,
-            workout_overlap_days: 2,
-            enhanced_tag_history_days: 45,
-            enhanced_tag_overlap_days: 2,
-            session_history_days: 30,
-            session_overlap_days: 2,
-            max_backoff_secs: 60 * 60,
-            demo_fixture_dir: None,
-        };
+        let refresh = review_refresh_config();
 
         let bounds = DeriveBounds::bounded_refresh(&refresh, Some("2026-04-08"));
         let start = Date::parse(
@@ -1185,6 +1209,29 @@ mod tests {
                 .as_deref()
                 .is_some_and(|note| note.contains("bounded recent window"))
         );
+    }
+
+    #[test]
+    fn bounded_refresh_uses_anchor_day_for_review_freshness() {
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| panic!("store should open in memory: {error}"));
+        populate_history(&store);
+
+        let artifacts = derive_review_artifacts_with_bounds(
+            &store,
+            DeriveBounds::bounded_refresh(&review_refresh_config(), Some("2026-04-08")),
+        )
+        .unwrap_or_else(|error| {
+            panic!("bounded derive should build review artifacts for freshness test: {error}")
+        });
+
+        let anchored_row = artifacts
+            .review_signal_days
+            .iter()
+            .find(|row| row.signal_key == "sleep_score" && row.day == "2026-04-08")
+            .unwrap_or_else(|| panic!("anchored sleep score row should exist"));
+
+        assert_eq!(anchored_row.stale_days, 0);
     }
 
     #[test]
