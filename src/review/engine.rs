@@ -297,7 +297,7 @@ fn build_week_measurements<'a>(
             .map(|(_, row)| row.stale_days)
             .min()
             .unwrap_or_default();
-        let sufficiency = ReviewSufficiency::from_comparable_days(baseline_aggregates.len());
+        let sufficiency = ReviewSufficiency::from_comparable_weeks(baseline_aggregates.len());
 
         measurements.push(AggregateMeasurement {
             definition,
@@ -1217,7 +1217,7 @@ mod tests {
             .find(|card| card.signal_key == "vo2_max")
             .unwrap_or_else(|| panic!("vo2 max card should be ranked"));
 
-        assert_eq!(vo2_card.sufficiency, ReviewSufficiency::Thin);
+        assert_eq!(vo2_card.sufficiency, ReviewSufficiency::Medium);
     }
 
     #[test]

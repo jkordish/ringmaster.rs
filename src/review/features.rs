@@ -14,6 +14,8 @@ use crate::store::queries::{
 
 const COMPARABLE_MEDIUM_DAYS: usize = 7;
 const COMPARABLE_STRONG_DAYS: usize = 14;
+const COMPARABLE_MEDIUM_WEEKS: usize = 2;
+const COMPARABLE_STRONG_WEEKS: usize = 4;
 const MIN_STDDEV: f64 = 0.01;
 const PERSISTENCE_Z_THRESHOLD: f64 = 0.5;
 
@@ -94,6 +96,18 @@ impl ReviewSufficiency {
         } else if comparable_days < COMPARABLE_MEDIUM_DAYS {
             Self::Thin
         } else if comparable_days < COMPARABLE_STRONG_DAYS {
+            Self::Medium
+        } else {
+            Self::Strong
+        }
+    }
+
+    pub fn from_comparable_weeks(comparable_weeks: usize) -> Self {
+        if comparable_weeks == 0 {
+            Self::Missing
+        } else if comparable_weeks < COMPARABLE_MEDIUM_WEEKS {
+            Self::Thin
+        } else if comparable_weeks < COMPARABLE_STRONG_WEEKS {
             Self::Medium
         } else {
             Self::Strong
@@ -637,6 +651,22 @@ mod tests {
         );
         assert_eq!(
             ReviewSufficiency::from_comparable_days(20),
+            ReviewSufficiency::Strong
+        );
+        assert_eq!(
+            ReviewSufficiency::from_comparable_weeks(0),
+            ReviewSufficiency::Missing
+        );
+        assert_eq!(
+            ReviewSufficiency::from_comparable_weeks(1),
+            ReviewSufficiency::Thin
+        );
+        assert_eq!(
+            ReviewSufficiency::from_comparable_weeks(3),
+            ReviewSufficiency::Medium
+        );
+        assert_eq!(
+            ReviewSufficiency::from_comparable_weeks(5),
             ReviewSufficiency::Strong
         );
     }

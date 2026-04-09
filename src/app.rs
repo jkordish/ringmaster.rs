@@ -2119,15 +2119,16 @@ fn latest_review_anchor_day(snapshot: &LiveSnapshot) -> String {
             .map(|row| row.day.clone()),
     );
     days.extend(snapshot.sleep_time.iter().map(|row| row.day.clone()));
+    let current_day = current_local_day_string();
     for period in &snapshot.rest_mode_periods {
         days.push(period.start_day.clone());
         if let Some(end_day) = &period.end_day {
             days.push(end_day.clone());
+        } else {
+            days.push(current_day.clone());
         }
     }
-    days.into_iter()
-        .max()
-        .unwrap_or_else(current_local_day_string)
+    days.into_iter().max().unwrap_or(current_day)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4526,6 +4527,27 @@ mod tests {
         assert_eq!(
             super::available_days(&snapshot),
             vec!["2026-04-07".to_owned(), "2026-04-08".to_owned()]
+        );
+    }
+
+    #[test]
+    fn latest_review_anchor_day_treats_open_rest_mode_as_current() {
+        let mut snapshot = make_snapshot(&[]);
+        snapshot.rest_mode_periods = vec![RestModePeriodRecord {
+            period_id: "open-rest-mode".to_owned(),
+            start_day: "2026-02-01".to_owned(),
+            start_time: None,
+            end_day: None,
+            end_time: None,
+            episode_count: 1,
+            tags_json: "[]".to_owned(),
+            raw_cache_key: None,
+            updated_at: "2026-04-08T12:00:00Z".to_owned(),
+        }];
+
+        assert_eq!(
+            super::latest_review_anchor_day(&snapshot),
+            super::current_local_day_string()
         );
     }
 
