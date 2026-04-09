@@ -1205,7 +1205,7 @@ fn build_live_model(snapshot: &LiveSnapshot, options: &LiveModelOptions) -> AppM
             });
 
     AppModel {
-        title: "ringmaster".to_owned(),
+        title: build_app_title(snapshot, &selected_day, options.refresh_in_flight),
         dashboard: build_dashboard_model(
             snapshot,
             options.selected_day_index,
@@ -2521,6 +2521,55 @@ fn freshness_source_summary(snapshot: &LiveSnapshot) -> String {
     )
 }
 
+fn build_app_title(snapshot: &LiveSnapshot, selected_day: &str, refresh_in_flight: bool) -> String {
+    let connection_state = header_connection_label(&snapshot.auth_status);
+    let daily_freshness = freshness_badge(&family_freshness(snapshot, DataFamily::Daily));
+    let refresh_state = if refresh_in_flight { "Running" } else { "Idle" };
+    let granted_scope_count = snapshot.auth_status.granted_scopes.len();
+
+    [
+        format!(
+            "Connection: {connection_state} | Daily status: {daily_freshness} | Viewing: {selected_day} | Sync: {refresh_state}"
+        ),
+        format!(
+            "Latest sync: {} | Access: {granted_scope_count} scopes granted | Triggers: {}",
+            latest_sync_summary(snapshot),
+            freshness_source_summary(snapshot)
+        ),
+    ]
+    .join("\n")
+}
+
+fn latest_sync_summary(snapshot: &LiveSnapshot) -> String {
+    snapshot
+        .sync_states
+        .iter()
+        .filter_map(|state| {
+            sync_state_effective_timestamp(state).map(|timestamp| (timestamp, state))
+        })
+        .max_by_key(|(timestamp, _)| *timestamp)
+        .map_or_else(
+            || "none".to_owned(),
+            |(_, state)| {
+                let timestamp = state
+                    .last_completed_at
+                    .as_deref()
+                    .unwrap_or(&state.last_attempted_at);
+                format!("{} at {}", state.sync_key, trim_date_time(timestamp))
+            },
+        )
+}
+
+fn header_connection_label(auth_status: &AuthStatus) -> &'static str {
+    if auth_status.access_token_stored || auth_status.refresh_token_stored {
+        "Connected"
+    } else if auth_status.configured {
+        "Configured, no session"
+    } else {
+        "Setup needed"
+    }
+}
+
 fn last_trigger_summary(snapshot: &LiveSnapshot, trigger_source: &str) -> String {
     snapshot
         .sync_states
@@ -3695,6 +3744,14 @@ fn format_minutes(value: u16) -> String {
 fn trim_timestamp(value: &str) -> String {
     if value.len() >= 16 {
         value.chars().skip(11).take(5).collect()
+    } else {
+        value.to_owned()
+    }
+}
+
+fn trim_date_time(value: &str) -> String {
+    if value.len() >= 16 {
+        format!("{} {}", &value[..10], &value[11..16])
     } else {
         value.to_owned()
     }

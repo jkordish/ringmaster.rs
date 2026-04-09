@@ -289,8 +289,14 @@ fn build_week_measurements<'a>(
         };
         let persistence_days = current_values
             .iter()
-            .filter_map(|(_, row)| row.z_score)
-            .filter(|value| value.abs() >= DEVIATION_THRESHOLD)
+            .filter(|(_, row)| {
+                row.z_score
+                    .is_some_and(|value| value.abs() >= DEVIATION_THRESHOLD)
+                    && delta.is_some_and(|weekly_delta| {
+                        row.delta
+                            .is_some_and(|day_delta| same_direction(day_delta, weekly_delta))
+                    })
+            })
             .count();
         let stale_days = current_values
             .iter()
@@ -714,6 +720,10 @@ fn aggregate_baseline_weeks(
     Ok(weekly_aggregates)
 }
 
+fn same_direction(left: f64, right: f64) -> bool {
+    (left > 0.0 && right > 0.0) || (left < 0.0 && right < 0.0)
+}
+
 fn mean_value(values: &[f64]) -> Option<f64> {
     if values.is_empty() {
         None
@@ -931,7 +941,8 @@ mod tests {
 
     use crate::oura::models::CapabilityReport;
     use crate::review::engine::{
-        ReviewInputs, ReviewMode, build_review_deck, overlapping_rest_mode_days, ranked_cards,
+        ReviewInputs, ReviewMode, build_review_deck, build_week_measurements,
+        overlapping_rest_mode_days, ranked_cards,
     };
     use crate::review::features::ReviewSufficiency;
     use crate::store::queries::{
@@ -1164,6 +1175,68 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("700.0 recent baseline")),
             "steps should compare against the configured 21-day baseline, not an older fourth week"
+        );
+    }
+
+    #[test]
+    fn weekly_persistence_only_counts_days_in_the_weekly_drift_direction() {
+        let auth_status = auth_status();
+        let start_day = time::Date::from_calendar_date(2026, Month::March, 5)
+            .unwrap_or_else(|error| panic!("test start day should be valid: {error}"));
+        let signal_days = (0_i64..35_i64)
+            .map(|offset| {
+                let day = start_day
+                    .checked_add(time::Duration::days(offset))
+                    .unwrap_or_else(|| panic!("test day should stay in range"));
+                let day = day
+                    .format(&time::macros::format_description!("[year]-[month]-[day]"))
+                    .unwrap_or_else(|error| panic!("test day should format: {error}"));
+                let (numeric_value, delta, z_score) = if (28..=34).contains(&offset) {
+                    match offset {
+                        28..=30 => (Some(130.0), Some(30.0), Some(3.0)),
+                        31..=34 => (Some(90.0), Some(-10.0), Some(-1.0)),
+                        _ => (Some(100.0), Some(0.0), Some(0.0)),
+                    }
+                } else {
+                    (Some(100.0), Some(0.0), Some(0.0))
+                };
+                ReviewSignalDayRecord {
+                    signal_key: "steps".to_owned(),
+                    day,
+                    numeric_value,
+                    text_value: None,
+                    baseline_mean: Some(100.0),
+                    baseline_stddev: Some(10.0),
+                    delta,
+                    z_score,
+                    persistence_days: 0,
+                    sufficiency: ReviewSufficiency::Strong,
+                    stale_days: 0,
+                    metadata_json: "{}".to_owned(),
+                    updated_at: "2026-04-08T12:00:00Z".to_owned(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let inputs = ReviewInputs {
+            auth_status: &auth_status,
+            signal_days: &signal_days,
+            context_events: &[],
+            pattern_summaries: &[],
+            sleep_time: &[],
+            rest_mode_periods: &[],
+        };
+        let measurements = build_week_measurements("2026-04-08", &inputs)
+            .unwrap_or_else(|error| panic!("weekly measurements should build: {error}"));
+
+        let steps_measurement = measurements
+            .into_iter()
+            .find(|measurement| measurement.definition.key == "steps")
+            .unwrap_or_else(|| panic!("steps weekly measurement should exist"));
+
+        assert_eq!(
+            steps_measurement.persistence_days, 3,
+            "weekly persistence should only count in-window days that drift in the same direction as the weekly aggregate"
         );
     }
 

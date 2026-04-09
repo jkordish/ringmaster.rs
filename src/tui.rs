@@ -119,7 +119,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &AppState) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Length(3),
             Constraint::Min(10),
             Constraint::Length(2),
@@ -713,6 +713,8 @@ mod tests {
             .unwrap_or_else(|error| panic!("snapshot should render: {error}"));
 
         assert!(output.contains("ringmaster"));
+        assert!(output.contains("Connection: Connected"));
+        assert!(output.contains("Latest sync:"));
         assert!(output.contains("Selected day: 2026-04-08"));
         assert!(output.contains("Capabilities"));
         assert!(output.contains("What Changed"));
@@ -908,7 +910,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("live state should build: {error}"));
         app.active_screen = Screen::Ops;
 
-        let output = render_snapshot(&app, 120, 42)
+        let output = render_snapshot(&app, 120, 44)
             .unwrap_or_else(|error| panic!("ops snapshot should render: {error}"));
 
         assert!(output.contains("Auth state: authenticated"));

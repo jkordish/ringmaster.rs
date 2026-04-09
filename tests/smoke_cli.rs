@@ -55,10 +55,12 @@ async fn demo_output_mentions_dashboard() {
     };
 
     assert!(output.contains("ringmaster"));
+    assert!(output.contains("Connection: Connected"));
+    assert!(output.contains("Latest sync:"));
     assert!(output.contains("Selected day: 2026-04-08"));
     assert!(output.contains("Capabilities"));
     assert!(output.contains("What Changed"));
-    assert!(output.contains("Review:"));
+    assert!(output.contains("Review"));
     assert!(output.contains("Stress high time is higher than usual."));
 }
 
