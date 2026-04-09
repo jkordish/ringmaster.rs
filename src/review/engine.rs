@@ -334,7 +334,7 @@ fn build_card(
         &measurement.anchor_day,
         inputs,
     );
-    let counterevidence = counterevidence_lines(&measurement, inputs);
+    let counterevidence = counterevidence_lines(mode, &measurement, inputs);
     let counterevidence_penalty = i32::try_from(counterevidence.len()).ok()?.min(2);
     let freshness_penalty = freshness_penalty(measurement.stale_days);
     let sufficiency_penalty = sufficiency_penalty(measurement.sufficiency);
@@ -459,19 +459,24 @@ fn evidence_lines(
 }
 
 fn counterevidence_lines(
+    mode: ReviewMode,
     measurement: &AggregateMeasurement<'_>,
     inputs: &ReviewInputs<'_>,
 ) -> Vec<String> {
     let mut lines = Vec::new();
     let sibling_keys = sibling_keys(measurement.definition.key);
     for sibling_key in sibling_keys {
-        if let Some(sibling) = inputs
-            .signal_days
-            .iter()
-            .find(|row| row.signal_key == *sibling_key && row.day == measurement.anchor_day)
-            && sibling
-                .z_score
-                .is_none_or(|value| value.abs() < DEVIATION_THRESHOLD)
+        let sibling_rows = sibling_signal_rows_in_review_window(
+            mode,
+            &measurement.anchor_day,
+            sibling_key,
+            inputs.signal_days,
+        );
+        if !sibling_rows.is_empty()
+            && sibling_rows.iter().all(|row| {
+                row.z_score
+                    .is_none_or(|value| value.abs() < DEVIATION_THRESHOLD)
+            })
             && let Some(definition) = signal_definition(sibling_key)
         {
             lines.push(format!(
@@ -488,6 +493,27 @@ fn counterevidence_lines(
     }
 
     lines
+}
+
+fn sibling_signal_rows_in_review_window<'a>(
+    mode: ReviewMode,
+    anchor_day: &str,
+    sibling_key: &str,
+    signal_days: &'a [ReviewSignalDayRecord],
+) -> Vec<&'a ReviewSignalDayRecord> {
+    let Some((window_start, window_end)) = review_window_bounds(mode, anchor_day) else {
+        return Vec::new();
+    };
+
+    signal_days
+        .iter()
+        .filter(|row| row.signal_key == sibling_key)
+        .filter(|row| {
+            parse_day(&row.day)
+                .ok()
+                .is_some_and(|day| day >= window_start && day <= window_end)
+        })
+        .collect()
 }
 
 fn context_support_lines(
@@ -1179,6 +1205,94 @@ mod tests {
         assert_eq!(
             overlapping_rest_mode_days(ReviewMode::Week, "2026-04-05", &periods),
             3
+        );
+    }
+
+    #[test]
+    fn weekly_counterevidence_checks_the_full_review_window() {
+        let auth_status = auth_status();
+        let start_day = time::Date::from_calendar_date(2026, Month::March, 5)
+            .unwrap_or_else(|error| panic!("test start day should be valid: {error}"));
+        let signal_days = (0_i64..35_i64)
+            .flat_map(|offset| {
+                let day = start_day
+                    .checked_add(time::Duration::days(offset))
+                    .unwrap_or_else(|| panic!("test day should stay in range"))
+                    .format(&time::macros::format_description!("[year]-[month]-[day]"))
+                    .unwrap_or_else(|error| panic!("test day should format: {error}"));
+                let in_current_week = offset >= 28;
+                let readiness = ReviewSignalDayRecord {
+                    signal_key: "readiness_score".to_owned(),
+                    day: day.clone(),
+                    numeric_value: Some(if in_current_week { 60.0 } else { 80.0 }),
+                    text_value: None,
+                    baseline_mean: Some(80.0),
+                    baseline_stddev: Some(5.0),
+                    delta: Some(if in_current_week { -20.0 } else { 0.0 }),
+                    z_score: Some(if in_current_week { -4.0 } else { 0.0 }),
+                    persistence_days: if in_current_week { 4 } else { 0 },
+                    sufficiency: ReviewSufficiency::Strong,
+                    stale_days: 0,
+                    metadata_json: "{}".to_owned(),
+                    updated_at: "2026-04-08T12:00:00Z".to_owned(),
+                };
+                let activity_z_score = match offset {
+                    28..=33 => -1.5,
+                    34 => 0.0,
+                    _ => 0.0,
+                };
+                let activity = ReviewSignalDayRecord {
+                    signal_key: "activity_score".to_owned(),
+                    day,
+                    numeric_value: Some(if (28..=33).contains(&offset) {
+                        65.0
+                    } else {
+                        78.0
+                    }),
+                    text_value: None,
+                    baseline_mean: Some(78.0),
+                    baseline_stddev: Some(4.0),
+                    delta: Some(if (28..=33).contains(&offset) {
+                        -13.0
+                    } else {
+                        0.0
+                    }),
+                    z_score: Some(activity_z_score),
+                    persistence_days: if (28..=33).contains(&offset) { 3 } else { 0 },
+                    sufficiency: ReviewSufficiency::Strong,
+                    stale_days: 0,
+                    metadata_json: "{}".to_owned(),
+                    updated_at: "2026-04-08T12:00:00Z".to_owned(),
+                };
+                [readiness, activity]
+            })
+            .collect::<Vec<_>>();
+
+        let deck = build_review_deck(
+            ReviewMode::Week,
+            "2026-04-08",
+            &ReviewInputs {
+                auth_status: &auth_status,
+                signal_days: &signal_days,
+                context_events: &[],
+                pattern_summaries: &[],
+                sleep_time: &[],
+                rest_mode_periods: &[],
+            },
+        )
+        .unwrap_or_else(|error| panic!("weekly review should build: {error}"));
+
+        let readiness_card = ranked_cards(&deck)
+            .into_iter()
+            .find(|card| card.signal_key == "readiness_score")
+            .unwrap_or_else(|| panic!("readiness card should be ranked"));
+
+        assert!(
+            readiness_card
+                .counterevidence
+                .iter()
+                .all(|line| !line.contains("stayed near baseline")),
+            "weekly sibling drift elsewhere in the window should prevent a mixed-signal penalty"
         );
     }
 }

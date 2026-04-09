@@ -2214,7 +2214,7 @@ impl<'connection> ViewStore<'connection> {
                 updated_at
              FROM rest_mode_periods
              WHERE start_day <= ?2
-               AND COALESCE(end_day, start_day) >= ?1
+               AND (end_day IS NULL OR end_day >= ?1)
              ORDER BY start_day ASC, COALESCE(start_time, start_day) ASC, period_id ASC",
         )?;
         let rows = statement.query_map(params![start_day, end_day], |row| {
@@ -3006,6 +3006,34 @@ mod tests {
                 .as_deref(),
             Some("2026-04-10")
         );
+    }
+
+    #[test]
+    fn rest_mode_periods_between_days_include_open_periods_started_before_window() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        store
+            .imports()
+            .upsert_rest_mode_period(&RestModePeriodRecord {
+                period_id: "rest-open".to_owned(),
+                start_day: "2026-04-01".to_owned(),
+                start_time: Some("2026-04-01T00:00:00Z".to_owned()),
+                end_day: None,
+                end_time: None,
+                episode_count: 1,
+                tags_json: "[]".to_owned(),
+                raw_cache_key: None,
+                updated_at: "2026-04-01T00:00:00Z".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("rest mode period should seed: {error}"));
+
+        let periods = store
+            .views()
+            .rest_mode_periods_between_days("2026-04-03", "2026-04-04")
+            .unwrap_or_else(|error| panic!("rest mode periods should load: {error}"));
+
+        assert_eq!(periods.len(), 1);
+        assert_eq!(periods[0].period_id, "rest-open");
     }
 
     #[test]

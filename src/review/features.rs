@@ -494,7 +494,7 @@ impl NumericSeriesIndex {
         target_index: usize,
         baseline_window_days: usize,
     ) -> ComparableStats {
-        let start_index = target_index.saturating_sub(baseline_window_days);
+        let start_index = self.window_start_index(target_index, baseline_window_days);
         let count = target_index.saturating_sub(start_index);
         if count == 0 {
             return ComparableStats::default();
@@ -511,6 +511,24 @@ impl NumericSeriesIndex {
             mean: Some(mean),
             stddev: Some(variance.max(0.0).sqrt()),
         }
+    }
+
+    fn window_start_index(&self, target_index: usize, baseline_window_days: usize) -> usize {
+        if target_index == 0 || baseline_window_days == 0 {
+            return target_index;
+        }
+
+        let Some(window_days) = i64::try_from(baseline_window_days).ok() else {
+            return 0;
+        };
+        let Some(window_start) = self.points[target_index]
+            .date
+            .checked_sub(time::Duration::days(window_days))
+        else {
+            return 0;
+        };
+
+        self.points[..target_index].partition_point(|point| point.date < window_start)
     }
 }
 
@@ -836,5 +854,30 @@ mod tests {
 
         assert!(short_window >= 3);
         assert_eq!(long_window, 0);
+    }
+
+    #[test]
+    fn comparable_stats_use_calendar_days_not_sample_count() {
+        let seed_points = [
+            ("2026-01-01", 10.0),
+            ("2026-02-01", 20.0),
+            ("2026-03-20", 100.0),
+            ("2026-04-08", 110.0),
+        ]
+        .into_iter()
+        .map(|(day, value)| SeedPoint {
+            day: day.to_owned(),
+            numeric_value: Some(value),
+            text_value: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .collect::<Vec<_>>();
+        let numeric_series = NumericSeriesIndex::build(&seed_points)
+            .unwrap_or_else(|error| panic!("numeric series index should build: {error}"));
+
+        let comparable_stats = numeric_series.comparable_stats("2026-04-08", 30);
+
+        assert_eq!(comparable_stats.count, 1);
+        assert_eq!(comparable_stats.mean, Some(100.0));
     }
 }
