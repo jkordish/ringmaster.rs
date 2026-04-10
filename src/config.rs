@@ -13,6 +13,9 @@ use crate::webhook::{
 };
 
 pub const APP_NAME: &str = "ringmaster";
+pub const DEFAULT_OURA_AUTHORIZE_URL: &str = "https://cloud.ouraring.com/oauth/authorize";
+pub const DEFAULT_OURA_TOKEN_URL: &str = "https://api.ouraring.com/oauth/token";
+pub const DEFAULT_OURA_API_BASE_URL: &str = "https://api.ouraring.com";
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -318,7 +321,7 @@ impl Config {
                             .as_ref()
                             .and_then(|oura| oura.authorize_url.clone())
                     })
-                    .unwrap_or_else(|| "https://cloud.oura.com/oauth/authorize".to_owned()),
+                    .unwrap_or_else(|| DEFAULT_OURA_AUTHORIZE_URL.to_owned()),
                 token_url: env_string("RINGMASTER_OURA_TOKEN_URL")
                     .or_else(|| {
                         file_config
@@ -326,7 +329,7 @@ impl Config {
                             .as_ref()
                             .and_then(|oura| oura.token_url.clone())
                     })
-                    .unwrap_or_else(|| "https://api.oura.com/oauth/token".to_owned()),
+                    .unwrap_or_else(|| DEFAULT_OURA_TOKEN_URL.to_owned()),
                 api_base_url: env_string("RINGMASTER_OURA_API_BASE_URL")
                     .or_else(|| {
                         file_config
@@ -334,7 +337,7 @@ impl Config {
                             .as_ref()
                             .and_then(|oura| oura.api_base_url.clone())
                     })
-                    .unwrap_or_else(|| "https://api.oura.com".to_owned()),
+                    .unwrap_or_else(|| DEFAULT_OURA_API_BASE_URL.to_owned()),
                 callback_bind,
                 callback_path,
                 requested_scopes: env_csv("RINGMASTER_OURA_REQUESTED_SCOPES").unwrap_or_else(
@@ -1065,7 +1068,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        AiConfig, AiInputTransport, AiProviderKind, AiRequestMode, AppPaths, Config, OuraConfig,
+        AiConfig, AiInputTransport, AiProviderKind, AiRequestMode, AppPaths, Config,
+        DEFAULT_OURA_API_BASE_URL, DEFAULT_OURA_AUTHORIZE_URL, DEFAULT_OURA_TOKEN_URL, OuraConfig,
         PromptCacheMode, RefreshConfig, WebhookConfig, default_requested_scopes,
         parse_webhook_subscription_env,
     };
@@ -1126,6 +1130,19 @@ mod tests {
         assert_eq!(config.ai.request_mode, AiRequestMode::Stateless);
         assert_eq!(config.ai.input_transport, AiInputTransport::Inline);
         assert_eq!(config.ai.prompt_cache, PromptCacheMode::Off);
+    }
+
+    #[test]
+    fn oura_default_urls_match_official_hosts() {
+        assert_eq!(
+            DEFAULT_OURA_AUTHORIZE_URL,
+            "https://cloud.ouraring.com/oauth/authorize"
+        );
+        assert_eq!(
+            DEFAULT_OURA_TOKEN_URL,
+            "https://api.ouraring.com/oauth/token"
+        );
+        assert_eq!(DEFAULT_OURA_API_BASE_URL, "https://api.ouraring.com");
     }
 
     #[test]

@@ -1065,7 +1065,8 @@ mod tests {
         SyncFamily, WatchOptions, due_families, next_wake_duration, watch_idle_sleep_duration,
     };
     use crate::config::{
-        AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
+        AppPaths, Config, DEFAULT_OURA_API_BASE_URL, DEFAULT_OURA_AUTHORIZE_URL,
+        DEFAULT_OURA_TOKEN_URL, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
     };
     use crate::oura::models::CapabilityReport;
     use crate::oura::sync::{SliceReport, SyncReport};
@@ -1097,9 +1098,9 @@ mod tests {
             oura: OuraConfig {
                 client_id: None,
                 client_secret: None,
-                authorize_url: "https://cloud.oura.com/oauth/authorize".to_owned(),
-                token_url: "https://api.oura.com/oauth/token".to_owned(),
-                api_base_url: "https://api.oura.com".to_owned(),
+                authorize_url: DEFAULT_OURA_AUTHORIZE_URL.to_owned(),
+                token_url: DEFAULT_OURA_TOKEN_URL.to_owned(),
+                api_base_url: DEFAULT_OURA_API_BASE_URL.to_owned(),
                 callback_bind: "127.0.0.1:8788"
                     .parse()
                     .unwrap_or_else(|error| panic!("socket should parse: {error}")),

@@ -749,7 +749,10 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::config::{AppPaths, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig};
+    use crate::config::{
+        AppPaths, DEFAULT_OURA_API_BASE_URL, DEFAULT_OURA_AUTHORIZE_URL, LoggingConfig, OuraConfig,
+        RefreshConfig, WebhookConfig,
+    };
     use crate::webhook::default_desired_subscriptions;
 
     #[derive(Debug, Default)]
@@ -798,9 +801,9 @@ mod tests {
             oura: OuraConfig {
                 client_id: Some("test-client".to_owned()),
                 client_secret: Some("test-secret".to_owned()),
-                authorize_url: "https://cloud.oura.com/oauth/authorize".to_owned(),
+                authorize_url: DEFAULT_OURA_AUTHORIZE_URL.to_owned(),
                 token_url,
-                api_base_url: "https://api.oura.com".to_owned(),
+                api_base_url: DEFAULT_OURA_API_BASE_URL.to_owned(),
                 callback_bind: "127.0.0.1:0".parse().unwrap(),
                 callback_path: "/callback".to_owned(),
                 requested_scopes: vec![

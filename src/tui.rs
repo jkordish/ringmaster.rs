@@ -432,6 +432,12 @@ fn handle_ai_side_effect(
     ai_action_tx: &UnboundedSender<Action>,
     ai_tasks: &mut HashMap<String, AsyncJoinHandle<()>>,
 ) -> Result<()> {
+    if ai_run_controls_require_runs_tab(&action) && selected_tab != AiBrowserTab::Runs {
+        let _ = ai_action_tx.send(Action::RefreshFailed {
+            message: "Run controls only apply while browsing saved AI runs.".to_owned(),
+        });
+        return Ok(());
+    }
     match action {
         Action::RequestAiLaunch(intent) => {
             let Some(selected_day) = selected_day else {
@@ -698,6 +704,16 @@ fn handle_ai_side_effect(
         _ => {}
     }
     Ok(())
+}
+
+fn ai_run_controls_require_runs_tab(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::RequestCancelAiRun
+            | Action::RequestAiGuidedFollowUp(_)
+            | Action::RequestAiRerunNextPrivacy
+            | Action::RequestAiRerunNextModel
+    )
 }
 
 fn spawn_ai_preflight_task(
@@ -2311,6 +2327,7 @@ impl Drop for TerminalSession {
 #[allow(clippy::panic)]
 mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use std::collections::HashMap;
     use std::future::pending;
     use std::time::Duration;
     use tokio::sync::mpsc::unbounded_channel;
@@ -2318,7 +2335,8 @@ mod tests {
     use crate::action::Action;
     use crate::ai::{AiRequestPreview, AiRequestPreviewSnapshot, GuidedFollowUpKind};
     use crate::app::{
-        AiLaunchIntent, AiPreflightState, Screen, build_demo_state, build_live_state,
+        AiBrowserTab, AiLaunchIntent, AiPreflightState, RunMode, Screen, build_demo_state,
+        build_live_state,
     };
     use crate::build_scenario_fixture_snapshot_apps_for_tests;
     use crate::config::{Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig};
@@ -3329,6 +3347,55 @@ mod tests {
         assert_eq!(overrides.privacy_profile, PrivacyProfile::Redacted);
         assert!(overrides.model_override.is_none());
         assert!(overrides.compare_previous_snapshot);
+    }
+
+    #[test]
+    fn run_controls_require_runs_tab_and_fail_closed_on_other_tabs() {
+        assert!(super::ai_run_controls_require_runs_tab(
+            &Action::RequestCancelAiRun
+        ));
+        assert!(super::ai_run_controls_require_runs_tab(
+            &Action::RequestAiGuidedFollowUp(GuidedFollowUpKind::ExpandEvidence)
+        ));
+        assert!(super::ai_run_controls_require_runs_tab(
+            &Action::RequestAiRerunNextPrivacy
+        ));
+        assert!(super::ai_run_controls_require_runs_tab(
+            &Action::RequestAiRerunNextModel
+        ));
+        assert!(!super::ai_run_controls_require_runs_tab(
+            &Action::RequestAiGenerateReport
+        ));
+
+        let (ai_action_tx, mut ai_action_rx) = unbounded_channel();
+        let mut ai_tasks = HashMap::new();
+        super::handle_ai_side_effect(
+            &test_config(),
+            RunMode::Live,
+            Action::RequestCancelAiRun,
+            Screen::Ai,
+            Some("2026-04-08".to_owned()),
+            None,
+            AiBrowserTab::Snapshots,
+            Some(sample_ai_run_record()),
+            None,
+            None,
+            None,
+            &ai_action_tx,
+            &mut ai_tasks,
+        )
+        .unwrap_or_else(|error| panic!("non-run tab guard should not fail: {error}"));
+
+        assert!(ai_tasks.is_empty());
+        match ai_action_rx.try_recv() {
+            Ok(Action::RefreshFailed { message }) => {
+                assert_eq!(
+                    message,
+                    "Run controls only apply while browsing saved AI runs."
+                );
+            }
+            other => panic!("expected non-runs-tab guard message, got {other:?}"),
+        }
     }
 
     #[tokio::test]
