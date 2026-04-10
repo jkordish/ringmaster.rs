@@ -135,12 +135,12 @@ For the complete config and runtime behavior, use the docs below instead of the 
 - Visual system references:
   - [docs/DESIGN_AUDIT.md](docs/DESIGN_AUDIT.md)
   - [docs/DESIGN_SYSTEM.md](docs/DESIGN_SYSTEM.md)
-- Current execution plan for the snapshot library/report/eval pass:
-  - [docs/execplans/20260410-phase8-snapshot-library-reports-and-eval-flywheel.md](docs/execplans/20260410-phase8-snapshot-library-reports-and-eval-flywheel.md)
-- Current execution plan for the AI workbench pass:
-  - [docs/execplans/20260410-phase9-ai-workbench-and-first-class-tui.md](docs/execplans/20260410-phase9-ai-workbench-and-first-class-tui.md)
-- Current execution plan for the eval lab and regression console pass:
-  - [docs/execplans/20260410-phase10-ai-eval-lab-and-regression-console.md](docs/execplans/20260410-phase10-ai-eval-lab-and-regression-console.md)
+- Snapshot library, reports, and eval workflow plan:
+  - [Snapshot library, report export, and eval flywheel](docs/execplans/20260410-snapshot-library-reports-and-eval-flywheel.md)
+- AI workbench plan:
+  - [AI workbench and first-class TUI](docs/execplans/20260410-ai-workbench-and-first-class-tui.md)
+- Eval lab and regression console plan:
+  - [AI eval lab and regression console](docs/execplans/20260410-ai-eval-lab-and-regression-console.md)
 
 ## Development notes
 

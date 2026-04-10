@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This file is the execution runbook for the current phase-10 product. It only describes flows that work today, including the AI workbench, inline AI launch points, preflight confirmation, the snapshot library, AI run registry, report export workflow, the in-app eval browser, and the local eval harness.
+This file is the execution runbook for the current product. It only describes flows that work today, including the AI workbench, inline AI launch points, preflight confirmation, the snapshot library, AI run registry, report export workflow, the in-app eval browser, and the local eval harness.
 
 ## Commands
 
@@ -363,7 +363,7 @@ Supported sources:
 - `--fixture-dir <dir>` for a fixture-backed temporary store
 - live local store when neither `--demo` nor `--fixture-dir` is passed
 
-Important phase-10 usage:
+Important current usage:
 
 - `--screen ai` renders deterministic AI workbench snapshots
 - demo AI snapshots cover provider-disabled, preflight, running, success, failure/cancel, and saved-detail paths

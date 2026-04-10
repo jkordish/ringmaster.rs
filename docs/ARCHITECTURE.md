@@ -104,7 +104,7 @@ tui / tui --demo
 ui snapshot
   -> app state builder
   -> deterministic screen + size matrix selection
-  -> optional phase-7 scenario matrix expansion
+  -> optional scenario matrix expansion
   -> AI workbench smoke rendering
   -> shared Ratatui render path
   -> text artifact writing for visual QA
@@ -394,7 +394,7 @@ Responsibilities:
 - reusable chrome/panel/badge builders
 - shared chart grammar
 - deterministic multi-screen snapshot artifact generation
-- phase-7 scenario tagging for `strong`, `weak`, `empty`, `stale`, and `error`
+- scenario tagging for `strong`, `weak`, `empty`, `stale`, and `error`
 
 Implemented modules:
 
@@ -407,7 +407,7 @@ Implemented modules:
 The snapshot writer now supports two naming modes:
 
 - legacy/demo mode: `screen-size.txt`
-- phase-7 scenario mode: `screen-scenario-size.txt`
+- scenario mode: `screen-scenario-size.txt`
 
 Boundary rule:
 

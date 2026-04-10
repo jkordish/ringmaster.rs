@@ -1,4 +1,4 @@
-# Phase 9: AI Workbench and First-Class TUI
+# AI Workbench and First-Class TUI
 
 ## Goal
 
@@ -6,7 +6,7 @@ Make AI a first-class, privacy-explicit workflow in the TUI with a dedicated wor
 
 ## Why
 
-Previous phases made snapshots, AI artifacts, reports, and evals durable, but the product still feels CLI-first for AI. This pass should make those capabilities visible, understandable, and useful where users already work inside the TUI.
+The earlier snapshot, AI artifact, report, and eval work made those capabilities durable, but the product still felt CLI-first for AI. This pass makes them visible, understandable, and useful where users already work inside the TUI.
 
 ## Current state
 
@@ -44,7 +44,7 @@ Previous phases made snapshots, AI artifacts, reports, and evals durable, but th
 
 ## File plan
 
-- `docs/execplans/20260410-phase9-ai-workbench-and-first-class-tui.md`
+- `docs/execplans/20260410-ai-workbench-and-first-class-tui.md`
 - `src/action.rs`
 - `src/app.rs`
 - `src/tui.rs`

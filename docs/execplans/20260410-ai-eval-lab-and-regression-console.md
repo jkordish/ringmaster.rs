@@ -1,4 +1,4 @@
-# Phase 10: AI Eval Lab and Regression Console
+# AI Eval Lab and Regression Console
 
 ## Goal
 
@@ -6,7 +6,7 @@ Make evals a first-class in-app workflow by extending the existing AI workbench 
 
 ## Why
 
-Phase 8 made evals durable and deterministic, and Phase 9 made the AI workbench first-class, but evals are still effectively CLI-only. The app already loads `ai_eval_runs` into `LiveSnapshot`; this pass turns that persisted history into a usable operator surface without changing the snapshot-first, stateless-by-default AI contract.
+The earlier snapshot/report/eval work made evals durable and deterministic, and the AI workbench work made the TUI artifact browser first-class, but evals were still effectively CLI-only. The app already loads `ai_eval_runs` into `LiveSnapshot`; this pass turns that persisted history into a usable operator surface without changing the snapshot-first, stateless-by-default AI contract.
 
 ## Current state
 
@@ -37,7 +37,7 @@ Phase 8 made evals durable and deterministic, and Phase 9 made the AI workbench 
 
 ## File plan
 
-- `docs/execplans/20260410-phase10-ai-eval-lab-and-regression-console.md`
+- `docs/execplans/20260410-ai-eval-lab-and-regression-console.md`
 - `src/eval.rs`
 - `src/store/migrations.rs`
 - `src/store/queries.rs`
@@ -56,7 +56,7 @@ Phase 8 made evals durable and deterministic, and Phase 9 made the AI workbench 
 
 ## Milestones
 
-- [x] Milestone 1: add the phase-10 execplan, extend eval persistence with `details_json`, and upgrade the eval runtime to persist manifest/case/grader detail plus optional lineage.
+- [x] Milestone 1: add the execplan, extend eval persistence with `details_json`, and upgrade the eval runtime to persist manifest/case/grader detail plus optional lineage.
 - [x] Milestone 2: add the `Evals` browser tab, detail rendering, and linked-artifact jump behavior inside the AI workbench.
 - [x] Milestone 3: extend Status eval health, seed deterministic demo eval data, and add render/snapshot coverage for eval and Status flows.
 - [x] Milestone 4: update docs and run full verification.

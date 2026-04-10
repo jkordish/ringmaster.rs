@@ -2,13 +2,13 @@
 
 ## Purpose
 
-This file is the current truth for the repository after the `ai-eval-lab-and-regression-console` pass completed on `2026-04-10`. It records what landed, what was verified, and what remains intentionally deferred.
+This file is the current truth for the repository after the AI eval lab and regression console work landed on `2026-04-10`. It records what shipped, what was verified, and what remains intentionally deferred.
 
 ## Baseline before this pass
 
 Verified before implementation:
 
-- the local-first CLI, sync, derive, review, webhook, UI snapshot, and phase-8 snapshot/OpenAI flows were already working
+- the local-first CLI, sync, derive, review, webhook, UI snapshot, and snapshot/OpenAI artifact flows were already working
 - snapshot export already produced canonical hashed artifacts with privacy profiles
 - `ai review` and `ai compare` already persisted structured artifacts locally
 - reports and eval summaries were already durable and browseable from the CLI
