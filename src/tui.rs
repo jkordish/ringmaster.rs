@@ -40,6 +40,7 @@ use crate::eval::parse_persisted_eval_details;
 use crate::oura::{auth, sync::SyncOptions, sync::SyncReport, sync::sync_selected};
 use crate::refresh::{SyncFamily, due_families, next_wake_duration};
 use crate::report;
+use crate::resolved_demo_fixture_dir;
 use crate::snapshot::{self, LoadedSnapshotArtifact, PrivacyProfile, SnapshotSourceMode};
 use crate::store::Store;
 use crate::store::queries::{
@@ -647,6 +648,7 @@ fn handle_ai_side_effect(
                 };
                 spawn_report_export_task(
                     config.clone(),
+                    run_mode,
                     ReportSourceSelection::AiArtifact(artifact_id),
                     ai_action_tx.clone(),
                 );
@@ -657,6 +659,7 @@ fn handle_ai_side_effect(
                 };
                 spawn_report_export_task(
                     config.clone(),
+                    run_mode,
                     ReportSourceSelection::Snapshot(snapshot.snapshot_hash),
                     ai_action_tx.clone(),
                 );
@@ -824,6 +827,7 @@ fn spawn_ai_snapshot_compare_task(
 
 fn spawn_report_export_task(
     config: Config,
+    run_mode: RunMode,
     source: ReportSourceSelection,
     action_tx: UnboundedSender<Action>,
 ) {
@@ -839,48 +843,44 @@ fn spawn_report_export_task(
             }
         };
 
-        let args = match source {
-            ReportSourceSelection::Snapshot(snapshot_hash) => ReportExportArgs {
-                from_snapshot: Some(snapshot_hash),
-                from_ai_run: None,
-                format: ReportFormatArg::Markdown,
-                out: output_path.clone(),
-                demo: false,
-                fixture_dir: None,
-            },
-            ReportSourceSelection::AiArtifact(artifact_id) => ReportExportArgs {
-                from_snapshot: None,
-                from_ai_run: Some(artifact_id),
-                format: ReportFormatArg::Markdown,
-                out: output_path.clone(),
-                demo: false,
-                fixture_dir: None,
-            },
-        };
+        let export_context = build_report_export_context(&config, run_mode, source, output_path);
+        let output_path = export_context.args.out.clone();
+        let success_message = format!("Exported report to {}.", output_path.display());
 
         let export_task = tokio::task::spawn_blocking({
             let config = config.clone();
-            let args = args.clone();
+            let args = export_context.args.clone();
             move || runtime_handle.block_on(report::export_report(&config, args))
         });
 
         match export_task.await {
-            Ok(Ok(_)) => match reload_live_snapshot_action(
-                &config,
-                &format!("Exported report to {}.", output_path.display()),
-                None,
-            ) {
-                Ok(action) => {
-                    let _ = action_tx.send(action);
+            Ok(Ok(_)) => {
+                let refresh_task = tokio::task::spawn_blocking({
+                    let config = config.clone();
+                    let success_message = success_message.clone();
+                    move || reload_live_snapshot_action(&config, &success_message, None)
+                });
+
+                match refresh_task.await {
+                    Ok(Ok(action)) => {
+                        let _ = action_tx.send(action);
+                    }
+                    Ok(Err(error)) => {
+                        let _ = action_tx.send(Action::RefreshFailed {
+                            message: format!(
+                                "Report export succeeded, but the workbench could not refresh: {error}"
+                            ),
+                        });
+                    }
+                    Err(error) => {
+                        let _ = action_tx.send(Action::RefreshFailed {
+                            message: format!(
+                                "Report export succeeded, but the refresh worker failed to join: {error}"
+                            ),
+                        });
+                    }
                 }
-                Err(error) => {
-                    let _ = action_tx.send(Action::RefreshFailed {
-                        message: format!(
-                            "Report export succeeded, but the workbench could not refresh: {error}"
-                        ),
-                    });
-                }
-            },
+            }
             Ok(Err(error)) => {
                 let _ = action_tx.send(Action::RefreshFailed {
                     message: format!("Report export failed: {error}"),
@@ -893,6 +893,42 @@ fn spawn_report_export_task(
             }
         }
     });
+}
+
+#[derive(Debug, Clone)]
+struct ReportExportContext {
+    args: ReportExportArgs,
+}
+
+fn build_report_export_context(
+    config: &Config,
+    run_mode: RunMode,
+    source: ReportSourceSelection,
+    output_path: PathBuf,
+) -> ReportExportContext {
+    let demo = run_mode == RunMode::Demo;
+    let fixture_dir = resolved_demo_fixture_dir(config, demo, None);
+
+    let args = match source {
+        ReportSourceSelection::Snapshot(snapshot_hash) => ReportExportArgs {
+            from_snapshot: Some(snapshot_hash),
+            from_ai_run: None,
+            format: ReportFormatArg::Markdown,
+            out: output_path,
+            demo,
+            fixture_dir,
+        },
+        ReportSourceSelection::AiArtifact(artifact_id) => ReportExportArgs {
+            from_snapshot: None,
+            from_ai_run: Some(artifact_id),
+            format: ReportFormatArg::Markdown,
+            out: output_path,
+            demo,
+            fixture_dir,
+        },
+    };
+
+    ReportExportContext { args }
 }
 
 fn prepare_ai_preflight(
@@ -2396,7 +2432,7 @@ mod tests {
             reasoning_effort: None,
             request_mode: "stateless".to_owned(),
             input_transport: "inline".to_owned(),
-            run_mode: "live".to_owned(),
+            run_mode: "real".to_owned(),
             prompt_version: "review_prompt_v1".to_owned(),
             output_schema_version: "ringmaster.ai.review.v1".to_owned(),
             privacy_profile: PrivacyProfile::Redacted.as_str().to_owned(),
@@ -3347,6 +3383,43 @@ mod tests {
         assert_eq!(overrides.privacy_profile, PrivacyProfile::Redacted);
         assert!(overrides.model_override.is_none());
         assert!(overrides.compare_previous_snapshot);
+    }
+
+    #[test]
+    fn report_export_context_tracks_demo_fixture_scope() {
+        let mut config = test_config();
+        config.refresh.demo_fixture_dir = Some(PathBuf::from("tests/fixtures/ai"));
+
+        let demo_context = super::build_report_export_context(
+            &config,
+            RunMode::Demo,
+            super::ReportSourceSelection::Snapshot("snapshot-123".to_owned()),
+            PathBuf::from("/tmp/demo-report.md"),
+        );
+        assert!(demo_context.args.demo);
+        assert_eq!(
+            demo_context.args.fixture_dir,
+            Some(PathBuf::from("tests/fixtures/ai"))
+        );
+        assert_eq!(
+            demo_context.args.from_snapshot.as_deref(),
+            Some("snapshot-123")
+        );
+        assert!(demo_context.args.from_ai_run.is_none());
+
+        let live_context = super::build_report_export_context(
+            &config,
+            RunMode::Live,
+            super::ReportSourceSelection::AiArtifact("artifact-123".to_owned()),
+            PathBuf::from("/tmp/live-report.md"),
+        );
+        assert!(!live_context.args.demo);
+        assert_eq!(live_context.args.fixture_dir, None);
+        assert_eq!(
+            live_context.args.from_ai_run.as_deref(),
+            Some("artifact-123")
+        );
+        assert!(live_context.args.from_snapshot.is_none());
     }
 
     #[test]
