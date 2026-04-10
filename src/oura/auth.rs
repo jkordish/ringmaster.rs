@@ -1,4 +1,7 @@
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
@@ -12,14 +15,14 @@ use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointNotSet, EndpointSet,
     PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse, TokenUrl,
     basic::{BasicClient, BasicErrorResponse},
+    reqwest::{Client as OAuthHttpClient, Error as OAuthReqwestError, redirect::Policy},
 };
-use reqwest::{Client as HttpClient, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
-use crate::config::Config;
+use crate::config::{Config, OuraSecretBackend};
 use crate::error::{AuthError, OuraProblem, Result, SecretStoreError};
 use crate::oura::models::{AuthStatus, CapabilityReport};
 use crate::store::Store;
@@ -101,6 +104,9 @@ struct CallbackState {
 
 trait SecretStore: Send + Sync {
     fn backend_label(&self) -> &'static str;
+    fn backend_location(&self) -> Option<String> {
+        None
+    }
     fn read_tokens(&self) -> std::result::Result<Option<StoredTokens>, SecretStoreError>;
     fn write_tokens(&self, tokens: &StoredTokens) -> std::result::Result<(), SecretStoreError>;
 }
@@ -109,12 +115,76 @@ trait SecretStore: Send + Sync {
 struct RuntimeSecretStore;
 
 impl RuntimeSecretStore {
-    pub fn new() -> Self {
-        Self
+    pub fn from_config(config: &Config) -> SecretBackend {
+        match config.oura.secret_backend {
+            OuraSecretBackend::Keyring => SecretBackend::Keyring(Self),
+            OuraSecretBackend::File => {
+                SecretBackend::File(FileSecretStore::new(config.oura.secret_file.clone()))
+            }
+        }
     }
 
     fn entry() -> std::result::Result<keyring::Entry, SecretStoreError> {
         keyring::Entry::new(SECRET_SERVICE_NAME, SECRET_USER_NAME).map_err(Into::into)
+    }
+}
+
+#[derive(Debug, Clone)]
+enum SecretBackend {
+    Keyring(RuntimeSecretStore),
+    File(FileSecretStore),
+}
+
+#[derive(Debug, Clone)]
+struct FileSecretStore {
+    path: PathBuf,
+}
+
+impl FileSecretStore {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn secure_storage_backend_hint() -> &'static str {
+    " On Linux, make sure a Secret Service provider such as gnome-keyring or KeePassXC is running and unlocked, or opt into local file storage with `RINGMASTER_OURA_SECRET_BACKEND=file`."
+}
+
+#[cfg(not(target_os = "linux"))]
+fn secure_storage_backend_hint() -> &'static str {
+    ""
+}
+
+fn normalize_keyring_read_error(error: keyring::Error) -> SecretStoreError {
+    match error {
+        keyring::Error::NoStorageAccess(source) => SecretStoreError::BackendUnavailable(format!(
+            "secure storage is locked or unavailable: {source}.{}",
+            secure_storage_backend_hint()
+        )),
+        keyring::Error::PlatformFailure(source) => SecretStoreError::BackendUnavailable(format!(
+            "secure storage backend failed: {source}.{}",
+            secure_storage_backend_hint()
+        )),
+        other => SecretStoreError::Keyring(other),
+    }
+}
+
+fn normalize_keyring_write_error(error: keyring::Error) -> SecretStoreError {
+    match error {
+        keyring::Error::NoEntry => SecretStoreError::BackendUnavailable(format!(
+            "secure storage could not create the token entry.{}",
+            secure_storage_backend_hint()
+        )),
+        keyring::Error::NoStorageAccess(source) => SecretStoreError::BackendUnavailable(format!(
+            "secure storage is locked or unavailable: {source}.{}",
+            secure_storage_backend_hint()
+        )),
+        keyring::Error::PlatformFailure(source) => SecretStoreError::BackendUnavailable(format!(
+            "secure storage backend failed: {source}.{}",
+            secure_storage_backend_hint()
+        )),
+        other => SecretStoreError::Keyring(other),
     }
 }
 
@@ -128,7 +198,7 @@ impl SecretStore for RuntimeSecretStore {
         let payload = match entry.get_password() {
             Ok(value) => value,
             Err(keyring::Error::NoEntry) => return Ok(None),
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(normalize_keyring_read_error(error)),
         };
 
         serde_json::from_str(&payload).map(Some).map_err(|error| {
@@ -145,31 +215,154 @@ impl SecretStore for RuntimeSecretStore {
                 "failed to encode stored tokens for secure storage: {error}"
             ))
         })?;
-        entry.set_password(&payload)?;
+        entry
+            .set_password(&payload)
+            .map_err(normalize_keyring_write_error)?;
+        Ok(())
+    }
+}
+
+impl SecretStore for SecretBackend {
+    fn backend_label(&self) -> &'static str {
+        match self {
+            Self::Keyring(store) => store.backend_label(),
+            Self::File(store) => store.backend_label(),
+        }
+    }
+
+    fn backend_location(&self) -> Option<String> {
+        match self {
+            Self::Keyring(store) => store.backend_location(),
+            Self::File(store) => store.backend_location(),
+        }
+    }
+
+    fn read_tokens(&self) -> std::result::Result<Option<StoredTokens>, SecretStoreError> {
+        match self {
+            Self::Keyring(store) => store.read_tokens(),
+            Self::File(store) => store.read_tokens(),
+        }
+    }
+
+    fn write_tokens(&self, tokens: &StoredTokens) -> std::result::Result<(), SecretStoreError> {
+        match self {
+            Self::Keyring(store) => store.write_tokens(tokens),
+            Self::File(store) => store.write_tokens(tokens),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn set_owner_only_permissions(path: &Path, mode: u32) -> std::result::Result<(), SecretStoreError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|source| {
+        SecretStoreError::BackendUnavailable(format!(
+            "failed to apply private permissions to `{}`: {source}",
+            path.display()
+        ))
+    })
+}
+
+#[cfg(not(unix))]
+fn set_owner_only_permissions(
+    _path: &Path,
+    _mode: u32,
+) -> std::result::Result<(), SecretStoreError> {
+    Ok(())
+}
+
+impl SecretStore for FileSecretStore {
+    fn backend_label(&self) -> &'static str {
+        "file"
+    }
+
+    fn backend_location(&self) -> Option<String> {
+        Some(self.path.display().to_string())
+    }
+
+    fn read_tokens(&self) -> std::result::Result<Option<StoredTokens>, SecretStoreError> {
+        match fs::read_to_string(&self.path) {
+            Ok(payload) => serde_json::from_str(&payload).map(Some).map_err(|error| {
+                SecretStoreError::BackendUnavailable(format!(
+                    "stored session payload at `{}` is invalid JSON: {error}",
+                    self.path.display()
+                ))
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(SecretStoreError::BackendUnavailable(format!(
+                "failed to read token file `{}`: {source}",
+                self.path.display()
+            ))),
+        }
+    }
+
+    fn write_tokens(&self, tokens: &StoredTokens) -> std::result::Result<(), SecretStoreError> {
+        let payload = serde_json::to_string(tokens).map_err(|error| {
+            SecretStoreError::BackendUnavailable(format!(
+                "failed to encode stored tokens for local file storage: {error}"
+            ))
+        })?;
+        let parent = self.path.parent().ok_or_else(|| {
+            SecretStoreError::BackendUnavailable(format!(
+                "token file path `{}` does not have a parent directory",
+                self.path.display()
+            ))
+        })?;
+        fs::create_dir_all(parent).map_err(|source| {
+            SecretStoreError::BackendUnavailable(format!(
+                "failed to create token directory `{}`: {source}",
+                parent.display()
+            ))
+        })?;
+        set_owner_only_permissions(parent, 0o700)?;
+
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&self.path).map_err(|source| {
+            SecretStoreError::BackendUnavailable(format!(
+                "failed to open token file `{}` for writing: {source}",
+                self.path.display()
+            ))
+        })?;
+        file.write_all(payload.as_bytes()).map_err(|source| {
+            SecretStoreError::BackendUnavailable(format!(
+                "failed to write token file `{}`: {source}",
+                self.path.display()
+            ))
+        })?;
+        file.flush().map_err(|source| {
+            SecretStoreError::BackendUnavailable(format!(
+                "failed to flush token file `{}`: {source}",
+                self.path.display()
+            ))
+        })?;
+        set_owner_only_permissions(&self.path, 0o600)?;
         Ok(())
     }
 }
 
 pub fn inspect_auth(config: &Config, store: &Store) -> Result<AuthStatus> {
-    inspect_auth_with_secret_store(config, store, &RuntimeSecretStore::new())
+    let secret_store = RuntimeSecretStore::from_config(config);
+    inspect_auth_with_secret_store(config, store, &secret_store)
 }
 
 pub async fn login(config: &Config, store: &Store) -> Result<LoginReport> {
-    login_with_secret_store(config, store, &RuntimeSecretStore::new()).await
+    let secret_store = RuntimeSecretStore::from_config(config);
+    login_with_secret_store(config, store, &secret_store).await
 }
 
 pub async fn ensure_authorized_session(
     config: &Config,
     store: &Store,
-    http_client: &HttpClient,
 ) -> Result<AuthorizedSession> {
-    ensure_authorized_session_with_secret_store(
-        config,
-        store,
-        &RuntimeSecretStore::new(),
-        http_client,
-    )
-    .await
+    let secret_store = RuntimeSecretStore::from_config(config);
+    ensure_authorized_session_with_secret_store(config, store, &secret_store).await
 }
 
 fn inspect_auth_with_secret_store(
@@ -271,7 +464,7 @@ async fn login_with_secret_store(
         callback_path: config.oura.callback_path.clone(),
         timeout_secs: config.oura.auth_timeout_secs,
     };
-    let callback_url = format!("http://{}{}", bound_address, config.oura.callback_path);
+    let callback_url = config.oura.callback_url_for_bind_address(bound_address);
     let oauth_client = build_oauth_client(config, &callback_url)?;
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
     let (authorization_url, csrf_token) = oauth_client
@@ -329,6 +522,9 @@ async fn login_with_secret_store(
                     auth_status.secret_backend
                 ),
             ];
+            if let Some(location) = secret_store.backend_location() {
+                notes.push(format!("Secure token file: {location}"));
+            }
             if missing_scopes.is_empty() {
                 notes.push("All requested scopes were granted.".to_owned());
             } else {
@@ -353,7 +549,6 @@ async fn ensure_authorized_session_with_secret_store(
     config: &Config,
     store: &Store,
     secret_store: &dyn SecretStore,
-    http_client: &HttpClient,
 ) -> Result<AuthorizedSession> {
     let session = store.auth().get(OURA_PROVIDER)?.ok_or_else(|| {
         AuthError::OAuthFlow("no persisted Oura auth session is available".to_owned())
@@ -371,7 +566,8 @@ async fn ensure_authorized_session_with_secret_store(
             .clone()
             .ok_or(AuthError::MissingRefreshToken)?;
         let oauth_client = build_oauth_client(config, &config.oura.callback_url())?;
-        let refreshed = refresh_access_token(&oauth_client, http_client, refresh_token).await?;
+        let http_client = oauth_http_client()?;
+        let refreshed = refresh_access_token(&oauth_client, &http_client, refresh_token).await?;
         persist_authorized_session(
             store,
             secret_store,
@@ -425,11 +621,13 @@ fn build_oauth_client(config: &Config, callback_url: &str) -> Result<OAuthClient
         .set_redirect_uri(redirect_url))
 }
 
-fn oauth_http_client() -> Result<HttpClient> {
-    HttpClient::builder()
+fn oauth_http_client() -> Result<OAuthHttpClient> {
+    OAuthHttpClient::builder()
         .redirect(Policy::none())
         .build()
-        .map_err(Into::into)
+        .map_err(|error| {
+            AuthError::OAuthFlow(format!("failed to build OAuth HTTP client: {error}")).into()
+        })
 }
 
 async fn wait_for_callback(
@@ -533,7 +731,7 @@ fn evaluate_callback(query: &OAuthCallbackQuery, expected_state: &str) -> Result
 
 async fn exchange_authorization_code(
     oauth_client: &OAuthClient,
-    http_client: &HttpClient,
+    http_client: &OAuthHttpClient,
     code: String,
     pkce_verifier: PkceCodeVerifier,
     requested_scopes: &[String],
@@ -550,7 +748,7 @@ async fn exchange_authorization_code(
 
 async fn refresh_access_token(
     oauth_client: &OAuthClient,
-    http_client: &HttpClient,
+    http_client: &OAuthHttpClient,
     refresh_token: String,
 ) -> Result<ExchangedTokenSet> {
     let requested_scopes = Vec::new();
@@ -700,7 +898,10 @@ fn secret_store_problem(detail: String) -> OuraProblem {
 }
 
 fn map_oauth_exchange_error(
-    error: oauth2::RequestTokenError<oauth2::HttpClientError<reqwest::Error>, BasicErrorResponse>,
+    error: oauth2::RequestTokenError<
+        oauth2::HttpClientError<OAuthReqwestError>,
+        BasicErrorResponse,
+    >,
 ) -> crate::error::RingmasterError {
     match error {
         oauth2::RequestTokenError::ServerResponse(server_error) => {
@@ -714,7 +915,9 @@ fn map_oauth_exchange_error(
             .into()
         }
         oauth2::RequestTokenError::Request(error) => match error {
-            oauth2::HttpClientError::Reqwest(error) => (*error).into(),
+            oauth2::HttpClientError::Reqwest(error) => {
+                AuthError::OAuthFlow(format!("OAuth HTTP client request failed: {error}")).into()
+            }
             oauth2::HttpClientError::Http(error) => AuthError::OAuthFlow(format!(
                 "OAuth HTTP client could not build a valid request: {error}"
             ))
@@ -742,11 +945,14 @@ fn map_oauth_exchange_error(
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use std::collections::VecDeque;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::Mutex;
 
     use axum::{Json, extract::Form, routing::post};
     use serde_json::json;
+    use tempfile::tempdir;
 
     use super::*;
     use crate::config::{
@@ -804,6 +1010,8 @@ mod tests {
                 authorize_url: DEFAULT_OURA_AUTHORIZE_URL.to_owned(),
                 token_url,
                 api_base_url: DEFAULT_OURA_API_BASE_URL.to_owned(),
+                secret_backend: crate::config::OuraSecretBackend::Keyring,
+                secret_file: PathBuf::from("/tmp/state/ringmaster/secrets/oura-tokens.json"),
                 callback_bind: "127.0.0.1:0".parse().unwrap(),
                 callback_path: "/callback".to_owned(),
                 requested_scopes: vec![
@@ -811,7 +1019,7 @@ mod tests {
                     "daily".to_owned(),
                     "heartrate".to_owned(),
                     "workout".to_owned(),
-                    "enhanced_tag".to_owned(),
+                    "tag".to_owned(),
                     "session".to_owned(),
                 ],
                 auth_timeout_secs: 5,
@@ -1010,12 +1218,9 @@ mod tests {
                 updated_at: "2020-01-01T00:00:00Z".to_owned(),
             })
             .expect("seed auth session");
-        let http_client = oauth_http_client().expect("http client");
-
-        let session =
-            ensure_authorized_session_with_secret_store(&config, &store, &secrets, &http_client)
-                .await
-                .expect("refresh should succeed");
+        let session = ensure_authorized_session_with_secret_store(&config, &store, &secrets)
+            .await
+            .expect("refresh should succeed");
 
         assert_eq!(session.access_token, "access-2");
         let stored = secrets
@@ -1031,5 +1236,70 @@ mod tests {
         assert!(auth.last_refresh_at.is_some());
 
         server.abort();
+    }
+
+    #[test]
+    fn keyring_write_no_entry_maps_to_backend_unavailable() {
+        let error = normalize_keyring_write_error(keyring::Error::NoEntry);
+
+        match error {
+            SecretStoreError::BackendUnavailable(detail) => {
+                assert!(detail.contains("could not create the token entry"));
+            }
+            other => panic!("expected backend unavailable error, got {other}"),
+        }
+    }
+
+    #[test]
+    fn keyring_read_no_storage_access_maps_to_backend_unavailable() {
+        let error = normalize_keyring_read_error(keyring::Error::NoStorageAccess(Box::new(
+            std::io::Error::other("locked"),
+        )));
+
+        match error {
+            SecretStoreError::BackendUnavailable(detail) => {
+                assert!(detail.contains("locked or unavailable"));
+            }
+            other => panic!("expected backend unavailable error, got {other}"),
+        }
+    }
+
+    #[test]
+    fn file_secret_store_round_trips_tokens_with_private_permissions() {
+        let tempdir = tempdir()
+            .unwrap_or_else(|error| panic!("tempdir should succeed for file backend: {error}"));
+        let path = tempdir.path().join("secrets").join("oura-tokens.json");
+        let store = FileSecretStore::new(path.clone());
+        let tokens = StoredTokens {
+            access_token: "access-token".to_owned(),
+            refresh_token: Some("refresh-token".to_owned()),
+        };
+
+        store
+            .write_tokens(&tokens)
+            .unwrap_or_else(|error| panic!("writing token file should succeed: {error}"));
+
+        let loaded = store
+            .read_tokens()
+            .unwrap_or_else(|error| panic!("reading token file should succeed: {error}"))
+            .unwrap_or_else(|| panic!("token file should contain a payload"));
+        assert_eq!(loaded, tokens);
+
+        let file_mode = fs::metadata(&path)
+            .unwrap_or_else(|error| panic!("metadata should be readable: {error}"))
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600);
+
+        let parent_mode = fs::metadata(
+            path.parent()
+                .unwrap_or_else(|| panic!("token file should have a parent directory")),
+        )
+        .unwrap_or_else(|error| panic!("parent directory metadata should be readable: {error}"))
+        .permissions()
+        .mode()
+            & 0o777;
+        assert_eq!(parent_mode, 0o700);
     }
 }

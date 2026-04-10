@@ -327,10 +327,8 @@ impl CapabilityReport {
             .map(|kind| {
                 let requested = requested_scopes
                     .iter()
-                    .any(|scope| scope == kind.scope_name());
-                let granted = granted_scopes
-                    .iter()
-                    .any(|scope| scope == kind.scope_name());
+                    .any(|scope| kind.matches_scope(scope));
+                let granted = granted_scopes.iter().any(|scope| kind.matches_scope(scope));
                 let note = match (requested, granted) {
                     (true, true) => "granted".to_owned(),
                     (true, false) => "missing scope".to_owned(),
@@ -423,8 +421,14 @@ impl CapabilityKind {
             Self::Heartrate => "heartrate",
             Self::Workout => "workout",
             Self::Session => "session",
-            Self::Tag => "tag",
-            Self::EnhancedTag => "enhanced_tag",
+            Self::Tag | Self::EnhancedTag => "tag",
+        }
+    }
+
+    pub fn matches_scope(self, scope: &str) -> bool {
+        match self {
+            Self::EnhancedTag => scope == "tag" || scope == "enhanced_tag",
+            _ => scope == self.scope_name(),
         }
     }
 }
@@ -548,7 +552,10 @@ fn current_local_day_string() -> String {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::{RestModeEpisodeDocument, RestModePeriodDocument, current_local_day_string};
+    use super::{
+        CapabilityKind, CapabilityReport, RestModeEpisodeDocument, RestModePeriodDocument,
+        current_local_day_string,
+    };
 
     #[test]
     fn open_rest_mode_period_overlaps_windows_after_start_day() {
@@ -566,5 +573,13 @@ mod tests {
         };
 
         assert!(period.overlaps_day_window("2026-04-03", &current_day));
+    }
+
+    #[test]
+    fn enhanced_tag_capability_accepts_tag_scope_alias() {
+        let report = CapabilityReport::from_scopes(&["tag".to_owned()], &["tag".to_owned()]);
+
+        assert!(report.is_granted(CapabilityKind::Tag));
+        assert!(report.is_granted(CapabilityKind::EnhancedTag));
     }
 }

@@ -85,7 +85,7 @@ struct TempRootGuard {
 const FIXTURE_SNAPSHOT_WEBHOOK_BIND_ADDRESS: &str = "127.0.0.1:8799";
 const FIXTURE_SNAPSHOT_WEBHOOK_PATH: &str = "/webhooks/oura";
 const FIXTURE_SNAPSHOT_WEBHOOK_CALLBACK_URL: &str = "https://fixture.example.test/webhooks/oura";
-const FIXTURE_SNAPSHOT_AUTH_CALLBACK_URL: &str = "http://127.0.0.1:8788/callback";
+const FIXTURE_SNAPSHOT_AUTH_CALLBACK_URL: &str = "http://localhost:8788/callback";
 const FIXTURE_SNAPSHOT_AUTH_TIMEOUT_SECS: u64 = 120;
 const FIXTURE_SNAPSHOT_SECRET_BACKEND: &str = "fixture-memory";
 const FIXTURE_SNAPSHOT_ACCESS_TOKEN_EXPIRES_AT: &str = "2026-04-09T12:45:00Z";
@@ -1073,7 +1073,7 @@ fn fixture_snapshot_granted_scopes(fixture_dir: &std::path::Path) -> Vec<String>
         scopes.push("workout".to_owned());
     }
     if fixture_dir.join("enhanced_tags.json").is_file() {
-        scopes.push("enhanced_tag".to_owned());
+        scopes.push("tag".to_owned());
     }
     if fixture_dir.join("sessions.json").is_file() {
         scopes.push("session".to_owned());
@@ -1348,10 +1348,8 @@ fn apply_scenario_fixture_snapshot_overlay(
                     }
                     "oura.enhanced_tags" => {
                         state.status = crate::store::queries::SyncRunStatus::Blocked;
-                        state.message = Some(
-                            "Missing `enhanced_tag` scope; tag context stays unavailable."
-                                .to_owned(),
-                        );
+                        state.message =
+                            Some("Missing `tag` scope; tag context stays unavailable.".to_owned());
                         state.last_error = None;
                     }
                     "oura.sessions" => {
@@ -3317,6 +3315,10 @@ mod tests {
         let root = tempdir.path();
         let config_root = root.join("config");
         let state_root = root.join("state");
+        let secret_file = state_root
+            .join("ringmaster")
+            .join("secrets")
+            .join("oura-tokens.json");
         let cache_root = root.join("cache");
         let paths = AppPaths::from_roots(root.to_path_buf(), config_root, state_root, cache_root)
             .unwrap_or_else(|error| panic!("paths should resolve: {error}"));
@@ -3335,6 +3337,8 @@ mod tests {
                     authorize_url: "https://example.invalid/auth".to_owned(),
                     token_url: "https://example.invalid/token".to_owned(),
                     api_base_url: "https://example.invalid/api".to_owned(),
+                    secret_backend: crate::config::OuraSecretBackend::Keyring,
+                    secret_file,
                     callback_bind: "127.0.0.1:8788".parse().unwrap_or_else(|error| {
                         panic!("socket address should parse in doctor test: {error}")
                     }),
@@ -3344,7 +3348,7 @@ mod tests {
                         "daily".to_owned(),
                         "heartrate".to_owned(),
                         "workout".to_owned(),
-                        "enhanced_tag".to_owned(),
+                        "tag".to_owned(),
                         "session".to_owned(),
                     ],
                     auth_timeout_secs: 120,
@@ -4608,7 +4612,7 @@ mod tests {
             "daily".to_owned(),
             "heartrate".to_owned(),
             "workout".to_owned(),
-            "enhanced_tag".to_owned(),
+            "tag".to_owned(),
             "session".to_owned(),
         ];
         second_config.refresh.daily_interval_secs = 1;
@@ -4647,9 +4651,10 @@ mod tests {
         assert!(first_snapshot.contains(super::FIXTURE_SNAPSHOT_WEBHOOK_CALLBACK_URL));
         assert!(first_snapshot.contains(super::FIXTURE_SNAPSHOT_BASE_SYNC_COMPLETED_AT));
         assert!(first_snapshot.contains("Auth state: authenticated"));
-        assert!(first_snapshot.contains(
-            "Granted scopes: personal, daily, heartrate, workout, enhanced_tag, session"
-        ));
+        assert!(
+            first_snapshot
+                .contains("Granted scopes: personal, daily, heartrate, workout, tag, session")
+        );
         assert!(first_snapshot.contains("Secret backend: fixture-memory"));
         assert!(first_snapshot.contains("tests/fixtures/phase3/ringmaster.db"));
     }
@@ -4681,7 +4686,7 @@ mod tests {
                 "daily".to_owned(),
                 "heartrate".to_owned(),
                 "workout".to_owned(),
-                "enhanced_tag".to_owned(),
+                "tag".to_owned(),
                 "session".to_owned(),
             ]
         );
@@ -4753,7 +4758,7 @@ mod tests {
             "daily".to_owned(),
             "heartrate".to_owned(),
             "workout".to_owned(),
-            "enhanced_tag".to_owned(),
+            "tag".to_owned(),
             "session".to_owned(),
         ];
         second_config.refresh.daily_interval_secs = 1;
@@ -4790,9 +4795,10 @@ mod tests {
             "demo status snapshots should not vary with host auth or refresh config"
         );
         assert!(first_snapshot.contains("Auth state: authenticated"));
-        assert!(first_snapshot.contains(
-            "Granted scopes: personal, daily, heartrate, workout, enhanced_tag, session"
-        ));
+        assert!(
+            first_snapshot
+                .contains("Granted scopes: personal, daily, heartrate, workout, tag, session")
+        );
         assert!(first_snapshot.contains("Secret backend: demo-memory"));
         assert_eq!(
             first_refresh_policy,

@@ -51,10 +51,18 @@ pub struct OuraConfig {
     pub authorize_url: String,
     pub token_url: String,
     pub api_base_url: String,
+    pub secret_backend: OuraSecretBackend,
+    pub secret_file: PathBuf,
     pub callback_bind: SocketAddr,
     pub callback_path: String,
     pub requested_scopes: Vec<String>,
     pub auth_timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OuraSecretBackend {
+    Keyring,
+    File,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +164,8 @@ struct FileOuraConfig {
     authorize_url: Option<String>,
     token_url: Option<String>,
     api_base_url: Option<String>,
+    secret_backend: Option<String>,
+    secret_file: Option<PathBuf>,
     callback_bind: Option<String>,
     callback_path: Option<String>,
     requested_scopes: Option<Vec<String>>,
@@ -299,6 +309,7 @@ impl Config {
             } else {
                 default_desired_subscriptions()
             };
+        let default_oura_secret_file = paths.state_dir.join("secrets").join("oura-tokens.json");
 
         let config = Self {
             app_name: APP_NAME,
@@ -338,6 +349,26 @@ impl Config {
                             .and_then(|oura| oura.api_base_url.clone())
                     })
                     .unwrap_or_else(|| DEFAULT_OURA_API_BASE_URL.to_owned()),
+                secret_backend: env_string("RINGMASTER_OURA_SECRET_BACKEND")
+                    .or_else(|| {
+                        file_config
+                            .oura
+                            .as_ref()
+                            .and_then(|oura| oura.secret_backend.clone())
+                    })
+                    .as_deref()
+                    .map(OuraSecretBackend::parse)
+                    .transpose()?
+                    .unwrap_or(OuraSecretBackend::Keyring),
+                secret_file: env_string("RINGMASTER_OURA_SECRET_FILE")
+                    .map(PathBuf::from)
+                    .or_else(|| {
+                        file_config
+                            .oura
+                            .as_ref()
+                            .and_then(|oura| oura.secret_file.clone())
+                    })
+                    .unwrap_or(default_oura_secret_file),
                 callback_bind,
                 callback_path,
                 requested_scopes: env_csv("RINGMASTER_OURA_REQUESTED_SCOPES").unwrap_or_else(
@@ -727,7 +758,16 @@ impl AppPaths {
 
 impl OuraConfig {
     pub fn callback_url(&self) -> String {
-        format!("http://{}{}", self.callback_bind, self.callback_path)
+        self.callback_url_for_bind_address(self.callback_bind)
+    }
+
+    pub fn callback_url_for_bind_address(&self, bind_address: SocketAddr) -> String {
+        let host = if bind_address.ip().is_loopback() {
+            format!("localhost:{}", bind_address.port())
+        } else {
+            bind_address.to_string()
+        };
+        format!("http://{}{}", host, self.callback_path)
     }
 
     pub fn client_configured(&self) -> bool {
@@ -745,6 +785,25 @@ impl OuraConfig {
         }
 
         fields
+    }
+}
+
+impl OuraSecretBackend {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "keyring" => Ok(Self::Keyring),
+            "file" => Ok(Self::File),
+            other => Err(RingmasterError::Config(format!(
+                "oura.secret_backend must be `keyring` or `file`, got `{other}`"
+            ))),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Keyring => "keyring",
+            Self::File => "file",
+        }
     }
 }
 
@@ -1036,7 +1095,7 @@ fn default_requested_scopes() -> Vec<String> {
         "heartrate",
         "workout",
         "session",
-        "enhanced_tag",
+        "tag",
     ]
     .into_iter()
     .map(ToOwned::to_owned)
@@ -1070,7 +1129,7 @@ mod tests {
     use super::{
         AiConfig, AiInputTransport, AiProviderKind, AiRequestMode, AppPaths, Config,
         DEFAULT_OURA_API_BASE_URL, DEFAULT_OURA_AUTHORIZE_URL, DEFAULT_OURA_TOKEN_URL, OuraConfig,
-        PromptCacheMode, RefreshConfig, WebhookConfig, default_requested_scopes,
+        OuraSecretBackend, PromptCacheMode, RefreshConfig, WebhookConfig, default_requested_scopes,
         parse_webhook_subscription_env,
     };
     use crate::webhook::{WebhookEventType, default_desired_subscriptions};
@@ -1103,6 +1162,8 @@ mod tests {
             authorize_url: String::new(),
             token_url: String::new(),
             api_base_url: String::new(),
+            secret_backend: crate::config::OuraSecretBackend::Keyring,
+            secret_file: PathBuf::from("/tmp/state/ringmaster/secrets/oura-tokens.json"),
             callback_bind: "127.0.0.1:8788"
                 .parse()
                 .unwrap_or_else(|error| panic!("test socket addr should parse: {error}")),
@@ -1143,6 +1204,75 @@ mod tests {
             "https://api.ouraring.com/oauth/token"
         );
         assert_eq!(DEFAULT_OURA_API_BASE_URL, "https://api.ouraring.com");
+    }
+
+    #[test]
+    fn loopback_callback_urls_prefer_localhost() {
+        let config = OuraConfig {
+            client_id: None,
+            client_secret: None,
+            authorize_url: String::new(),
+            token_url: String::new(),
+            api_base_url: String::new(),
+            secret_backend: crate::config::OuraSecretBackend::Keyring,
+            secret_file: PathBuf::from("/tmp/state/ringmaster/secrets/oura-tokens.json"),
+            callback_bind: "127.0.0.1:8788"
+                .parse()
+                .unwrap_or_else(|error| panic!("test socket addr should parse: {error}")),
+            callback_path: "/callback".to_owned(),
+            requested_scopes: default_requested_scopes(),
+            auth_timeout_secs: 120,
+        };
+
+        assert_eq!(config.callback_url(), "http://localhost:8788/callback");
+        assert_eq!(
+            config.callback_url_for_bind_address(
+                "127.0.0.1:9999"
+                    .parse()
+                    .unwrap_or_else(|error| panic!("test socket addr should parse: {error}"))
+            ),
+            "http://localhost:9999/callback"
+        );
+    }
+
+    #[test]
+    fn default_requested_scopes_use_oura_tag_scope() {
+        assert_eq!(
+            default_requested_scopes(),
+            vec![
+                "personal".to_owned(),
+                "daily".to_owned(),
+                "heartrate".to_owned(),
+                "workout".to_owned(),
+                "session".to_owned(),
+                "tag".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn oura_secret_backend_parser_accepts_supported_values() {
+        assert_eq!(
+            OuraSecretBackend::parse("keyring")
+                .unwrap_or_else(|error| panic!("keyring should parse: {error}")),
+            OuraSecretBackend::Keyring
+        );
+        assert_eq!(
+            OuraSecretBackend::parse("file")
+                .unwrap_or_else(|error| panic!("file should parse: {error}")),
+            OuraSecretBackend::File
+        );
+    }
+
+    #[test]
+    fn oura_secret_backend_parser_rejects_unknown_values() {
+        let error = OuraSecretBackend::parse("secret-sauce")
+            .err()
+            .unwrap_or_else(|| panic!("unknown backend should fail"));
+        assert!(
+            error.to_string().contains("oura.secret_backend"),
+            "error should mention the secret backend field"
+        );
     }
 
     #[test]

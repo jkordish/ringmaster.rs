@@ -570,7 +570,7 @@ Responsibilities:
 Current live sync behavior:
 
 - `auth login` prints an authorization URL, listens on the configured loopback callback, validates CSRF state, exchanges the code server-side, and persists auth/session metadata
-- token secrets live behind the keyring-backed `SecretStore` seam; tests use an in-memory secret store
+- token secrets live behind the `SecretStore` seam; production defaults to the keyring-backed backend, Linux expects a desktop Secret Service provider, headless users can explicitly opt into a file-backed token store, and tests use in-memory or temp-file stores
 - `ensure_authorized_session` is the single owner for access-token refresh
 - `ReqwestOuraClient` and `FixtureOuraClient` share the same typed fetch surface
 - the webhook admin client uses app credentials for subscription list/create/update/renew/delete flows

@@ -23,8 +23,6 @@ const HEARTRATE_SYNC_KEY: &str = "oura.heartrate";
 const WORKOUT_SYNC_KEY: &str = "oura.workouts";
 const ENHANCED_TAG_SYNC_KEY: &str = "oura.enhanced_tags";
 const SESSION_SYNC_KEY: &str = "oura.sessions";
-const OURA_SYNC_USER_AGENT: &str = "ringmaster.rs/oura-sync";
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SyncOptions {
     pub dry_run: bool,
@@ -146,11 +144,7 @@ pub async fn sync_selected(
             });
         }
 
-        let http_client = reqwest::Client::builder()
-            .user_agent(OURA_SYNC_USER_AGENT)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
-        let session = match auth::ensure_authorized_session(config, store, &http_client).await {
+        let session = match auth::ensure_authorized_session(config, store).await {
             Ok(session) => session,
             Err(error) => {
                 let slice_reports = persist_failed_slice_reports(
@@ -788,7 +782,7 @@ async fn sync_enhanced_tags(
             store,
             slice_blocked(
                 ENHANCED_TAG_SYNC_KEY,
-                "Missing `enhanced_tag` scope; tag overlays and explainability evidence remain unavailable.",
+                "Missing `tag` scope; tag overlays and explainability evidence remain unavailable.",
             ),
             granted_scopes_from_report(capability_report),
             options,
@@ -1317,6 +1311,8 @@ mod tests {
                 authorize_url: DEFAULT_OURA_AUTHORIZE_URL.to_owned(),
                 token_url: DEFAULT_OURA_TOKEN_URL.to_owned(),
                 api_base_url: DEFAULT_OURA_API_BASE_URL.to_owned(),
+                secret_backend: crate::config::OuraSecretBackend::Keyring,
+                secret_file: PathBuf::from("/tmp/state/ringmaster/secrets/oura-tokens.json"),
                 callback_bind: "127.0.0.1:8788".parse().unwrap(),
                 callback_path: "/callback".to_owned(),
                 requested_scopes: vec![
@@ -1324,7 +1320,7 @@ mod tests {
                     "daily".to_owned(),
                     "heartrate".to_owned(),
                     "workout".to_owned(),
-                    "enhanced_tag".to_owned(),
+                    "tag".to_owned(),
                     "session".to_owned(),
                 ],
                 auth_timeout_secs: 120,

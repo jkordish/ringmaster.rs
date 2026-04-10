@@ -6088,7 +6088,7 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
     let capability_report = CapabilityReport::demo();
     let auth_status = AuthStatus {
         configured: true,
-        callback_url: "http://127.0.0.1:8788/callback".to_owned(),
+        callback_url: "http://localhost:8788/callback".to_owned(),
         requested_scopes: demo_requested_scopes(),
         granted_scopes: demo_requested_scopes(),
         missing_fields: Vec::new(),
@@ -6530,7 +6530,7 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
             latest_review_day: Some("2026-04-08".to_owned()),
             freshness_summary: "current day with local sync coverage".to_owned(),
             trust_summary: "explicit snapshot export, redacted profile".to_owned(),
-            capability_summary: "personal,daily,heartrate,workout,enhanced_tag,session".to_owned(),
+            capability_summary: "personal,daily,heartrate,workout,tag,session".to_owned(),
             provenance_summary: "sleep_time + review_signal + context refs".to_owned(),
             created_at: "2026-04-08T22:18:00Z".to_owned(),
         },
@@ -6943,7 +6943,7 @@ fn demo_requested_scopes() -> Vec<String> {
         "daily".to_owned(),
         "heartrate".to_owned(),
         "workout".to_owned(),
-        "enhanced_tag".to_owned(),
+        "tag".to_owned(),
         "session".to_owned(),
     ]
 }
@@ -7065,13 +7065,13 @@ mod tests {
             },
             auth_status: AuthStatus {
                 configured: true,
-                callback_url: "http://127.0.0.1:8788/callback".to_owned(),
+                callback_url: "http://localhost:8788/callback".to_owned(),
                 requested_scopes: vec![
                     "personal".to_owned(),
                     "daily".to_owned(),
                     "heartrate".to_owned(),
                     "workout".to_owned(),
-                    "enhanced_tag".to_owned(),
+                    "tag".to_owned(),
                     "session".to_owned(),
                 ],
                 granted_scopes: vec![
@@ -7079,7 +7079,7 @@ mod tests {
                     "daily".to_owned(),
                     "heartrate".to_owned(),
                     "workout".to_owned(),
-                    "enhanced_tag".to_owned(),
+                    "tag".to_owned(),
                     "session".to_owned(),
                 ],
                 missing_fields: Vec::new(),
@@ -7257,7 +7257,7 @@ mod tests {
             latest_review_day: Some("2026-04-08".to_owned()),
             freshness_summary: "current day with local sync coverage".to_owned(),
             trust_summary: "explicit snapshot export, redacted profile".to_owned(),
-            capability_summary: "personal,daily,heartrate,workout,enhanced_tag,session".to_owned(),
+            capability_summary: "personal,daily,heartrate,workout,tag,session".to_owned(),
             provenance_summary: "review_signal + context refs".to_owned(),
             created_at: "2026-04-08T22:18:00Z".to_owned(),
         }
@@ -8152,7 +8152,7 @@ mod tests {
             vec![
                 "Workouts context is unavailable because the `workout` scope is missing."
                     .to_owned(),
-                "Enhanced Tags context is unavailable because the `enhanced_tag` scope is missing."
+                "Enhanced Tags context is unavailable because the `tag` scope is missing."
                     .to_owned(),
                 "Sessions context is unavailable because the `session` scope is missing."
                     .to_owned(),

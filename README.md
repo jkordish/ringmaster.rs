@@ -34,6 +34,15 @@ cargo run -- sync once
 cargo run -- tui
 ```
 
+On Linux, `auth login` stores tokens through the desktop Secret Service keyring by default. If token persistence fails, make sure a provider such as `gnome-keyring` or `KeePassXC` is running and unlocked. For headless boxes, you can explicitly opt into local file storage instead:
+
+```bash
+export RINGMASTER_OURA_SECRET_BACKEND=file
+export RINGMASTER_OURA_SECRET_FILE="$HOME/.local/state/ringmaster/secrets/oura-tokens.json"
+```
+
+The file backend is opt-in only. Ringmaster will not silently fall back from secure storage to plaintext local files.
+
 ## Common workflows
 
 ### Explore locally
