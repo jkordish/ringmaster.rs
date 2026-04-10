@@ -3024,14 +3024,7 @@ fn resolve_snapshot_record(
 
     let matches = store
         .analysis()
-        .list_snapshot_exports()?
-        .into_iter()
-        .filter(|record| record.snapshot_hash.starts_with(snapshot_ref))
-        .map(|record| store.analysis().snapshot_export(&record.snapshot_hash))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        .snapshot_exports_with_prefix(snapshot_ref)?;
     if matches.len() > 1 {
         return Err(RingmasterError::Ui(format!(
             "snapshot `{snapshot_ref}` matched multiple catalog entries; use a longer prefix"
@@ -4124,6 +4117,63 @@ mod tests {
             .unwrap_or_else(|error| panic!("report output should be readable: {error}"));
         assert!(report_contents.contains("AI review report"));
         assert!(report_contents.contains(&persisted.artifact_id[..12]));
+    }
+
+    #[tokio::test]
+    async fn report_export_from_snapshot_accepts_unique_prefixes() {
+        let (_tempdir, mut config) =
+            test_config(Some("https://example.test"), Some("verify-token"));
+        config.refresh.demo_fixture_dir =
+            Some(std::path::PathBuf::from("tests/fixtures/phase7/strong"));
+        let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
+        let snapshot_path = out_dir.path().join("snapshot.json");
+        let report_path = out_dir.path().join("report.md");
+
+        run_snapshot_export(
+            &config,
+            SnapshotExportArgs {
+                demo: true,
+                fixture_dir: None,
+                scope: "today".to_owned(),
+                profile: crate::cli::PrivacyProfileArg::Redacted,
+                out: Some(snapshot_path.clone()),
+                compact: false,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("snapshot export should succeed: {error}"));
+
+        let snapshot_artifact = crate::snapshot::load_snapshot_artifact(&snapshot_path)
+            .unwrap_or_else(|error| panic!("snapshot artifact should load: {error}"));
+        let store = Store::open(&config)
+            .unwrap_or_else(|error| panic!("store should open for snapshot prefix test: {error}"));
+        let record = crate::snapshot::catalog_record_from_loaded_artifact(&snapshot_artifact, None);
+        store
+            .analysis()
+            .upsert_snapshot_export(&record, &[])
+            .unwrap_or_else(|error| panic!("snapshot export should persist: {error}"));
+        let prefix = snapshot_artifact.bundle.metadata.snapshot_hash[..12].to_owned();
+
+        run_report_export(
+            &config,
+            ReportExportArgs {
+                from_snapshot: Some(prefix),
+                from_ai_run: None,
+                format: ReportFormatArg::Markdown,
+                out: report_path.clone(),
+                demo: false,
+                fixture_dir: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("report export should succeed with a unique snapshot prefix: {error}")
+        });
+
+        let report_contents = std::fs::read_to_string(&report_path)
+            .unwrap_or_else(|error| panic!("report output should be readable: {error}"));
+        assert!(report_contents.contains("Snapshot report"));
+        assert!(report_contents.contains(&snapshot_artifact.bundle.metadata.snapshot_hash[..12]));
     }
 
     #[tokio::test]

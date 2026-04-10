@@ -195,10 +195,21 @@ fn resolve_snapshot_source(store: &Store, spec: &str) -> Result<ReportSource> {
         });
     }
 
-    let Some(record) = store.analysis().snapshot_export(spec)? else {
-        return Err(RingmasterError::Ui(format!(
-            "snapshot `{spec}` was not found in the local catalog and is not a readable file path"
-        )));
+    let record = if let Some(record) = store.analysis().snapshot_export(spec)? {
+        record
+    } else {
+        let matches = store.analysis().snapshot_exports_with_prefix(spec)?;
+        if matches.len() > 1 {
+            return Err(RingmasterError::Ui(format!(
+                "snapshot `{spec}` matched multiple catalog entries; use a longer prefix"
+            )));
+        }
+        let Some(record) = matches.into_iter().next() else {
+            return Err(RingmasterError::Ui(format!(
+                "snapshot `{spec}` was not found in the local catalog and is not a readable file path"
+            )));
+        };
+        record
     };
     let provenance = store
         .analysis()

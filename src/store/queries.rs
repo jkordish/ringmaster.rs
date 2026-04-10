@@ -1908,6 +1908,68 @@ impl<'connection> AnalysisStore<'connection> {
             .map_err(Into::into)
     }
 
+    pub fn snapshot_exports_with_prefix(
+        &self,
+        snapshot_prefix: &str,
+    ) -> Result<Vec<SnapshotExportRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                snapshot_hash,
+                schema_version,
+                app_version,
+                generated_at,
+                scope,
+                start_day,
+                end_day,
+                anchor_day,
+                day_count,
+                privacy_profile,
+                source_mode,
+                fixture_dir,
+                latest_source_day,
+                latest_review_day,
+                freshness_summary,
+                trust_summary,
+                capability_summary,
+                provenance_summary,
+                snapshot_json,
+                created_at
+             FROM snapshot_exports
+             WHERE snapshot_hash LIKE ?1
+             ORDER BY created_at DESC, snapshot_hash DESC",
+        )?;
+        let rows = statement.query_map(params![format!("{snapshot_prefix}%")], |row| {
+            Ok(SnapshotExportRecord {
+                snapshot_hash: row.get(0)?,
+                schema_version: row.get(1)?,
+                app_version: row.get(2)?,
+                generated_at: row.get(3)?,
+                scope: row.get(4)?,
+                start_day: row.get(5)?,
+                end_day: row.get(6)?,
+                anchor_day: row.get(7)?,
+                day_count: row.get(8)?,
+                privacy_profile: row.get(9)?,
+                source_mode: row.get(10)?,
+                fixture_dir: row.get(11)?,
+                latest_source_day: row.get(12)?,
+                latest_review_day: row.get(13)?,
+                freshness_summary: row.get(14)?,
+                trust_summary: row.get(15)?,
+                capability_summary: row.get(16)?,
+                provenance_summary: row.get(17)?,
+                snapshot_json: row.get(18)?,
+                created_at: row.get(19)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
     pub fn list_snapshot_exports(&self) -> Result<Vec<SnapshotCatalogEntry>> {
         let mut statement = self.connection.prepare(
             "SELECT
