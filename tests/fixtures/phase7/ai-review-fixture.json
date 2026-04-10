@@ -1,0 +1,40 @@
+{
+  "schema_version": "ringmaster.ai.review.v1",
+  "prompt_version": "review_prompt_v1",
+  "status": "fixture",
+  "overview": "Fixture-backed review for regression testing.",
+  "headline_findings": [
+    {
+      "finding_id": "fixture-headline-1",
+      "title": "Sleep score remained elevated",
+      "summary": "Fixture data keeps the headline stable for schema regression coverage.",
+      "confidence": "medium",
+      "sufficiency": "medium",
+      "evidence_refs": [
+        {
+          "export_ref": "daily:2026-04-10",
+          "note": "Fixture daily score row"
+        }
+      ],
+      "counterevidence_refs": []
+    }
+  ],
+  "positive_findings": [],
+  "negative_findings": [],
+  "unresolved_questions": [
+    "Which local review command should validate the fixture headline first?"
+  ],
+  "limitations": [
+    {
+      "code": "fixture",
+      "message": "This artifact came from a local fixture and not a live provider."
+    }
+  ],
+  "follow_up_targets": [
+    {
+      "label": "Review today",
+      "command": "review today --day 2026-04-10",
+      "reason": "Validate the fixture against local review tooling."
+    }
+  ]
+}

@@ -1,0 +1,136 @@
+{
+  "schema_version": "ringmaster.snapshot.v1",
+  "metadata": {
+    "app_version": "0.1.0",
+    "generated_at": "2026-04-10T00:00:00Z",
+    "snapshot_hash": "f4be9e06cc255ab9b976880c464ac9a2d2656bbcc768425f82d2ef6db7baf6cb",
+    "scope": "day:2026-04-10",
+    "start_day": "2026-04-10",
+    "end_day": "2026-04-10",
+    "anchor_day": "2026-04-10",
+    "privacy_profile": "redacted",
+    "source_mode": "demo",
+    "schema_version": 14
+  },
+  "freshness": {
+    "latest_source_day": "2026-04-08",
+    "latest_review_day": "2026-04-10",
+    "warnings": [
+      "Snapshot is stale relative to the latest available source day."
+    ],
+    "sync_states": [
+      {
+        "sync_key": "oura.daily",
+        "status": "success",
+        "last_attempted_at": "2026-04-10T00:00:00Z",
+        "last_completed_at": "2026-04-10T00:00:00Z",
+        "failure_count": 0,
+        "next_attempt_after": null,
+        "message": "Fixture sync completed."
+      }
+    ]
+  },
+  "capabilities": {
+    "requested_scopes": [
+      "daily",
+      "session"
+    ],
+    "granted_scopes": [
+      "daily"
+    ],
+    "missing_scopes": [
+      "session"
+    ],
+    "entries": [
+      {
+        "key": "daily",
+        "label": "Daily",
+        "requested": true,
+        "granted": true,
+        "note": "granted"
+      },
+      {
+        "key": "session",
+        "label": "Sessions",
+        "requested": true,
+        "granted": false,
+        "note": "missing"
+      }
+    ]
+  },
+  "record_counts": {
+    "daily_history_days": 1,
+    "heartrate_days": 0,
+    "context_events": 1,
+    "pattern_summaries": 0,
+    "review_signals": 1,
+    "raw_tables": {
+      "daily_activity": 1,
+      "daily_readiness": 1,
+      "daily_sleep": 1
+    }
+  },
+  "metrics": {
+    "daily_scores": [
+      {
+        "export_ref": "daily:2026-04-10",
+        "day": "2026-04-10",
+        "sleep_score": 84,
+        "readiness_score": 80,
+        "activity_score": 78
+      }
+    ],
+    "activity": [],
+    "heartrate_daily_averages": [],
+    "sleep_windows": [],
+    "stress": [],
+    "resilience": [],
+    "cardiovascular_age": [],
+    "vo2_max": [],
+    "rest_mode_periods": []
+  },
+  "baselines": [],
+  "trend_summaries": [
+    {
+      "metric_key": "sleep_score",
+      "label": "Sleep score",
+      "direction": "higher",
+      "summary": "Sleep score improved relative to the comparison baseline.",
+      "current_average": 84.0,
+      "previous_average": 79.0
+    }
+  ],
+  "context_events": [
+    {
+      "export_ref": "context:2026-04-10-workout",
+      "anchor_day": "2026-04-10",
+      "family": "Workout",
+      "label": "Workout",
+      "subtype": "run",
+      "intensity": "medium",
+      "summary": null
+    }
+  ],
+  "pattern_summaries": [],
+  "review_signals": [
+    {
+      "export_ref": "signal:sleep:2026-04-10",
+      "day": "2026-04-10",
+      "signal_key": "sleep_consistency",
+      "numeric_value": 1.0,
+      "text_value": null,
+      "delta": 3.0,
+      "z_score": 1.4,
+      "persistence_days": 2,
+      "sufficiency": "medium",
+      "stale_days": 0
+    }
+  ],
+  "follow_up_targets": [
+    {
+      "label": "Review today",
+      "command": "review today --day 2026-04-10",
+      "reason": "Inspect the local brief."
+    }
+  ]
+}

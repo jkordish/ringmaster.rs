@@ -1,0 +1,33 @@
+{
+  "schema_version": "ringmaster.ai.review.v1",
+  "prompt_version": "review_prompt_v1",
+  "status": "fixture",
+  "overview": "Baseline fixture review for regression testing.",
+  "headline_findings": [
+    {
+      "finding_id": "review-baseline-1",
+      "title": "Sleep score remained elevated",
+      "summary": "The exported daily score stayed above the local baseline in this redacted snapshot.",
+      "confidence": "medium",
+      "sufficiency": "medium",
+      "evidence_refs": [
+        {
+          "export_ref": "daily:2026-04-10",
+          "note": "Fixture daily score row"
+        }
+      ],
+      "counterevidence_refs": []
+    }
+  ],
+  "positive_findings": [],
+  "negative_findings": [],
+  "unresolved_questions": [],
+  "limitations": [],
+  "follow_up_targets": [
+    {
+      "label": "Review today",
+      "command": "review today --day 2026-04-10",
+      "reason": "Validate the fixture against local review tooling."
+    }
+  ]
+}

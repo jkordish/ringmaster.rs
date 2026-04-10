@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document describes the implemented phase-7 architecture for `ringmaster.rs`. It reflects the code that exists in the repository today, not the eventual end-state product.
+This document describes the implemented architecture for `ringmaster.rs` as of `2026-04-10`. It reflects the code that exists in the repository today, including the snapshot library, AI run registry, report export workflow, local eval flywheel, and the Review-screen AI artifact viewer, not the eventual end-state product.
 
 ## Design goals
 
@@ -16,6 +16,9 @@ This document describes the implemented phase-7 architecture for `ringmaster.rs`
 - auditable operations when freshness goes wrong
 - deterministic derived analytics rather than pseudo-intelligence
 - bounded smart reviews and investigations rather than a chat assistant
+- optional external synthesis only through explicit exported snapshots
+- structured machine-safe AI outputs instead of prose parsing
+- durable local artifact workflows instead of transient AI stdout
 
 ## Runtime shape
 
@@ -32,6 +35,44 @@ doctor / auth / sync once / sync watch / derive rebuild / review today / review 
   -> bounded auto-derived rebuilds after sync, plus explicit full-history rebuilds
   -> deterministic review feature snapshots and ranking
   -> formatted text output
+
+snapshot export
+  -> store + auth/session seams
+  -> derived read models + bounded view queries
+  -> privacy-profile redaction layer
+  -> deterministic versioned JSON bundle
+  -> snapshot manifest + provenance persistence
+
+snapshot list / snapshot show
+  -> snapshot catalog queries
+  -> path-or-id resolution
+  -> compact metadata rendering
+  -> lineage and privacy visibility
+
+ai review / ai compare
+  -> local snapshot file loading only
+  -> provider boundary (`dry_run`, `fixture`, `openai`)
+  -> canonical request builders with versioned prompt/task/schema framing
+  -> OpenAI Responses API with strict JSON schema output when enabled
+  -> local artifact persistence + summary cache + request fingerprint
+  -> local human-readable briefing rendering
+
+ai runs list / ai runs show
+  -> AI run registry queries
+  -> local artifact inspection over time
+
+report export
+  -> source resolution from snapshot or AI run
+  -> shared report document model
+  -> Markdown / HTML renderers
+  -> report manifest persistence
+
+ai eval
+  -> fixture manifest loading
+  -> deterministic snapshot/artifact fixture validation
+  -> local grader execution
+  -> optional JSON summary export
+  -> eval summary persistence
 
 webhook serve
   -> axum receiver
@@ -115,6 +156,18 @@ Current webhook config covers:
 - renewal lead window
 - desired subscription specs
 
+Current AI config covers:
+
+- provider enablement
+- model selection
+- reasoning effort
+- timeout and retry policy
+- stateless vs stateful mode
+- inline vs file-upload input transport
+- prompt cache mode
+- optional `safety_identifier`
+- env-var based API key loading
+
 ### `src/app.rs`
 
 Responsibilities:
@@ -130,6 +183,8 @@ Responsibilities:
 - deterministic review decks and bounded investigations
 
 The app layer is where persisted normalized rows, derived tables, auth diagnostics, sync provenance, subscription state, delivery history, queue state, and runtime heartbeats become screen models. It deliberately does not own terminal I/O, HTTP, or SQL.
+
+The optional AI layer does not bypass this shaping logic. Snapshot exports are built from typed store and derived queries, not from raw SQL dumps or live database inspection.
 
 Important implemented state concepts:
 
@@ -153,6 +208,7 @@ Important implemented state concepts:
 - `review_mode`: Today, Week, or Investigate within the Review screen
 - `review_focus`: readiness, sleep, recovery, stress, or activity within Investigate mode
 - `selected_review_card_index`: selected ranked card within Review
+- `ai_artifacts_by_day`: preloaded day-keyed summaries derived from `ai_artifacts` joined through `snapshot_exports`, used only for read-only Review provenance display
 
 ### `src/tui.rs`
 
@@ -196,6 +252,102 @@ Implemented screen set:
 - Patterns
 - Review
 - Status
+
+There is intentionally no freeform AI chat screen in this pass. The TUI remains a pure consumer of persisted local state.
+
+### `src/snapshot.rs`
+
+Responsibilities:
+
+- canonical snapshot bundle types
+- snapshot scope resolution
+- privacy-profile redaction
+- deterministic serialization and hashing
+- snapshot manifest + provenance record creation
+- snapshot file loading and validation
+
+Boundary rules:
+
+- snapshot export reads typed store/query outputs and derived artifacts only
+- snapshot export never reaches into auth secrets, raw config internals, or live provider state
+- provenance references are local-only join handles and remain opaque inside exported artifacts
+
+Implemented concepts:
+
+- `SnapshotBundleV1`
+- `PrivacyProfile::{Redacted,Balanced,Full}`
+- `ResolvedSnapshotScope`
+- manifest persistence in `snapshot_exports`
+- local export-reference mapping in `snapshot_provenance_refs`
+- catalog summary fields for freshness, trust, capability, and provenance
+
+### `src/ai.rs`
+
+Responsibilities:
+
+- provider abstraction for snapshot review and compare
+- dry-run, fixture, and OpenAI provider implementations
+- canonical request construction
+- Structured Outputs schema generation
+- local briefing rendering
+- persisted AI artifact record construction
+
+Boundary rules:
+
+- AI code only reads local snapshot files, never the live store directly
+- provider configuration is isolated from sync/auth/webhook logic
+- no OpenAI-specific behavior is allowed inside Ratatui widgets
+- rendered prose is derived locally from structured JSON, not parsed back from model text
+
+Implemented concepts:
+
+- `ReviewArtifactV1`
+- `CompareArtifactV1`
+- provider metadata and run modes (`real`, `dry_run`, `fixture`)
+- prompt and schema version constants
+- stateless-by-default Responses API usage with no tools
+- request previews and request fingerprints
+
+### `src/ai_prompts.rs` and `src/ai_prompts/*`
+
+Responsibilities:
+
+- versioned prompt and task-frame asset loading
+- centralized prompt/schema version names
+- keeping prompt strings out of unrelated implementation modules
+
+Boundary rule:
+
+- prompt assets define framing, not runtime transport or persistence behavior
+
+### `src/report.rs`
+
+Responsibilities:
+
+- source resolution for report export
+- shared `ReportDocument` view model construction
+- Markdown and HTML rendering
+- report manifest persistence and lineage wiring
+
+Boundary rule:
+
+- report rendering is derived from local snapshots and AI artifacts only
+- no network work happens in report generation
+
+### `src/eval.rs`
+
+Responsibilities:
+
+- fixture manifest loading
+- deterministic local artifact evaluation
+- grader execution and summary scoring
+- eval summary persistence
+- optional JSON export
+
+Boundary rule:
+
+- eval runs do not require live OpenAI calls
+- eval fixtures remain snapshot-first and local-only
 
 ### `src/ui/*`
 
@@ -248,7 +400,7 @@ Component responsibilities today:
 - Timeline, Explain, and Review include lightweight breadcrumbs only when they keep shared day or event context visible
 - Patterns renders grouped associations and interpretive notes distinct from Explain
 - Status renders the utilitarian operator console with summary, family status, diagnostics, and warnings without reaching back into the store
-- Review renders ranked briefing cards plus bounded investigation detail without making network or database calls
+- Review renders ranked briefing cards, bounded investigation detail, and a small read-only AI artifact panel without making network or database calls
 
 ### `src/refresh.rs`
 
@@ -311,12 +463,26 @@ Current schema families:
 - `derived_context_events`
 - `derived_pattern_summaries`
 - `derived_review_signal_days`
+- `snapshot_exports`
+- `snapshot_provenance_refs`
+- `ai_artifacts`
+- `report_exports`
+- `ai_eval_runs`
 
 Important query responsibilities added in phase 5:
 
 - normalized upserts and views for the six review-support Oura families
 - persisted review signal snapshots rebuilt from local data
 - typed reads for ranked review and investigation inputs
+
+Additional query responsibilities added in this pass:
+
+- snapshot catalog list/show queries keyed by stable snapshot hash
+- local export-reference provenance lookup for AI evidence mapping
+- persisted AI review/compare artifact storage and latest-artifact lookup
+- day-scoped AI artifact summary lookup keyed by snapshot `anchor_day`, including compare-side lineage resolution
+- report export manifest persistence and lineage lookup
+- eval summary persistence
 
 ### `src/review/*`
 

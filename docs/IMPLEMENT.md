@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This file is the execution runbook for the current phase-7 product. It only describes flows that work today.
+This file is the execution runbook for the current phase-8 product. It only describes flows that work today, including the snapshot library, AI run registry, report export workflow, and local eval harness.
 
 ## Commands
 
@@ -24,196 +24,237 @@ cargo run -- derive rebuild --demo
 cargo run -- review today --demo
 cargo run -- review week --demo
 cargo run -- review investigate --focus readiness --demo
+cargo run -- snapshot export --demo --profile redacted --out /tmp/ringmaster-snapshot.json
+cargo run -- snapshot list --demo
+cargo run -- snapshot show /tmp/ringmaster-snapshot.json
+cargo run -- ai review /tmp/ringmaster-snapshot.json --dry-run
+cargo run -- ai compare /tmp/ringmaster-snapshot.json /tmp/ringmaster-snapshot.json --dry-run
+cargo run -- ai runs list --demo
+cargo run -- ai runs show <run-id>
+cargo run -- report export --from-snapshot /tmp/ringmaster-snapshot.json --format markdown --out /tmp/ringmaster-report.md
+cargo run -- report export --from-ai-run <run-id> --format html --out /tmp/ringmaster-report.html
+cargo run -- ai eval --fixture-dir tests/fixtures/ai
 cargo run -- webhook serve
 cargo run -- webhook replay --fixture tests/fixtures/webhooks/sample.json
 cargo run -- webhook subscriptions list --fixture-dir tests/fixtures/webhooks
 cargo run -- webhook subscriptions sync --dry-run --fixture-dir tests/fixtures/webhooks
 ```
 
+## Snapshot library runtime
+
+`ringmaster snapshot export` remains the canonical boundary between local product state and any optional external AI analysis.
+
+Runtime behavior:
+
+1. resolve a bounded scope from the local store
+2. load auth capability metadata, persisted sync state, typed metrics, and derived review/context/pattern artifacts
+3. apply the selected privacy profile
+4. build a `SnapshotBundleV1`
+5. compute a deterministic snapshot hash
+6. persist the snapshot manifest and local provenance refs
+7. render pretty or compact JSON to stdout or disk
+
+The snapshot library is then browseable through:
+
+- `snapshot list`
+- `snapshot show <snapshot-id-or-path>`
+
+Important rules:
+
+- the snapshot is useful even when AI is disabled
+- the snapshot is the only thing the optional OpenAI provider can inspect
+- exported provenance refs stay opaque and local-first
+- snapshot export never includes auth secrets or raw config internals
+- catalog summaries stay compact and avoid secret leakage
+
+### Privacy profiles
+
+Implemented profiles:
+
+- `redacted`
+  - default
+  - strips obvious account identifiers
+  - removes free-text review signal payloads
+  - minimizes text leakage while keeping metrics, trends, and follow-up references useful
+- `balanced`
+  - keeps the same core redaction posture while allowing richer derived labels where safe
+- `full`
+  - preserves more local explanatory text, but still excludes secrets and config/auth internals
+
+## AI review, compare, and registry runtime
+
+`ringmaster ai review` and `ringmaster ai compare` only accept local snapshot files as input.
+
+Provider selection order:
+
+1. `--dry-run`
+2. `--fixture <path>`
+3. configured real provider
+
+### Dry-run behavior
+
+- no network request
+- deterministic structured artifacts generated locally
+- request preview output shows the final request shape, version metadata, and request fingerprint
+- useful for smoke tests and CI
+
+### Fixture behavior
+
+- no network request
+- loads a stored JSON artifact from disk
+- useful for prompt regression and rendering tests
+
+### Real OpenAI behavior
+
+- uses the Responses API
+- uses strict Structured Outputs via JSON Schema
+- sends no tools in this pass
+- defaults to stateless mode
+- persists the returned artifact locally after local validation
+
+### Output handling
+
+Both commands:
+
+1. validate the snapshot input
+2. run the selected provider
+3. serialize the structured artifact to JSON
+4. render the human-readable briefing locally
+5. persist an `ai_artifacts` row with snapshot linkage, provider metadata, versions, and summary cache
+6. optionally write the raw JSON artifact to disk
+
+Saved AI runs are browseable through:
+
+- `ai runs list`
+- `ai runs show <run-id>`
+
+## Report export runtime
+
+`ringmaster report export` is the canonical human-facing report workflow.
+
+Supported sources:
+
+- `--from-snapshot <snapshot-id-or-path>`
+- `--from-ai-run <run-id>`
+
+Supported formats:
+
+- `markdown`
+- `html`
+
+Current behavior:
+
+1. resolve the source snapshot or AI run
+2. auto-catalog linked snapshots when needed so lineage remains valid
+3. build a shared `ReportDocument` view model
+4. render the requested format
+5. write the output file
+6. persist a `report_exports` manifest row
+
+Each report includes:
+
+- title and scope
+- generation metadata
+- freshness and trust summary
+- key findings
+- supporting evidence
+- uncertainty and sufficiency notes
+- provenance references
+- explicit privacy profile and AI usage marker
+
+## Eval runtime
+
+`ringmaster ai eval --fixture-dir <dir>` is the canonical local reliability loop.
+
+Runtime behavior:
+
+1. load the fixture manifest from the fixture directory
+2. load snapshot fixtures and candidate/baseline artifact fixtures
+3. validate snapshot integrity and schema versions
+4. run local graders against rendered artifact text and evidence refs
+5. render a compact summary to stdout
+6. optionally export a JSON summary file
+7. persist an `ai_eval_runs` summary row
+
+Current graders:
+
+- schema validity
+- required-field completeness
+- overclaiming
+- medical safety language
+- privacy leakage
+- evidence-reference integrity
+- stale-data honesty
+
+Important rules:
+
+- no live API calls are required for baseline regression coverage
+- fixture directories are deterministic and suitable for CI
+- eval persistence stores summaries, not every case payload by default
+
+## Prompt, schema, and template versioning
+
+Prompt and rendering assets now live in explicit versioned files:
+
+- `src/ai_prompts/review_prompt_v1.md`
+- `src/ai_prompts/compare_prompt_v1.md`
+- `src/ai_prompts/review_task_frame_v1.md`
+- `src/ai_prompts/compare_task_frame_v1.md`
+- `src/report_templates/markdown_v1.md`
+- `src/report_templates/html_v1.html`
+
+Persisted AI runs record:
+
+- prompt version
+- output schema version
+- provider/model
+- request mode
+- input transport
+- run mode
+- request fingerprint
+
+## Persistence and schema
+
+Current snapshot/AI/report/eval persistence tables:
+
+- `snapshot_exports`
+- `snapshot_provenance_refs`
+- `ai_artifacts`
+- `report_exports`
+- `ai_eval_runs`
+
+These tables are used for:
+
+- snapshot library browsing
+- local evidence-to-record mapping
+- saved AI review/compare artifacts
+- report export lineage
+- eval run history
+- prompt/schema/provider drift diagnosis
+
 ## Visual-system runtime
 
-The TUI now has a dedicated shared presentation layer under `src/ui/*`.
-
-At runtime this means:
-
-1. `src/app.rs` still shapes persisted data into presentation models
-2. `src/tui.rs` builds a `UiContext` for the current terminal size
-3. screen renderers consume semantic theme, layout, chrome, and chart helpers
-4. screens pick compact, medium, or wide choreography instead of squeezing one layout into all terminals
+The TUI still uses the dedicated shared presentation layer under `src/ui/*`.
 
 Important boundary:
 
 - widgets never perform HTTP
 - widgets never refresh tokens
 - widgets never write to SQLite
+- widgets never invoke the OpenAI provider directly
 - the render path stays on persisted presentation models only
+
+There is intentionally no freeform AI chat surface and no artifact browser screen in the TUI in this pass.
 
 ## `ui snapshot`
 
-`ringmaster ui snapshot` is the canonical non-interactive design-QA surface. It uses the same rendering stack as the interactive TUI and writes deterministic UTF-8 artifacts to disk.
+`ringmaster ui snapshot` remains the canonical non-interactive design-QA surface. It uses the same rendering stack as the interactive TUI and writes deterministic UTF-8 artifacts to disk.
 
 Supported sources:
 
 - `--demo` for deterministic built-in presentation data
 - `--fixture-dir <dir>` for a fixture-backed temporary store
 - live local store when neither `--demo` nor `--fixture-dir` is passed
-
-Special fixture-root behavior:
-
-- if `--fixture-dir` points at `tests/fixtures/phase7` or another directory with `strong`, `weak`, and `empty` subdirectories, the command switches into scenario-matrix mode
-- scenario-matrix mode expands the same screen and size selection across `strong`, `weak`, `empty`, `stale`, and `error`
-- `stale` and `error` are overlaid from the seeded fixture state in code so the repo does not duplicate more Oura payload families than necessary
-
-Supported viewport classes:
-
-- `compact`: `90x28`
-- `medium`: `120x36`
-- `wide`: `160x44`
-
-Examples:
-
-```bash
-cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots
-
-cargo run -- ui snapshot --demo \
-  --screen dashboard --screen timeline --screen review --screen status \
-  --size compact --size wide \
-  --out-dir /tmp/ringmaster-ui-snapshots-smoke
-
-cargo run -- ui snapshot \
-  --fixture-dir tests/fixtures/phase7 \
-  --screen dashboard --screen explain --screen review --screen status \
-  --size compact --size wide \
-  --out-dir /tmp/ringmaster-ui-snapshots-phase7-smoke
-```
-
-Artifact naming:
-
-- demo and single-fixture mode write one text file per `screen x size` combination as `screen-size.txt`
-- phase-7 scenario mode writes one text file per `screen x scenario x size` combination as `screen-scenario-size.txt`
-
-Scenario meanings:
-
-- `strong`: healthy local cache with full capability coverage and rich context
-- `weak`: sparse but still usable local history with explicit uncertainty
-- `empty`: granted scopes but no cached local records yet
-- `stale`: persisted data with degraded freshness or receiver/subscription drift
-- `error`: auth, capability, or sync failure state blocking part of the product surface
-
-The command prints the resolved source mode, scenarios, screens, sizes, and generated artifact paths.
-
-## Sync and derivation flows
-
-### `sync once`
-
-`ringmaster sync once` is the one-shot importer. It:
-
-1. Inspects persisted auth/session state
-2. Refreshes tokens when needed through the auth layer
-3. Fetches the supported live families, including the review-support Oura families
-4. Caches raw payloads separately from normalized tables
-5. Performs idempotent upserts into SQLite
-6. Rebuilds bounded derived state when persisted rows change
-7. Updates per-family sync watermarks, status, failure counts, backoff state, structured errors, and trigger provenance
-
-### `sync watch`
-
-`ringmaster sync watch` remains the hybrid invalidation consumer and scheduler. It:
-
-1. Reads persisted sync state and webhook queue state
-2. Writes runtime heartbeats
-3. Claims pending webhook invalidations first
-4. Runs targeted `sync_selected(...)` windows when webhook work exists
-5. Preserves scheduled fallback reconciliation for all families
-6. Leaves unsupported webhook families honest instead of pretending they are realtime
-
-### `derive rebuild`
-
-`ringmaster derive rebuild` is the explicit non-network rebuild workflow for derived product state. It:
-
-1. Opens the existing SQLite database
-2. Reads persisted normalized daily, context, and review-support families
-3. Rebuilds canonical context events
-4. Rebuilds persisted pattern summaries
-5. Rebuilds persisted `derived_review_signal_days`
-6. Replaces the derived tables through typed store APIs
-7. Prints rebuilt counts for the derived surfaces
-
-This remains the full-history recompute path. Normal syncs still use bounded recent-window rebuilds.
-
-## Screen behavior
-
-### Dashboard
-
-- acts as the editorial front page
-- leads with “what matters now”
-- follows with the daily metric band
-- uses freshness, capability, and drill-down cues as supporting structure
-
-### Timeline
-
-- leads with the chart
-- places overlay lanes and selected detail beneath that primary temporal view
-- keeps day-event detail available without competing with the chart for first attention
-
-### Trends
-
-- emphasizes 7d / 30d / 90d comparison and baseline drift
-- uses compact spark hints and delta language for scanning
-
-### Explain
-
-- starts with the selected-day claim
-- then shows measured inputs, evidence, context, and uncertainty
-- labels prior-day carryover explicitly so linked context is not mistaken for same-day evidence
-
-### Patterns
-
-- groups deterministic associations and interpretation
-- avoids duplicating Explain’s evidence layout
-
-### Status
-
-- keeps diagnostic density
-- separates summary, family status, diagnostics, and warnings more clearly
-
-### Review
-
-- remains the canonical smart surface
-- uses ranked cards, bounded brief detail, and fixed-focus investigations
-- keeps the selected day and current review mode visible through a lightweight breadcrumb
-
-## Shared interaction semantics
-
-- Dashboard, Timeline, Explain, and Review share one selected day
-- Timeline and Explain share one selected event
-- Timeline, Explain, and Patterns share family filter toggles for workouts, tags, and sessions
-- when new live data arrives, the selected day stays anchored to the same day if possible, then the nearest earlier available day, then the next later day
-
-Default key flow:
-
-- `1-7`: Dashboard, Timeline, Trends, Explain, Patterns, Review, Status
-- `[` / `]`: previous/next selected day on Dashboard, Timeline, Explain, and Review
-- `,` / `.`: previous/next heartrate point on Timeline
-- `j` / `k`: previous/next selected event on Timeline and Explain
-- `j` / `k` on Review: previous/next ranked card
-- `w` / `t` / `s`: toggle workouts, tags, and sessions on Timeline, Explain, and Patterns
-- `m`: cycle the metric filter on Patterns
-- `v`: cycle Review mode
-- `f`: cycle Review investigation focus
-
-## Fixture and demo behavior
-
-- `cargo run -- sync once --dry-run --fixture-dir tests/fixtures/phase3` runs the same parse/normalize pipeline without live credentials and without mutating SQLite
-- `cargo run -- sync watch --demo --max-iterations 1` runs the same hybrid scheduler/import path in bounded fixture mode
-- `cargo run -- derive rebuild --demo` seeds a temporary store from the phase-5 fixtures and rebuilds all derived tables
-- `cargo run -- review today --demo` uses a temporary fixture-backed store and renders the deterministic daily brief
-- `cargo run -- review week --demo` uses a temporary fixture-backed store and renders the deterministic weekly brief
-- `cargo run -- review investigate --focus readiness --demo` uses the same fixture-backed store and renders the bounded readiness investigation
-- `cargo run -- tui --demo` uses deterministic in-memory presentation data and skips live background refresh
-- `cargo run -- demo` is an alias for `cargo run -- tui --demo`
-- `cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots` writes deterministic design-review artifacts without requiring a TTY
-- `cargo run -- ui snapshot --fixture-dir tests/fixtures/phase7 ...` is the bounded regression path for strong, weak, empty, stale, and error state coverage
 
 ## Verification sequence
 
@@ -224,22 +265,18 @@ cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
 cargo run -- doctor
-cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots
-cargo run -- ui snapshot --demo \
-  --screen dashboard --screen timeline --screen review --screen status \
-  --size compact --size wide \
-  --out-dir /tmp/ringmaster-ui-snapshots-smoke
-cargo run -- ui snapshot \
-  --fixture-dir tests/fixtures/phase7 \
-  --screen dashboard --screen explain --screen review --screen status \
-  --size compact --size wide \
-  --out-dir /tmp/ringmaster-ui-snapshots-phase7-smoke
+cargo run -- snapshot export --demo --profile redacted --out /tmp/ringmaster-snapshot.json
+cargo run -- snapshot list --demo
+cargo run -- ai review /tmp/ringmaster-snapshot.json --dry-run
+cargo run -- ai runs list --demo
+cargo run -- report export --from-snapshot /tmp/ringmaster-snapshot.json --format markdown --out /tmp/ringmaster-report.md
+cargo run -- ai eval --fixture-dir tests/fixtures/ai
 ```
 
 ## Notes for future passes
 
-- keep UI rendering pure; any new sync, auth, or webhook work belongs outside `src/components/*`
-- extend the semantic theme/layout/chrome layers instead of scattering style decisions back into individual screens
-- keep `ui snapshot` deterministic and text-first unless a later pass explicitly adds a richer visual export path
-- do not turn Review into chat without a separate explicit design pass
-- hosted relay services, notifications, packaging, installers, and release automation remain intentionally deferred
+- keep the AI boundary snapshot-first
+- keep the TUI pure and read-only with respect to saved AI artifacts
+- do not add freeform chat without a dedicated design pass
+- do not enable tools, browsing, or direct database inspection in the provider path without a new privacy review
+- add a read-only TUI artifact browser only if it can reuse the same report and registry rendering models

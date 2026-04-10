@@ -2,206 +2,213 @@
 
 ## Purpose
 
-This file is the current truth for the repository during the phase-7 scenario-hardening-and-state-coverage pass. It records what now works, what gaps this pass closed, and what remains intentionally deferred.
+This file is the current truth for the repository after the `snapshot-library-reports-and-eval-flywheel` pass and the same-day Review-screen AI artifact viewer follow-up completed on `2026-04-10`. It records what landed, what was verified, and what remains intentionally deferred.
 
-## Baseline audit at start of this pass
+## Baseline before this pass
 
-Verified on `2026-04-09` before implementation:
+Verified before implementation:
 
-- `cargo fmt --all --check` passed
-- `cargo clippy --all-targets --all-features -- -D warnings` passed
-- `cargo test --all` passed
-- `cargo run -- doctor` passed
-- `cargo run -- sync watch --demo --max-iterations 1` passed
+- the local-first CLI, sync, derive, review, webhook, UI snapshot, and phase-7 snapshot/OpenAI flows were already working
+- snapshot export already produced canonical hashed artifacts with privacy profiles
+- `ai review` and `ai compare` already persisted structured artifacts locally
 
-Repository strengths at baseline:
+Primary gaps before this pass:
 
-- real local OAuth login and real one-shot sync
-- deterministic demo mode and useful snapshot rendering
-- SQLite-backed typed store/query seams
-- honest live empty/error states
-- local-first poll plus webhook freshness architecture
-- bounded derived context overlays, explainability, pattern summaries, and smart reviews
-
-Repository gaps at baseline:
-
-- demo snapshots were strong enough for smoke coverage, but fixture-backed scenario coverage was still shallow
-- `ui snapshot` could render only one fixture-backed app state at a time
-- screen regression coverage did not exercise canonical strong, weak, empty, stale, and error states across the full screen set
-- selected-day continuity still jumped to the newest day when the current day disappeared after reload
-- uncertainty and missing-capability copy still had a few ambiguous or awkward phrases
+- saved snapshots were persisted but not browseable as a first-class local library
+- AI review and compare runs were persisted but not easy to inspect over time
+- there was no canonical report export command
+- prompt framing still lived inline in AI implementation code
+- there was no local eval harness for safe prompt/model iteration
+- there was no durable report or eval lineage registry
 
 ## Current implemented truth
 
 The repository now includes:
 
-- a new design audit in `docs/DESIGN_AUDIT.md` with explicit screen-by-screen hierarchy and clutter findings
-- a centralized design-system reference in `docs/DESIGN_SYSTEM.md`
-- an internal presentation layer under `src/ui/*` for:
-  - semantic palette roles
-  - state tones
-  - text emphasis helpers
-  - breakpoint-aware layout helpers
-  - shared panel, badge, and title-row chrome
-  - shared chart styling helpers
-  - deterministic snapshot artifact generation
-- a dedicated `ui snapshot` CLI family for deterministic design QA
-- a canonical phase-7 fixture root under `tests/fixtures/phase7` with `strong`, `weak`, and `empty` seed states plus code-driven `stale` and `error` overlays
-- deterministic snapshot output across these viewport classes:
-  - `compact` = `90x28`
-  - `medium` = `120x36`
-  - `wide` = `160x44`
-- deterministic scenario-matrix output across these scenario classes:
-  - `strong`
-  - `weak`
-  - `empty`
-  - `stale`
-  - `error`
-- redesigned screen choreography for:
-  - Dashboard as the editorial front page
-  - Timeline as the immersive temporal view
-  - Trends as the comparative scanning matrix
-  - Explain as the deliberate evidence view
-  - Patterns as the grouped association browser
-  - Review as the editorial digest
-  - Status as the utilitarian operator console
-- shared state styling for:
-  - selected
-  - focused
-  - stale
-  - syncing
-  - empty
-  - missing capability
-  - warning
-  - error
-  - de-emphasized metadata
-- non-color-only state emphasis through wording, badges, prefixes, ordering, and chrome
-- tighter copy for:
-  - thin-history uncertainty
-  - missing capability states
-  - empty local-cache states
-  - stale receiver/subscription/sync states
-- selected-day restoration that prefers nearest continuity instead of defaulting straight to newest data
-- lightweight breadcrumbs on Timeline, Explain, and Review when they reduce cognitive load around shared day and linked-event context
-- snapshot and smoke coverage for:
-  - core screen rendering
-  - compact / medium / wide sizing
-  - canonical strong / weak / empty / stale / error scenario shaping
-  - `ui snapshot` artifact plumbing
-  - selected-card and screen-role regressions
-  - scenario-tagged smoke output
+- a local snapshot catalog backed by `snapshot_exports`
+- canonical snapshot library commands:
+  - `snapshot list`
+  - `snapshot show`
+- a first-class AI run registry backed by `ai_artifacts`
+- a Review-screen AI artifact panel backed by day-scoped local artifact summaries
+- canonical AI run browse commands:
+  - `ai runs list`
+  - `ai runs show`
+- a canonical report workflow:
+  - `report export`
+- Markdown and HTML report rendering from either:
+  - a saved snapshot
+  - a saved AI review run
+  - a saved AI compare run
+- persisted report manifests in `report_exports`
+- a local eval flywheel:
+  - `ai eval`
+  - fixture manifest support
+  - summary persistence in `ai_eval_runs`
+  - graders for schema validity, completeness, overclaiming, medical safety, privacy, evidence integrity, and stale-data honesty
+- explicit prompt/template/schema versioning with dedicated files under:
+  - `src/ai_prompts/*`
+  - `src/report_templates/*`
+- canonical per-task request builders with stable framing and dry-run request previews
+- stronger lineage between snapshots, AI runs, and report exports
 
-## What changed in this pass
+## Snapshot library capabilities that now work
 
-Dashboard:
+- `ringmaster snapshot export --demo --profile redacted --out /tmp/ringmaster-snapshot.json`
+- `ringmaster snapshot list --demo`
+- `ringmaster snapshot show /tmp/ringmaster-snapshot.json`
+- `ringmaster snapshot show <snapshot-hash-prefix>`
 
-- now has one clear focal point: “what matters now”
-- treats metric cards and freshness/capability context as secondary rhythm
-- uses drill-down cues as tertiary navigation instead of another block wall
-- now has canonical strong, weak, empty, stale, and error fixture coverage in the snapshot matrix
+Snapshot catalog metadata now exposes:
 
-Timeline:
+- created time
+- stable snapshot hash identity
+- scope and day bounds
+- privacy profile
+- schema version
+- source mode
+- freshness summary
+- trust summary
+- capability summary
+- provenance summary
 
-- leads with the chart rather than splitting attention equally with side panels
-- uses overlay lanes and selected detail to reinforce temporal reading
-- keeps compact terminals usable instead of collapsing into crushed sections
-- shows a lightweight breadcrumb when the selected day or linked event context would otherwise be easy to lose
+The catalog stores compact metadata only. It does not leak obvious personal identifiers or secrets in the default redacted path.
 
-Trends:
+## AI artifact capabilities that now work
 
-- now reads like a comparison surface instead of a stacked card list
-- uses baseline relationships, deltas, and compact spark hints for scanability
+- `ringmaster ai review <snapshot-path> --dry-run`
+- `ringmaster ai compare <snapshot-a> <snapshot-b> --dry-run`
+- `ringmaster ai runs list --demo`
+- `ringmaster ai runs show <run-id-prefix>`
 
-Explain:
+Persisted AI run metadata now includes:
 
-- now emphasizes the claim first, then measured inputs, then evidence and uncertainty
-- feels deliberately narrower and more narrative without turning into prose soup
-- labels prior-day carryover explicitly so late events are not mistaken for same-day evidence
+- artifact kind and status
+- provider/model metadata
+- prompt version
+- output schema version
+- request mode and input transport
+- privacy profile
+- snapshot linkage
+- run mode (`real`, `dry_run`, `fixture`)
+- request fingerprint
+- summary/overview cache for library rendering
 
-Patterns:
+The Review screen now also shows, for the currently selected day:
 
-- now groups findings and interpretation so it reads differently from Explain at a glance
-- uses cleaner relation copy instead of awkward “associated with lower ...” phrasing
+- whether a saved AI artifact exists
+- whether the latest saved run was a `review` or `compare`
+- compact saved summary text derived from local `summary_cache` and `overview`
+- provenance-first lineage including run id, matched snapshot hash, compare peer hash when present, provider/model, prompt version, schema version, and privacy profile
 
-Review:
+## Report export capabilities that now work
 
-- now feels like an editorial digest with ranked observations and bounded brief detail
-- keeps selected day, review mode, and focus visible through a lightweight breadcrumb
+- `ringmaster report export --from-snapshot /tmp/ringmaster-snapshot.json --format markdown --out /tmp/ringmaster-report.md`
+- `ringmaster report export --from-snapshot /tmp/ringmaster-snapshot.json --format html --out /tmp/ringmaster-report.html`
+- `ringmaster report export --from-ai-run <run-id> --format markdown --out /tmp/ringmaster-report.md`
 
-Status:
+Report exports now include:
 
-- remains dense, but diagnostics no longer compete equally with every other element
-- uses sharper grouping for summary, family status, diagnostics, and warnings
-- now has explicit strong, weak, empty, stale, and error regression coverage through fixture-backed snapshots
+- title and source scope
+- generation metadata
+- freshness and trust summaries
+- key findings
+- supporting evidence
+- sufficiency and uncertainty notes
+- provenance references and local lineage handles
+- explicit privacy profile and AI usage markers
 
-## Design-system truth
+## Eval flywheel capabilities that now work
 
-The code now standardizes:
+- `ringmaster ai eval --fixture-dir tests/fixtures/ai`
+- optional JSON summary export via `--export`
+- candidate/baseline label selection
+- fixture-manifest driven datasets
+- deterministic local execution with no live API requirement
+- persisted eval summary history in `ai_eval_runs`
 
-- palette roles:
-  - background
-  - layered surfaces
-  - strong/default/muted foreground tiers
-  - accent
-  - positive
-  - warning
-  - danger
-  - info
-  - focus
-- typography/emphasis roles:
-  - hero
-  - section title
-  - label
-  - body
-  - annotation
-  - metadata
-- spacing rhythm:
-  - compact internal gaps
-  - standard block spacing
-  - section separation
-  - viewport-specific density rules
-- chrome language:
-  - full panels for primary regions
-  - dividers and implied grouping for secondary regions
-  - consistent badge and chip treatment
-  - standardized focus and state emphasis
-- chart grammar:
-  - lines for time
-  - compact bars for discrete comparison
-  - sparklines for directional hints
-  - consistent missing-data and stale-data treatment
+The local graders currently cover:
+
+- schema validity
+- required-field completeness
+- overclaiming / unsupported causality
+- medical-advice safety language
+- privacy leakage in rendered text
+- evidence-reference integrity
+- stale or missing data honesty
+
+## Privacy and provenance truth
+
+The current behavior remains intentionally conservative:
+
+- the OpenAI layer is opt-in
+- no user data is uploaded unless the user explicitly runs an AI command against a local snapshot
+- the exported snapshot remains the only provider-visible boundary object
+- `redacted` remains the default export profile
+- requests remain stateless by default
+- no tools are enabled by default
+- local reports and AI runs now show their lineage and privacy profile explicitly
+- report/export/eval persistence stores metadata and paths, not hidden background uploads
+
+## Versioning truth
+
+The repository now has explicit version discipline for:
+
+- snapshot schema version: `ringmaster.snapshot.v1`
+- review output schema version: `ringmaster.ai.review.v1`
+- compare output schema version: `ringmaster.ai.compare.v1`
+- prompt templates:
+  - `review_prompt_v1`
+  - `compare_prompt_v1`
+  - `review_task_frame_v1`
+  - `compare_task_frame_v1`
+- report templates:
+  - `markdown_v1`
+  - `html_v1`
 
 ## Tests now in place
 
-The phase-7 pass now includes meaningful coverage for:
+Coverage now includes:
 
-- semantic theme and layout helpers
-- deterministic snapshot size selection
-- `ui snapshot` artifact generation
-- CLI parsing for the new `ui snapshot` surface
-- compact vs wide screen rendering expectations
-- selected-state emphasis that does not depend on color alone
-- selected-day continuity after live snapshot replacement
-- carryover labeling and missing-capability copy regression tests
-- phase-7 fixture-root smoke coverage with scenario-tagged artifact assertions
-- smoke coverage for design-QA snapshot output
+- snapshot catalog tests
+- AI run registry tests
+- report export tests
+- Markdown and HTML renderer tests
+- eval harness tests
+- prompt-version regression fixtures
+- redaction/privacy regression tests
+- lineage and provenance persistence tests
+- CLI parsing and smoke tests for:
+  - `snapshot list`
+  - `snapshot show`
+  - `ai runs list`
+  - `ai runs show`
+  - `report export`
+  - `ai eval`
 
-## Verification completed in this pass
+## Verification completed for this pass
 
-Verified on `2026-04-09` after implementation:
+Verified on `2026-04-10` after implementation:
 
 - `cargo fmt --all --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test --all`
 - `cargo run -- doctor`
-- `cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots`
-- `cargo run -- ui snapshot --fixture-dir tests/fixtures/phase7 --screen dashboard --screen explain --screen review --screen status --size compact --size wide --out-dir /tmp/ringmaster-ui-snapshots-phase7-smoke`
+- `cargo run -- snapshot export --demo --profile redacted --out /tmp/ringmaster-snapshot.json`
+- `cargo run -- snapshot list --demo`
+- `cargo run -- ai review /tmp/ringmaster-snapshot.json --dry-run`
+- `cargo run -- ai runs list --demo`
+- `cargo run -- report export --from-snapshot /tmp/ringmaster-snapshot.json --format markdown --out /tmp/ringmaster-report.md`
+- `cargo run -- ai eval --fixture-dir tests/fixtures/ai`
 
-## Known intentional deferrals
+## Intentionally deferred
 
-- new Oura analytics families beyond the existing live and review-support surface
-- freeform chat or hosted AI assistance
-- PNG/image snapshot export; text snapshots remain the canonical visual QA surface
-- richer animation or transition effects
-- notifications
-- packaging, installers, and release automation
+- freeform chat or arbitrary natural-language Q&A over the live database
+- any direct database-to-OpenAI pipeline
+- tool-enabled or browsing-enabled OpenAI runs
+- a new AI chat screen in the TUI
+- a dedicated TUI artifact browser in this pass beyond the shipped Review-only read-only artifact panel
+- PDF export as a required format
+- batch/archive processing as a user-facing feature
+- hosted eval services as a runtime requirement
+- packaging, installers, notifications, and release automation

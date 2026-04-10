@@ -7,7 +7,7 @@ use crate::config::Config;
 use crate::error::{Result, RingmasterError};
 use crate::store::migrations::{MigrationReport, run_migrations};
 use crate::store::queries::{
-    AuthStore, DerivedStore, ImportStore, MetadataStore, SyncStateStore, ViewStore,
+    AnalysisStore, AuthStore, DerivedStore, ImportStore, MetadataStore, SyncStateStore, ViewStore,
 };
 use crate::store::webhook_store::WebhookStore;
 
@@ -104,6 +104,10 @@ impl Store {
         DerivedStore::new(&self.connection)
     }
 
+    pub fn analysis(&self) -> AnalysisStore<'_> {
+        AnalysisStore::new(&self.connection)
+    }
+
     pub fn views(&self) -> ViewStore<'_> {
         ViewStore::new(&self.connection)
     }
@@ -134,6 +138,6 @@ mod tests {
         let store =
             Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
 
-        assert_eq!(store.migration_report().current_version, 12);
+        assert_eq!(store.migration_report().current_version, 14);
     }
 }

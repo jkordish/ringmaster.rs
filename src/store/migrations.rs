@@ -601,6 +601,152 @@ pub const MIGRATIONS: &[Migration] = &[
             ON vo2_max(recorded_at);
         ",
     },
+    Migration {
+        version: 13,
+        name: "phase7_snapshot_and_ai_artifacts",
+        sql: r"
+        CREATE TABLE IF NOT EXISTS snapshot_exports (
+            snapshot_hash TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL,
+            app_version TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            privacy_profile TEXT NOT NULL,
+            source_mode TEXT NOT NULL,
+            fixture_dir TEXT,
+            snapshot_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS snapshot_provenance_refs (
+            snapshot_hash TEXT NOT NULL,
+            export_ref TEXT NOT NULL,
+            local_kind TEXT NOT NULL,
+            local_locator TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (snapshot_hash, export_ref),
+            FOREIGN KEY (snapshot_hash) REFERENCES snapshot_exports(snapshot_hash) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS ai_artifacts (
+            artifact_id TEXT PRIMARY KEY,
+            artifact_kind TEXT NOT NULL,
+            output_schema_version TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            reasoning_effort TEXT,
+            request_mode TEXT NOT NULL,
+            input_transport TEXT NOT NULL,
+            run_mode TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            snapshot_hash_a TEXT NOT NULL,
+            snapshot_hash_b TEXT,
+            privacy_profile TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            rendered_briefing TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_snapshot_exports_generated_at
+            ON snapshot_exports(generated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_snapshot_exports_scope_profile
+            ON snapshot_exports(scope, privacy_profile, generated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_snapshot_provenance_locator
+            ON snapshot_provenance_refs(local_kind, local_locator);
+        CREATE INDEX IF NOT EXISTS idx_ai_artifacts_created_at
+            ON ai_artifacts(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_ai_artifacts_snapshot_kind
+            ON ai_artifacts(snapshot_hash_a, artifact_kind, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_ai_artifacts_compare_snapshot
+            ON ai_artifacts(snapshot_hash_b, artifact_kind, created_at DESC);
+        ",
+    },
+    Migration {
+        version: 14,
+        name: "phase8_catalog_reports_and_evals",
+        sql: r"
+        ALTER TABLE snapshot_exports ADD COLUMN start_day TEXT NOT NULL DEFAULT '';
+        ALTER TABLE snapshot_exports ADD COLUMN end_day TEXT NOT NULL DEFAULT '';
+        ALTER TABLE snapshot_exports ADD COLUMN anchor_day TEXT NOT NULL DEFAULT '';
+        ALTER TABLE snapshot_exports ADD COLUMN day_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE snapshot_exports ADD COLUMN latest_source_day TEXT;
+        ALTER TABLE snapshot_exports ADD COLUMN latest_review_day TEXT;
+        ALTER TABLE snapshot_exports ADD COLUMN freshness_summary TEXT NOT NULL DEFAULT '';
+        ALTER TABLE snapshot_exports ADD COLUMN trust_summary TEXT NOT NULL DEFAULT '';
+        ALTER TABLE snapshot_exports ADD COLUMN capability_summary TEXT NOT NULL DEFAULT '';
+        ALTER TABLE snapshot_exports ADD COLUMN provenance_summary TEXT NOT NULL DEFAULT '';
+
+        ALTER TABLE ai_artifacts ADD COLUMN artifact_status TEXT NOT NULL DEFAULT '';
+        ALTER TABLE ai_artifacts ADD COLUMN overview TEXT NOT NULL DEFAULT '';
+        ALTER TABLE ai_artifacts ADD COLUMN summary_cache TEXT NOT NULL DEFAULT '';
+        ALTER TABLE ai_artifacts ADD COLUMN request_fingerprint TEXT;
+
+        CREATE TABLE IF NOT EXISTS report_exports (
+            report_id TEXT PRIMARY KEY,
+            report_kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            format TEXT NOT NULL,
+            output_path TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            privacy_profile TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            source_snapshot_hash_a TEXT,
+            source_snapshot_hash_b TEXT,
+            source_ai_artifact_id TEXT,
+            provider TEXT,
+            model TEXT,
+            prompt_version TEXT,
+            output_schema_version TEXT,
+            export_status TEXT NOT NULL,
+            last_verified_exists INTEGER NOT NULL DEFAULT 1,
+            last_verified_at TEXT NOT NULL,
+            FOREIGN KEY (source_snapshot_hash_a) REFERENCES snapshot_exports(snapshot_hash) ON DELETE SET NULL,
+            FOREIGN KEY (source_snapshot_hash_b) REFERENCES snapshot_exports(snapshot_hash) ON DELETE SET NULL,
+            FOREIGN KEY (source_ai_artifact_id) REFERENCES ai_artifacts(artifact_id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS ai_eval_runs (
+            eval_run_id TEXT PRIMARY KEY,
+            task_family TEXT NOT NULL,
+            fixture_dir TEXT NOT NULL,
+            candidate_label TEXT NOT NULL,
+            baseline_label TEXT,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            output_schema_version TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            total_cases INTEGER NOT NULL,
+            passed_cases INTEGER NOT NULL,
+            failed_cases INTEGER NOT NULL,
+            schema_validity_score REAL NOT NULL,
+            completeness_score REAL NOT NULL,
+            overclaiming_score REAL NOT NULL,
+            medical_safety_score REAL NOT NULL,
+            privacy_score REAL NOT NULL,
+            evidence_score REAL NOT NULL,
+            honesty_score REAL NOT NULL,
+            regression_summary TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_snapshot_exports_created_at
+            ON snapshot_exports(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_snapshot_exports_summary
+            ON snapshot_exports(privacy_profile, source_mode, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_ai_artifacts_status_created_at
+            ON ai_artifacts(artifact_status, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_report_exports_created_at
+            ON report_exports(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_report_exports_snapshot_a
+            ON report_exports(source_snapshot_hash_a, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_report_exports_snapshot_b
+            ON report_exports(source_snapshot_hash_b, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_report_exports_ai_artifact
+            ON report_exports(source_ai_artifact_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_ai_eval_runs_created_at
+            ON ai_eval_runs(created_at DESC);
+        ",
+    },
 ];
 
 pub fn run_migrations(connection: &mut rusqlite::Connection) -> Result<MigrationReport> {
@@ -682,7 +828,7 @@ mod tests {
         assert_eq!(report.current_version, current_version());
         assert_eq!(
             report.applied_versions,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
         );
     }
 
@@ -755,7 +901,10 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("phase-3 migrations should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(
+            report.applied_versions,
+            vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        );
 
         let (workout_day, workout_title): (String, String) = connection
             .query_row(
@@ -827,7 +976,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("phase4 migrations should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![7, 8, 9, 10, 11, 12]);
+        assert_eq!(report.applied_versions, vec![7, 8, 9, 10, 11, 12, 13, 14]);
 
         let row: (String, String, String) = connection
             .query_row(
@@ -871,7 +1020,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("phase4 migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![9, 10, 11, 12]);
+        assert_eq!(report.applied_versions, vec![9, 10, 11, 12, 13, 14]);
 
         let daily_sleep_columns: Vec<String> = {
             let mut statement = connection
@@ -914,7 +1063,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("phase5 migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![10, 11, 12]);
+        assert_eq!(report.applied_versions, vec![10, 11, 12, 13, 14]);
 
         let table_names: Vec<String> = {
             let mut statement = connection
@@ -983,7 +1132,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("review signal migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![11, 12]);
+        assert_eq!(report.applied_versions, vec![11, 12, 13, 14]);
 
         let table_names: Vec<String> = {
             let mut statement = connection
@@ -1053,7 +1202,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("vo2 history migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![12]);
+        assert_eq!(report.applied_versions, vec![12, 13, 14]);
 
         let primary_key_columns: Vec<String> = {
             let mut statement = connection
