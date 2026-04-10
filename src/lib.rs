@@ -2498,6 +2498,11 @@ pub(crate) async fn seed_demo_library_artifacts(
     fixture_dir: Option<&std::path::Path>,
     include_ai_runs: bool,
 ) -> Result<()> {
+    const DEMO_REVIEW_RUN_ID: &str = "demo-review";
+    const DEMO_COMPARE_RUN_ID: &str = "demo-compare";
+    const DEMO_REVIEW_RUN_CREATED_AT: &str = "2026-04-10T00:00:00Z";
+    const DEMO_COMPARE_RUN_CREATED_AT: &str = "2026-04-10T00:00:01Z";
+
     let today_scope = snapshot::resolve_scope(store, "today")?;
     let week_scope = snapshot::resolve_scope(store, "week")?;
     let today_export = snapshot::export_snapshot(
@@ -2537,10 +2542,26 @@ pub(crate) async fn seed_demo_library_artifacts(
             bundle: week_export.bundle.clone(),
             compact_json: week_export.compact_json.clone(),
         };
-        let review = ai::review_snapshot(config, &today_artifact, true, None).await?;
+        let mut review = ai::review_snapshot_with_run_identity(
+            config,
+            &today_artifact,
+            true,
+            None,
+            Some(DEMO_REVIEW_RUN_CREATED_AT),
+        )
+        .await?;
+        DEMO_REVIEW_RUN_ID.clone_into(&mut review.record.artifact_id);
         store.analysis().upsert_ai_artifact(&review.record)?;
-        let compare =
-            ai::compare_snapshots(config, &today_artifact, &week_artifact, true, None).await?;
+        let mut compare = ai::compare_snapshots_with_run_identity(
+            config,
+            &today_artifact,
+            &week_artifact,
+            true,
+            None,
+            Some(DEMO_COMPARE_RUN_CREATED_AT),
+        )
+        .await?;
+        DEMO_COMPARE_RUN_ID.clone_into(&mut compare.record.artifact_id);
         store.analysis().upsert_ai_artifact(&compare.record)?;
     }
 

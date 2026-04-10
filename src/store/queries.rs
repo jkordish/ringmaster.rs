@@ -1785,7 +1785,7 @@ impl<'connection> AnalysisStore<'connection> {
                         ELSE snapshot_exports.provenance_summary
                     END,
                     snapshot_json = excluded.snapshot_json,
-                    created_at = excluded.created_at",
+                    created_at = snapshot_exports.created_at",
                 params![
                     record.snapshot_hash,
                     record.schema_version,
@@ -4298,6 +4298,61 @@ mod tests {
         assert_eq!(loaded.freshness_summary, metadata_only.freshness_summary);
         assert_eq!(loaded_provenance.len(), 1);
         assert_eq!(loaded_provenance[0].export_ref, "daily:2026-04-10");
+    }
+
+    #[test]
+    fn analysis_store_preserves_snapshot_created_at_on_upsert() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let original = SnapshotExportRecord {
+            snapshot_hash: "hash-created-at".to_owned(),
+            schema_version: "ringmaster.snapshot.v1".to_owned(),
+            app_version: "0.1.0".to_owned(),
+            generated_at: "2026-04-10T00:00:00Z".to_owned(),
+            scope: "today".to_owned(),
+            start_day: "2026-04-10".to_owned(),
+            end_day: "2026-04-10".to_owned(),
+            anchor_day: "2026-04-10".to_owned(),
+            day_count: 1,
+            privacy_profile: "redacted".to_owned(),
+            source_mode: "demo".to_owned(),
+            fixture_dir: None,
+            latest_source_day: Some("2026-04-10".to_owned()),
+            latest_review_day: Some("2026-04-10".to_owned()),
+            freshness_summary:
+                "latest_source_day=2026-04-10 latest_review_day=2026-04-10 warnings=0".to_owned(),
+            trust_summary: "review_signals=1 strong=1 stale=0 follow_up_targets=1".to_owned(),
+            capability_summary: "granted=3 missing=0 requested=3".to_owned(),
+            provenance_summary: "refs=0 local_kinds=0".to_owned(),
+            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v1\"}".to_owned(),
+            created_at: "2026-04-10T00:00:01Z".to_owned(),
+        };
+
+        store
+            .analysis()
+            .upsert_snapshot_export(&original, &[])
+            .unwrap_or_else(|error| panic!("snapshot export should persist: {error}"));
+
+        let refreshed = SnapshotExportRecord {
+            created_at: "2026-04-09T23:59:59Z".to_owned(),
+            freshness_summary:
+                "latest_source_day=2026-04-10 latest_review_day=2026-04-10 warnings=1".to_owned(),
+            ..original
+        };
+
+        store
+            .analysis()
+            .upsert_snapshot_export(&refreshed, &[])
+            .unwrap_or_else(|error| panic!("snapshot export should refresh: {error}"));
+
+        let loaded = store
+            .analysis()
+            .snapshot_export("hash-created-at")
+            .unwrap_or_else(|error| panic!("snapshot export should load: {error}"))
+            .unwrap_or_else(|| panic!("snapshot export should exist"));
+
+        assert_eq!(loaded.created_at, "2026-04-10T00:00:01Z");
+        assert_eq!(loaded.freshness_summary, refreshed.freshness_summary);
     }
 
     #[test]

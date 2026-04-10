@@ -264,6 +264,42 @@ async fn ai_runs_list_demo_renders_registry_output() {
 }
 
 #[tokio::test]
+async fn ai_runs_show_demo_accepts_id_listed_by_previous_demo_invocation() {
+    let list_result = ringmaster::run_from(["ringmaster", "ai", "runs", "list", "--demo"]).await;
+    assert!(list_result.is_ok(), "ai runs list demo should run");
+
+    let list_output = match list_result {
+        Ok(Some(output)) => output,
+        Ok(None) => panic!("ai runs list demo should render text output"),
+        Err(error) => panic!("unexpected ai runs list failure: {error}"),
+    };
+    let listed_id = list_output
+        .lines()
+        .find_map(|line| {
+            line.trim_start()
+                .strip_prefix("- ")
+                .and_then(|value| value.split(" | ").next())
+        })
+        .unwrap_or_else(|| panic!("expected at least one demo AI run id in list output"));
+
+    let show_result =
+        ringmaster::run_from(["ringmaster", "ai", "runs", "show", "--demo", listed_id]).await;
+    assert!(
+        show_result.is_ok(),
+        "ai runs show demo should resolve an id listed by a previous invocation"
+    );
+
+    let show_output = match show_result {
+        Ok(Some(output)) => output,
+        Ok(None) => panic!("ai runs show demo should render text output"),
+        Err(error) => panic!("unexpected ai runs show failure: {error}"),
+    };
+
+    assert!(show_output.contains("ringmaster ai runs show"));
+    assert!(show_output.contains("artifact_id:"));
+}
+
+#[tokio::test]
 async fn report_export_from_snapshot_writes_markdown_report() {
     let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
     let snapshot_path = out_dir.path().join("snapshot.json");

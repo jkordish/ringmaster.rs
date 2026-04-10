@@ -210,6 +210,16 @@ pub async fn review_snapshot(
     dry_run: bool,
     fixture: Option<&Path>,
 ) -> Result<ReviewRunOutput> {
+    review_snapshot_with_run_identity(config, snapshot, dry_run, fixture, None).await
+}
+
+pub(crate) async fn review_snapshot_with_run_identity(
+    config: &Config,
+    snapshot: &LoadedSnapshotArtifact,
+    dry_run: bool,
+    fixture: Option<&Path>,
+    run_identity_override: Option<&str>,
+) -> Result<ReviewRunOutput> {
     let request_plan = build_review_request_plan(&config.ai, &snapshot.compact_json)?;
     let provider = select_provider(&config.ai, dry_run, fixture)?;
     let metadata = provider.metadata();
@@ -219,7 +229,7 @@ pub async fn review_snapshot(
             snapshot_json: &snapshot.compact_json,
         })
         .await?;
-    let created_at = run_created_at()?;
+    let created_at = resolve_run_created_at(run_identity_override)?;
     let payload_json = serde_json::to_string_pretty(&artifact)?;
     let rendered_briefing = render_review_briefing(&artifact);
     let summary_cache = review_summary_cache(&artifact);
@@ -270,6 +280,18 @@ pub async fn compare_snapshots(
     dry_run: bool,
     fixture: Option<&Path>,
 ) -> Result<CompareRunOutput> {
+    compare_snapshots_with_run_identity(config, snapshot_a, snapshot_b, dry_run, fixture, None)
+        .await
+}
+
+pub(crate) async fn compare_snapshots_with_run_identity(
+    config: &Config,
+    snapshot_a: &LoadedSnapshotArtifact,
+    snapshot_b: &LoadedSnapshotArtifact,
+    dry_run: bool,
+    fixture: Option<&Path>,
+    run_identity_override: Option<&str>,
+) -> Result<CompareRunOutput> {
     let request_plan = build_compare_request_plan(
         &config.ai,
         &snapshot_a.compact_json,
@@ -285,7 +307,7 @@ pub async fn compare_snapshots(
             snapshot_b_json: &snapshot_b.compact_json,
         })
         .await?;
-    let created_at = run_created_at()?;
+    let created_at = resolve_run_created_at(run_identity_override)?;
     let payload_json = serde_json::to_string_pretty(&artifact)?;
     let rendered_briefing = render_compare_briefing(&artifact);
     let summary_cache = compare_summary_cache(&artifact);
@@ -1152,7 +1174,10 @@ fn artifact_id(
     hex::encode(digest.finalize())
 }
 
-fn run_created_at() -> Result<String> {
+fn resolve_run_created_at(run_identity_override: Option<&str>) -> Result<String> {
+    if let Some(run_identity) = run_identity_override {
+        return Ok(run_identity.to_owned());
+    }
     OffsetDateTime::now_utc().format(&Rfc3339).map_err(|error| {
         RingmasterError::Config(format!("failed to format AI run timestamp: {error}"))
     })
