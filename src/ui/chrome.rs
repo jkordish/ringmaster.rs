@@ -1,6 +1,5 @@
 use ratatui::{
     prelude::{Line, Span, Style},
-    style::Modifier,
     widgets::{Block, Borders, Paragraph},
 };
 
@@ -90,7 +89,7 @@ pub fn emphasis_style(theme: &Theme, selected: bool, tone: Tone) -> Style {
     };
 
     if selected {
-        base.add_modifier(Modifier::BOLD)
+        base
     } else {
         base.fg(theme.tone(tone))
     }

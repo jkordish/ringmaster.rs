@@ -85,6 +85,18 @@ const FIXTURE_SNAPSHOT_LAST_AUTHENTICATED_AT: &str = "2026-04-09T08:45:00Z";
 const FIXTURE_SNAPSHOT_LAST_REFRESH_AT: &str = "2026-04-09T11:45:00Z";
 const FIXTURE_SNAPSHOT_ACCOUNT_ID: &str = "fixture-user";
 const FIXTURE_SNAPSHOT_ACCOUNT_EMAIL: &str = "fixture@example.com";
+const FIXTURE_SNAPSHOT_PERSONAL_INTERVAL_SECS: u64 = 3_600;
+const FIXTURE_SNAPSHOT_DAILY_INTERVAL_SECS: u64 = 300;
+const FIXTURE_SNAPSHOT_HEARTRATE_INTERVAL_SECS: u64 = 60;
+const FIXTURE_SNAPSHOT_WORKOUT_INTERVAL_SECS: u64 = 600;
+const FIXTURE_SNAPSHOT_ENHANCED_TAG_INTERVAL_SECS: u64 = 300;
+const FIXTURE_SNAPSHOT_SESSION_INTERVAL_SECS: u64 = 300;
+const FIXTURE_SNAPSHOT_PERSONAL_STALE_AFTER_SECS: u64 = 72 * 60 * 60;
+const FIXTURE_SNAPSHOT_DAILY_STALE_AFTER_SECS: u64 = 12 * 60 * 60;
+const FIXTURE_SNAPSHOT_HEARTRATE_STALE_AFTER_SECS: u64 = 15 * 60;
+const FIXTURE_SNAPSHOT_WORKOUT_STALE_AFTER_SECS: u64 = 24 * 60 * 60;
+const FIXTURE_SNAPSHOT_ENHANCED_TAG_STALE_AFTER_SECS: u64 = 12 * 60 * 60;
+const FIXTURE_SNAPSHOT_SESSION_STALE_AFTER_SECS: u64 = 12 * 60 * 60;
 const FIXTURE_SNAPSHOT_BASE_SYNC_ATTEMPTED_AT: &str = "2026-04-09T11:58:00Z";
 const FIXTURE_SNAPSHOT_BASE_SYNC_COMPLETED_AT: &str = "2026-04-09T11:59:00Z";
 const FIXTURE_SNAPSHOT_STALE_SYNC_ATTEMPTED_AT: &str = "2026-04-09T05:00:00Z";
@@ -902,6 +914,7 @@ fn apply_fixture_snapshot_overlay(snapshot: &mut app::LiveSnapshot, fixture_dir:
     "2026-04-09T12:00:00Z".clone_into(&mut snapshot.captured_at);
     snapshot.config_path = format!("{fixture_display_path}/config.toml");
     snapshot.database_path = format!("{fixture_display_path}/ringmaster.db");
+    normalize_fixture_snapshot_refresh_policy(&mut snapshot.refresh_policy);
     normalize_fixture_snapshot_auth_status(&mut snapshot.auth_status, fixture_dir);
     FIXTURE_SNAPSHOT_WEBHOOK_BIND_ADDRESS.clone_into(&mut snapshot.webhook.bind_address);
     FIXTURE_SNAPSHOT_WEBHOOK_PATH.clone_into(&mut snapshot.webhook.path);
@@ -922,6 +935,25 @@ fn apply_fixture_snapshot_overlay(snapshot: &mut app::LiveSnapshot, fixture_dir:
         FIXTURE_SNAPSHOT_BASE_SYNC_ATTEMPTED_AT,
         FIXTURE_SNAPSHOT_BASE_SYNC_COMPLETED_AT,
     );
+}
+
+fn normalize_fixture_snapshot_refresh_policy(
+    refresh_policy: &mut crate::app::RefreshPolicySnapshot,
+) {
+    *refresh_policy = crate::app::RefreshPolicySnapshot {
+        personal_interval_secs: FIXTURE_SNAPSHOT_PERSONAL_INTERVAL_SECS,
+        daily_interval_secs: FIXTURE_SNAPSHOT_DAILY_INTERVAL_SECS,
+        heartrate_interval_secs: FIXTURE_SNAPSHOT_HEARTRATE_INTERVAL_SECS,
+        workout_interval_secs: FIXTURE_SNAPSHOT_WORKOUT_INTERVAL_SECS,
+        enhanced_tag_interval_secs: FIXTURE_SNAPSHOT_ENHANCED_TAG_INTERVAL_SECS,
+        session_interval_secs: FIXTURE_SNAPSHOT_SESSION_INTERVAL_SECS,
+        personal_stale_after_secs: FIXTURE_SNAPSHOT_PERSONAL_STALE_AFTER_SECS,
+        daily_stale_after_secs: FIXTURE_SNAPSHOT_DAILY_STALE_AFTER_SECS,
+        heartrate_stale_after_secs: FIXTURE_SNAPSHOT_HEARTRATE_STALE_AFTER_SECS,
+        workout_stale_after_secs: FIXTURE_SNAPSHOT_WORKOUT_STALE_AFTER_SECS,
+        enhanced_tag_stale_after_secs: FIXTURE_SNAPSHOT_ENHANCED_TAG_STALE_AFTER_SECS,
+        session_stale_after_secs: FIXTURE_SNAPSHOT_SESSION_STALE_AFTER_SECS,
+    };
 }
 
 fn normalize_fixture_snapshot_auth_status(
@@ -3179,6 +3211,9 @@ mod tests {
             .unwrap_or_else(|error| panic!("test callback bind should parse: {error}"));
         first_config.oura.callback_path = "/custom-callback".to_owned();
         first_config.oura.requested_scopes = vec!["personal".to_owned()];
+        first_config.refresh.daily_interval_secs = 999;
+        first_config.refresh.heartrate_interval_secs = 777;
+        first_config.refresh.personal_stale_after_secs = 9_999;
         second_config.oura.requested_scopes = vec![
             "personal".to_owned(),
             "daily".to_owned(),
@@ -3187,6 +3222,9 @@ mod tests {
             "enhanced_tag".to_owned(),
             "session".to_owned(),
         ];
+        second_config.refresh.daily_interval_secs = 1;
+        second_config.refresh.heartrate_interval_secs = 2;
+        second_config.refresh.personal_stale_after_secs = 3;
 
         let mut first_app = super::build_fixture_snapshot_app(
             &first_config,
@@ -3290,5 +3328,87 @@ mod tests {
             Some(super::FIXTURE_SNAPSHOT_ACCOUNT_EMAIL)
         );
         assert!(snapshot.auth_status.last_error.is_none());
+        assert_eq!(
+            snapshot.refresh_policy.personal_interval_secs,
+            super::FIXTURE_SNAPSHOT_PERSONAL_INTERVAL_SECS
+        );
+        assert_eq!(
+            snapshot.refresh_policy.daily_interval_secs,
+            super::FIXTURE_SNAPSHOT_DAILY_INTERVAL_SECS
+        );
+        assert_eq!(
+            snapshot.refresh_policy.heartrate_interval_secs,
+            super::FIXTURE_SNAPSHOT_HEARTRATE_INTERVAL_SECS
+        );
+        assert_eq!(
+            snapshot.refresh_policy.personal_stale_after_secs,
+            super::FIXTURE_SNAPSHOT_PERSONAL_STALE_AFTER_SECS
+        );
+    }
+
+    #[test]
+    fn demo_status_snapshots_are_stable_across_host_config() {
+        let (_first_tempdir, mut first_config) =
+            test_config(Some("https://host-one.example.test"), Some("verify-one"));
+        let (_second_tempdir, mut second_config) = test_config(None, None);
+        first_config.oura.client_secret = None;
+        first_config.oura.callback_bind = "127.0.0.1:9999"
+            .parse()
+            .unwrap_or_else(|error| panic!("test callback bind should parse: {error}"));
+        first_config.oura.callback_path = "/custom-callback".to_owned();
+        first_config.oura.requested_scopes = vec!["personal".to_owned()];
+        first_config.refresh.daily_interval_secs = 999;
+        first_config.refresh.heartrate_interval_secs = 777;
+        second_config.oura.requested_scopes = vec![
+            "personal".to_owned(),
+            "daily".to_owned(),
+            "heartrate".to_owned(),
+            "workout".to_owned(),
+            "enhanced_tag".to_owned(),
+            "session".to_owned(),
+        ];
+        second_config.refresh.daily_interval_secs = 1;
+        second_config.refresh.heartrate_interval_secs = 2;
+
+        let mut first_app = crate::app::build_demo_state(&first_config);
+        let mut second_app = crate::app::build_demo_state(&second_config);
+        let first_refresh_policy = first_app
+            .model
+            .ops
+            .items
+            .iter()
+            .find(|item| item.label == "Refresh policy")
+            .map(|item| item.value.clone())
+            .unwrap_or_else(|| panic!("first demo app should expose refresh policy"));
+        let second_refresh_policy = second_app
+            .model
+            .ops
+            .items
+            .iter()
+            .find(|item| item.label == "Refresh policy")
+            .map(|item| item.value.clone())
+            .unwrap_or_else(|| panic!("second demo app should expose refresh policy"));
+        first_app.active_screen = crate::app::Screen::Ops;
+        second_app.active_screen = crate::app::Screen::Ops;
+
+        let first_snapshot = crate::tui::render_snapshot(&first_app, 160, 44)
+            .unwrap_or_else(|error| panic!("first demo status snapshot should render: {error}"));
+        let second_snapshot = crate::tui::render_snapshot(&second_app, 160, 44)
+            .unwrap_or_else(|error| panic!("second demo status snapshot should render: {error}"));
+
+        assert_eq!(
+            first_snapshot, second_snapshot,
+            "demo status snapshots should not vary with host auth or refresh config"
+        );
+        assert!(first_snapshot.contains("Auth state: authenticated"));
+        assert!(first_snapshot.contains(
+            "Granted scopes: personal, daily, heartrate, workout, enhanced_tag, session"
+        ));
+        assert!(first_snapshot.contains("Secret backend: demo-memory"));
+        assert_eq!(
+            first_refresh_policy,
+            "personal=3600s daily=300s heartrate=60s workouts=600s tags=300s sessions=300s"
+        );
+        assert_eq!(first_refresh_policy, second_refresh_policy);
     }
 }

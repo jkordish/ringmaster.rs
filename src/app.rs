@@ -4091,16 +4091,16 @@ impl AppModel {
     }
 }
 
-fn demo_snapshot(config: &Config) -> LiveSnapshot {
+fn demo_snapshot(_config: &Config) -> LiveSnapshot {
     let capability_report = CapabilityReport::demo();
     let auth_status = AuthStatus {
         configured: true,
-        callback_url: config.oura.callback_url(),
-        requested_scopes: config.oura.requested_scopes.clone(),
-        granted_scopes: config.oura.requested_scopes.clone(),
+        callback_url: "http://127.0.0.1:8788/callback".to_owned(),
+        requested_scopes: demo_requested_scopes(),
+        granted_scopes: demo_requested_scopes(),
         missing_fields: Vec::new(),
         capability_report,
-        auth_timeout_secs: config.oura.auth_timeout_secs,
+        auth_timeout_secs: 120,
         secret_backend: "demo-memory".to_owned(),
         access_token_stored: true,
         refresh_token_stored: true,
@@ -4379,7 +4379,7 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
 
     LiveSnapshot {
         captured_at: "2026-04-08T22:30:00Z".to_owned(),
-        refresh_policy: RefreshPolicySnapshot::from_config(config),
+        refresh_policy: demo_refresh_policy_snapshot(),
         auth_status,
         webhook: WebhookOpsSnapshot {
             bind_address: "127.0.0.1:8799".to_owned(),
@@ -4467,8 +4467,36 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
             ..RecordCounts::default()
         },
         schema_version: crate::store::migrations::current_version(),
-        database_path: config.paths.database_file.display().to_string(),
-        config_path: config.paths.config_file.display().to_string(),
+        database_path: "~/.local/share/ringmaster/demo/ringmaster.db".to_owned(),
+        config_path: "~/.config/ringmaster/demo-config.toml".to_owned(),
+    }
+}
+
+fn demo_requested_scopes() -> Vec<String> {
+    vec![
+        "personal".to_owned(),
+        "daily".to_owned(),
+        "heartrate".to_owned(),
+        "workout".to_owned(),
+        "enhanced_tag".to_owned(),
+        "session".to_owned(),
+    ]
+}
+
+fn demo_refresh_policy_snapshot() -> RefreshPolicySnapshot {
+    RefreshPolicySnapshot {
+        personal_interval_secs: 3_600,
+        daily_interval_secs: 300,
+        heartrate_interval_secs: 60,
+        workout_interval_secs: 600,
+        enhanced_tag_interval_secs: 300,
+        session_interval_secs: 300,
+        personal_stale_after_secs: 72 * 60 * 60,
+        daily_stale_after_secs: 12 * 60 * 60,
+        heartrate_stale_after_secs: 15 * 60,
+        workout_stale_after_secs: 24 * 60 * 60,
+        enhanced_tag_stale_after_secs: 12 * 60 * 60,
+        session_stale_after_secs: 12 * 60 * 60,
     }
 }
 
