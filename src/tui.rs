@@ -455,6 +455,26 @@ fn handle_ai_side_effect(
         }
         Action::CycleAiPreflightPrivacyProfile => {
             if let Some(preflight) = current_preflight {
+                if let Some(overrides) = saved_run_privacy_cycle_overrides(&preflight) {
+                    let Some(run) = selected_run else {
+                        let _ = ai_action_tx.send(Action::AiPreflightFailed {
+                            message:
+                                "The current AI preflight came from a saved run, but that run is no longer selected."
+                                    .to_owned(),
+                        });
+                        return Ok(());
+                    };
+                    spawn_ai_saved_run_preflight_task(
+                        config.clone(),
+                        run_mode,
+                        source_screen,
+                        run,
+                        preflight.follow_up_kind,
+                        Some(overrides),
+                        ai_action_tx.clone(),
+                    );
+                    return Ok(());
+                }
                 let Some(selected_day) = selected_day_from_preflight(&preflight) else {
                     let _ = ai_action_tx.send(Action::AiPreflightFailed {
                         message:
@@ -574,18 +594,14 @@ fn handle_ai_side_effect(
                 let Some(run) = selected_run else {
                     return Ok(());
                 };
-                let privacy_profile = next_privacy_profile_from_run(&run)?;
+                let overrides = compare_previous_snapshot_overrides(&run)?;
                 spawn_ai_saved_run_preflight_task(
                     config.clone(),
                     run_mode,
                     source_screen,
                     run,
                     None,
-                    Some(SavedRunPreflightOverrides {
-                        privacy_profile,
-                        model_override: None,
-                        compare_previous_snapshot: true,
-                    }),
+                    Some(overrides),
                     ai_action_tx.clone(),
                 );
             }
@@ -1200,6 +1216,31 @@ fn prepare_ai_snapshot_compare_preflight(
     );
     let snapshot_reload = reload_live_snapshot_action(config, &status_line, Some(&store))?;
     Ok((snapshot_reload, preflight, status_line))
+}
+
+fn saved_run_privacy_cycle_overrides(
+    preflight: &AiPreflightState,
+) -> Option<SavedRunPreflightOverrides> {
+    if preflight.follow_up_kind.is_none()
+        && preflight.source_ai_artifact_id.is_none()
+        && preflight.model_override.is_none()
+    {
+        return None;
+    }
+
+    Some(SavedRunPreflightOverrides {
+        privacy_profile: preflight.privacy_profile.next(),
+        model_override: preflight.model_override.clone(),
+        compare_previous_snapshot: false,
+    })
+}
+
+fn compare_previous_snapshot_overrides(run: &AiRunRecord) -> Result<SavedRunPreflightOverrides> {
+    Ok(SavedRunPreflightOverrides {
+        privacy_profile: parse_privacy_profile_label(&run.privacy_profile)?,
+        model_override: None,
+        compare_previous_snapshot: true,
+    })
 }
 
 fn export_preflight_snapshot(
@@ -2275,7 +2316,7 @@ mod tests {
     use tokio::sync::mpsc::unbounded_channel;
 
     use crate::action::Action;
-    use crate::ai::{AiRequestPreview, AiRequestPreviewSnapshot};
+    use crate::ai::{AiRequestPreview, AiRequestPreviewSnapshot, GuidedFollowUpKind};
     use crate::app::{
         AiLaunchIntent, AiPreflightState, Screen, build_demo_state, build_live_state,
     };
@@ -2286,8 +2327,8 @@ mod tests {
     use crate::snapshot::PrivacyProfile;
     use crate::store::Store;
     use crate::store::queries::{
-        AuthSessionRecord, DailyActivityRecord, DailyReadinessRecord, DailySleepRecord,
-        PersonalInfoRecord, SyncRunStatus, SyncStateRecord,
+        AiRunRecord, AuthSessionRecord, DailyActivityRecord, DailyReadinessRecord,
+        DailySleepRecord, PersonalInfoRecord, SyncRunStatus, SyncStateRecord,
     };
     use crate::tui::render_snapshot;
     use crate::webhook::default_desired_subscriptions;
@@ -2324,6 +2365,39 @@ mod tests {
             prefix_fingerprint: "preview-prefix".to_owned(),
             payload_fingerprint: "preview-payload".to_owned(),
             request_fingerprint: "preview-request".to_owned(),
+        }
+    }
+
+    fn sample_ai_run_record() -> AiRunRecord {
+        AiRunRecord {
+            run_id: "run-review-1".to_owned(),
+            run_kind: "review".to_owned(),
+            run_status: "succeeded".to_owned(),
+            provider: "openai".to_owned(),
+            model: "gpt-5-mini".to_owned(),
+            reasoning_effort: None,
+            request_mode: "stateless".to_owned(),
+            input_transport: "inline".to_owned(),
+            run_mode: "live".to_owned(),
+            prompt_version: "review_prompt_v1".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            privacy_profile: PrivacyProfile::Redacted.as_str().to_owned(),
+            snapshot_scope: "day:2026-04-08".to_owned(),
+            snapshot_hash_a: "demo-snapshot-20260408".to_owned(),
+            snapshot_hash_b: None,
+            source_ai_artifact_id: Some("run-demo-review-20260408".to_owned()),
+            follow_up_kind: Some(GuidedFollowUpKind::ExpandEvidence.as_str().to_owned()),
+            request_fingerprint: Some("preview-request".to_owned()),
+            request_preview_json: serde_json::to_string(&sample_request_preview(
+                "demo-snapshot-20260408",
+            ))
+            .unwrap_or_else(|error| panic!("sample request preview should serialize: {error}")),
+            artifact_id: Some("artifact-review-1".to_owned()),
+            error_message: None,
+            created_at: "2026-04-10T00:00:00Z".to_owned(),
+            started_at: Some("2026-04-10T00:01:00Z".to_owned()),
+            ended_at: Some("2026-04-10T00:02:00Z".to_owned()),
+            updated_at: "2026-04-10T00:02:00Z".to_owned(),
         }
     }
 
@@ -3219,6 +3293,42 @@ mod tests {
         assert_eq!(failed.error_message.as_deref(), Some("boom"));
         assert_eq!(failed.run_status, "failed");
         assert!(failed.ended_at.is_some());
+    }
+
+    #[test]
+    fn saved_run_privacy_cycle_overrides_preserve_follow_up_context() {
+        let preflight = AiPreflightState {
+            intent: AiLaunchIntent::ChallengeSelectedDay,
+            source_screen: Screen::Ai,
+            snapshot_scope: "day:2026-04-08".to_owned(),
+            snapshot_paths: vec!["/tmp/follow-up-20260408-redacted.json".to_owned()],
+            request_preview: sample_request_preview("demo-snapshot-20260408"),
+            privacy_profile: PrivacyProfile::Redacted,
+            model_override: Some("gpt-5-mini".to_owned()),
+            source_ai_artifact_id: Some("run-demo-review-20260408".to_owned()),
+            follow_up_kind: Some(GuidedFollowUpKind::ExpandEvidence),
+            warning_lines: Vec::new(),
+            confirm_enabled: true,
+        };
+
+        let overrides = super::saved_run_privacy_cycle_overrides(&preflight)
+            .unwrap_or_else(|| panic!("saved-run follow-up preflight should preserve overrides"));
+
+        assert_eq!(overrides.privacy_profile, PrivacyProfile::Balanced);
+        assert_eq!(overrides.model_override.as_deref(), Some("gpt-5-mini"));
+        assert!(!overrides.compare_previous_snapshot);
+    }
+
+    #[test]
+    fn compare_previous_snapshot_overrides_keep_current_privacy_profile() {
+        let run = sample_ai_run_record();
+
+        let overrides = super::compare_previous_snapshot_overrides(&run)
+            .unwrap_or_else(|error| panic!("compare-previous overrides should build: {error}"));
+
+        assert_eq!(overrides.privacy_profile, PrivacyProfile::Redacted);
+        assert!(overrides.model_override.is_none());
+        assert!(overrides.compare_previous_snapshot);
     }
 
     #[tokio::test]
