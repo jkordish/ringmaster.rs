@@ -1,0 +1,54 @@
+{
+  "data": [
+    {
+      "id": "daily_stress_2026-04-02",
+      "day": "2026-04-02",
+      "stress_high": 2200,
+      "recovery_high": 4600,
+      "day_summary": "normal"
+    },
+    {
+      "id": "daily_stress_2026-04-03",
+      "day": "2026-04-03",
+      "stress_high": 1800,
+      "recovery_high": 5100,
+      "day_summary": "restored"
+    },
+    {
+      "id": "daily_stress_2026-04-04",
+      "day": "2026-04-04",
+      "stress_high": 2600,
+      "recovery_high": 4200,
+      "day_summary": "normal"
+    },
+    {
+      "id": "daily_stress_2026-04-05",
+      "day": "2026-04-05",
+      "stress_high": 5400,
+      "recovery_high": 1800,
+      "day_summary": "stressful"
+    },
+    {
+      "id": "daily_stress_2026-04-06",
+      "day": "2026-04-06",
+      "stress_high": 2100,
+      "recovery_high": 4700,
+      "day_summary": "restored"
+    },
+    {
+      "id": "daily_stress_2026-04-07",
+      "day": "2026-04-07",
+      "stress_high": 5100,
+      "recovery_high": 2100,
+      "day_summary": "stressful"
+    },
+    {
+      "id": "daily_stress_2026-04-08",
+      "day": "2026-04-08",
+      "stress_high": 3900,
+      "recovery_high": 2600,
+      "day_summary": "normal"
+    }
+  ],
+  "next_token": null
+}

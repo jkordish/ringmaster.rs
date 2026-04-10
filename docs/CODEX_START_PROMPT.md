@@ -41,12 +41,12 @@ Implement the following in one coherent pass:
      - Dashboard
      - Timeline
      - Trends
-     - Ops
+     - Status
    - keyboard navigation can be minimal, but the structure should be clean and extendable
 
 3. **Demo mode**
    - deterministic fake data
-   - enough data to exercise the dashboard, trends, and ops screens
+   - enough data to exercise the dashboard, trends, and status screens
    - runnable without Oura credentials or network access
 
 4. **Config + diagnostics**

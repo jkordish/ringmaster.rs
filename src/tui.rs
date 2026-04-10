@@ -11,9 +11,10 @@ use crossterm::{
 use ratatui::{
     Terminal,
     backend::{CrosstermBackend, TestBackend},
+    buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
     text::Line,
-    widgets::{Block, Borders, Paragraph, Tabs},
+    widgets::{Block, Paragraph, Tabs},
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -25,6 +26,9 @@ use crate::error::{Result, RingmasterError};
 use crate::oura::{auth, sync::SyncOptions, sync::SyncReport, sync::sync_selected};
 use crate::refresh::{SyncFamily, due_families, next_wake_duration};
 use crate::store::Store;
+use crate::ui::chrome::{self, PanelKind};
+use crate::ui::layout::UiContext;
+use crate::ui::theme::{Theme, Tone};
 
 enum WorkerCommand {
     ManualRefresh,
@@ -94,14 +98,21 @@ pub async fn run(config: &Config, app: &mut AppState) -> Result<()> {
 }
 
 pub fn render_snapshot(app: &AppState, width: u16, height: u16) -> Result<String> {
+    let buffer = render_buffer(app, width, height)?;
+    Ok(buffer_to_string(&buffer))
+}
+
+pub fn render_buffer(app: &AppState, width: u16, height: u16) -> Result<Buffer> {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend)
         .map_err(|error| RingmasterError::Ui(format!("building test terminal failed: {error}")))?;
     terminal
         .draw(|frame| draw(frame, app))
         .map_err(|error| RingmasterError::Ui(format!("drawing test terminal failed: {error}")))?;
+    Ok(terminal.backend().buffer().clone())
+}
 
-    let buffer = terminal.backend().buffer().clone();
+fn buffer_to_string(buffer: &Buffer) -> String {
     let mut lines = Vec::new();
 
     for y in 0..buffer.area.height {
@@ -112,22 +123,31 @@ pub fn render_snapshot(app: &AppState, width: u16, height: u16) -> Result<String
         lines.push(line.trim_end().to_owned());
     }
 
-    Ok(lines.join("\n"))
+    lines.join("\n")
 }
 
 fn draw(frame: &mut ratatui::Frame<'_>, app: &AppState) {
+    let theme = Theme::default();
+    let ui = UiContext::new(frame.area());
+    frame.render_widget(Block::default().style(theme.screen()), frame.area());
+
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
+            Constraint::Length(if ui.viewport.is_compact() { 4 } else { 5 }),
             Constraint::Length(3),
             Constraint::Min(10),
-            Constraint::Length(2),
+            Constraint::Length(3),
         ])
         .split(frame.area());
 
     let header = Paragraph::new(app.model.title.clone())
-        .block(Block::default().title("ringmaster").borders(Borders::ALL));
+        .style(theme.hero())
+        .block(chrome::panel(
+            &theme,
+            Line::from("ringmaster.rs"),
+            PanelKind::Hero,
+        ));
     frame.render_widget(header, layout[0]);
 
     let tab_titles = Screen::ALL
@@ -135,25 +155,44 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &AppState) {
         .map(|screen| Line::from(screen.title()))
         .collect::<Vec<_>>();
     let tabs = Tabs::new(tab_titles)
-        .block(Block::default().title("Screens").borders(Borders::ALL))
+        .block(chrome::panel(
+            &theme,
+            chrome::title_with_badge(&theme, "Views", app.active_screen.title(), Tone::Accent),
+            PanelKind::Subtle,
+        ))
+        .style(theme.annotation())
+        .highlight_style(theme.emphasis(Tone::Focus))
+        .divider(" ")
         .select(app.active_tab_index());
     frame.render_widget(tabs, layout[1]);
 
-    draw_active_screen(frame, layout[2], app);
+    draw_active_screen(frame, layout[2], app, &ui, &theme);
 
-    let footer = Paragraph::new(app.footer()).block(Block::default().borders(Borders::ALL));
+    let footer = Paragraph::new(app.footer())
+        .style(theme.annotation())
+        .block(chrome::panel(
+            &theme,
+            chrome::title_with_badge(&theme, "Keys", "keyboard-first", Tone::Muted),
+            PanelKind::Subtle,
+        ));
     frame.render_widget(footer, layout[3]);
 }
 
-fn draw_active_screen(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
+fn draw_active_screen(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    app: &AppState,
+    ui: &UiContext,
+    theme: &Theme,
+) {
     match app.active_screen {
-        Screen::Dashboard => dashboard::draw(frame, area, &app.model.dashboard),
-        Screen::Timeline => timeline::draw(frame, area, &app.model.timeline),
-        Screen::Trends => trends::draw(frame, area, &app.model.trends),
-        Screen::Explain => explain::draw(frame, area, &app.model.explain),
-        Screen::Patterns => patterns::draw(frame, area, &app.model.patterns),
-        Screen::Ops => ops::draw(frame, area, &app.model.ops),
-        Screen::Review => review::draw(frame, area, &app.model.review),
+        Screen::Dashboard => dashboard::draw(frame, area, &app.model.dashboard, ui, theme),
+        Screen::Timeline => timeline::draw(frame, area, &app.model.timeline, ui, theme),
+        Screen::Trends => trends::draw(frame, area, &app.model.trends, ui, theme),
+        Screen::Explain => explain::draw(frame, area, &app.model.explain, ui, theme),
+        Screen::Patterns => patterns::draw(frame, area, &app.model.patterns, ui, theme),
+        Screen::Ops => ops::draw(frame, area, &app.model.ops, ui, theme),
+        Screen::Review => review::draw(frame, area, &app.model.review, ui, theme),
     }
 }
 
@@ -169,8 +208,8 @@ fn map_event(active_screen: Screen, event: Event) -> Option<Action> {
             KeyCode::Char('3') => Some(Action::ShowScreen(Screen::Trends)),
             KeyCode::Char('4') => Some(Action::ShowScreen(Screen::Explain)),
             KeyCode::Char('5') => Some(Action::ShowScreen(Screen::Patterns)),
-            KeyCode::Char('6') => Some(Action::ShowScreen(Screen::Ops)),
-            KeyCode::Char('7') => Some(Action::ShowScreen(Screen::Review)),
+            KeyCode::Char('6') => Some(Action::ShowScreen(Screen::Review)),
+            KeyCode::Char('7') => Some(Action::ShowScreen(Screen::Ops)),
             KeyCode::Char('[') => match active_screen {
                 Screen::Dashboard | Screen::Timeline | Screen::Explain | Screen::Review => {
                     Some(Action::PreviousDay)
@@ -317,7 +356,7 @@ fn spawn_refresh_worker(
                             Some(WorkerCommand::ManualRefresh) => Some((SyncFamily::ALL.to_vec(), true)),
                             Some(WorkerCommand::Shutdown) | None => None,
                         },
-                        _ = tokio::time::sleep(delay) => {
+                        () = tokio::time::sleep(delay) => {
                             match due_families(&config, &sync_states, time::OffsetDateTime::now_utc(), false) {
                                 Ok(families) if !families.is_empty() => Some((families, false)),
                                 Ok(_) => continue,
@@ -495,6 +534,7 @@ mod tests {
 
     use crate::action::Action;
     use crate::app::{Screen, build_demo_state, build_live_state};
+    use crate::build_scenario_fixture_snapshot_apps_for_tests;
     use crate::config::{Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig};
     use crate::error::OuraProblem;
     use crate::oura::models::{AuthStatus, CapabilityReport};
@@ -505,7 +545,7 @@ mod tests {
     };
     use crate::tui::render_snapshot;
     use crate::webhook::default_desired_subscriptions;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn test_config() -> Config {
         Config {
@@ -715,9 +755,9 @@ mod tests {
         assert!(output.contains("ringmaster"));
         assert!(output.contains("Connection: Connected"));
         assert!(output.contains("Latest sync:"));
-        assert!(output.contains("Selected day: 2026-04-08"));
+        assert!(output.contains("What matters now | 2026-04-08"));
         assert!(output.contains("Capabilities"));
-        assert!(output.contains("What Changed"));
+        assert!(output.contains("Drill-down cues"));
     }
 
     #[test]
@@ -741,9 +781,8 @@ mod tests {
         let output = render_snapshot(&app, 100, 32)
             .unwrap_or_else(|error| panic!("dashboard snapshot should render: {error}"));
 
-        assert!(output.contains("Daily: waiting (missing scope)"));
-        assert!(output.contains("Heartrate: waiting (missing scope)"));
-        assert!(output.contains("sleep is still building a baseline."));
+        assert!(output.contains("missing scope"));
+        assert!(output.contains("sleep normal is still forming."));
     }
 
     #[test]
@@ -799,13 +838,8 @@ mod tests {
         let output = render_snapshot(&app, 100, 32)
             .unwrap_or_else(|error| panic!("trends snapshot should render: {error}"));
 
-        assert!(output.contains("Trend Window"));
-        assert!(output.contains("Sleep | -- | confidence: thin"));
-        assert!(
-            output.contains(
-                "Confidence is thin because only 0 to 0 prior daily points are available."
-            )
-        );
+        assert!(output.contains("Analyst notes"));
+        assert!(output.contains("confidence: thin"));
     }
 
     #[test]
@@ -818,8 +852,8 @@ mod tests {
             .unwrap_or_else(|error| panic!("explain snapshot should render: {error}"));
 
         assert!(output.contains("Day story for 2026-04-08"));
-        assert!(output.contains("Evidence"));
-        assert!(output.contains("Caveats"));
+        assert!(output.contains("Supporting evidence"));
+        assert!(output.contains("Uncertainty"));
         assert!(output.contains("Press 2 to open Timeline"));
     }
 
@@ -847,7 +881,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("patterns snapshot should render: {error}"));
 
         assert!(output.contains("Not enough data yet"));
-        assert!(output.contains("descriptive associations"));
+        assert!(output.contains("Patterns stay descriptive on purpose."));
     }
 
     #[test]
@@ -859,8 +893,8 @@ mod tests {
         let output = render_snapshot(&app, 120, 40)
             .unwrap_or_else(|error| panic!("review snapshot should render: {error}"));
 
-        assert!(output.contains("Ranked Cards"));
-        assert!(output.contains("Investigation Focus"));
+        assert!(output.contains("Ranked observations"));
+        assert!(output.contains("Briefing detail"));
         assert!(output.contains("Readiness score"));
     }
 
@@ -917,8 +951,168 @@ mod tests {
         assert!(output.contains("Secret backend: keyring"));
         assert!(output.contains("Granted scopes: personal, daily, heartrate"));
         assert!(output.contains("Database path: :memory:"));
-        assert!(output.contains("Heartrate: stale: sync failed"));
+        assert!(output.contains("Warnings [operator attention]"));
         assert!(output.contains("Warnings"));
+    }
+
+    #[test]
+    fn compact_status_snapshot_keeps_auth_and_queue_diagnostics_visible() {
+        let config = test_config();
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        seed_live_rows(&store);
+        seed_sync_state(
+            &store,
+            "oura.personal",
+            SyncRunStatus::Success,
+            "Imported personal info for profile user_123.",
+            &["personal", "daily", "heartrate"],
+            None,
+        );
+        seed_sync_state(
+            &store,
+            "oura.daily",
+            SyncRunStatus::Success,
+            "Imported 3 daily summary rows from fixture history.",
+            &["personal", "daily", "heartrate"],
+            None,
+        );
+        seed_sync_state(
+            &store,
+            "oura.heartrate",
+            SyncRunStatus::Failed,
+            "Heartrate sync failed after a partial import.",
+            &["personal", "daily", "heartrate"],
+            Some(OuraProblem::new(
+                Some(429),
+                "rate limit reached",
+                Some("retry after the minute window resets".to_owned()),
+            )),
+        );
+        let auth_status = test_auth_status(
+            &config,
+            vec![
+                "personal".to_owned(),
+                "daily".to_owned(),
+                "heartrate".to_owned(),
+            ],
+        );
+        let mut app = build_live_state(&config, &store, &auth_status)
+            .unwrap_or_else(|error| panic!("live state should build: {error}"));
+        app.active_screen = Screen::Ops;
+
+        let output = render_snapshot(&app, 90, 28)
+            .unwrap_or_else(|error| panic!("compact status snapshot should render: {error}"));
+
+        assert!(output.contains("Auth state: authenticated"));
+        assert!(output.contains("Granted scopes: personal, daily, heartrate"));
+        assert!(output.contains("Receiver heartbeat: missing"));
+        assert!(output.contains("Invalidation queue: pending=0"));
+    }
+
+    #[test]
+    fn dashboard_compact_and_wide_snapshots_have_distinct_reading_paths() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Dashboard;
+
+        let compact = render_snapshot(&app, 90, 28)
+            .unwrap_or_else(|error| panic!("compact snapshot should render: {error}"));
+        let wide = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| panic!("wide snapshot should render: {error}"));
+
+        assert!(compact.contains("Secondary detail"));
+        assert!(wide.contains("Drill-down cues"));
+    }
+
+    #[test]
+    fn review_snapshot_marks_selected_card_without_relying_on_color() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Review;
+
+        let output = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| panic!("review snapshot should render: {error}"));
+
+        assert!(output.contains("> #1"));
+        assert!(output.contains("Warnings and caveats"));
+    }
+
+    #[test]
+    fn compact_review_snapshot_keeps_tabs_and_multiple_cards_visible() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Review;
+
+        let output = render_snapshot(&app, 90, 28)
+            .unwrap_or_else(|error| panic!("compact review snapshot should render: {error}"));
+
+        assert!(output.contains("Today   Week   Investigate"));
+        assert!(output.contains("Readiness   Sleep   Recovery"));
+        assert!(output.contains("> #1"));
+        assert!(output.contains("#2"));
+    }
+
+    #[tokio::test]
+    async fn renders_scenario_fixture_matrix_across_compact_and_wide() {
+        let config = test_config();
+        let states = build_scenario_fixture_snapshot_apps_for_tests(
+            &config,
+            Path::new("tests/fixtures/phase7"),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("scenario fixture apps should build: {error}"));
+
+        for (scenario, mut app) in states {
+            let scenario_marker = format!("Scenario fixture `{}`", scenario.label());
+
+            for (screen, compact_marker, wide_marker) in [
+                (Screen::Dashboard, "Now |", "What matters now"),
+                (
+                    Screen::Timeline,
+                    "Timeline instrument",
+                    "Timeline instrument",
+                ),
+                (Screen::Trends, "Trend windows", "Trend windows"),
+                (
+                    Screen::Explain,
+                    "Supporting evidence",
+                    "Supporting evidence",
+                ),
+                (Screen::Patterns, "Patterns browser", "Patterns browser"),
+                (Screen::Review, "Review digest", "Review digest"),
+                (Screen::Ops, "Status console", "Status console"),
+            ] {
+                app.active_screen = screen;
+
+                for (width, height) in [(90, 28), (160, 44)] {
+                    let output = render_snapshot(&app, width, height)
+                        .unwrap_or_else(|error| panic!("matrix snapshot should render: {error}"));
+                    let marker = if width == 90 {
+                        compact_marker
+                    } else {
+                        wide_marker
+                    };
+
+                    assert!(
+                        output.contains(&scenario_marker),
+                        "scenario marker missing for {:?} {:?} {}x{}",
+                        scenario,
+                        screen,
+                        width,
+                        height
+                    );
+                    assert!(
+                        output.contains(marker),
+                        "screen marker `{marker}` missing for {:?} {:?} {}x{}",
+                        scenario,
+                        screen,
+                        width,
+                        height
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -950,8 +1144,12 @@ mod tests {
             Some(Action::NextEvent)
         );
         assert_eq!(
-            super::map_event(Screen::Review, press(KeyCode::Char('7'))),
+            super::map_event(Screen::Review, press(KeyCode::Char('6'))),
             Some(Action::ShowScreen(Screen::Review))
+        );
+        assert_eq!(
+            super::map_event(Screen::Review, press(KeyCode::Char('7'))),
+            Some(Action::ShowScreen(Screen::Ops))
         );
         assert_eq!(
             super::map_event(Screen::Review, press(KeyCode::Char('v'))),

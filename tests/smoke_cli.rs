@@ -1,5 +1,7 @@
 #![allow(clippy::panic)]
 
+use tempfile::tempdir;
+
 use ringmaster::cli::{AuthCommand, Cli, Command};
 
 #[test]
@@ -57,11 +59,88 @@ async fn demo_output_mentions_dashboard() {
     assert!(output.contains("ringmaster"));
     assert!(output.contains("Connection: Connected"));
     assert!(output.contains("Latest sync:"));
-    assert!(output.contains("Selected day: 2026-04-08"));
+    assert!(output.contains("What matters now | 2026-04-08"));
     assert!(output.contains("Capabilities"));
-    assert!(output.contains("What Changed"));
+    assert!(output.contains("Drill-down cues"));
     assert!(output.contains("Review"));
     assert!(output.contains("Stress high time is higher than usual."));
+}
+
+#[tokio::test]
+async fn ui_snapshot_demo_writes_artifacts() {
+    let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
+    let out_path = out_dir.path().join("snapshots");
+    let out_arg = out_path.to_string_lossy().into_owned();
+
+    let result = ringmaster::run_from([
+        "ringmaster",
+        "ui",
+        "snapshot",
+        "--demo",
+        "--screen",
+        "dashboard",
+        "--screen",
+        "status",
+        "--size",
+        "compact",
+        "--size",
+        "wide",
+        "--out-dir",
+        &out_arg,
+    ])
+    .await;
+    assert!(result.is_ok(), "ui snapshot should run");
+
+    let output = match result {
+        Ok(Some(output)) => output,
+        Ok(None) => panic!("ui snapshot should render command output"),
+        Err(error) => panic!("unexpected ui snapshot failure: {error}"),
+    };
+
+    assert!(output.contains("ringmaster ui snapshot"));
+    assert!(output.contains("dashboard"));
+    assert!(output.contains("status"));
+    assert!(out_path.join("dashboard-compact.txt").exists());
+    assert!(out_path.join("status-wide.txt").exists());
+}
+
+#[tokio::test]
+async fn ui_snapshot_scenario_fixture_root_writes_scenario_tagged_artifacts() {
+    let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
+    let out_path = out_dir.path().join("phase7");
+    let out_arg = out_path.to_string_lossy().into_owned();
+
+    let result = ringmaster::run_from([
+        "ringmaster",
+        "ui",
+        "snapshot",
+        "--fixture-dir",
+        "tests/fixtures/phase7",
+        "--screen",
+        "dashboard",
+        "--screen",
+        "status",
+        "--size",
+        "compact",
+        "--size",
+        "wide",
+        "--out-dir",
+        &out_arg,
+    ])
+    .await;
+    assert!(result.is_ok(), "scenario fixture ui snapshot should run");
+
+    let output = match result {
+        Ok(Some(output)) => output,
+        Ok(None) => panic!("scenario fixture ui snapshot should render command output"),
+        Err(error) => panic!("unexpected scenario fixture ui snapshot failure: {error}"),
+    };
+
+    assert!(output.contains("scenario fixture root"));
+    assert!(output.contains("strong, weak, empty, stale, error"));
+    assert!(out_path.join("dashboard-strong-compact.txt").exists());
+    assert!(out_path.join("dashboard-error-wide.txt").exists());
+    assert!(out_path.join("status-stale-compact.txt").exists());
 }
 
 #[tokio::test]

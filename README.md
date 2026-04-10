@@ -1,14 +1,17 @@
 # ringmaster.rs
 
-`ringmaster.rs` is a local-first Rust terminal application for exploring Oura Cloud data with a Ratatui interface, SQLite-backed local storage, deterministic demo and fixture paths, a real Oura Cloud API v2 integration, a near-real-time webhook-aware freshness model where the upstream API supports it, and a deterministic review layer for daily briefs, weekly drift, and bounded investigations.
+`ringmaster.rs` is a local-first Rust terminal application for exploring Oura Cloud data with a Ratatui interface, SQLite-backed local storage, deterministic demo and fixture paths, a real Oura Cloud API v2 integration, a near-real-time webhook-aware freshness model where the upstream API supports it, a deterministic review layer for daily briefs, weekly drift, and bounded investigations, and a centralized visual design system with scenario-rich snapshot QA for consistent screen choreography.
 
 ## Status
 
-This repository now includes an operationally trustworthy personal observability MVP:
+This repository now includes an operationally trustworthy personal observability MVP with a deliberate visual system:
 
-- `clap` CLI with `tui`, `tui --demo`, `doctor`, `auth login`, `sync once`, `sync watch`, `derive rebuild`, `review today`, `review week`, `review investigate`, `webhook serve`, `webhook replay`, `webhook subscriptions list`, `webhook subscriptions sync`, and the compatibility alias `demo`
-- a useful Ratatui Dashboard, Timeline, Trends, Explain, Patterns, Ops, and Review screen backed by persisted SQLite data
+- `clap` CLI with `tui`, `tui --demo`, `ui snapshot`, `doctor`, `auth login`, `sync once`, `sync watch`, `derive rebuild`, `review today`, `review week`, `review investigate`, `webhook serve`, `webhook replay`, `webhook subscriptions list`, `webhook subscriptions sync`, and the compatibility alias `demo`
+- a useful Ratatui Dashboard, Timeline, Trends, Explain, Patterns, Review, and Status screen backed by persisted SQLite data
 - deterministic demo data that exercises the same seven-screen shell without credentials or network access
+- a centralized semantic theme/token layer for palette roles, spacing rhythm, badge language, panel chrome, breakpoint-aware layout, and chart styling
+- stronger screen-specific reading paths so Dashboard, Timeline, Trends, Explain, Patterns, Review, and Status no longer feel like the same grid with different labels
+- deterministic visual QA via `ringmaster ui snapshot` for demo, single-fixture, and canonical phase-7 scenario-matrix snapshot generation across compact, medium, and wide terminal sizes
 - real loopback OAuth login with server-side code exchange, PKCE, and CSRF-safe state handling
 - persisted auth/session metadata in SQLite with token secrets stored through the OS keyring seam
 - real sync for personal info, daily summaries, heartrate, workouts, enhanced tags, sessions, daily stress, daily resilience, sleep time, cardiovascular age, VO2 max, and rest mode periods into normalized tables plus raw payload cache
@@ -19,7 +22,7 @@ This repository now includes an operationally trustworthy personal observability
 - a dedicated webhook receiver with explicit verification, accepted/rejected delivery audit, invalidation enqueue, and clean shutdown
 - declarative webhook subscription lifecycle management with list, diff, dry-run, create, update, renew, and optional prune flows
 - explicit freshness-source and stale-reason semantics instead of a generic “fresh/stale/error” model
-- a substantially upgraded Ops and `doctor` surface for receiver health, subscription expiry, queue lag, delivery history, and freshness debugging
+- a substantially upgraded Status and `doctor` surface for receiver health, subscription expiry, queue lag, delivery history, and freshness debugging
 - structured logging via `tracing`
 
 The project is intentionally not feature-complete yet. The goal is a trustworthy local foundation with one operationally credible observability slice, not a one-shot full product dump.
@@ -29,6 +32,7 @@ The project is intentionally not feature-complete yet. The goal is a trustworthy
 ```bash
 cargo run -- tui
 cargo run -- tui --demo
+cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots
 cargo run -- doctor
 cargo run -- auth login
 cargo run -- sync once
@@ -53,6 +57,8 @@ Behavior notes:
 
 - `ringmaster tui` launches the live TUI when attached to a terminal. Without a TTY it renders a snapshot of the current local app state instead.
 - `ringmaster tui --demo` launches the same UI shell in deterministic demo mode. Without a TTY it renders a text snapshot, which is useful for CI and smoke-oriented workflows.
+- `ringmaster ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots` remains the canonical non-interactive design QA smoke path. It writes deterministic text artifacts for selected screens and sizes and reuses the same rendering stack as the interactive UI.
+- `ringmaster ui snapshot --fixture-dir tests/fixtures/phase7 ...` enables the deeper phase-7 scenario matrix. It expands the same screen and size selection across `strong`, `weak`, `empty`, `stale`, and `error` states and writes scenario-tagged artifacts.
 - `ringmaster demo` remains a compatibility alias for `ringmaster tui --demo`.
 - `ringmaster doctor` resolves paths, initializes SQLite, applies migrations, and prints auth, capability, per-family freshness, receiver, subscription, queue, and record-count diagnostics.
 - `ringmaster auth login` starts a loopback OAuth flow, validates state, exchanges the code server-side, and persists auth/session metadata locally.
@@ -172,6 +178,23 @@ Important notes:
 - the receiver is local-first only; there is no hosted relay service
 - a real Oura webhook deployment requires a user-managed public HTTPS endpoint, reverse proxy, or tunnel that forwards to `webhook.bind`
 
+## Visual system
+
+Phase 6 turns the interface into a more deliberate observability instrument instead of a collection of similarly styled panels.
+
+Implemented visual principles:
+
+- at-a-glance comprehension comes first, with the most important thing on each screen given the strongest positional and typographic emphasis
+- palette decisions are semantic and centralized instead of scattered through widgets
+- states never rely on color alone; badges, wording, prefixes, ordering, and chrome all contribute
+- compact, medium, and wide terminals use different layout strategies instead of one compressed layout trying to fit everywhere
+- charts and compact displays prefer familiar forms: lines for time, bars for comparison, sparklines for directional hints
+
+The canonical references are:
+
+- `docs/DESIGN_AUDIT.md`
+- `docs/DESIGN_SYSTEM.md`
+
 ## Supported families
 
 The current live sync and persistence surface includes:
@@ -206,25 +229,25 @@ Webhook-driven freshness is intentionally limited to Oura `data_type`s the produ
 
 What the screens now do:
 
-- Dashboard shows the shared selected day, daily metric cards, freshness badges, capability badges, a compact baseline summary, and a restrained “what likely changed?” panel.
-- Dashboard also reuses the strongest Today review items so the smart layer is visible without leaving the landing screen.
-- Timeline shows a gap-aware intraday heartrate chart, family filter toggles, real overlay lanes for workouts, enhanced tags, and sessions, selected-event details, and the selected-day event list.
-- Trends shows 7d / 30d / 90d windows, baseline-aware trend summaries, confidence notes when history is thin, and a weekly review drift banner when the local evidence is strong enough to justify one.
-- Explain shows the selected day summary, today-vs-baseline or selected-day-vs-baseline framing, supporting evidence bullets, related context entries, and explicit caveats for thin data, missing scopes, or missing measurements.
-- Explain also surfaces a concise Review hint when the selected day is part of the ranked brief.
-- Patterns shows deterministic descriptive associations by family and metric with `n`, magnitude, and sufficiency buckets.
-- Review is the canonical smart surface. It has Today, Week, and Investigate modes, ranked review cards, explicit evidence and counterevidence, confidence and sufficiency labels, and bounded focus-driven investigations instead of freeform chat.
-- Ops acts as a local operator console with auth state, granted scopes, per-family freshness source, webhook receiver status, callback configuration, subscription drift and expiry, queue depth and lag, delivery history, and current runtime mode.
+- Dashboard is the editorial front page. It leads with “what matters now,” follows with a daily metric band and freshness/capability framing, and uses drill-down cues as the tertiary rhythm.
+- Timeline is the immersive temporal view. The chart is first, overlay lanes are second, and selected details plus day events come last.
+- Trends is the comparative scanning surface. It emphasizes windows, deltas, baselines, and compact directional hints in a matrix-like rhythm.
+- Explain is the evidence view. It narrows focus to a selected day, presents the primary claim first, then measured inputs, evidence bundles, context, and uncertainty.
+- Timeline, Explain, and Review now expose lightweight breadcrumbs when they materially reduce cognitive load. These breadcrumbs keep the current day, linked event, and carryover context visible without changing the render pipeline.
+- Patterns is the grouped association browser. It clusters findings by interpretation and comparison instead of reading like another evidence detail page.
+- Review is the editorial briefing surface. It presents ranked observations, concise rationale, and bounded investigations without becoming another dashboard clone.
+- Status remains the utilitarian operator console, but with clearer grouping, stronger status emphasis, and less visual competition between diagnostics.
 
 Shared interaction semantics:
 
 - Dashboard, Timeline, Explain, and Review all share one selected day
 - Timeline and Explain share the same selected event where relevant
 - Timeline, Explain, and Patterns share the same family filter toggles for workouts, tags, and sessions
+- when fresh data replaces the live snapshot, the shared selected day stays anchored to the exact day if it still exists, otherwise the nearest earlier available day, then the next later day, before finally falling back to the newest day
 
 Key navigation defaults:
 
-- `1-7`: Dashboard, Timeline, Trends, Explain, Patterns, Ops, Review
+- `1-7`: Dashboard, Timeline, Trends, Explain, Patterns, Review, Status
 - `[` / `]`: move the shared selected day on Dashboard, Timeline, Explain, and Review
 - `,` / `.`: move the selected heartrate point on Timeline
 - `j` / `k`: move the selected event on Timeline and Explain
@@ -233,6 +256,44 @@ Key navigation defaults:
 - `m`: cycle the metric filter on Patterns
 - `v`: cycle Today, Week, and Investigate on Review
 - `f`: cycle investigation focus on Review
+
+## Visual QA
+
+Use `ringmaster ui snapshot` for deterministic non-interactive review and regression testing.
+
+Examples:
+
+```bash
+cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots
+cargo run -- ui snapshot --demo \
+  --screen dashboard --screen timeline --screen review --screen status \
+  --size compact --size wide \
+  --out-dir /tmp/ringmaster-ui-snapshots-smoke
+cargo run -- ui snapshot \
+  --fixture-dir tests/fixtures/phase7 \
+  --screen dashboard --screen explain --screen review --screen status \
+  --size compact --size wide \
+  --out-dir /tmp/ringmaster-ui-snapshots-phase7-smoke
+```
+
+Current deterministic sizes:
+
+- `compact`: `90x28`
+- `medium`: `120x36`
+- `wide`: `160x44`
+
+Phase-7 scenario meanings:
+
+- `strong`: healthy local cache, full capability coverage, rich context, and current freshness
+- `weak`: sparse but still usable local history with explicit uncertainty
+- `empty`: scopes are granted, but the local cache has not accumulated records yet
+- `stale`: persisted data exists, but sync age or webhook/runtime state has drifted outside the expected freshness window
+- `error`: capability, auth, or sync failure states that block part of the product surface
+
+Artifact naming:
+
+- demo and legacy single-fixture mode keep `screen-size.txt`
+- phase-7 scenario-matrix mode writes `screen-scenario-size.txt`
 
 ## Canonical event model
 
@@ -306,7 +367,7 @@ Preferred wording includes:
 - `co-occurred with`
 - `below your baseline`
 - `evidence is limited because...`
-- `after days with`
+- `carryover from <day>`
 - `this may be relevant, but evidence is limited`
 
 ## Freshness semantics

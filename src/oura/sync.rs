@@ -23,6 +23,7 @@ const HEARTRATE_SYNC_KEY: &str = "oura.heartrate";
 const WORKOUT_SYNC_KEY: &str = "oura.workouts";
 const ENHANCED_TAG_SYNC_KEY: &str = "oura.enhanced_tags";
 const SESSION_SYNC_KEY: &str = "oura.sessions";
+const OURA_SYNC_USER_AGENT: &str = "ringmaster.rs/oura-sync";
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SyncOptions {
@@ -146,7 +147,7 @@ pub async fn sync_selected(
         }
 
         let http_client = reqwest::Client::builder()
-            .user_agent("ringmaster.rs/phase3")
+            .user_agent(OURA_SYNC_USER_AGENT)
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
         let session = match auth::ensure_authorized_session(config, store, &http_client).await {
@@ -1262,11 +1263,11 @@ mod tests {
     use crate::store::queries::{SyncRunStatus, SyncStateRecord};
     use crate::webhook::default_desired_subscriptions;
 
-    fn phase3_fixture_dir() -> PathBuf {
+    fn baseline_fixture_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase3")
     }
 
-    fn phase5_fixture_dir() -> PathBuf {
+    fn review_fixture_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase5")
     }
 
@@ -1367,12 +1368,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fixture_sync_populates_phase3_tables_idempotently() {
+    async fn fixture_sync_populates_baseline_tables_idempotently() {
         let store = Store::open_in_memory().expect("store should open");
         let config = fixture_config();
         let options = SyncOptions {
             dry_run: false,
-            fixture_dir: Some(phase3_fixture_dir()),
+            fixture_dir: Some(baseline_fixture_dir()),
             families: SyncFamily::ALL.to_vec(),
             trigger_source: Some("periodic_reconcile".to_owned()),
             trigger_detail: Some("test fixture sync".to_owned()),
@@ -1408,7 +1409,7 @@ mod tests {
             &store,
             SyncOptions {
                 dry_run: true,
-                fixture_dir: Some(phase3_fixture_dir()),
+                fixture_dir: Some(baseline_fixture_dir()),
                 families: SyncFamily::ALL.to_vec(),
                 trigger_source: Some("periodic_reconcile".to_owned()),
                 trigger_detail: Some("test dry-run sync".to_owned()),
@@ -1428,7 +1429,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fixture_sync_populates_phase5_review_family_tables() {
+    async fn fixture_sync_populates_review_family_tables() {
         let store = Store::open_in_memory().expect("store should open");
         let config = fixture_config();
         let report = sync_once(
@@ -1436,14 +1437,14 @@ mod tests {
             &store,
             SyncOptions {
                 dry_run: false,
-                fixture_dir: Some(phase5_fixture_dir()),
+                fixture_dir: Some(review_fixture_dir()),
                 families: SyncFamily::ALL.to_vec(),
                 trigger_source: Some("periodic_reconcile".to_owned()),
-                trigger_detail: Some("test phase5 fixture sync".to_owned()),
+                trigger_detail: Some("test review fixture sync".to_owned()),
             },
         )
         .await
-        .expect("phase5 fixture sync should succeed");
+        .expect("review fixture sync should succeed");
         let counts = store.views().record_counts().expect("record counts");
         let latest_source_day = store
             .views()
@@ -1465,8 +1466,8 @@ mod tests {
         let store = Store::open_in_memory().expect("store should open");
         let config = fixture_config();
         let tempdir = tempfile::tempdir().expect("tempdir should build");
-        let fixture_dir = tempdir.path().join("phase5-malformed-sleep-time");
-        copy_fixture_dir(&phase5_fixture_dir(), &fixture_dir);
+        let fixture_dir = tempdir.path().join("review-malformed-sleep-time");
+        copy_fixture_dir(&review_fixture_dir(), &fixture_dir);
         fs::write(fixture_dir.join("sleep_time.json"), "{ not valid json")
             .expect("optional fixture should be rewritable");
 

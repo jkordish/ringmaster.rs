@@ -1,0 +1,33 @@
+{
+  "data": [
+    {
+      "day": "2026-04-02",
+      "vascular_age": 31
+    },
+    {
+      "day": "2026-04-03",
+      "vascular_age": 31
+    },
+    {
+      "day": "2026-04-04",
+      "vascular_age": 31
+    },
+    {
+      "day": "2026-04-05",
+      "vascular_age": 32
+    },
+    {
+      "day": "2026-04-06",
+      "vascular_age": 31
+    },
+    {
+      "day": "2026-04-07",
+      "vascular_age": 33
+    },
+    {
+      "day": "2026-04-08",
+      "vascular_age": 32
+    }
+  ],
+  "next_token": null
+}

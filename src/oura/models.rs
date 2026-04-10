@@ -243,7 +243,7 @@ pub struct HeartRateDocument {
     pub timestamp: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkoutDocument {
     pub id: String,
     #[serde(default)]
@@ -268,7 +268,7 @@ pub struct WorkoutDocument {
     pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnhancedTagDocument {
     pub id: String,
     pub day: String,
@@ -288,7 +288,7 @@ pub struct EnhancedTagDocument {
     pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionDocument {
     pub id: String,
     pub day: String,

@@ -1,0 +1,53 @@
+{
+  "data": [
+    {
+      "id": "etag_2026-04-04_caffeine",
+      "day": "2026-04-04",
+      "start_time": "2026-04-04T20:15:00Z",
+      "end_time": "2026-04-04T20:15:00Z",
+      "tag_type_code": "caffeine",
+      "tags": [
+        "Late coffee"
+      ],
+      "comment": "Espresso after dinner.",
+      "intensity": "medium"
+    },
+    {
+      "id": "etag_2026-04-05_stress",
+      "day": "2026-04-05",
+      "start_time": "2026-04-05T09:00:00Z",
+      "end_time": "2026-04-05T11:30:00Z",
+      "tag_type_code": "stress",
+      "tags": [
+        "Travel day"
+      ],
+      "comment": "Packed morning with back-to-back errands.",
+      "intensity": "high"
+    },
+    {
+      "id": "etag_2026-04-07_caffeine",
+      "day": "2026-04-07",
+      "start_time": "2026-04-07T21:10:00Z",
+      "end_time": "2026-04-07T21:10:00Z",
+      "tag_type_code": "caffeine",
+      "tags": [
+        "Late coffee"
+      ],
+      "comment": "Needed a boost for evening work.",
+      "intensity": "medium"
+    },
+    {
+      "id": "etag_2026-04-08_focus",
+      "day": "2026-04-08",
+      "start_time": "2026-04-08T14:00:00Z",
+      "end_time": "2026-04-08T15:00:00Z",
+      "tag_type_code": "focus",
+      "tags": [
+        "Deep work"
+      ],
+      "comment": "Protected writing block.",
+      "intensity": "low"
+    }
+  ],
+  "next_token": null
+}

@@ -270,7 +270,7 @@ async fn run_watch_inner(
                     next_wake_duration(config, &sync_states, OffsetDateTime::now_utc())?,
                 );
                 tokio::select! {
-                    _ = tokio::time::sleep(sleep_for) => {}
+                    () = tokio::time::sleep(sleep_for) => {}
                     signal = tokio::signal::ctrl_c() => {
                         signal.map_err(|error| RingmasterError::Config(format!("failed to listen for ctrl-c: {error}")))?;
                         notes.push("watch loop interrupted by ctrl-c".to_owned());
@@ -310,7 +310,7 @@ async fn run_watch_inner(
                 next_wake_duration(config, &sync_states, OffsetDateTime::now_utc())?,
             );
             tokio::select! {
-                _ = tokio::time::sleep(sleep_for) => {}
+                () = tokio::time::sleep(sleep_for) => {}
                 signal = tokio::signal::ctrl_c() => {
                     signal.map_err(|error| RingmasterError::Config(format!("failed to listen for ctrl-c: {error}")))?;
                     notes.push("watch loop interrupted by ctrl-c".to_owned());
@@ -1161,7 +1161,7 @@ mod tests {
         PathBuf::from("/tmp").join(format!("ringmaster-{label}-{}-{nanos}", std::process::id()))
     }
 
-    fn phase3_fixture_dir() -> PathBuf {
+    fn baseline_fixture_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase3")
     }
 
@@ -1380,7 +1380,7 @@ mod tests {
             WatchOptions {
                 dry_run: false,
                 demo: true,
-                fixture_dir: Some(phase3_fixture_dir()),
+                fixture_dir: Some(baseline_fixture_dir()),
                 max_iterations: Some(1),
             },
         )
@@ -1409,7 +1409,7 @@ mod tests {
             WatchOptions {
                 dry_run: false,
                 demo: true,
-                fixture_dir: Some(phase3_fixture_dir()),
+                fixture_dir: Some(baseline_fixture_dir()),
                 max_iterations: Some(0),
             },
         )
@@ -1562,7 +1562,7 @@ mod tests {
             &config,
             &store,
             false,
-            Some(phase3_fixture_dir()),
+            Some(baseline_fixture_dir()),
         )
         .await
         .unwrap_or_else(|error| panic!("invalidation processing should succeed: {error}"));
@@ -1603,7 +1603,7 @@ mod tests {
             &store,
             crate::oura::sync::SyncOptions {
                 dry_run: false,
-                fixture_dir: Some(phase3_fixture_dir()),
+                fixture_dir: Some(baseline_fixture_dir()),
                 families: vec![SyncFamily::Workout],
                 trigger_source: Some("periodic_reconcile".to_owned()),
                 trigger_detail: Some("seed workouts".to_owned()),
@@ -1646,7 +1646,7 @@ mod tests {
             &config,
             &store,
             false,
-            Some(phase3_fixture_dir()),
+            Some(baseline_fixture_dir()),
         )
         .await
         .unwrap_or_else(|error| panic!("delete invalidation processing should succeed: {error}"));

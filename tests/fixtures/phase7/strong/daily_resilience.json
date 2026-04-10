@@ -1,0 +1,75 @@
+{
+  "data": [
+    {
+      "id": "daily_resilience_2026-04-02",
+      "day": "2026-04-02",
+      "contributors": {
+        "sleep_recovery": 77.0,
+        "daytime_recovery": 71.0,
+        "stress": 69.0
+      },
+      "level": "solid"
+    },
+    {
+      "id": "daily_resilience_2026-04-03",
+      "day": "2026-04-03",
+      "contributors": {
+        "sleep_recovery": 79.0,
+        "daytime_recovery": 73.0,
+        "stress": 72.0
+      },
+      "level": "strong"
+    },
+    {
+      "id": "daily_resilience_2026-04-04",
+      "day": "2026-04-04",
+      "contributors": {
+        "sleep_recovery": 75.0,
+        "daytime_recovery": 70.0,
+        "stress": 66.0
+      },
+      "level": "solid"
+    },
+    {
+      "id": "daily_resilience_2026-04-05",
+      "day": "2026-04-05",
+      "contributors": {
+        "sleep_recovery": 61.0,
+        "daytime_recovery": 58.0,
+        "stress": 44.0
+      },
+      "level": "adequate"
+    },
+    {
+      "id": "daily_resilience_2026-04-06",
+      "day": "2026-04-06",
+      "contributors": {
+        "sleep_recovery": 82.0,
+        "daytime_recovery": 76.0,
+        "stress": 74.0
+      },
+      "level": "strong"
+    },
+    {
+      "id": "daily_resilience_2026-04-07",
+      "day": "2026-04-07",
+      "contributors": {
+        "sleep_recovery": 59.0,
+        "daytime_recovery": 56.0,
+        "stress": 42.0
+      },
+      "level": "adequate"
+    },
+    {
+      "id": "daily_resilience_2026-04-08",
+      "day": "2026-04-08",
+      "contributors": {
+        "sleep_recovery": 68.0,
+        "daytime_recovery": 61.0,
+        "stress": 54.0
+      },
+      "level": "solid"
+    }
+  ],
+  "next_token": null
+}

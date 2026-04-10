@@ -190,6 +190,7 @@ pub struct AppState {
     review_focus: ReviewFocus,
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppModel {
     pub title: String,
@@ -215,6 +216,7 @@ pub struct DashboardModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelineModel {
     pub summary: String,
+    pub breadcrumb: String,
     pub day_selector: String,
     pub selected_day_label: String,
     pub selected_day_index: usize,
@@ -242,6 +244,7 @@ pub struct TrendsModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExplainModel {
     pub selected_day_label: String,
+    pub breadcrumb: String,
     pub headline: String,
     pub summary_lines: Vec<String>,
     pub measurement_lines: Vec<String>,
@@ -271,6 +274,7 @@ pub struct OpsModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewModel {
     pub selected_day_label: String,
+    pub breadcrumb: String,
     pub mode_tabs: Vec<ReviewTab>,
     pub selected_mode_index: usize,
     pub focus_tabs: Vec<ReviewTab>,
@@ -352,6 +356,16 @@ pub struct EventListItem {
     pub headline: String,
     pub detail: String,
     pub selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExplainSupportingEvent {
+    family_label: &'static str,
+    headline: String,
+    detail: String,
+    selected: bool,
+    source_day: String,
+    carried_forward: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -525,7 +539,6 @@ impl AppState {
             Action::TimelineZoomIn => {
                 self.timeline_window_hours = match self.timeline_window_hours {
                     24 => 12,
-                    12 => 6,
                     _ => 6,
                 };
                 self.align_point_to_selected_event();
@@ -536,7 +549,6 @@ impl AppState {
             Action::TimelineZoomOut => {
                 self.timeline_window_hours = match self.timeline_window_hours {
                     6 => 12,
-                    12 => 24,
                     _ => 24,
                 };
                 self.align_point_to_selected_event();
@@ -636,6 +648,7 @@ impl AppState {
         }
     }
 
+    #[must_use]
     pub fn footer(&self) -> String {
         let spinner = ["·", "o", "O", "o"][(self.tick_count % 4) as usize];
         let screen_hint = match self.active_screen {
@@ -644,8 +657,8 @@ impl AppState {
             Screen::Trends => "[ ] window",
             Screen::Explain => "[ ] day | j k event | w/t/s filters",
             Screen::Patterns => "w/t/s family | m metric",
-            Screen::Ops => "1-7 jump",
             Screen::Review => "[ ] day | v mode | f focus | j k cards",
+            Screen::Ops => "1-7 jump",
         };
         let refresh_hint = if self.refresh_in_flight {
             "refreshing"
@@ -659,6 +672,7 @@ impl AppState {
         )
     }
 
+    #[must_use]
     pub fn active_tab_index(&self) -> usize {
         self.active_screen.index()
     }
@@ -670,10 +684,10 @@ impl AppState {
 
         if let Some(snapshot) = &self.live_snapshot {
             let day_labels = available_days(snapshot);
-            self.selected_day_index = previous_day
-                .as_deref()
-                .and_then(|selected_day| day_labels.iter().position(|day| day == selected_day))
-                .unwrap_or_else(|| newest_day_index(snapshot));
+            self.selected_day_index = previous_day.as_deref().map_or_else(
+                || newest_day_index(snapshot),
+                |selected_day| restored_day_index(&day_labels, selected_day),
+            );
             self.selected_event_id = previous_event.filter(|event_id| {
                 snapshot
                     .context_events
@@ -876,10 +890,11 @@ impl Screen {
         Self::Trends,
         Self::Explain,
         Self::Patterns,
-        Self::Ops,
         Self::Review,
+        Self::Ops,
     ];
 
+    #[must_use]
     pub fn title(self) -> &'static str {
         match self {
             Self::Dashboard => "Dashboard",
@@ -887,8 +902,8 @@ impl Screen {
             Self::Trends => "Trends",
             Self::Explain => "Explain",
             Self::Patterns => "Patterns",
-            Self::Ops => "Ops",
             Self::Review => "Review",
+            Self::Ops => "Status",
         }
     }
 
@@ -899,8 +914,8 @@ impl Screen {
             Self::Trends => 2,
             Self::Explain => 3,
             Self::Patterns => 4,
-            Self::Ops => 5,
-            Self::Review => 6,
+            Self::Review => 5,
+            Self::Ops => 6,
         }
     }
 
@@ -910,26 +925,27 @@ impl Screen {
             Self::Timeline => Self::Trends,
             Self::Trends => Self::Explain,
             Self::Explain => Self::Patterns,
-            Self::Patterns => Self::Ops,
-            Self::Ops => Self::Review,
-            Self::Review => Self::Dashboard,
+            Self::Patterns => Self::Review,
+            Self::Review => Self::Ops,
+            Self::Ops => Self::Dashboard,
         }
     }
 
     fn previous(self) -> Self {
         match self {
-            Self::Dashboard => Self::Review,
+            Self::Dashboard => Self::Ops,
             Self::Timeline => Self::Dashboard,
             Self::Trends => Self::Timeline,
             Self::Explain => Self::Trends,
             Self::Patterns => Self::Explain,
-            Self::Ops => Self::Patterns,
-            Self::Review => Self::Ops,
+            Self::Review => Self::Patterns,
+            Self::Ops => Self::Review,
         }
     }
 }
 
 impl ReviewScreenMode {
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Today => "Today",
@@ -956,6 +972,7 @@ impl ReviewScreenMode {
 }
 
 impl TrendWindowKind {
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Days7 => "7d",
@@ -964,6 +981,7 @@ impl TrendWindowKind {
         }
     }
 
+    #[must_use]
     pub fn days(self) -> usize {
         match self {
             Self::Days7 => 7,
@@ -998,6 +1016,7 @@ impl TrendWindowKind {
 }
 
 impl PatternMetricFilter {
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::All => "all metrics",
@@ -1027,6 +1046,7 @@ impl PatternMetricFilter {
 }
 
 impl OverlayFilterState {
+    #[must_use]
     pub const fn all() -> Self {
         Self {
             workouts: true,
@@ -1045,18 +1065,17 @@ impl OverlayFilterState {
     }
 }
 
-pub fn build_live_state(
-    config: &Config,
-    store: &Store,
-    auth_status: &AuthStatus,
-) -> crate::error::Result<AppState> {
-    let snapshot = load_live_snapshot(config, store, auth_status)?;
+pub fn build_state_from_snapshot(
+    mode: RunMode,
+    status_line: impl Into<String>,
+    snapshot: LiveSnapshot,
+) -> AppState {
     let selected_day_index = newest_day_index(&snapshot);
     let mut app = AppState {
-        mode: RunMode::Live,
+        mode,
         active_screen: Screen::Dashboard,
         model: AppModel::empty(),
-        status_line: "Live mode is reading from the local store.".to_owned(),
+        status_line: status_line.into(),
         tick_count: 0,
         should_quit: false,
         refresh_in_flight: false,
@@ -1075,9 +1094,32 @@ pub fn build_live_state(
     app.select_default_event_for_selected_day();
     app.align_point_to_selected_event();
     app.rebuild_live_model();
-    Ok(app)
+    app
 }
 
+/// Build an application state from the current local store snapshot.
+///
+/// # Errors
+///
+/// Returns an error when loading the current live snapshot from the store fails.
+pub fn build_live_state(
+    config: &Config,
+    store: &Store,
+    auth_status: &AuthStatus,
+) -> crate::error::Result<AppState> {
+    let snapshot = load_live_snapshot(config, store, auth_status)?;
+    Ok(build_state_from_snapshot(
+        RunMode::Live,
+        "Live mode is reading from the local store.",
+        snapshot,
+    ))
+}
+
+/// Load the live snapshot that drives the terminal UI from local persisted state.
+///
+/// # Errors
+///
+/// Returns an error when store-backed snapshot queries fail.
 pub fn load_live_snapshot(
     config: &Config,
     store: &Store,
@@ -1156,31 +1198,7 @@ pub fn load_live_snapshot(
 
 pub fn build_demo_state(config: &Config) -> AppState {
     let snapshot = demo_snapshot(config);
-    let selected_day_index = newest_day_index(&snapshot);
-    let mut app = AppState {
-        mode: RunMode::Demo,
-        active_screen: Screen::Dashboard,
-        model: AppModel::empty(),
-        status_line: "Demo mode ready.".to_owned(),
-        tick_count: 0,
-        should_quit: false,
-        refresh_in_flight: false,
-        live_snapshot: Some(snapshot),
-        selected_day_index,
-        selected_timeline_point: 0,
-        timeline_window_hours: 24,
-        trends_window: TrendWindowKind::Days7,
-        selected_event_id: None,
-        selected_review_card_index: 0,
-        overlay_filters: OverlayFilterState::all(),
-        pattern_metric_filter: PatternMetricFilter::All,
-        review_mode: ReviewScreenMode::Today,
-        review_focus: ReviewFocus::Readiness,
-    };
-    app.select_default_event_for_selected_day();
-    app.align_point_to_selected_event();
-    app.rebuild_live_model();
-    app
+    build_state_from_snapshot(RunMode::Demo, "Demo mode ready.", snapshot)
 }
 
 fn build_live_model(snapshot: &LiveSnapshot, options: &LiveModelOptions) -> AppModel {
@@ -1381,13 +1399,14 @@ fn build_timeline_model(
         .get(clamped_day_index)
         .cloned()
         .unwrap_or_else(|| "no day selected".to_owned());
-    let visible = selected_heartrate_day(snapshot, &selected_day)
-        .map(|day| visible_timeline(day, window_hours))
-        .unwrap_or_else(|| VisibleTimeline {
+    let visible = selected_heartrate_day(snapshot, &selected_day).map_or_else(
+        || VisibleTimeline {
             points: Vec::new(),
             window_start_minute: 0,
             window_end_minute: 24 * 60 - 1,
-        });
+        },
+        |day| visible_timeline(day, window_hours),
+    );
     let selected_point_index = if visible.points.is_empty() {
         None
     } else {
@@ -1404,13 +1423,15 @@ fn build_timeline_model(
     });
     let selected_point_detail = selected_point_index
         .and_then(|index| visible.points.get(index))
-        .map(|point| {
-            format!(
-                "Heartrate cursor: {} at {} bpm.",
-                point.recorded_at, point.bpm
-            )
-        })
-        .unwrap_or_else(|| freshness.detail.clone());
+        .map_or_else(
+            || freshness.detail.clone(),
+            |point| {
+                format!(
+                    "Heartrate cursor: {} at {} bpm.",
+                    point.recorded_at, point.bpm
+                )
+            },
+        );
 
     let event_detail_lines = selected_event_index
         .and_then(|index| events.get(index))
@@ -1423,6 +1444,32 @@ fn build_timeline_model(
             },
             |event| explain_event_detail_lines(&selected_day, event),
         );
+    let breadcrumb = selected_event_index
+        .and_then(|index| events.get(index))
+        .map_or_else(
+            || {
+                format!(
+                    "Day {} -> {} matching context event{}",
+                    selected_day,
+                    events.len(),
+                    if events.len() == 1 { "" } else { "s" }
+                )
+            },
+            |event| {
+                let carryover = if event.anchor_day == selected_day {
+                    String::new()
+                } else {
+                    format!(" | carries over from {}", event.anchor_day)
+                };
+                format!(
+                    "Day {} -> {} {}{}",
+                    selected_day,
+                    overlay_family_label(event.family),
+                    event.title,
+                    carryover
+                )
+            },
+        );
 
     TimelineModel {
         summary: format!(
@@ -1430,6 +1477,7 @@ fn build_timeline_model(
             selected_day,
             freshness_badge(&freshness)
         ),
+        breadcrumb,
         day_selector: format!(
             "{} | window={}h | filters {}",
             format_day_selector(&day_labels, clamped_day_index),
@@ -1567,18 +1615,19 @@ fn build_explain_model(
         || insight_is_thin(&readiness_insight)
         || insight_is_thin(&activity_insight)
     {
-        caveat_lines.push("This day story is based on limited history.".to_owned());
+        caveat_lines.push(
+            "Baseline comparisons are still tentative because local history is thin for this day."
+                .to_owned(),
+        );
     }
     if selected_daily.is_none() {
         caveat_lines.push(format!(
-            "No daily closeout is available for {} yet.",
-            selected_day
+            "No daily closeout has been cached for {selected_day} yet."
         ));
     }
     if heartrate.is_none() {
         caveat_lines.push(format!(
-            "No heartrate samples were cached for {}.",
-            selected_day
+            "No heartrate samples are cached for {selected_day} yet."
         ));
     }
     if supporting_events.is_empty() {
@@ -1592,12 +1641,14 @@ fn build_explain_model(
         .iter()
         .find(|card| card.anchor_day == selected_day)
     {
-        caveat_lines.push(format!("Review hint: {}", card.headline));
+        caveat_lines.push(format!("Today's review also flagged: {}", card.headline));
     }
+    let breadcrumb = explain_breadcrumb(&selected_day, &supporting_events);
 
     ExplainModel {
         selected_day_label: selected_day.clone(),
-        headline: format!("Day story for {}", selected_day),
+        breadcrumb,
+        headline: format!("Day story for {selected_day}"),
         summary_lines: vec![
             selected_day_baseline_sentence("Sleep", &selected_day, &sleep_insight),
             selected_day_baseline_sentence("Readiness", &selected_day, &readiness_insight),
@@ -1605,11 +1656,20 @@ fn build_explain_model(
         ],
         measurement_lines: measurement_lines_for_day(selected_daily, heartrate),
         evidence_lines: if supporting_events.is_empty() {
-            vec!["Evidence is limited for this day.".to_owned()]
+            vec!["Evidence is still sparse for this day.".to_owned()]
         } else {
             supporting_events
                 .iter()
-                .map(|event| format!("{} {}.", event.family_label, event.headline))
+                .map(|event| {
+                    if event.carried_forward {
+                        format!(
+                            "{} carryover from {}: {}.",
+                            event.family_label, event.source_day, event.headline
+                        )
+                    } else {
+                        format!("{} {}.", event.family_label, event.headline)
+                    }
+                })
                 .collect()
         },
         caveat_lines,
@@ -1619,10 +1679,15 @@ fn build_explain_model(
             let mut lines = supporting_events
                 .iter()
                 .map(|event| {
-                    if event.selected {
-                        format!("> {} ({})", event.headline, event.detail)
+                    let breadcrumb = if event.carried_forward {
+                        format!("Carryover from {}: ", event.source_day)
                     } else {
-                        format!("  {} ({})", event.headline, event.detail)
+                        String::new()
+                    };
+                    if event.selected {
+                        format!("> {}{} ({})", breadcrumb, event.headline, event.detail)
+                    } else {
+                        format!("  {}{} ({})", breadcrumb, event.headline, event.detail)
                     }
                 })
                 .collect::<Vec<_>>();
@@ -1925,6 +1990,12 @@ fn build_review_model(
 
     ReviewModel {
         selected_day_label: selected_day.to_owned(),
+        breadcrumb: format!(
+            "Day {} -> {} mode -> focus {}",
+            selected_day,
+            review_mode.label(),
+            review_focus.label()
+        ),
         mode_tabs: [
             ReviewScreenMode::Today,
             ReviewScreenMode::Week,
@@ -2263,7 +2334,7 @@ fn empty_investigation_report(
             error.to_string()
         )],
         look_at: vec![
-            "Open Ops to confirm sync freshness and granted capabilities.".to_owned(),
+            "Open Status to confirm sync freshness and granted capabilities.".to_owned(),
             "Run derive rebuild after syncing more history.".to_owned(),
         ],
     }
@@ -2447,10 +2518,7 @@ fn overall_subscription_summary(snapshot: &LiveSnapshot) -> String {
         .iter()
         .filter(|record| record.drift_status != "matched")
         .count();
-    format!(
-        "desired_enabled={} remote={} healthy={} drifted={}",
-        desired, remote, healthy, drifted
-    )
+    format!("desired_enabled={desired} remote={remote} healthy={healthy} drifted={drifted}")
 }
 
 fn subscription_horizon_summary(snapshot: &LiveSnapshot) -> String {
@@ -2468,13 +2536,12 @@ fn subscription_horizon_summary(snapshot: &LiveSnapshot) -> String {
             parse_timestamp(&record.expiration_time).map(|timestamp| (timestamp, record))
         })
         .min_by_key(|(timestamp, _)| *timestamp)
-        .map(|(_, record)| format!("{} {}", record.data_type, record.expiration_time))
-        .unwrap_or_else(|| "none".to_owned());
+        .map_or_else(
+            || "none".to_owned(),
+            |(_, record)| format!("{} {}", record.data_type, record.expiration_time),
+        );
 
-    format!(
-        "renewals_due={} next_expiration={}",
-        renewals_due, next_expiration
-    )
+    format!("renewals_due={renewals_due} next_expiration={next_expiration}")
 }
 
 fn family_delivery_summary(snapshot: &LiveSnapshot) -> String {
@@ -2515,10 +2582,7 @@ fn freshness_source_summary(snapshot: &LiveSnapshot) -> String {
         }
     }
 
-    format!(
-        "webhook={} periodic={} other={}",
-        webhook_count, periodic_count, other_count
-    )
+    format!("webhook={webhook_count} periodic={periodic_count} other={other_count}")
 }
 
 fn build_app_title(snapshot: &LiveSnapshot, selected_day: &str, refresh_in_flight: bool) -> String {
@@ -2803,13 +2867,12 @@ fn family_freshness(snapshot: &LiveSnapshot, family: DataFamily) -> FreshnessSta
             .or(Some(sync_state.last_attempted_at.as_str()));
         let is_fresh = reference
             .and_then(parse_timestamp)
-            .map(|timestamp| {
+            .is_some_and(|timestamp| {
                 now - timestamp
                     <= time::Duration::seconds(
                         snapshot.refresh_policy.stale_after_seconds(family) as i64
                     )
-            })
-            .unwrap_or(false);
+            });
 
         if is_fresh
             && matches!(
@@ -2964,29 +3027,31 @@ where
 }
 
 fn metric_subtitle(insight: &MetricInsight) -> String {
-    if let Some(delta) = insight.baseline_7d.delta_from_today {
-        format!("7d baseline {:+.1}", delta)
-    } else {
-        insight
-            .confidence_note
-            .clone()
-            .unwrap_or_else(|| "insufficient history".to_owned())
-    }
+    insight.baseline_7d.delta_from_today.map_or_else(
+        || {
+            insight
+                .confidence_note
+                .clone()
+                .unwrap_or_else(|| "insufficient history".to_owned())
+        },
+        |delta| format!("7d baseline {delta:+.1}"),
+    )
 }
 
 fn short_baseline_phrase(label: &str, insight: &MetricInsight) -> String {
-    if let Some(delta) = insight.baseline_7d.delta_from_today {
-        let relation = if delta >= 1.0 {
-            "above"
-        } else if delta <= -1.0 {
-            "below"
-        } else {
-            "close to"
-        };
-        format!("{label} is {relation} normal.")
-    } else {
-        format!("{label} is still building a baseline.")
-    }
+    insight.baseline_7d.delta_from_today.map_or_else(
+        || format!("{label} normal is still forming."),
+        |delta| {
+            let relation = if delta >= 1.0 {
+                "above"
+            } else if delta <= -1.0 {
+                "below"
+            } else {
+                "close to"
+            };
+            format!("{label} is {relation} normal.")
+        },
+    )
 }
 
 fn selected_day_baseline_sentence(
@@ -2995,11 +3060,11 @@ fn selected_day_baseline_sentence(
     insight: &MetricInsight,
 ) -> String {
     let Some(today) = insight.today.as_ref() else {
-        return format!("{label} has no daily closeout on {}.", selected_day);
+        return format!("{label} has no daily closeout on {selected_day}.");
     };
     if insight.baseline_30d.sample_count < 4 {
         return format!(
-            "{} is {} on {}, but there is not enough history to compare it to your normal yet.",
+            "{} is {} on {}, but local history is still too thin to compare it to your normal yet.",
             label,
             format_float(today.value),
             selected_day
@@ -3090,8 +3155,7 @@ fn visible_timeline(day: &HeartRateDay, window_hours: u16) -> VisibleTimeline {
     let latest_minute = day
         .points
         .last()
-        .map(|point| minutes_from_timestamp(&point.recorded_at))
-        .unwrap_or(0);
+        .map_or(0, |point| minutes_from_timestamp(&point.recorded_at));
     let window_end = latest_minute.max(window_hours.saturating_mul(60).saturating_sub(1));
     let window_start = window_end.saturating_sub(window_hours.saturating_mul(60).saturating_sub(1));
     let mut visible = Vec::new();
@@ -3103,9 +3167,8 @@ fn visible_timeline(day: &HeartRateDay, window_hours: u16) -> VisibleTimeline {
             continue;
         }
 
-        let gap_before = previous_minute
-            .map(|previous| minute.saturating_sub(previous) > 30)
-            .unwrap_or(false);
+        let gap_before =
+            previous_minute.is_some_and(|previous| minute.saturating_sub(previous) > 30);
         visible.push(TimelinePoint {
             label: trim_timestamp(&point.recorded_at),
             recorded_at: point.recorded_at.clone(),
@@ -3202,13 +3265,13 @@ fn supporting_events_for_explain(
     day: &str,
     filters: &OverlayFilterState,
     selected_event_id: Option<&str>,
-) -> Vec<EventListItem> {
+) -> Vec<ExplainSupportingEvent> {
     let mut seen = BTreeSet::new();
     let mut items = Vec::new();
 
     for event in filtered_events_for_day(snapshot, day, filters) {
         if seen.insert(event.context_event_id.clone()) {
-            items.push(event_list_item(day, event, selected_event_id));
+            items.push(explain_supporting_event(day, day, event, selected_event_id));
         }
     }
 
@@ -3218,12 +3281,69 @@ fn supporting_events_for_explain(
                 || event_starts_after_hour(event, 18))
                 && seen.insert(event.context_event_id.clone())
             {
-                items.push(event_list_item(&previous_day, event, selected_event_id));
+                items.push(explain_supporting_event(
+                    day,
+                    &previous_day,
+                    event,
+                    selected_event_id,
+                ));
             }
         }
     }
 
     items
+}
+
+fn explain_supporting_event(
+    selected_day: &str,
+    display_day: &str,
+    event: &ContextEventRecord,
+    selected_event_id: Option<&str>,
+) -> ExplainSupportingEvent {
+    ExplainSupportingEvent {
+        family_label: overlay_family_label(event.family),
+        headline: format!("{} {}", format_event_time(display_day, event), event.title),
+        detail: [
+            event.subtype.clone(),
+            event.intensity.clone(),
+            event.notes.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" | "),
+        selected: selected_event_id.is_some_and(|event_id| event.context_event_id == event_id),
+        source_day: event.anchor_day.clone(),
+        carried_forward: event.anchor_day != selected_day,
+    }
+}
+
+fn explain_breadcrumb(selected_day: &str, supporting_events: &[ExplainSupportingEvent]) -> String {
+    if let Some(event) = supporting_events.iter().find(|event| event.selected) {
+        if event.carried_forward {
+            return format!(
+                "Day {selected_day} -> linked event carries forward from {}",
+                event.source_day
+            );
+        }
+        return format!("Day {selected_day} -> linked event stays in focus");
+    }
+    if let Some(event) = supporting_events.iter().find(|event| event.carried_forward) {
+        return format!(
+            "Day {selected_day} -> includes carryover context from {}",
+            event.source_day
+        );
+    }
+    format!(
+        "Day {} -> {} local evidence item{}",
+        selected_day,
+        supporting_events.len(),
+        if supporting_events.len() == 1 {
+            ""
+        } else {
+            "s"
+        }
+    )
 }
 
 fn previous_daily_day(snapshot: &LiveSnapshot, day: &str) -> Option<String> {
@@ -3402,10 +3522,9 @@ fn pattern_row_view(summary: &PatternSummaryRecord) -> PatternRowView {
             prettify_key(&summary.normalized_key)
         ),
         detail: format!(
-            "{} {} {} ({}, n={}, confidence={})",
+            "{} trended toward {} ({}, n={}, confidence={})",
             relation_phrase(summary.relation_window),
-            effect_direction_phrase(summary.effect_direction),
-            summary.metric.label().to_lowercase(),
+            effect_direction_phrase(summary.effect_direction, summary.metric),
             signed_delta(summary.median_delta),
             summary.sample_count,
             data_sufficiency_label(summary.confidence),
@@ -3426,12 +3545,12 @@ fn measurement_lines_for_day(
             score_text(daily.activity_score),
         ));
     } else {
-        lines.push("Daily closeout is not available for this day.".to_owned());
+        lines.push("Daily closeout has not been cached for this day yet.".to_owned());
     }
 
     if let Some(heartrate_day) = heartrate_day {
         if heartrate_day.points.is_empty() {
-            lines.push("Heartrate samples are missing for this day.".to_owned());
+            lines.push("Heartrate samples have not been cached for this day yet.".to_owned());
         } else {
             let mean = heartrate_day
                 .points
@@ -3446,7 +3565,7 @@ fn measurement_lines_for_day(
             ));
         }
     } else {
-        lines.push("Heartrate samples are missing for this day.".to_owned());
+        lines.push("Heartrate samples have not been cached for this day yet.".to_owned());
     }
 
     lines
@@ -3458,13 +3577,16 @@ fn explain_event_detail_lines(day: &str, event: &ContextEventRecord) -> Vec<Stri
         format!("When: {}", format_event_time(day, event)),
     ];
     if let Some(subtype) = &event.subtype {
-        lines.push(format!("Type: {}", subtype));
+        lines.push(format!("Type: {subtype}"));
     }
     if let Some(intensity) = &event.intensity {
-        lines.push(format!("Strength: {}", intensity));
+        lines.push(format!("Strength: {intensity}"));
     }
     if let Some(notes) = &event.notes {
-        lines.push(format!("Notes: {}", notes));
+        lines.push(format!("Notes: {notes}"));
+    }
+    if event.anchor_day != day {
+        lines.push(format!("Carries over from: {}", event.anchor_day));
     }
     lines.push(format!("Source id: {}", event.source_id));
     lines
@@ -3480,7 +3602,7 @@ fn missing_scope_messages(report: &CapabilityReport) -> Vec<String> {
     .filter(|kind| !report.is_granted(*kind))
     .map(|kind| {
         format!(
-            "{} are unavailable because the `{}` scope was not granted.",
+            "{} context is unavailable because the `{}` scope is missing.",
             kind.label(),
             kind.scope_name()
         )
@@ -3504,6 +3626,28 @@ fn available_days(snapshot: &LiveSnapshot) -> Vec<String> {
         days.insert(event.anchor_day.clone());
     }
     days.into_iter().collect()
+}
+
+fn restored_day_index(day_labels: &[String], selected_day: &str) -> usize {
+    if let Some(index) = day_labels.iter().position(|day| day == selected_day) {
+        return index;
+    }
+    if let Some((index, _)) = day_labels
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, day)| day.as_str() < selected_day)
+    {
+        return index;
+    }
+    if let Some((index, _)) = day_labels
+        .iter()
+        .enumerate()
+        .find(|(_, day)| day.as_str() > selected_day)
+    {
+        return index;
+    }
+    day_labels.len().saturating_sub(1)
 }
 
 fn event_overlaps_day(event: &ContextEventRecord, day: &str) -> bool {
@@ -3558,9 +3702,7 @@ fn event_local_day_bounds(
 }
 
 fn event_starts_after_hour(event: &ContextEventRecord, hour: u8) -> bool {
-    parse_timestamp(&event.start_at)
-        .map(|timestamp| timestamp.hour() >= hour)
-        .unwrap_or(false)
+    parse_timestamp(&event.start_at).is_some_and(|timestamp| timestamp.hour() >= hour)
 }
 
 fn minute_of_day(value: OffsetDateTime) -> u16 {
@@ -3601,17 +3743,22 @@ fn overlay_family_glyph(family: ContextEventFamily) -> char {
 
 fn relation_phrase(window: PatternRelationWindow) -> &'static str {
     match window {
-        PatternRelationWindow::SameDayActivity => "after days with",
-        PatternRelationWindow::NextDayReadiness => "after days with",
-        PatternRelationWindow::SameNightSleep => "after days with",
+        PatternRelationWindow::SameDayActivity => "same-day activity",
+        PatternRelationWindow::NextDayReadiness => "next-day readiness",
+        PatternRelationWindow::SameNightSleep => "same-night sleep",
     }
 }
 
-fn effect_direction_phrase(direction: EffectDirection) -> &'static str {
+fn effect_direction_phrase(direction: EffectDirection, metric: PatternMetric) -> String {
+    let metric_label = match metric {
+        PatternMetric::ActivityScore => "activity score",
+        PatternMetric::ReadinessScore => "readiness score",
+        PatternMetric::SleepScore => "sleep score",
+    };
     match direction {
-        EffectDirection::Higher => "associated with higher",
-        EffectDirection::Lower => "associated with lower",
-        EffectDirection::Flat => "co-occurred with flat",
+        EffectDirection::Higher => format!("higher {metric_label}"),
+        EffectDirection::Lower => format!("lower {metric_label}"),
+        EffectDirection::Flat => format!("flat {metric_label}"),
     }
 }
 
@@ -3881,6 +4028,7 @@ impl AppModel {
             },
             timeline: TimelineModel {
                 summary: String::new(),
+                breadcrumb: String::new(),
                 day_selector: String::new(),
                 selected_day_label: String::new(),
                 selected_day_index: 0,
@@ -3904,6 +4052,7 @@ impl AppModel {
             },
             explain: ExplainModel {
                 selected_day_label: String::new(),
+                breadcrumb: String::new(),
                 headline: String::new(),
                 summary_lines: Vec::new(),
                 measurement_lines: Vec::new(),
@@ -3927,6 +4076,7 @@ impl AppModel {
             },
             review: ReviewModel {
                 selected_day_label: String::new(),
+                breadcrumb: String::new(),
                 mode_tabs: Vec::new(),
                 selected_mode_index: 0,
                 focus_tabs: Vec::new(),
@@ -3941,16 +4091,16 @@ impl AppModel {
     }
 }
 
-fn demo_snapshot(config: &Config) -> LiveSnapshot {
+fn demo_snapshot(_config: &Config) -> LiveSnapshot {
     let capability_report = CapabilityReport::demo();
     let auth_status = AuthStatus {
         configured: true,
-        callback_url: config.oura.callback_url(),
-        requested_scopes: config.oura.requested_scopes.clone(),
-        granted_scopes: config.oura.requested_scopes.clone(),
+        callback_url: "http://127.0.0.1:8788/callback".to_owned(),
+        requested_scopes: demo_requested_scopes(),
+        granted_scopes: demo_requested_scopes(),
         missing_fields: Vec::new(),
         capability_report,
-        auth_timeout_secs: config.oura.auth_timeout_secs,
+        auth_timeout_secs: 120,
         secret_backend: "demo-memory".to_owned(),
         access_token_stored: true,
         refresh_token_stored: true,
@@ -4229,7 +4379,7 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
 
     LiveSnapshot {
         captured_at: "2026-04-08T22:30:00Z".to_owned(),
-        refresh_policy: RefreshPolicySnapshot::from_config(config),
+        refresh_policy: demo_refresh_policy_snapshot(),
         auth_status,
         webhook: WebhookOpsSnapshot {
             bind_address: "127.0.0.1:8799".to_owned(),
@@ -4317,8 +4467,36 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
             ..RecordCounts::default()
         },
         schema_version: crate::store::migrations::current_version(),
-        database_path: config.paths.database_file.display().to_string(),
-        config_path: config.paths.config_file.display().to_string(),
+        database_path: "~/.local/share/ringmaster/demo/ringmaster.db".to_owned(),
+        config_path: "~/.config/ringmaster/demo-config.toml".to_owned(),
+    }
+}
+
+fn demo_requested_scopes() -> Vec<String> {
+    vec![
+        "personal".to_owned(),
+        "daily".to_owned(),
+        "heartrate".to_owned(),
+        "workout".to_owned(),
+        "enhanced_tag".to_owned(),
+        "session".to_owned(),
+    ]
+}
+
+fn demo_refresh_policy_snapshot() -> RefreshPolicySnapshot {
+    RefreshPolicySnapshot {
+        personal_interval_secs: 3_600,
+        daily_interval_secs: 300,
+        heartrate_interval_secs: 60,
+        workout_interval_secs: 600,
+        enhanced_tag_interval_secs: 300,
+        session_interval_secs: 300,
+        personal_stale_after_secs: 72 * 60 * 60,
+        daily_stale_after_secs: 12 * 60 * 60,
+        heartrate_stale_after_secs: 15 * 60,
+        workout_stale_after_secs: 24 * 60 * 60,
+        enhanced_tag_stale_after_secs: 12 * 60 * 60,
+        session_stale_after_secs: 12 * 60 * 60,
     }
 }
 
@@ -4349,14 +4527,15 @@ mod tests {
     };
     use crate::action::Action;
     use crate::insights::MetricPoint;
-    use crate::oura::models::{AuthStatus, CapabilityReport};
+    use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
     use crate::review::{
         InvestigationReport, ReviewCard, ReviewConfidence, ReviewDeck, ReviewFocus, ReviewMode,
         ReviewSection, ReviewSufficiency,
     };
     use crate::store::queries::{
-        ContextEventFamily, ContextEventRecord, HeartRatePoint, RecordCounts, RestModePeriodRecord,
-        ReviewSignalDayRecord, SleepTimeRecord, TimeSemantics,
+        ContextEventFamily, ContextEventRecord, DataSufficiency, EffectDirection, HeartRatePoint,
+        PatternMetric, PatternRelationWindow, PatternSummaryRecord, RecordCounts,
+        RestModePeriodRecord, ReviewSignalDayRecord, SleepTimeRecord, TimeSemantics,
     };
 
     fn make_review_card(id: &str, signal_key: &str, score: i32) -> ReviewCard {
@@ -4541,6 +4720,26 @@ mod tests {
     }
 
     #[test]
+    fn replace_live_snapshot_prefers_nearest_earlier_day_when_the_selected_day_disappears() {
+        let mut app = make_live_app(make_snapshot(&["2026-04-07", "2026-04-08", "2026-04-09"]));
+
+        app.replace_live_snapshot(make_snapshot(&["2026-04-07", "2026-04-08", "2026-04-10"]));
+
+        assert_eq!(app.model.timeline.selected_day_label, "2026-04-08");
+        assert_eq!(app.model.dashboard.selected_day_label, "2026-04-08");
+    }
+
+    #[test]
+    fn replace_live_snapshot_falls_forward_when_no_earlier_day_exists() {
+        let mut app = make_live_app(make_snapshot(&["2026-04-06", "2026-04-07"]));
+        app.handle(Action::PreviousDay);
+
+        app.replace_live_snapshot(make_snapshot(&["2026-04-07", "2026-04-08"]));
+
+        assert_eq!(app.model.timeline.selected_day_label, "2026-04-07");
+    }
+
+    #[test]
     fn available_days_ignore_review_only_baseline_rows() {
         let mut snapshot = make_snapshot(&["2026-04-07", "2026-04-08"]);
         snapshot.review_signal_days = vec![ReviewSignalDayRecord {
@@ -4676,6 +4875,105 @@ mod tests {
     }
 
     #[test]
+    fn explain_marks_prior_day_carryover_in_context_and_breadcrumbs() {
+        let mut snapshot = make_snapshot(&["2026-04-07", "2026-04-08"]);
+        snapshot.context_events.push(ContextEventRecord {
+            context_event_id: "session:late".to_owned(),
+            family: ContextEventFamily::Session,
+            source_id: "late-session".to_owned(),
+            anchor_day: "2026-04-07".to_owned(),
+            start_at: "2026-04-07T19:30:00Z".to_owned(),
+            end_at: Some("2026-04-07T20:15:00Z".to_owned()),
+            time_semantics: TimeSemantics::Interval,
+            title: "Late session".to_owned(),
+            subtype: Some("focus".to_owned()),
+            notes: Some("carryover context".to_owned()),
+            intensity: Some("light".to_owned()),
+            metadata_json: "{}".to_owned(),
+            updated_at: "2026-04-07T20:20:00Z".to_owned(),
+        });
+
+        let model = build_live_model(
+            &snapshot,
+            &LiveModelOptions {
+                selected_day_index: 1,
+                selected_point_index: 0,
+                selected_event_id: None,
+                overlay_filters: OverlayFilterState::all(),
+                window_hours: 24,
+                trends_window: TrendWindowKind::Days7,
+                pattern_metric_filter: PatternMetricFilter::All,
+                refresh_in_flight: false,
+                review_mode: ReviewScreenMode::Today,
+                review_focus: ReviewFocus::Readiness,
+                selected_review_card_index: 0,
+            },
+        );
+
+        assert!(
+            model
+                .explain
+                .evidence_lines
+                .iter()
+                .any(|line| line.contains("carryover from 2026-04-07"))
+        );
+        assert!(
+            model
+                .explain
+                .context_lines
+                .iter()
+                .any(|line| line.contains("Carryover from 2026-04-07"))
+        );
+        assert!(model.explain.breadcrumb.contains("carryover"));
+    }
+
+    #[test]
+    fn explain_marks_cross_midnight_events_as_carryover_on_the_selected_day() {
+        let mut snapshot = make_snapshot(&["2026-04-07", "2026-04-08"]);
+        snapshot.context_events.push(ContextEventRecord {
+            context_event_id: "workout:overnight".to_owned(),
+            family: ContextEventFamily::Workout,
+            source_id: "overnight-workout".to_owned(),
+            anchor_day: "2026-04-07".to_owned(),
+            start_at: "2026-04-07T23:30:00Z".to_owned(),
+            end_at: Some("2026-04-08T00:30:00Z".to_owned()),
+            time_semantics: TimeSemantics::Interval,
+            title: "Overnight workout".to_owned(),
+            subtype: Some("run".to_owned()),
+            notes: Some("crosses midnight".to_owned()),
+            intensity: Some("moderate".to_owned()),
+            metadata_json: "{}".to_owned(),
+            updated_at: "2026-04-08T00:35:00Z".to_owned(),
+        });
+
+        let model = build_live_model(
+            &snapshot,
+            &LiveModelOptions {
+                selected_day_index: 1,
+                selected_point_index: 0,
+                selected_event_id: None,
+                overlay_filters: OverlayFilterState::all(),
+                window_hours: 24,
+                trends_window: TrendWindowKind::Days7,
+                pattern_metric_filter: PatternMetricFilter::All,
+                refresh_in_flight: false,
+                review_mode: ReviewScreenMode::Today,
+                review_focus: ReviewFocus::Readiness,
+                selected_review_card_index: 0,
+            },
+        );
+
+        assert!(
+            model
+                .explain
+                .context_lines
+                .iter()
+                .any(|line| line.contains("Carryover from 2026-04-07"))
+        );
+        assert!(model.explain.breadcrumb.contains("carryover"));
+    }
+
+    #[test]
     fn freshness_knows_context_families() {
         let snapshot = make_snapshot(&["2026-04-08"]);
         let freshness = super::family_freshness(&snapshot, DataFamily::Workout);
@@ -4705,6 +5003,52 @@ mod tests {
         assert_eq!(
             super::receiver_status_line(&snapshot),
             "missing heartbeat".to_owned()
+        );
+    }
+
+    #[test]
+    fn missing_scope_messages_are_capability_specific() {
+        let report = CapabilityReport::from_scopes(
+            &[
+                CapabilityKind::Workout.scope_name().to_owned(),
+                CapabilityKind::EnhancedTag.scope_name().to_owned(),
+                CapabilityKind::Session.scope_name().to_owned(),
+            ],
+            &[],
+        );
+
+        assert_eq!(
+            super::missing_scope_messages(&report),
+            vec![
+                "Workouts context is unavailable because the `workout` scope is missing."
+                    .to_owned(),
+                "Enhanced Tags context is unavailable because the `enhanced_tag` scope is missing."
+                    .to_owned(),
+                "Sessions context is unavailable because the `session` scope is missing."
+                    .to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn pattern_row_copy_reads_cleanly() {
+        let row = super::pattern_row_view(&PatternSummaryRecord {
+            summary_id: "pattern-1".to_owned(),
+            family: ContextEventFamily::Workout,
+            normalized_key: "strength_builder".to_owned(),
+            relation_window: PatternRelationWindow::NextDayReadiness,
+            metric: PatternMetric::ReadinessScore,
+            sample_count: 5,
+            median_delta: -2.4,
+            effect_direction: EffectDirection::Lower,
+            confidence: DataSufficiency::Medium,
+            metadata_json: "{}".to_owned(),
+            updated_at: "2026-04-08T12:00:00Z".to_owned(),
+        });
+
+        assert_eq!(
+            row.detail,
+            "next-day readiness trended toward lower readiness score (-2.4, n=5, confidence=medium)"
         );
     }
 

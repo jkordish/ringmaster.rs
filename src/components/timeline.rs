@@ -1,124 +1,217 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
-    prelude::{Color, Rect, Style},
+    prelude::Rect,
     symbols,
-    text::Span,
-    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, List, ListItem, Paragraph},
+    text::{Line, Span},
+    widgets::{Axis, Chart, Dataset, GraphType, List, ListItem, Paragraph},
 };
 
 use crate::app::{OverlayFamilyGroup, TimelineModel};
+use crate::ui::{
+    charts,
+    chrome::{self, PanelKind},
+    layout::UiContext,
+    theme::{Theme, Tone},
+};
 
-pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel) {
+pub fn draw(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &TimelineModel,
+    ui: &UiContext,
+    theme: &Theme,
+) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(8),
-            Constraint::Length(8),
-            Constraint::Length(11),
+            Constraint::Length(if ui.viewport.is_compact() { 4 } else { 5 }),
+            Constraint::Min(if ui.viewport.is_compact() { 6 } else { 13 }),
+            Constraint::Length(if ui.viewport.is_compact() { 4 } else { 7 }),
+            Constraint::Min(if ui.viewport.is_compact() { 5 } else { 10 }),
         ])
         .split(area);
 
-    let summary = Paragraph::new(model.summary.clone())
-        .block(Block::default().title("Timeline").borders(Borders::ALL));
-    frame.render_widget(summary, layout[0]);
-
-    let toggle_summary = model
-        .overlay_toggles
-        .iter()
-        .map(|toggle| {
-            format!(
-                "{}={} ({})",
-                toggle.label,
-                if toggle.enabled { "on" } else { "off" },
-                toggle.key_hint
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" | ");
-    let day_selector = Paragraph::new(format!("{} | {}", model.day_selector, toggle_summary))
-        .block(
-            Block::default()
-                .title("Date And Filters")
-                .borders(Borders::ALL),
-        );
-    frame.render_widget(day_selector, layout[1]);
-
-    if model.heart_rate.is_empty() {
-        let empty = Paragraph::new(model.selected_detail.clone()).block(
-            Block::default()
-                .title("Intraday Heartrate")
-                .borders(Borders::ALL),
-        );
-        frame.render_widget(empty, layout[2]);
+    let summary = if ui.viewport.is_compact() {
+        format!("{}\n{}", model.selected_day_label, model.breadcrumb)
     } else {
-        let mut segments = Vec::new();
-        let mut current_segment = Vec::new();
+        format!(
+            "{}\n{}\n{}",
+            model.summary, model.breadcrumb, model.day_selector
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(summary)
+            .style(theme.body())
+            .block(chrome::panel(
+                theme,
+                chrome::title_with_badge(
+                    theme,
+                    "Timeline instrument",
+                    &model.selected_day_label,
+                    Tone::Accent,
+                ),
+                PanelKind::Hero,
+            )),
+        layout[0],
+    );
 
-        for point in &model.heart_rate {
-            if point.gap_before && !current_segment.is_empty() {
-                segments.push(current_segment);
-                current_segment = Vec::new();
-            }
+    draw_chart(frame, layout[1], model, theme);
+    draw_overlay_lane(frame, layout[2], model, theme);
 
-            current_segment.push((f64::from(point.minute_of_day), f64::from(point.bpm)));
-        }
+    let bottom = if ui.viewport.is_compact() {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(2)])
+            .split(layout[3])
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+            .split(layout[3])
+    };
 
-        if !current_segment.is_empty() {
-            segments.push(current_segment);
-        }
+    frame.render_widget(
+        List::new(
+            std::iter::once(model.selected_detail.clone())
+                .chain(model.event_detail_lines.iter().cloned())
+                .map(ListItem::new),
+        )
+        .block(chrome::panel(
+            theme,
+            chrome::title_with_badge(
+                theme,
+                "Selected detail",
+                if model.selected_event_index.is_some() {
+                    "linked"
+                } else {
+                    "cursor"
+                },
+                Tone::Focus,
+            ),
+            PanelKind::Section,
+        )),
+        bottom[0],
+    );
 
-        let selected_dataset = model
-            .selected_point_index
-            .and_then(|index| model.heart_rate.get(index))
-            .map(|point| vec![(f64::from(point.minute_of_day), f64::from(point.bpm))]);
-
-        let mut datasets = segments
+    let events = if model.events.is_empty() {
+        vec![ListItem::new(
+            "[empty] No context events match the current filters.",
+        )]
+    } else {
+        model
+            .events
             .iter()
-            .map(|segment| {
-                Dataset::default()
-                    .marker(symbols::Marker::Braille)
-                    .graph_type(GraphType::Line)
-                    .style(Style::default().fg(Color::Cyan))
-                    .data(segment.as_slice())
+            .map(|event| {
+                let prefix = chrome::focus_prefix(event.selected);
+                let detail = if event.detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(" | {}", event.detail)
+                };
+                ListItem::new(format!(
+                    "{} [{}] {}{}",
+                    prefix, event.glyph, event.headline, detail
+                ))
             })
-            .collect::<Vec<_>>();
-        if let Some(selected_dataset) = selected_dataset.as_ref() {
-            datasets.push(
-                Dataset::default()
-                    .name("selected")
-                    .marker(symbols::Marker::Dot)
-                    .graph_type(GraphType::Scatter)
-                    .style(Style::default().fg(Color::Yellow))
-                    .data(selected_dataset.as_slice()),
-            );
+            .collect::<Vec<_>>()
+    };
+    frame.render_widget(
+        List::new(events).block(chrome::panel(
+            theme,
+            Line::from("Day events"),
+            PanelKind::Section,
+        )),
+        bottom[1],
+    );
+}
+
+fn draw_chart(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel, theme: &Theme) {
+    if model.heart_rate.is_empty() {
+        frame.render_widget(
+            Paragraph::new(model.selected_detail.clone()).block(chrome::panel(
+                theme,
+                chrome::title_with_badge(theme, "Heartrate", "no data", Tone::Warning),
+                PanelKind::Hero,
+            )),
+            area,
+        );
+        return;
+    }
+
+    let mut segments = Vec::new();
+    let mut current_segment = Vec::new();
+
+    for point in &model.heart_rate {
+        if point.gap_before && !current_segment.is_empty() {
+            segments.push(current_segment);
+            current_segment = Vec::new();
         }
 
-        let x_min = f64::from(model.window_start_minute);
-        let x_max = f64::from(model.window_end_minute.max(model.window_start_minute + 1));
-        let y_min = model
-            .heart_rate
-            .iter()
-            .map(|point| point.bpm)
-            .min()
-            .map_or(40.0, |value| f64::from(value.saturating_sub(5)));
-        let y_max = model
-            .heart_rate
-            .iter()
-            .map(|point| point.bpm)
-            .max()
-            .map_or(120.0, |value| f64::from(value.saturating_add(5)));
-        let chart = Chart::new(datasets)
-            .block(
-                Block::default()
-                    .title("Intraday Heartrate")
-                    .borders(Borders::ALL),
-            )
+        current_segment.push((f64::from(point.minute_of_day), f64::from(point.bpm)));
+    }
+
+    if !current_segment.is_empty() {
+        segments.push(current_segment);
+    }
+
+    let selected_dataset = model
+        .selected_point_index
+        .and_then(|index| model.heart_rate.get(index))
+        .map(|point| vec![(f64::from(point.minute_of_day), f64::from(point.bpm))]);
+
+    let mut datasets = segments
+        .iter()
+        .map(|segment| {
+            Dataset::default()
+                .marker(symbols::Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(charts::line_style(theme))
+                .data(segment.as_slice())
+        })
+        .collect::<Vec<_>>();
+    if let Some(selected_dataset) = selected_dataset.as_ref() {
+        datasets.push(
+            Dataset::default()
+                .name("selected")
+                .marker(symbols::Marker::Dot)
+                .graph_type(GraphType::Scatter)
+                .style(charts::selected_point_style(theme))
+                .data(selected_dataset.as_slice()),
+        );
+    }
+
+    let x_min = f64::from(model.window_start_minute);
+    let x_max = f64::from(model.window_end_minute.max(model.window_start_minute + 1));
+    let y_min = model
+        .heart_rate
+        .iter()
+        .map(|point| point.bpm)
+        .min()
+        .map_or(40.0, |value| f64::from(value.saturating_sub(5)));
+    let y_max = model
+        .heart_rate
+        .iter()
+        .map(|point| point.bpm)
+        .max()
+        .map_or(120.0, |value| f64::from(value.saturating_add(5)));
+
+    frame.render_widget(
+        Chart::new(datasets)
+            .block(chrome::panel(
+                theme,
+                chrome::title_with_badge(
+                    theme,
+                    "Heartrate",
+                    &format!("{}h window", model.window_hours),
+                    Tone::Accent,
+                ),
+                PanelKind::Hero,
+            ))
             .x_axis(
                 Axis::default()
-                    .title("Time")
+                    .title("time")
+                    .style(charts::baseline_style(theme))
                     .bounds([x_min, x_max])
                     .labels(vec![
                         Span::raw(format_minutes(model.window_start_minute)),
@@ -132,23 +225,26 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel) {
             .y_axis(
                 Axis::default()
                     .title("bpm")
+                    .style(charts::baseline_style(theme))
                     .bounds([y_min, y_max])
                     .labels(vec![
                         Span::raw(format!("{y_min:.0}")),
                         Span::raw(format!("{:.0}", f64::midpoint(y_min, y_max))),
                         Span::raw(format!("{y_max:.0}")),
                     ]),
-            );
-        frame.render_widget(chart, layout[2]);
-    }
+            ),
+        area,
+    );
+}
 
+fn draw_overlay_lane(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel, theme: &Theme) {
     let overlay_lines = if model.overlay_groups.is_empty() {
         vec![ListItem::new(
-            "No workouts, tags, or sessions overlap the selected window.",
+            "[quiet] No workouts, tags, or sessions overlap the selected window.",
         )]
     } else {
         render_overlay_lines(
-            layout[3].width.saturating_sub(4),
+            area.width.saturating_sub(4),
             model.window_start_minute,
             model.window_end_minute,
             &model.overlay_groups,
@@ -158,58 +254,12 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel) {
         .collect()
     };
     frame.render_widget(
-        List::new(overlay_lines).block(
-            Block::default()
-                .title("Overlay Lanes")
-                .borders(Borders::ALL),
-        ),
-        layout[3],
-    );
-
-    let bottom = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
-        .split(layout[4]);
-
-    frame.render_widget(
-        List::new(
-            std::iter::once(model.selected_detail.clone())
-                .chain(model.event_detail_lines.iter().cloned())
-                .map(ListItem::new),
-        )
-        .block(
-            Block::default()
-                .title("Selected Detail")
-                .borders(Borders::ALL),
-        ),
-        bottom[0],
-    );
-
-    let events = if model.events.is_empty() {
-        vec![ListItem::new(
-            "No context events match the current filters.",
-        )]
-    } else {
-        model
-            .events
-            .iter()
-            .map(|event| {
-                let prefix = if event.selected { ">" } else { " " };
-                let detail = if event.detail.is_empty() {
-                    String::new()
-                } else {
-                    format!(" | {}", event.detail)
-                };
-                ListItem::new(format!(
-                    "{} {} {}{}",
-                    prefix, event.glyph, event.headline, detail
-                ))
-            })
-            .collect::<Vec<_>>()
-    };
-    frame.render_widget(
-        List::new(events).block(Block::default().title("Day Events").borders(Borders::ALL)),
-        bottom[1],
+        List::new(overlay_lines).block(chrome::panel(
+            theme,
+            chrome::title_with_badge(theme, "Overlay lanes", "temporal context", Tone::Info),
+            PanelKind::Subtle,
+        )),
+        area,
     );
 }
 
@@ -226,8 +276,8 @@ fn render_overlay_lines(
 
     for group in groups {
         lines.push(format!(
-            "{} [{}] {} event(s)",
-            group.family_label, group.glyph, group.item_count
+            "[{}] {} event(s) | {}",
+            group.glyph, group.item_count, group.family_label
         ));
 
         let mut packed_rows: Vec<Vec<(usize, usize, bool)>> = Vec::new();
@@ -260,10 +310,10 @@ fn render_overlay_lines(
                     *cell = glyph;
                 }
             }
-            lines.push(chars.into_iter().collect());
+            lines.push(chars.into_iter().collect::<String>());
         }
         if hidden_rows > 0 {
-            lines.push(format!("+{} overlapping row(s) hidden", hidden_rows));
+            lines.push(format!("... {} additional lane row(s)", hidden_rows));
         }
     }
 

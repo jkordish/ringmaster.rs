@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This file is the execution runbook for the current phase-5 product. It only describes flows that work today.
+This file is the execution runbook for the current phase-7 product. It only describes flows that work today.
 
 ## Commands
 
@@ -12,6 +12,7 @@ Current commands:
 cargo run -- tui
 cargo run -- tui --demo
 cargo run -- demo
+cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots
 cargo run -- doctor
 cargo run -- auth login
 cargo run -- sync once
@@ -28,6 +29,78 @@ cargo run -- webhook replay --fixture tests/fixtures/webhooks/sample.json
 cargo run -- webhook subscriptions list --fixture-dir tests/fixtures/webhooks
 cargo run -- webhook subscriptions sync --dry-run --fixture-dir tests/fixtures/webhooks
 ```
+
+## Visual-system runtime
+
+The TUI now has a dedicated shared presentation layer under `src/ui/*`.
+
+At runtime this means:
+
+1. `src/app.rs` still shapes persisted data into presentation models
+2. `src/tui.rs` builds a `UiContext` for the current terminal size
+3. screen renderers consume semantic theme, layout, chrome, and chart helpers
+4. screens pick compact, medium, or wide choreography instead of squeezing one layout into all terminals
+
+Important boundary:
+
+- widgets never perform HTTP
+- widgets never refresh tokens
+- widgets never write to SQLite
+- the render path stays on persisted presentation models only
+
+## `ui snapshot`
+
+`ringmaster ui snapshot` is the canonical non-interactive design-QA surface. It uses the same rendering stack as the interactive TUI and writes deterministic UTF-8 artifacts to disk.
+
+Supported sources:
+
+- `--demo` for deterministic built-in presentation data
+- `--fixture-dir <dir>` for a fixture-backed temporary store
+- live local store when neither `--demo` nor `--fixture-dir` is passed
+
+Special fixture-root behavior:
+
+- if `--fixture-dir` points at `tests/fixtures/phase7` or another directory with `strong`, `weak`, and `empty` subdirectories, the command switches into scenario-matrix mode
+- scenario-matrix mode expands the same screen and size selection across `strong`, `weak`, `empty`, `stale`, and `error`
+- `stale` and `error` are overlaid from the seeded fixture state in code so the repo does not duplicate more Oura payload families than necessary
+
+Supported viewport classes:
+
+- `compact`: `90x28`
+- `medium`: `120x36`
+- `wide`: `160x44`
+
+Examples:
+
+```bash
+cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots
+
+cargo run -- ui snapshot --demo \
+  --screen dashboard --screen timeline --screen review --screen status \
+  --size compact --size wide \
+  --out-dir /tmp/ringmaster-ui-snapshots-smoke
+
+cargo run -- ui snapshot \
+  --fixture-dir tests/fixtures/phase7 \
+  --screen dashboard --screen explain --screen review --screen status \
+  --size compact --size wide \
+  --out-dir /tmp/ringmaster-ui-snapshots-phase7-smoke
+```
+
+Artifact naming:
+
+- demo and single-fixture mode write one text file per `screen x size` combination as `screen-size.txt`
+- phase-7 scenario mode writes one text file per `screen x scenario x size` combination as `screen-scenario-size.txt`
+
+Scenario meanings:
+
+- `strong`: healthy local cache with full capability coverage and rich context
+- `weak`: sparse but still usable local history with explicit uncertainty
+- `empty`: granted scopes but no cached local records yet
+- `stale`: persisted data with degraded freshness or receiver/subscription drift
+- `error`: auth, capability, or sync failure state blocking part of the product surface
+
+The command prints the resolved source mode, scenarios, screens, sizes, and generated artifact paths.
 
 ## Sync and derivation flows
 
@@ -68,141 +141,58 @@ cargo run -- webhook subscriptions sync --dry-run --fixture-dir tests/fixtures/w
 
 This remains the full-history recompute path. Normal syncs still use bounded recent-window rebuilds.
 
-## Review flows
-
-The smart layer is deterministic and bounded. There is no freeform chat assistant.
-
-### `review today`
-
-`ringmaster review today`:
-
-1. Loads persisted local data
-2. Uses the review signal registry plus `derived_review_signal_days`
-3. Builds a ranked daily brief for the anchor day
-4. Renders deterministic copy with evidence, counterevidence, confidence, and sufficiency
-
-### `review week`
-
-`ringmaster review week`:
-
-1. Loads persisted local data
-2. Aggregates the anchor 7-day window
-3. Compares it against a prior 28-day baseline window
-4. Renders positive changes, negative drifts, anomalies, and warnings
-
-### `review investigate`
-
-`ringmaster review investigate --focus <readiness|sleep|recovery|stress|activity>`:
-
-1. Loads persisted local data
-2. Builds the ranked today and week decks
-3. Filters them through the fixed investigation focus
-4. Renders a bounded investigation report with:
-   - focus-specific evidence
-   - counterevidence
-   - warnings
-   - “look next” pointers
-
-## Review ranking and confidence rules
-
-Ranking is explicit rather than hidden. At a high level, the score combines:
-
-- deviation from baseline
-- persistence
-- recency
-- corroboration
-- counterevidence penalty
-- freshness penalty
-- sufficiency penalty
-
-Today review uses the selected day plus prior comparable history.
-
-Week review uses a trailing 7-day anchor window and a prior 28-day comparison window.
-
-Confidence and sufficiency are separate:
-
-- sufficiency reflects comparable-history volume
-- confidence reflects sufficiency plus freshness plus evidence balance
-
-## TUI runtime
-
-`ringmaster tui` is still the live product path. It:
-
-1. Opens the store and reads auth/session metadata
-2. Builds an initial `LiveSnapshot`
-3. Starts the Ratatui event loop
-4. Starts a dedicated background refresh worker on a separate thread
-5. Reuses the scheduler core plus `sync_selected(...)` inside that worker
-6. Rebuilds a fresh `LiveSnapshot` after each successful refresh
-7. Sends snapshot updates back into the reducer as actions
-
-Important boundary:
-
-- widgets never perform HTTP
-- widgets never refresh tokens
-- widgets never write to SQLite
-- the render path stays on persisted presentation models only
-
 ## Screen behavior
 
 ### Dashboard
 
-- shows the shared selected day
-- shows daily metric cards and baseline framing
-- shows freshness and capability banners
-- reuses top Today review items in the “what likely changed?” surface
+- acts as the editorial front page
+- leads with “what matters now”
+- follows with the daily metric band
+- uses freshness, capability, and drill-down cues as supporting structure
 
 ### Timeline
 
-- shows a gap-aware intraday heartrate chart
-- overlays workouts, enhanced tags, and sessions in separate lanes
-- supports family toggles that do not rely on color alone
-- shows selected-event details and a selected-day event list
+- leads with the chart
+- places overlay lanes and selected detail beneath that primary temporal view
+- keeps day-event detail available without competing with the chart for first attention
 
 ### Trends
 
-- shows 7d / 30d / 90d windows
-- shows baseline-aware summaries and thin-history notes
-- reuses weekly drift guidance when the ranked week review has strong enough evidence
+- emphasizes 7d / 30d / 90d comparison and baseline drift
+- uses compact spark hints and delta language for scanning
 
 ### Explain
 
-- shows the selected-day summary
-- compares the selected day against rolling baselines
-- shows evidence bullets and related context entries
-- shows caveats for thin data, missing scope, or missing measurement coverage
-- surfaces a Review hint when the selected day is part of the ranked brief
+- starts with the selected-day claim
+- then shows measured inputs, evidence, context, and uncertainty
+- labels prior-day carryover explicitly so linked context is not mistaken for same-day evidence
 
 ### Patterns
 
-- shows descriptive associations by family and metric
-- shows `n`, magnitude, and sufficiency bucket
-- explicitly says when there is not enough data yet
+- groups deterministic associations and interpretation
+- avoids duplicating Explain’s evidence layout
 
-### Ops
+### Status
 
-- shows auth/session state
-- shows granted capabilities
-- shows per-family freshness and trigger-source diagnostics
-- shows webhook receiver and subscription health
-- shows queue depth, runtime mode, and recent incidents
+- keeps diagnostic density
+- separates summary, family status, diagnostics, and warnings more clearly
 
 ### Review
 
-- shows Today, Week, and Investigate modes
-- shows ranked cards instead of a chart wall
-- shows evidence detail, counterevidence, warnings, confidence, and sufficiency
-- keeps investigation bounded to fixed focuses instead of freeform questioning
+- remains the canonical smart surface
+- uses ranked cards, bounded brief detail, and fixed-focus investigations
+- keeps the selected day and current review mode visible through a lightweight breadcrumb
 
 ## Shared interaction semantics
 
 - Dashboard, Timeline, Explain, and Review share one selected day
 - Timeline and Explain share one selected event
 - Timeline, Explain, and Patterns share family filter toggles for workouts, tags, and sessions
+- when new live data arrives, the selected day stays anchored to the same day if possible, then the nearest earlier available day, then the next later day
 
 Default key flow:
 
-- `1-7`: Dashboard, Timeline, Trends, Explain, Patterns, Ops, Review
+- `1-7`: Dashboard, Timeline, Trends, Explain, Patterns, Review, Status
 - `[` / `]`: previous/next selected day on Dashboard, Timeline, Explain, and Review
 - `,` / `.`: previous/next heartrate point on Timeline
 - `j` / `k`: previous/next selected event on Timeline and Explain
@@ -222,6 +212,8 @@ Default key flow:
 - `cargo run -- review investigate --focus readiness --demo` uses the same fixture-backed store and renders the bounded readiness investigation
 - `cargo run -- tui --demo` uses deterministic in-memory presentation data and skips live background refresh
 - `cargo run -- demo` is an alias for `cargo run -- tui --demo`
+- `cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots` writes deterministic design-review artifacts without requiring a TTY
+- `cargo run -- ui snapshot --fixture-dir tests/fixtures/phase7 ...` is the bounded regression path for strong, weak, empty, stale, and error state coverage
 
 ## Verification sequence
 
@@ -232,15 +224,22 @@ cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
 cargo run -- doctor
-cargo run -- review today --demo
-cargo run -- review week --demo
-cargo run -- review investigate --focus readiness --demo
-cargo run -- derive rebuild --demo
+cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots
+cargo run -- ui snapshot --demo \
+  --screen dashboard --screen timeline --screen review --screen status \
+  --size compact --size wide \
+  --out-dir /tmp/ringmaster-ui-snapshots-smoke
+cargo run -- ui snapshot \
+  --fixture-dir tests/fixtures/phase7 \
+  --screen dashboard --screen explain --screen review --screen status \
+  --size compact --size wide \
+  --out-dir /tmp/ringmaster-ui-snapshots-phase7-smoke
 ```
 
 ## Notes for future passes
 
-- Keep UI rendering pure; any new sync, auth, or webhook work belongs outside `src/components/*`.
-- Reuse the registry, feature snapshot, and bounded investigation seams instead of inventing parallel smart-summary logic.
-- Do not turn Review into chat without a separate explicit design pass.
-- Hosted relay services, notifications, packaging, installers, and release automation remain intentionally deferred.
+- keep UI rendering pure; any new sync, auth, or webhook work belongs outside `src/components/*`
+- extend the semantic theme/layout/chrome layers instead of scattering style decisions back into individual screens
+- keep `ui snapshot` deterministic and text-first unless a later pass explicitly adds a richer visual export path
+- do not turn Review into chat without a separate explicit design pass
+- hosted relay services, notifications, packaging, installers, and release automation remain intentionally deferred
