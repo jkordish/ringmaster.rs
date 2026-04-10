@@ -1150,6 +1150,7 @@ mod tests {
                 renewal_lead_secs: 7 * 24 * 60 * 60,
                 subscriptions: default_desired_subscriptions(),
             },
+            ai: crate::config::AiConfig::default(),
         }
     }
 

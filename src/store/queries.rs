@@ -383,8 +383,55 @@ pub struct DerivedStore<'connection> {
     connection: &'connection Connection,
 }
 
+pub struct AnalysisStore<'connection> {
+    connection: &'connection Connection,
+}
+
 pub struct ViewStore<'connection> {
     connection: &'connection Connection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotExportRecord {
+    pub snapshot_hash: String,
+    pub schema_version: String,
+    pub app_version: String,
+    pub generated_at: String,
+    pub scope: String,
+    pub privacy_profile: String,
+    pub source_mode: String,
+    pub fixture_dir: Option<String>,
+    pub snapshot_json: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotProvenanceRefRecord {
+    pub snapshot_hash: String,
+    pub export_ref: String,
+    pub local_kind: String,
+    pub local_locator: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiArtifactRecord {
+    pub artifact_id: String,
+    pub artifact_kind: String,
+    pub output_schema_version: String,
+    pub prompt_version: String,
+    pub provider: String,
+    pub model: String,
+    pub reasoning_effort: Option<String>,
+    pub request_mode: String,
+    pub input_transport: String,
+    pub run_mode: String,
+    pub created_at: String,
+    pub snapshot_hash_a: String,
+    pub snapshot_hash_b: Option<String>,
+    pub privacy_profile: String,
+    pub payload_json: String,
+    pub rendered_briefing: String,
 }
 
 impl Display for SyncRunStatus {
@@ -1558,6 +1605,278 @@ impl<'connection> DerivedStore<'connection> {
                 Err(error)
             }
         }
+    }
+}
+
+impl<'connection> AnalysisStore<'connection> {
+    pub fn new(connection: &'connection Connection) -> Self {
+        Self { connection }
+    }
+
+    pub fn upsert_snapshot_export(
+        &self,
+        record: &SnapshotExportRecord,
+        provenance_refs: &[SnapshotProvenanceRefRecord],
+    ) -> Result<()> {
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE TRANSACTION")?;
+
+        let result = (|| -> Result<()> {
+            self.connection.execute(
+                "INSERT INTO snapshot_exports (
+                    snapshot_hash,
+                    schema_version,
+                    app_version,
+                    generated_at,
+                    scope,
+                    privacy_profile,
+                    source_mode,
+                    fixture_dir,
+                    snapshot_json,
+                    created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                ON CONFLICT(snapshot_hash) DO UPDATE SET
+                    schema_version = excluded.schema_version,
+                    app_version = excluded.app_version,
+                    generated_at = excluded.generated_at,
+                    scope = excluded.scope,
+                    privacy_profile = excluded.privacy_profile,
+                    source_mode = excluded.source_mode,
+                    fixture_dir = excluded.fixture_dir,
+                    snapshot_json = excluded.snapshot_json,
+                    created_at = excluded.created_at",
+                params![
+                    record.snapshot_hash,
+                    record.schema_version,
+                    record.app_version,
+                    record.generated_at,
+                    record.scope,
+                    record.privacy_profile,
+                    record.source_mode,
+                    record.fixture_dir,
+                    record.snapshot_json,
+                    record.created_at,
+                ],
+            )?;
+
+            self.connection.execute(
+                "DELETE FROM snapshot_provenance_refs WHERE snapshot_hash = ?1",
+                params![record.snapshot_hash],
+            )?;
+
+            let mut statement = self.connection.prepare(
+                "INSERT INTO snapshot_provenance_refs (
+                    snapshot_hash,
+                    export_ref,
+                    local_kind,
+                    local_locator,
+                    created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for provenance_ref in provenance_refs {
+                statement.execute(params![
+                    provenance_ref.snapshot_hash,
+                    provenance_ref.export_ref,
+                    provenance_ref.local_kind,
+                    provenance_ref.local_locator,
+                    provenance_ref.created_at,
+                ])?;
+            }
+
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                self.connection.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn snapshot_export(&self, snapshot_hash: &str) -> Result<Option<SnapshotExportRecord>> {
+        self.connection
+            .query_row(
+                "SELECT
+                    snapshot_hash,
+                    schema_version,
+                    app_version,
+                    generated_at,
+                    scope,
+                    privacy_profile,
+                    source_mode,
+                    fixture_dir,
+                    snapshot_json,
+                    created_at
+                 FROM snapshot_exports
+                 WHERE snapshot_hash = ?1",
+                params![snapshot_hash],
+                |row| {
+                    Ok(SnapshotExportRecord {
+                        snapshot_hash: row.get(0)?,
+                        schema_version: row.get(1)?,
+                        app_version: row.get(2)?,
+                        generated_at: row.get(3)?,
+                        scope: row.get(4)?,
+                        privacy_profile: row.get(5)?,
+                        source_mode: row.get(6)?,
+                        fixture_dir: row.get(7)?,
+                        snapshot_json: row.get(8)?,
+                        created_at: row.get(9)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn snapshot_provenance_refs(
+        &self,
+        snapshot_hash: &str,
+    ) -> Result<Vec<SnapshotProvenanceRefRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                snapshot_hash,
+                export_ref,
+                local_kind,
+                local_locator,
+                created_at
+             FROM snapshot_provenance_refs
+             WHERE snapshot_hash = ?1
+             ORDER BY export_ref ASC",
+        )?;
+        let rows = statement.query_map(params![snapshot_hash], |row| {
+            Ok(SnapshotProvenanceRefRecord {
+                snapshot_hash: row.get(0)?,
+                export_ref: row.get(1)?,
+                local_kind: row.get(2)?,
+                local_locator: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
+    }
+
+    pub fn upsert_ai_artifact(&self, record: &AiArtifactRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO ai_artifacts (
+                artifact_id,
+                artifact_kind,
+                output_schema_version,
+                prompt_version,
+                provider,
+                model,
+                reasoning_effort,
+                request_mode,
+                input_transport,
+                run_mode,
+                created_at,
+                snapshot_hash_a,
+                snapshot_hash_b,
+                privacy_profile,
+                payload_json,
+                rendered_briefing
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+            ON CONFLICT(artifact_id) DO UPDATE SET
+                artifact_kind = excluded.artifact_kind,
+                output_schema_version = excluded.output_schema_version,
+                prompt_version = excluded.prompt_version,
+                provider = excluded.provider,
+                model = excluded.model,
+                reasoning_effort = excluded.reasoning_effort,
+                request_mode = excluded.request_mode,
+                input_transport = excluded.input_transport,
+                run_mode = excluded.run_mode,
+                created_at = excluded.created_at,
+                snapshot_hash_a = excluded.snapshot_hash_a,
+                snapshot_hash_b = excluded.snapshot_hash_b,
+                privacy_profile = excluded.privacy_profile,
+                payload_json = excluded.payload_json,
+                rendered_briefing = excluded.rendered_briefing",
+            params![
+                record.artifact_id,
+                record.artifact_kind,
+                record.output_schema_version,
+                record.prompt_version,
+                record.provider,
+                record.model,
+                record.reasoning_effort,
+                record.request_mode,
+                record.input_transport,
+                record.run_mode,
+                record.created_at,
+                record.snapshot_hash_a,
+                record.snapshot_hash_b,
+                record.privacy_profile,
+                record.payload_json,
+                record.rendered_briefing,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn latest_ai_artifact(
+        &self,
+        artifact_kind: &str,
+        snapshot_hash: &str,
+    ) -> Result<Option<AiArtifactRecord>> {
+        self.connection
+            .query_row(
+                "SELECT
+                    artifact_id,
+                    artifact_kind,
+                    output_schema_version,
+                    prompt_version,
+                    provider,
+                    model,
+                    reasoning_effort,
+                    request_mode,
+                    input_transport,
+                    run_mode,
+                    created_at,
+                    snapshot_hash_a,
+                    snapshot_hash_b,
+                    privacy_profile,
+                    payload_json,
+                    rendered_briefing
+                 FROM ai_artifacts
+                 WHERE artifact_kind = ?1
+                   AND snapshot_hash_a = ?2
+                 ORDER BY created_at DESC
+                 LIMIT 1",
+                params![artifact_kind, snapshot_hash],
+                |row| {
+                    Ok(AiArtifactRecord {
+                        artifact_id: row.get(0)?,
+                        artifact_kind: row.get(1)?,
+                        output_schema_version: row.get(2)?,
+                        prompt_version: row.get(3)?,
+                        provider: row.get(4)?,
+                        model: row.get(5)?,
+                        reasoning_effort: row.get(6)?,
+                        request_mode: row.get(7)?,
+                        input_transport: row.get(8)?,
+                        run_mode: row.get(9)?,
+                        created_at: row.get(10)?,
+                        snapshot_hash_a: row.get(11)?,
+                        snapshot_hash_b: row.get(12)?,
+                        privacy_profile: row.get(13)?,
+                        payload_json: row.get(14)?,
+                        rendered_briefing: row.get(15)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 }
 
@@ -2799,9 +3118,10 @@ mod tests {
     use crate::review::features::ReviewSufficiency;
     use crate::store::Store;
     use crate::store::queries::{
-        ContextEventFamily, ContextEventRecord, DailyActivityRecord, DailyReadinessRecord,
-        DailySleepRecord, HeartrateSampleRecord, RestModePeriodRecord, ReviewSignalDayRecord,
-        SyncRunStatus, SyncStateRecord, TimeSemantics, Vo2MaxRecord,
+        AiArtifactRecord, ContextEventFamily, ContextEventRecord, DailyActivityRecord,
+        DailyReadinessRecord, DailySleepRecord, HeartrateSampleRecord, RestModePeriodRecord,
+        ReviewSignalDayRecord, SnapshotExportRecord, SnapshotProvenanceRefRecord, SyncRunStatus,
+        SyncStateRecord, TimeSemantics, Vo2MaxRecord,
     };
 
     fn seed_daily_history(store: &Store) {
@@ -3085,6 +3405,89 @@ mod tests {
                 .as_deref(),
             Some(current_day.as_str())
         );
+    }
+
+    #[test]
+    fn analysis_store_round_trips_snapshot_exports_and_provenance() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let record = SnapshotExportRecord {
+            snapshot_hash: "hash-123".to_owned(),
+            schema_version: "ringmaster.snapshot.v1".to_owned(),
+            app_version: "0.1.0".to_owned(),
+            generated_at: "2026-04-10T00:00:00Z".to_owned(),
+            scope: "today".to_owned(),
+            privacy_profile: "redacted".to_owned(),
+            source_mode: "demo".to_owned(),
+            fixture_dir: Some("tests/fixtures/phase7/strong".to_owned()),
+            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v1\"}".to_owned(),
+            created_at: "2026-04-10T00:00:01Z".to_owned(),
+        };
+        let provenance = vec![SnapshotProvenanceRefRecord {
+            snapshot_hash: "hash-123".to_owned(),
+            export_ref: "daily:2026-04-10".to_owned(),
+            local_kind: "daily_overview".to_owned(),
+            local_locator: "2026-04-10".to_owned(),
+            created_at: "2026-04-10T00:00:00Z".to_owned(),
+        }];
+
+        store
+            .analysis()
+            .upsert_snapshot_export(&record, &provenance)
+            .unwrap_or_else(|error| panic!("snapshot export should persist: {error}"));
+
+        let loaded = store
+            .analysis()
+            .snapshot_export("hash-123")
+            .unwrap_or_else(|error| panic!("snapshot export should load: {error}"))
+            .unwrap_or_else(|| panic!("snapshot export should exist"));
+        let loaded_provenance = store
+            .analysis()
+            .snapshot_provenance_refs("hash-123")
+            .unwrap_or_else(|error| panic!("provenance refs should load: {error}"));
+
+        assert_eq!(loaded.scope, "today");
+        assert_eq!(loaded.privacy_profile, "redacted");
+        assert_eq!(loaded_provenance.len(), 1);
+        assert_eq!(loaded_provenance[0].export_ref, "daily:2026-04-10");
+    }
+
+    #[test]
+    fn analysis_store_round_trips_ai_artifacts() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let artifact = AiArtifactRecord {
+            artifact_id: "artifact-123".to_owned(),
+            artifact_kind: "review".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            prompt_version: "review_prompt_v1".to_owned(),
+            provider: "dry_run".to_owned(),
+            model: "deterministic".to_owned(),
+            reasoning_effort: None,
+            request_mode: "stateless".to_owned(),
+            input_transport: "inline".to_owned(),
+            run_mode: "dry_run".to_owned(),
+            created_at: "2026-04-10T00:05:00Z".to_owned(),
+            snapshot_hash_a: "hash-123".to_owned(),
+            snapshot_hash_b: None,
+            privacy_profile: "redacted".to_owned(),
+            payload_json: "{\"status\":\"dry_run\"}".to_owned(),
+            rendered_briefing: "ringmaster ai review".to_owned(),
+        };
+
+        store
+            .analysis()
+            .upsert_ai_artifact(&artifact)
+            .unwrap_or_else(|error| panic!("ai artifact should persist: {error}"));
+
+        let loaded = store
+            .analysis()
+            .latest_ai_artifact("review", "hash-123")
+            .unwrap_or_else(|error| panic!("ai artifact should load: {error}"))
+            .unwrap_or_else(|| panic!("ai artifact should exist"));
+
+        assert_eq!(loaded.provider, "dry_run");
+        assert_eq!(loaded.payload_json, "{\"status\":\"dry_run\"}");
     }
 
     #[test]

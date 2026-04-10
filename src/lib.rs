@@ -27,6 +27,7 @@
 )]
 
 pub mod action;
+pub mod ai;
 pub mod app;
 pub mod cli;
 pub mod components;
@@ -37,20 +38,23 @@ pub mod insights;
 pub mod oura;
 pub mod refresh;
 pub mod review;
+pub mod snapshot;
 pub mod store;
 pub mod tui;
 pub mod ui;
 pub mod webhook;
 
 use std::collections::HashMap;
+use std::fs;
 use std::io::{IsTerminal, stdin, stdout};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use app::{build_demo_state, build_live_state, load_live_snapshot};
 use cli::{
-    AuthCommand, Cli, Command, DeriveCommand, DeriveRebuildArgs, ReviewCommand, ReviewFocusArg,
-    ReviewInvestigateArgs, ReviewTodayArgs, ReviewWeekArgs, SnapshotScreenArg, SnapshotSizeArg,
+    AiCommand, AiCompareArgs, AiReviewArgs, AuthCommand, Cli, Command, DeriveCommand,
+    DeriveRebuildArgs, ReviewCommand, ReviewFocusArg, ReviewInvestigateArgs, ReviewTodayArgs,
+    ReviewWeekArgs, SnapshotCommand, SnapshotExportArgs, SnapshotScreenArg, SnapshotSizeArg,
     SyncCommand, SyncOnceArgs, SyncWatchArgs, TuiArgs, UiCommand, UiSnapshotArgs, WebhookCommand,
     WebhookReplayArgs, WebhookServeArgs, WebhookSubscriptionCommand, WebhookSubscriptionsListArgs,
     WebhookSubscriptionsSyncArgs,
@@ -131,6 +135,9 @@ pub async fn run_cli(cli: Cli) -> Result<Option<String>> {
         Command::Doctor => run_doctor(&config),
         Command::Demo => run_demo(&config).await,
         Command::Tui(args) => run_tui(&config, args).await,
+        Command::Snapshot { command } => match command {
+            SnapshotCommand::Export(args) => run_snapshot_export(&config, args).await,
+        },
         Command::Ui { command } => match command {
             UiCommand::Snapshot(args) => run_ui_snapshot(&config, args).await,
         },
@@ -160,6 +167,10 @@ pub async fn run_cli(cli: Cli) -> Result<Option<String>> {
             ReviewCommand::Today(args) => run_review_today(&config, args).await,
             ReviewCommand::Week(args) => run_review_week(&config, args).await,
             ReviewCommand::Investigate(args) => run_review_investigate(&config, args).await,
+        },
+        Command::Ai { command } => match command {
+            AiCommand::Review(args) => run_ai_review(&config, args).await,
+            AiCommand::Compare(args) => run_ai_compare(&config, args).await,
         },
     }
 }
@@ -1933,6 +1944,127 @@ notes:
     Ok(Some(output))
 }
 
+#[derive(Debug)]
+struct SnapshotCommandContext {
+    _guard: Option<TempRootGuard>,
+    config: Config,
+    store: Store,
+    auth_status: oura::models::AuthStatus,
+}
+
+async fn run_snapshot_export(config: &Config, args: SnapshotExportArgs) -> Result<Option<String>> {
+    let privacy_profile = snapshot::PrivacyProfile::try_from(args.profile)?;
+    let context =
+        load_snapshot_command_context(config, args.demo, args.fixture_dir.clone()).await?;
+    let scope = snapshot::resolve_scope(&context.store, &args.scope)?;
+    let export = snapshot::export_snapshot(
+        &context.config,
+        &context.store,
+        &context.auth_status,
+        if args.demo {
+            snapshot::SnapshotSourceMode::Demo
+        } else {
+            snapshot::SnapshotSourceMode::Live
+        },
+        args.fixture_dir.as_deref(),
+        &scope,
+        privacy_profile,
+    )?;
+    context
+        .store
+        .analysis()
+        .upsert_snapshot_export(&export.manifest_record, &export.provenance_records)?;
+
+    let rendered_json = if args.compact {
+        export.compact_json.clone()
+    } else {
+        export.pretty_json.clone()
+    };
+    if let Some(out_path) = args.out {
+        write_text_file(&out_path, &rendered_json, "writing snapshot export")?;
+        return Ok(Some(format!(
+            "\
+ringmaster snapshot export
+
+snapshot_hash: {}
+scope: {}
+privacy_profile: {}
+source_mode: {}
+out: {}
+",
+            export.bundle.metadata.snapshot_hash,
+            export.bundle.metadata.scope,
+            export.bundle.metadata.privacy_profile.as_str(),
+            export.bundle.metadata.source_mode.as_str(),
+            out_path.display(),
+        )));
+    }
+
+    Ok(Some(rendered_json))
+}
+
+async fn run_ai_review(config: &Config, args: AiReviewArgs) -> Result<Option<String>> {
+    let snapshot_artifact = snapshot::load_snapshot_artifact(&args.snapshot_path)?;
+    let output = ai::review_snapshot(
+        config,
+        &snapshot_artifact,
+        args.dry_run,
+        args.fixture.as_deref(),
+    )
+    .await?;
+    let store = Store::open(config)?;
+    store.analysis().upsert_ai_artifact(&output.record)?;
+    let rendered = if let Some(out_path) = args.out {
+        write_text_file(
+            &out_path,
+            &output.payload_json,
+            "writing AI review artifact",
+        )?;
+        format!(
+            "{}\n\nartifact_json_path: {}\nartifact_id: {}",
+            output.rendered_briefing,
+            out_path.display(),
+            output.record.artifact_id
+        )
+    } else {
+        format!("{}\n\n{}", output.rendered_briefing, output.payload_json)
+    };
+
+    Ok(Some(rendered))
+}
+
+async fn run_ai_compare(config: &Config, args: AiCompareArgs) -> Result<Option<String>> {
+    let snapshot_a = snapshot::load_snapshot_artifact(&args.snapshot_a)?;
+    let snapshot_b = snapshot::load_snapshot_artifact(&args.snapshot_b)?;
+    let output = ai::compare_snapshots(
+        config,
+        &snapshot_a,
+        &snapshot_b,
+        args.dry_run,
+        args.fixture.as_deref(),
+    )
+    .await?;
+    let store = Store::open(config)?;
+    store.analysis().upsert_ai_artifact(&output.record)?;
+    let rendered = if let Some(out_path) = args.out {
+        write_text_file(
+            &out_path,
+            &output.payload_json,
+            "writing AI compare artifact",
+        )?;
+        format!(
+            "{}\n\nartifact_json_path: {}\nartifact_id: {}",
+            output.rendered_briefing,
+            out_path.display(),
+            output.record.artifact_id
+        )
+    } else {
+        format!("{}\n\n{}", output.rendered_briefing, output.payload_json)
+    };
+
+    Ok(Some(rendered))
+}
+
 #[derive(Debug, Clone)]
 struct ReviewStoreSnapshot {
     auth_status: oura::models::AuthStatus,
@@ -2084,6 +2216,56 @@ async fn load_review_store_snapshot(
         derived.as_ref(),
     )?;
     Ok((None, snapshot))
+}
+
+async fn load_snapshot_command_context(
+    config: &Config,
+    demo: bool,
+    fixture_dir: Option<PathBuf>,
+) -> Result<SnapshotCommandContext> {
+    if demo {
+        let fixture_dir = fixture_dir
+            .or_else(|| config.refresh.demo_fixture_dir.clone())
+            .unwrap_or_else(|| PathBuf::from("tests/fixtures/phase5"));
+        let temp_root = TempRootGuard::new("snapshot-export");
+        let mut temp_config = config.clone();
+        temp_config.paths = AppPaths::from_roots(
+            config.paths.home_dir.clone(),
+            temp_root.path().join("config"),
+            temp_root.path().join("state"),
+            temp_root.path().join("cache"),
+        )?;
+        let store = Store::open(&temp_config)?;
+        oura::sync::sync_once(
+            &temp_config,
+            &store,
+            oura::sync::SyncOptions {
+                dry_run: false,
+                fixture_dir: Some(fixture_dir),
+                families: SyncFamily::ALL.to_vec(),
+                trigger_source: Some("snapshot_export_demo".to_owned()),
+                trigger_detail: Some("snapshot export seed sync".to_owned()),
+            },
+        )
+        .await?;
+        derive::rebuild_store(&store)?;
+        let auth_status = oura::auth::inspect_auth(&temp_config, &store)?;
+        return Ok(SnapshotCommandContext {
+            _guard: Some(temp_root),
+            config: temp_config,
+            store,
+            auth_status,
+        });
+    }
+
+    let store = Store::open(config)?;
+    let auth_status = oura::auth::inspect_auth(config, &store)?;
+    Ok(SnapshotCommandContext {
+        _guard: None,
+        config: config.clone(),
+        store,
+        auth_status,
+    })
 }
 
 fn load_review_snapshot_from_artifacts(
@@ -2390,6 +2572,15 @@ fn render_investigation_report(report: &InvestigationReport) -> String {
     lines.join("\n")
 }
 
+fn write_text_file(path: &std::path::Path, contents: &str, context: &'static str) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|error| RingmasterError::io(context, error))?;
+    }
+    fs::write(path, contents).map_err(|error| RingmasterError::io(context, error))
+}
+
 impl TempRootGuard {
     fn new(prefix: &str) -> Self {
         let timestamp = OffsetDateTime::now_utc().unix_timestamp_nanos().to_string();
@@ -2437,10 +2628,12 @@ fn interactive_terminal_available() -> bool {
 #[allow(clippy::panic)]
 mod tests {
     use super::{
-        run_doctor, run_review_investigate, run_review_today, run_review_week, run_webhook_replay,
+        run_ai_compare, run_ai_review, run_doctor, run_review_investigate, run_review_today,
+        run_review_week, run_snapshot_export, run_webhook_replay,
     };
     use crate::cli::{
-        ReviewFocusArg, ReviewInvestigateArgs, ReviewTodayArgs, ReviewWeekArgs, WebhookReplayArgs,
+        AiCompareArgs, AiReviewArgs, ReviewFocusArg, ReviewInvestigateArgs, ReviewTodayArgs,
+        ReviewWeekArgs, SnapshotExportArgs, WebhookReplayArgs,
     };
     use crate::config::{
         AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
@@ -2563,6 +2756,7 @@ mod tests {
                     renewal_lead_secs: 7 * 24 * 60 * 60,
                     subscriptions: default_desired_subscriptions(),
                 },
+                ai: crate::config::AiConfig::default(),
             },
         )
     }
@@ -3083,6 +3277,241 @@ mod tests {
         assert!(output.contains(
             "Stored-delivery replay re-enqueued invalidations without auto-running a fixture-backed sync."
         ));
+    }
+
+    #[tokio::test]
+    async fn snapshot_export_demo_writes_redacted_bundle() {
+        let (_tempdir, mut config) =
+            test_config(Some("https://example.test"), Some("verify-token"));
+        config.refresh.demo_fixture_dir =
+            Some(std::path::PathBuf::from("tests/fixtures/phase7/strong"));
+        let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
+        let out_path = out_dir.path().join("snapshot.json");
+
+        let output = run_snapshot_export(
+            &config,
+            SnapshotExportArgs {
+                demo: true,
+                fixture_dir: None,
+                scope: "today".to_owned(),
+                profile: crate::cli::PrivacyProfileArg::Redacted,
+                out: Some(out_path.clone()),
+                compact: false,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("snapshot export should succeed: {error}"))
+        .unwrap_or_else(|| panic!("snapshot export should render output"));
+
+        let raw_snapshot = std::fs::read_to_string(&out_path)
+            .unwrap_or_else(|error| panic!("snapshot artifact should read: {error}"));
+        let artifact = crate::snapshot::load_snapshot_artifact(&out_path)
+            .unwrap_or_else(|error| panic!("snapshot artifact should load: {error}"));
+
+        assert!(output.contains("ringmaster snapshot export"));
+        assert!(output.contains("privacy_profile: redacted"));
+        assert!(!raw_snapshot.contains("fixture@example.com"));
+        assert_eq!(
+            artifact.bundle.metadata.privacy_profile,
+            crate::snapshot::PrivacyProfile::Redacted
+        );
+    }
+
+    #[tokio::test]
+    async fn ai_review_dry_run_persists_local_artifact() {
+        let (_tempdir, mut config) =
+            test_config(Some("https://example.test"), Some("verify-token"));
+        config.refresh.demo_fixture_dir =
+            Some(std::path::PathBuf::from("tests/fixtures/phase7/strong"));
+        let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
+        let snapshot_path = out_dir.path().join("snapshot.json");
+        run_snapshot_export(
+            &config,
+            SnapshotExportArgs {
+                demo: true,
+                fixture_dir: None,
+                scope: "today".to_owned(),
+                profile: crate::cli::PrivacyProfileArg::Redacted,
+                out: Some(snapshot_path.clone()),
+                compact: false,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("snapshot export should succeed: {error}"));
+        let snapshot_artifact = crate::snapshot::load_snapshot_artifact(&snapshot_path)
+            .unwrap_or_else(|error| panic!("snapshot artifact should load: {error}"));
+
+        let output = run_ai_review(
+            &config,
+            AiReviewArgs {
+                snapshot_path: snapshot_path.clone(),
+                dry_run: true,
+                fixture: None,
+                out: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("dry-run review should succeed: {error}"))
+        .unwrap_or_else(|| panic!("dry-run review should render output"));
+
+        let store = Store::open(&config)
+            .unwrap_or_else(|error| panic!("store should open for ai review test: {error}"));
+        let persisted = store
+            .analysis()
+            .latest_ai_artifact("review", &snapshot_artifact.bundle.metadata.snapshot_hash)
+            .unwrap_or_else(|error| panic!("persisted ai review should load: {error}"))
+            .unwrap_or_else(|| panic!("persisted ai review should exist"));
+
+        assert!(output.contains("ringmaster ai review"));
+        assert_eq!(persisted.run_mode, "dry_run");
+    }
+
+    #[tokio::test]
+    async fn ai_review_fixture_path_uses_fixture_payload() {
+        let (_tempdir, mut config) =
+            test_config(Some("https://example.test"), Some("verify-token"));
+        config.refresh.demo_fixture_dir =
+            Some(std::path::PathBuf::from("tests/fixtures/phase7/strong"));
+        let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
+        let snapshot_path = out_dir.path().join("snapshot.json");
+        run_snapshot_export(
+            &config,
+            SnapshotExportArgs {
+                demo: true,
+                fixture_dir: None,
+                scope: "today".to_owned(),
+                profile: crate::cli::PrivacyProfileArg::Redacted,
+                out: Some(snapshot_path.clone()),
+                compact: false,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("snapshot export should succeed: {error}"));
+
+        let output = run_ai_review(
+            &config,
+            AiReviewArgs {
+                snapshot_path,
+                dry_run: false,
+                fixture: Some(std::path::PathBuf::from(
+                    "tests/fixtures/phase7/ai-review-fixture.json",
+                )),
+                out: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("fixture review should succeed: {error}"))
+        .unwrap_or_else(|| panic!("fixture review should render output"));
+
+        assert!(output.contains("Fixture-backed review for regression testing."));
+    }
+
+    #[tokio::test]
+    async fn ai_compare_dry_run_and_fixture_paths_render() {
+        let (_tempdir, mut config) =
+            test_config(Some("https://example.test"), Some("verify-token"));
+        config.refresh.demo_fixture_dir =
+            Some(std::path::PathBuf::from("tests/fixtures/phase7/strong"));
+        let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
+        let snapshot_a = out_dir.path().join("snapshot-a.json");
+        let snapshot_b = out_dir.path().join("snapshot-b.json");
+
+        run_snapshot_export(
+            &config,
+            SnapshotExportArgs {
+                demo: true,
+                fixture_dir: None,
+                scope: "today".to_owned(),
+                profile: crate::cli::PrivacyProfileArg::Redacted,
+                out: Some(snapshot_a.clone()),
+                compact: false,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("snapshot export should succeed: {error}"));
+        run_snapshot_export(
+            &config,
+            SnapshotExportArgs {
+                demo: true,
+                fixture_dir: None,
+                scope: "week".to_owned(),
+                profile: crate::cli::PrivacyProfileArg::Redacted,
+                out: Some(snapshot_b.clone()),
+                compact: false,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("second snapshot export should succeed: {error}"));
+
+        let dry_run_output = run_ai_compare(
+            &config,
+            AiCompareArgs {
+                snapshot_a: snapshot_a.clone(),
+                snapshot_b: snapshot_b.clone(),
+                dry_run: true,
+                fixture: None,
+                out: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("dry-run compare should succeed: {error}"))
+        .unwrap_or_else(|| panic!("dry-run compare should render output"));
+        let fixture_output = run_ai_compare(
+            &config,
+            AiCompareArgs {
+                snapshot_a,
+                snapshot_b,
+                dry_run: false,
+                fixture: Some(std::path::PathBuf::from(
+                    "tests/fixtures/phase7/ai-compare-fixture.json",
+                )),
+                out: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("fixture compare should succeed: {error}"))
+        .unwrap_or_else(|| panic!("fixture compare should render output"));
+
+        assert!(dry_run_output.contains("ringmaster ai compare"));
+        assert!(fixture_output.contains("Fixture-backed comparison for regression testing."));
+    }
+
+    #[tokio::test]
+    async fn ai_review_fails_cleanly_when_provider_is_disabled() {
+        let (_tempdir, mut config) =
+            test_config(Some("https://example.test"), Some("verify-token"));
+        config.refresh.demo_fixture_dir =
+            Some(std::path::PathBuf::from("tests/fixtures/phase7/strong"));
+        let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
+        let snapshot_path = out_dir.path().join("snapshot.json");
+        run_snapshot_export(
+            &config,
+            SnapshotExportArgs {
+                demo: true,
+                fixture_dir: None,
+                scope: "today".to_owned(),
+                profile: crate::cli::PrivacyProfileArg::Redacted,
+                out: Some(snapshot_path.clone()),
+                compact: false,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("snapshot export should succeed: {error}"));
+
+        let error = run_ai_review(
+            &config,
+            AiReviewArgs {
+                snapshot_path,
+                dry_run: false,
+                fixture: None,
+                out: None,
+            },
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("ai review should fail when provider is disabled"));
+
+        assert!(error.to_string().contains("AI provider is disabled"));
     }
 
     #[tokio::test]

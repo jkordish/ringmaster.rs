@@ -22,6 +22,7 @@ pub struct Config {
     pub oura: OuraConfig,
     pub refresh: RefreshConfig,
     pub webhook: WebhookConfig,
+    pub ai: AiConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -93,12 +94,52 @@ pub struct WebhookConfig {
     pub subscriptions: Vec<DesiredWebhookSubscription>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiProviderKind {
+    OpenAi,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiRequestMode {
+    Stateless,
+    Stateful,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiInputTransport {
+    Inline,
+    FileUpload,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptCacheMode {
+    Off,
+    Auto,
+}
+
+#[derive(Debug, Clone)]
+pub struct AiConfig {
+    pub enabled: bool,
+    pub provider: AiProviderKind,
+    pub api_base_url: String,
+    pub api_key_env: String,
+    pub model: String,
+    pub reasoning_effort: Option<String>,
+    pub timeout_secs: u64,
+    pub max_retries: u32,
+    pub request_mode: AiRequestMode,
+    pub input_transport: AiInputTransport,
+    pub prompt_cache: PromptCacheMode,
+    pub safety_identifier: Option<String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct FileConfig {
     logging: Option<FileLoggingConfig>,
     oura: Option<FileOuraConfig>,
     refresh: Option<FileRefreshConfig>,
     webhook: Option<FileWebhookConfig>,
+    ai: Option<FileAiConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -156,6 +197,22 @@ struct FileWebhookConfig {
     heartbeat_secs: Option<u64>,
     renewal_lead_secs: Option<u64>,
     subscriptions: Option<Vec<FileWebhookSubscription>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FileAiConfig {
+    enabled: Option<bool>,
+    provider: Option<String>,
+    api_base_url: Option<String>,
+    api_key_env: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    timeout_secs: Option<u64>,
+    max_retries: Option<u32>,
+    request_mode: Option<String>,
+    input_transport: Option<String>,
+    prompt_cache: Option<String>,
+    safety_identifier: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -467,10 +524,94 @@ impl Config {
                     .unwrap_or(7 * 24 * 60 * 60),
                 subscriptions: webhook_subscriptions,
             },
+            ai: AiConfig {
+                enabled: env_bool("RINGMASTER_AI_ENABLED")
+                    .or_else(|| file_config.ai.as_ref().and_then(|ai| ai.enabled))
+                    .unwrap_or(false),
+                provider: env_string("RINGMASTER_AI_PROVIDER")
+                    .or_else(|| file_config.ai.as_ref().and_then(|ai| ai.provider.clone()))
+                    .as_deref()
+                    .map(AiProviderKind::parse)
+                    .transpose()?
+                    .unwrap_or(AiProviderKind::OpenAi),
+                api_base_url: env_string("RINGMASTER_AI_API_BASE_URL")
+                    .or_else(|| {
+                        file_config
+                            .ai
+                            .as_ref()
+                            .and_then(|ai| ai.api_base_url.clone())
+                    })
+                    .unwrap_or_else(|| "https://api.openai.com/v1".to_owned()),
+                api_key_env: env_string("RINGMASTER_AI_API_KEY_ENV")
+                    .or_else(|| {
+                        file_config
+                            .ai
+                            .as_ref()
+                            .and_then(|ai| ai.api_key_env.clone())
+                    })
+                    .unwrap_or_else(|| "OPENAI_API_KEY".to_owned()),
+                model: env_string("RINGMASTER_AI_MODEL")
+                    .or_else(|| file_config.ai.as_ref().and_then(|ai| ai.model.clone()))
+                    .unwrap_or_else(|| "gpt-5-mini".to_owned()),
+                reasoning_effort: env_string("RINGMASTER_AI_REASONING_EFFORT").or_else(|| {
+                    file_config
+                        .ai
+                        .as_ref()
+                        .and_then(|ai| ai.reasoning_effort.clone())
+                }),
+                timeout_secs: env_string("RINGMASTER_AI_TIMEOUT_SECS")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .or_else(|| file_config.ai.as_ref().and_then(|ai| ai.timeout_secs))
+                    .unwrap_or(30),
+                max_retries: env_string("RINGMASTER_AI_MAX_RETRIES")
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .or_else(|| file_config.ai.as_ref().and_then(|ai| ai.max_retries))
+                    .unwrap_or(1),
+                request_mode: env_string("RINGMASTER_AI_REQUEST_MODE")
+                    .or_else(|| {
+                        file_config
+                            .ai
+                            .as_ref()
+                            .and_then(|ai| ai.request_mode.clone())
+                    })
+                    .as_deref()
+                    .map(AiRequestMode::parse)
+                    .transpose()?
+                    .unwrap_or(AiRequestMode::Stateless),
+                input_transport: env_string("RINGMASTER_AI_INPUT_TRANSPORT")
+                    .or_else(|| {
+                        file_config
+                            .ai
+                            .as_ref()
+                            .and_then(|ai| ai.input_transport.clone())
+                    })
+                    .as_deref()
+                    .map(AiInputTransport::parse)
+                    .transpose()?
+                    .unwrap_or(AiInputTransport::Inline),
+                prompt_cache: env_string("RINGMASTER_AI_PROMPT_CACHE")
+                    .or_else(|| {
+                        file_config
+                            .ai
+                            .as_ref()
+                            .and_then(|ai| ai.prompt_cache.clone())
+                    })
+                    .as_deref()
+                    .map(PromptCacheMode::parse)
+                    .transpose()?
+                    .unwrap_or(PromptCacheMode::Off),
+                safety_identifier: env_string("RINGMASTER_AI_SAFETY_IDENTIFIER").or_else(|| {
+                    file_config
+                        .ai
+                        .as_ref()
+                        .and_then(|ai| ai.safety_identifier.clone())
+                }),
+            },
         };
 
         config.refresh.validate()?;
         config.webhook.validate()?;
+        config.ai.validate()?;
 
         Ok(config)
     }
@@ -673,6 +814,126 @@ impl WebhookConfig {
     }
 }
 
+impl AiProviderKind {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "openai" => Ok(Self::OpenAi),
+            other => Err(RingmasterError::Config(format!(
+                "ai.provider must be `openai`, got `{other}`"
+            ))),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+        }
+    }
+}
+
+impl AiRequestMode {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "stateless" => Ok(Self::Stateless),
+            "stateful" => Ok(Self::Stateful),
+            other => Err(RingmasterError::Config(format!(
+                "ai.request_mode must be `stateless` or `stateful`, got `{other}`"
+            ))),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stateless => "stateless",
+            Self::Stateful => "stateful",
+        }
+    }
+}
+
+impl AiInputTransport {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "inline" => Ok(Self::Inline),
+            "file_upload" => Ok(Self::FileUpload),
+            other => Err(RingmasterError::Config(format!(
+                "ai.input_transport must be `inline` or `file_upload`, got `{other}`"
+            ))),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inline => "inline",
+            Self::FileUpload => "file_upload",
+        }
+    }
+}
+
+impl PromptCacheMode {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "off" => Ok(Self::Off),
+            "auto" => Ok(Self::Auto),
+            other => Err(RingmasterError::Config(format!(
+                "ai.prompt_cache must be `off` or `auto`, got `{other}`"
+            ))),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+impl AiConfig {
+    fn validate(&self) -> Result<()> {
+        if self.timeout_secs == 0 {
+            return Err(RingmasterError::Config(
+                "ai.timeout_secs must be at least 1".to_owned(),
+            ));
+        }
+        if self.api_base_url.trim().is_empty() {
+            return Err(RingmasterError::Config(
+                "ai.api_base_url must not be empty".to_owned(),
+            ));
+        }
+        if self.api_key_env.trim().is_empty() {
+            return Err(RingmasterError::Config(
+                "ai.api_key_env must not be empty".to_owned(),
+            ));
+        }
+        if self.model.trim().is_empty() {
+            return Err(RingmasterError::Config(
+                "ai.model must not be empty".to_owned(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: AiProviderKind::OpenAi,
+            api_base_url: "https://api.openai.com/v1".to_owned(),
+            api_key_env: "OPENAI_API_KEY".to_owned(),
+            model: "gpt-5-mini".to_owned(),
+            reasoning_effort: None,
+            timeout_secs: 30,
+            max_retries: 1,
+            request_mode: AiRequestMode::Stateless,
+            input_transport: AiInputTransport::Inline,
+            prompt_cache: PromptCacheMode::Off,
+            safety_identifier: None,
+        }
+    }
+}
+
 fn env_string(key: &str) -> Option<String> {
     env::var(key).ok().and_then(|value| {
         let trimmed = value.trim().to_owned();
@@ -686,6 +947,14 @@ fn env_string(key: &str) -> Option<String> {
 
 fn env_csv(key: &str) -> Option<Vec<String>> {
     env_string(key).map(|value| split_csv(&value))
+}
+
+fn env_bool(key: &str) -> Option<bool> {
+    env_string(key).and_then(|value| match value.as_str() {
+        "1" | "true" | "TRUE" | "True" | "yes" | "YES" | "on" | "ON" => Some(true),
+        "0" | "false" | "FALSE" | "False" | "no" | "NO" | "off" | "OFF" => Some(false),
+        _ => None,
+    })
 }
 
 fn split_csv(value: &str) -> Vec<String> {
@@ -796,7 +1065,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        AppPaths, Config, OuraConfig, RefreshConfig, WebhookConfig, default_requested_scopes,
+        AiConfig, AiInputTransport, AiProviderKind, AiRequestMode, AppPaths, Config, OuraConfig,
+        PromptCacheMode, RefreshConfig, WebhookConfig, default_requested_scopes,
         parse_webhook_subscription_env,
     };
     use crate::webhook::{WebhookEventType, default_desired_subscriptions};
@@ -852,6 +1122,10 @@ mod tests {
         assert_eq!(config.refresh.workout_interval_secs, 600);
         assert_eq!(config.refresh.enhanced_tag_interval_secs, 300);
         assert_eq!(config.refresh.session_interval_secs, 300);
+        assert_eq!(config.ai.provider, AiProviderKind::OpenAi);
+        assert_eq!(config.ai.request_mode, AiRequestMode::Stateless);
+        assert_eq!(config.ai.input_transport, AiInputTransport::Inline);
+        assert_eq!(config.ai.prompt_cache, PromptCacheMode::Off);
     }
 
     #[test]
@@ -940,5 +1214,25 @@ mod tests {
             .err()
             .unwrap_or_else(|| panic!("invalid public base url should be rejected"));
         assert!(error.to_string().contains("webhook.public_base_url"));
+    }
+
+    #[test]
+    fn validates_ai_defaults() {
+        let config = AiConfig {
+            enabled: false,
+            provider: AiProviderKind::OpenAi,
+            api_base_url: "https://api.openai.com/v1".to_owned(),
+            api_key_env: "OPENAI_API_KEY".to_owned(),
+            model: "gpt-5-mini".to_owned(),
+            reasoning_effort: Some("minimal".to_owned()),
+            timeout_secs: 30,
+            max_retries: 1,
+            request_mode: AiRequestMode::Stateless,
+            input_transport: AiInputTransport::Inline,
+            prompt_cache: PromptCacheMode::Off,
+            safety_identifier: None,
+        };
+
+        assert!(config.validate().is_ok(), "ai config should validate");
     }
 }

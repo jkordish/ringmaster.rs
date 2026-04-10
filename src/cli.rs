@@ -19,6 +19,11 @@ pub struct Cli {
 pub enum Command {
     /// Launch the live terminal UI.
     Tui(TuiArgs),
+    /// Snapshot export commands.
+    Snapshot {
+        #[command(subcommand)]
+        command: SnapshotCommand,
+    },
     /// Non-interactive UI tooling.
     Ui {
         #[command(subcommand)]
@@ -53,6 +58,11 @@ pub enum Command {
         #[command(subcommand)]
         command: ReviewCommand,
     },
+    /// Snapshot-based AI review and compare commands.
+    Ai {
+        #[command(subcommand)]
+        command: AiCommand,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
@@ -65,6 +75,12 @@ pub enum AuthCommand {
 pub enum UiCommand {
     /// Render deterministic screen snapshots for visual QA.
     Snapshot(UiSnapshotArgs),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum SnapshotCommand {
+    /// Export a versioned snapshot artifact for local inspection or AI analysis.
+    Export(SnapshotExportArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
@@ -89,6 +105,14 @@ pub enum ReviewCommand {
     Week(ReviewWeekArgs),
     /// Run a bounded evidence-backed investigation for a fixed focus.
     Investigate(ReviewInvestigateArgs),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum AiCommand {
+    /// Run a structured AI review against a local snapshot artifact.
+    Review(AiReviewArgs),
+    /// Run a structured AI comparison between two local snapshot artifacts.
+    Compare(AiCompareArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
@@ -138,6 +162,13 @@ pub enum SnapshotSizeArg {
     Wide,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum PrivacyProfileArg {
+    Redacted,
+    Balanced,
+    Full,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct UiSnapshotArgs {
     /// Use deterministic demo-mode screen data.
@@ -155,6 +186,28 @@ pub struct UiSnapshotArgs {
     /// Output directory for deterministic snapshot artifacts.
     #[arg(long)]
     pub out_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct SnapshotExportArgs {
+    /// Export a deterministic fixture-backed snapshot instead of using the live store.
+    #[arg(long)]
+    pub demo: bool,
+    /// Load Oura payloads from a fixture directory when exporting a demo snapshot.
+    #[arg(long)]
+    pub fixture_dir: Option<PathBuf>,
+    /// Snapshot scope selector such as `today`, `week`, `day:2026-04-08`, or `range:2026-04-01..2026-04-07`.
+    #[arg(long, default_value = "today")]
+    pub scope: String,
+    /// Privacy profile to apply to the exported artifact.
+    #[arg(long, value_enum, default_value_t = PrivacyProfileArg::Redacted)]
+    pub profile: PrivacyProfileArg,
+    /// Output path for the exported snapshot JSON.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+    /// Emit compact JSON instead of pretty JSON.
+    #[arg(long)]
+    pub compact: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
@@ -253,6 +306,38 @@ pub struct ReviewInvestigateArgs {
     pub fixture_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct AiReviewArgs {
+    /// Path to a local snapshot JSON artifact.
+    pub snapshot_path: PathBuf,
+    /// Skip remote API calls and render a deterministic dry-run artifact instead.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Load the AI result from a fixture JSON artifact instead of a live provider.
+    #[arg(long)]
+    pub fixture: Option<PathBuf>,
+    /// Optional output path for the persisted AI artifact JSON.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct AiCompareArgs {
+    /// Path to the base snapshot JSON artifact.
+    pub snapshot_a: PathBuf,
+    /// Path to the comparison snapshot JSON artifact.
+    pub snapshot_b: PathBuf,
+    /// Skip remote API calls and render a deterministic dry-run artifact instead.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Load the AI result from a fixture JSON artifact instead of a live provider.
+    #[arg(long)]
+    pub fixture: Option<PathBuf>,
+    /// Optional output path for the persisted AI artifact JSON.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Args, Default)]
 pub struct WebhookServeArgs {}
 
@@ -314,10 +399,11 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        AuthCommand, Cli, Command, DeriveCommand, DeriveRebuildArgs, ReviewCommand, ReviewFocusArg,
-        ReviewInvestigateArgs, ReviewTodayArgs, SnapshotScreenArg, SnapshotSizeArg, SyncCommand,
-        SyncOnceArgs, SyncWatchArgs, UiCommand, UiSnapshotArgs, WebhookCommand, WebhookReplayArgs,
-        WebhookSubscriptionCommand, WebhookSubscriptionsSyncArgs,
+        AiCommand, AiCompareArgs, AiReviewArgs, AuthCommand, Cli, Command, DeriveCommand,
+        DeriveRebuildArgs, PrivacyProfileArg, ReviewCommand, ReviewFocusArg, ReviewInvestigateArgs,
+        ReviewTodayArgs, SnapshotCommand, SnapshotExportArgs, SnapshotScreenArg, SnapshotSizeArg,
+        SyncCommand, SyncOnceArgs, SyncWatchArgs, UiCommand, UiSnapshotArgs, WebhookCommand,
+        WebhookReplayArgs, WebhookSubscriptionCommand, WebhookSubscriptionsSyncArgs,
     };
 
     #[test]
@@ -357,7 +443,8 @@ mod tests {
         let help = Cli::help_text();
 
         for command in [
-            "tui", "ui", "doctor", "auth", "sync", "webhook", "derive", "review", "demo",
+            "tui", "snapshot", "ui", "doctor", "auth", "sync", "webhook", "derive", "review", "ai",
+            "demo",
         ] {
             assert!(
                 help.contains(command),
@@ -588,6 +675,108 @@ mod tests {
             }) => {
                 assert_eq!(screen, vec![SnapshotScreenArg::Status]);
                 assert_eq!(out_dir, PathBuf::from("/tmp/ringmaster-snapshots"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_snapshot_export_args() {
+        let cli = Cli::parse_from([
+            "ringmaster",
+            "snapshot",
+            "export",
+            "--demo",
+            "--scope",
+            "week",
+            "--profile",
+            "balanced",
+            "--out",
+            "/tmp/ringmaster-snapshot.json",
+        ])
+        .unwrap_or_else(|error| {
+            panic!("expected clap parsing to succeed in test: {error}");
+        });
+
+        match cli.command {
+            Some(Command::Snapshot {
+                command:
+                    SnapshotCommand::Export(SnapshotExportArgs {
+                        demo: true,
+                        fixture_dir: None,
+                        scope,
+                        profile,
+                        out,
+                        compact: false,
+                    }),
+            }) => {
+                assert_eq!(scope, "week");
+                assert_eq!(profile, PrivacyProfileArg::Balanced);
+                assert_eq!(out, Some(PathBuf::from("/tmp/ringmaster-snapshot.json")));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ai_review_args() {
+        let cli = Cli::parse_from([
+            "ringmaster",
+            "ai",
+            "review",
+            "/tmp/snapshot.json",
+            "--dry-run",
+        ])
+        .unwrap_or_else(|error| {
+            panic!("expected clap parsing to succeed in test: {error}");
+        });
+
+        match cli.command {
+            Some(Command::Ai {
+                command:
+                    AiCommand::Review(AiReviewArgs {
+                        snapshot_path,
+                        dry_run: true,
+                        fixture: None,
+                        out: None,
+                    }),
+            }) => assert_eq!(snapshot_path, PathBuf::from("/tmp/snapshot.json")),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ai_compare_args() {
+        let cli = Cli::parse_from([
+            "ringmaster",
+            "ai",
+            "compare",
+            "/tmp/a.json",
+            "/tmp/b.json",
+            "--fixture",
+            "tests/fixtures/ai/compare.json",
+        ])
+        .unwrap_or_else(|error| {
+            panic!("expected clap parsing to succeed in test: {error}");
+        });
+
+        match cli.command {
+            Some(Command::Ai {
+                command:
+                    AiCommand::Compare(AiCompareArgs {
+                        snapshot_a,
+                        snapshot_b,
+                        dry_run: false,
+                        fixture,
+                        out: None,
+                    }),
+            }) => {
+                assert_eq!(snapshot_a, PathBuf::from("/tmp/a.json"));
+                assert_eq!(snapshot_b, PathBuf::from("/tmp/b.json"));
+                assert_eq!(
+                    fixture,
+                    Some(PathBuf::from("tests/fixtures/ai/compare.json"))
+                );
             }
             other => panic!("unexpected command: {other:?}"),
         }
