@@ -8,7 +8,7 @@ It gives you:
 - a SQLite-backed local cache with deterministic demo and fixture flows
 - real Oura login and sync for supported families
 - an optional snapshot-based OpenAI layer for bounded review, compare, follow-up, report, and eval workflows
-- a first-class in-app AI workbench with explicit preflight, saved-run browsing, and local evidence jump-backs
+- a first-class in-app AI workbench with explicit preflight, saved-run and eval browsing, and local evidence jump-backs
 
 The design goal is simple: useful local insight first, optional external analysis second, and no surprise data sharing.
 
@@ -50,6 +50,7 @@ cargo run -- review week --demo
 ```bash
 cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots
 cargo run -- ui snapshot --screen ai --demo --out-dir /tmp/ringmaster-ai-ui
+cargo run -- ui snapshot --screen status --demo --out-dir /tmp/ringmaster-status-ui
 ```
 
 ### Run the snapshot library and report workflow
@@ -73,9 +74,11 @@ AI is now a top-level product workflow, not a CLI-only add-on.
 - `7` opens the dedicated `AI` workbench screen.
 - `a` and `c` launch snapshot-bounded review or compare work from `Dashboard`, `Explain`, `Patterns`, `Review`, and the workbench itself.
 - every launch routes through an explicit preflight that shows snapshot scope, privacy profile, provider/model, stateless mode, tools-disabled status, content classes, payload size estimate, and the exact local artifact path that will be sent
-- the workbench browses saved snapshots, AI runs, and reports in one place
+- the workbench browses saved snapshots, AI runs, reports, and persisted eval runs in one place
 - saved AI runs render structured findings, evidence, counterevidence, uncertainty, and provenance directly in the TUI
+- saved eval runs render fixture manifest summaries, baseline-vs-candidate rollups, failing graders first, and lineage back to saved snapshots, AI runs, and reports when those local handles are available
 - bounded follow-up actions such as expanding evidence, surfacing counterevidence, rerunning with another privacy profile/model, and generating a report are available without adding a freeform chat box
+- the `Status` screen now surfaces latest eval health so regressions show up in the same operator surface as provider and sync readiness
 
 The workbench is intentionally guided and snapshot-first. There is still no arbitrary chat prompt, no direct database-to-model path, and no hidden uploads.
 
@@ -103,7 +106,7 @@ If you want the full contract, read [docs/OPENAI_INTEGRATION.md](docs/OPENAI_INT
 - structured AI review/compare/follow-up artifact persistence plus AI run browsing
 - local jump-backs from AI findings to Review / Explain / Patterns / Timeline evidence when the saved export refs are resolvable
 - Markdown and HTML report export from snapshots and AI runs
-- a fixture-backed local eval flywheel for prompt/schema/model regressions
+- a fixture-backed local eval flywheel for prompt/schema/model regressions, including an in-app eval browser and Status eval health
 
 ## Minimal config
 
@@ -136,6 +139,8 @@ For the complete config and runtime behavior, use the docs below instead of the 
   - [docs/execplans/20260410-phase8-snapshot-library-reports-and-eval-flywheel.md](docs/execplans/20260410-phase8-snapshot-library-reports-and-eval-flywheel.md)
 - Current execution plan for the AI workbench pass:
   - [docs/execplans/20260410-phase9-ai-workbench-and-first-class-tui.md](docs/execplans/20260410-phase9-ai-workbench-and-first-class-tui.md)
+- Current execution plan for the eval lab and regression console pass:
+  - [docs/execplans/20260410-phase10-ai-eval-lab-and-regression-console.md](docs/execplans/20260410-phase10-ai-eval-lab-and-regression-console.md)
 
 ## Development notes
 
@@ -152,6 +157,7 @@ cargo run -- snapshot list --demo
 cargo run -- ai review /tmp/ringmaster-snapshot.json --dry-run
 cargo run -- ai runs list --demo
 cargo run -- ui snapshot --screen ai --demo --out-dir /tmp/ringmaster-ai-ui
+cargo run -- ui snapshot --screen status --demo --out-dir /tmp/ringmaster-status-ui
 cargo run -- report export --from-snapshot /tmp/ringmaster-snapshot.json --format markdown --out /tmp/ringmaster-report.md
 cargo run -- ai eval --fixture-dir tests/fixtures/ai
 ```

@@ -7,12 +7,18 @@
       "case_id": "review-stale-snapshot",
       "task_family": "review",
       "snapshot_a": "review-snapshot.json",
+      "snapshot_hash_a": "fixture-review-snapshot",
       "artifacts": [
         {
           "label": "candidate",
           "artifact_path": "review-candidate.json",
           "provider": "fixture",
-          "model": "review-candidate"
+          "model": "review-candidate",
+          "lineage": {
+            "ai_run_id": "fixture-run-review-candidate",
+            "ai_artifact_id": "fixture-artifact-review-candidate",
+            "report_id": "fixture-report-review-candidate"
+          }
         },
         {
           "label": "baseline",
@@ -37,12 +43,17 @@
       "task_family": "compare",
       "snapshot_a": "compare-snapshot-a.json",
       "snapshot_b": "compare-snapshot-b.json",
+      "snapshot_hash_a": "fixture-compare-snapshot-a",
+      "snapshot_hash_b": "fixture-compare-snapshot-b",
       "artifacts": [
         {
           "label": "candidate",
           "artifact_path": "compare-candidate.json",
           "provider": "fixture",
-          "model": "compare-candidate"
+          "model": "compare-candidate",
+          "lineage": {
+            "ai_run_id": "fixture-run-compare-candidate"
+          }
         },
         {
           "label": "baseline",

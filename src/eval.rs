@@ -40,6 +40,10 @@ struct EvalFixtureCase {
     task_family: EvalTaskFamily,
     snapshot_a: String,
     snapshot_b: Option<String>,
+    #[serde(default)]
+    snapshot_hash_a: Option<String>,
+    #[serde(default)]
+    snapshot_hash_b: Option<String>,
     artifacts: Vec<EvalArtifactFixture>,
     expectations: EvalExpectations,
 }
@@ -50,63 +54,93 @@ struct EvalArtifactFixture {
     artifact_path: String,
     provider: Option<String>,
     model: Option<String>,
+    #[serde(default)]
+    lineage: EvalArtifactLineage,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
-struct EvalExpectations {
-    min_primary_findings: Option<usize>,
-    expected_primary_title: Option<String>,
-    forbidden_substrings: Vec<String>,
-    honesty_required: bool,
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub struct EvalExpectations {
+    pub min_primary_findings: Option<usize>,
+    pub expected_primary_title: Option<String>,
+    pub forbidden_substrings: Vec<String>,
+    pub honesty_required: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-struct EvalRunDetails {
-    fixture_dir: String,
-    candidate_label: String,
-    baseline_label: Option<String>,
-    total_cases: usize,
-    passed_cases: usize,
-    failed_cases: usize,
-    scores: EvalScoreSummary,
-    regression_summary: String,
-    cases: Vec<EvalCaseOutcome>,
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub struct EvalArtifactLineage {
+    pub ai_run_id: Option<String>,
+    pub ai_artifact_id: Option<String>,
+    pub report_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-struct EvalCaseOutcome {
-    case_id: String,
-    task_family: String,
-    label: String,
-    provider: String,
-    model: String,
-    prompt_version: String,
-    output_schema_version: String,
-    overall_pass: bool,
-    graders: Vec<GraderResult>,
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PersistedEvalArtifactDetail {
+    pub label: String,
+    pub artifact_path: String,
+    pub provider: String,
+    pub model: String,
+    pub prompt_version: String,
+    pub output_schema_version: String,
+    pub lineage: EvalArtifactLineage,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-struct GraderResult {
-    grader: String,
-    passed: bool,
-    note: String,
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PersistedEvalGraderResult {
+    pub grader: String,
+    pub candidate_passed: bool,
+    pub candidate_note: String,
+    pub baseline_passed: Option<bool>,
+    pub baseline_note: Option<String>,
+    pub comparison: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-struct EvalScoreSummary {
-    schema_validity: f64,
-    completeness: f64,
-    overclaiming: f64,
-    medical_safety: f64,
-    privacy: f64,
-    evidence: f64,
-    honesty: f64,
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PersistedEvalCaseDetail {
+    pub case_id: String,
+    pub task_family: String,
+    pub snapshot_a_path: String,
+    pub snapshot_b_path: Option<String>,
+    pub snapshot_hash_a: Option<String>,
+    pub snapshot_hash_b: Option<String>,
+    pub expectations: EvalExpectations,
+    pub overall_pass: bool,
+    pub candidate: PersistedEvalArtifactDetail,
+    pub baseline: Option<PersistedEvalArtifactDetail>,
+    pub graders: Vec<PersistedEvalGraderResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct EvalScoreSummary {
+    pub schema_validity: f64,
+    pub completeness: f64,
+    pub overclaiming: f64,
+    pub medical_safety: f64,
+    pub privacy: f64,
+    pub evidence: f64,
+    pub honesty: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct PersistedEvalRunDetails {
+    pub fixture_dir: String,
+    pub fixture_schema_version: String,
+    pub candidate_label: String,
+    pub baseline_label: Option<String>,
+    pub total_cases: usize,
+    pub passed_cases: usize,
+    pub failed_cases: usize,
+    pub scores: EvalScoreSummary,
+    pub regression_summary: String,
+    pub improvements: Vec<String>,
+    pub regressions: Vec<String>,
+    pub cases: Vec<PersistedEvalCaseDetail>,
 }
 
 #[derive(Debug, Clone)]
 struct LoadedEvalArtifact {
     label: String,
+    artifact_path: String,
+    lineage: EvalArtifactLineage,
     provider: String,
     model: String,
     prompt_version: String,
@@ -116,6 +150,51 @@ struct LoadedEvalArtifact {
     primary_title: Option<String>,
     evidence_refs: Vec<ArtifactEvidenceRef>,
     status_texts: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct EvalCaseOutcome {
+    case_id: String,
+    task_family: String,
+    snapshot_a_path: String,
+    snapshot_b_path: Option<String>,
+    snapshot_hash_a: Option<String>,
+    snapshot_hash_b: Option<String>,
+    expectations: EvalExpectations,
+    label: String,
+    provider: String,
+    model: String,
+    prompt_version: String,
+    output_schema_version: String,
+    artifact_path: String,
+    lineage: EvalArtifactLineage,
+    overall_pass: bool,
+    graders: Vec<GraderResult>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct GraderResult {
+    grader: String,
+    passed: bool,
+    note: String,
+}
+
+struct PersistedEvalBuildContext<'a> {
+    manifest: &'a EvalFixtureManifest,
+    fixture_dir: &'a Path,
+    candidate_label: &'a str,
+    baseline_label: Option<&'a str>,
+    passed_cases: usize,
+    failed_cases: usize,
+    scores: EvalScoreSummary,
+    regression: &'a RegressionDeltaSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegressionDeltaSummary {
+    summary: String,
+    improvements: Vec<String>,
+    regressions: Vec<String>,
 }
 
 pub async fn run_eval(config: &Config, args: AiEvalArgs) -> Result<Option<String>> {
@@ -151,19 +230,22 @@ pub async fn run_eval(config: &Config, args: AiEvalArgs) -> Result<Option<String
         .count();
     let failed_cases = outcomes.len().saturating_sub(passed_cases);
     let scores = score_summary(&outcomes);
-    let regression_summary = compare_against_baseline(&outcomes, baseline_outcomes.as_deref());
+    let regression = compare_against_baseline(&outcomes, baseline_outcomes.as_deref());
 
-    let details = EvalRunDetails {
-        fixture_dir: args.fixture_dir.display().to_string(),
-        candidate_label: candidate_label.clone(),
-        baseline_label: baseline_label.clone(),
-        total_cases: outcomes.len(),
-        passed_cases,
-        failed_cases,
-        scores,
-        regression_summary,
-        cases: outcomes,
-    };
+    let details = build_persisted_eval_details(
+        PersistedEvalBuildContext {
+            manifest: &manifest,
+            fixture_dir: args.fixture_dir.as_path(),
+            candidate_label: candidate_label.as_str(),
+            baseline_label: baseline_label.as_deref(),
+            passed_cases,
+            failed_cases,
+            scores,
+            regression: &regression,
+        },
+        &outcomes,
+        baseline_outcomes.as_deref(),
+    );
 
     if let Some(export_path) = &args.export {
         write_text_file(
@@ -173,16 +255,114 @@ pub async fn run_eval(config: &Config, args: AiEvalArgs) -> Result<Option<String
         )?;
     }
 
-    let record = build_eval_record(
-        &details,
-        args.fixture_dir.as_path(),
-        candidate_label,
-        baseline_label,
-    )?;
+    let record = build_eval_record(&details)?;
     let store = Store::open(config)?;
     store.analysis().upsert_ai_eval_run(&record)?;
 
     Ok(Some(render_eval_summary(&details, args.export.as_deref())))
+}
+
+#[must_use]
+pub fn parse_persisted_eval_details(details_json: &str) -> Option<PersistedEvalRunDetails> {
+    (!details_json.trim().is_empty())
+        .then(|| serde_json::from_str(details_json).ok())
+        .flatten()
+}
+
+fn build_persisted_eval_details(
+    context: PersistedEvalBuildContext<'_>,
+    outcomes: &[EvalCaseOutcome],
+    baseline_outcomes: Option<&[EvalCaseOutcome]>,
+) -> PersistedEvalRunDetails {
+    let cases = outcomes
+        .iter()
+        .map(|outcome| {
+            let baseline = baseline_outcomes.and_then(|baseline_outcomes| {
+                baseline_outcomes
+                    .iter()
+                    .find(|baseline| baseline.case_id == outcome.case_id)
+            });
+
+            PersistedEvalCaseDetail {
+                case_id: outcome.case_id.clone(),
+                task_family: outcome.task_family.clone(),
+                snapshot_a_path: outcome.snapshot_a_path.clone(),
+                snapshot_b_path: outcome.snapshot_b_path.clone(),
+                snapshot_hash_a: outcome.snapshot_hash_a.clone(),
+                snapshot_hash_b: outcome.snapshot_hash_b.clone(),
+                expectations: outcome.expectations.clone(),
+                overall_pass: outcome.overall_pass,
+                candidate: PersistedEvalArtifactDetail {
+                    label: outcome.label.clone(),
+                    artifact_path: outcome.artifact_path.clone(),
+                    provider: outcome.provider.clone(),
+                    model: outcome.model.clone(),
+                    prompt_version: outcome.prompt_version.clone(),
+                    output_schema_version: outcome.output_schema_version.clone(),
+                    lineage: outcome.lineage.clone(),
+                },
+                baseline: baseline.map(|baseline| PersistedEvalArtifactDetail {
+                    label: baseline.label.clone(),
+                    artifact_path: baseline.artifact_path.clone(),
+                    provider: baseline.provider.clone(),
+                    model: baseline.model.clone(),
+                    prompt_version: baseline.prompt_version.clone(),
+                    output_schema_version: baseline.output_schema_version.clone(),
+                    lineage: baseline.lineage.clone(),
+                }),
+                graders: build_persisted_grader_results(outcome, baseline),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    PersistedEvalRunDetails {
+        fixture_dir: context.fixture_dir.display().to_string(),
+        fixture_schema_version: context.manifest.schema_version.clone(),
+        candidate_label: context.candidate_label.to_owned(),
+        baseline_label: context.baseline_label.map(str::to_owned),
+        total_cases: outcomes.len(),
+        passed_cases: context.passed_cases,
+        failed_cases: context.failed_cases,
+        scores: context.scores,
+        regression_summary: context.regression.summary.clone(),
+        improvements: context.regression.improvements.clone(),
+        regressions: context.regression.regressions.clone(),
+        cases,
+    }
+}
+
+fn build_persisted_grader_results(
+    candidate: &EvalCaseOutcome,
+    baseline: Option<&EvalCaseOutcome>,
+) -> Vec<PersistedEvalGraderResult> {
+    candidate
+        .graders
+        .iter()
+        .map(|grader| {
+            let baseline_grader = baseline.and_then(|baseline| {
+                baseline
+                    .graders
+                    .iter()
+                    .find(|baseline_grader| baseline_grader.grader == grader.grader)
+            });
+            let comparison = baseline_grader.map_or_else(
+                || "candidate_only".to_owned(),
+                |baseline_grader| match (grader.passed, baseline_grader.passed) {
+                    (true, false) => "improved".to_owned(),
+                    (false, true) => "regressed".to_owned(),
+                    _ => "matched".to_owned(),
+                },
+            );
+            PersistedEvalGraderResult {
+                grader: grader.grader.clone(),
+                candidate_passed: grader.passed,
+                candidate_note: grader.note.clone(),
+                baseline_passed: baseline_grader.map(|grader| grader.passed),
+                baseline_note: baseline_grader.map(|grader| grader.note.clone()),
+                comparison,
+            }
+        })
+        .collect()
 }
 
 fn load_manifest(fixture_dir: &Path) -> Result<EvalFixtureManifest> {
@@ -247,11 +427,18 @@ fn evaluate_case(
     Ok(EvalCaseOutcome {
         case_id: case.case_id.clone(),
         task_family: task_family_label(&case.task_family).to_owned(),
+        snapshot_a_path: case.snapshot_a.clone(),
+        snapshot_b_path: case.snapshot_b.clone(),
+        snapshot_hash_a: case.snapshot_hash_a.clone(),
+        snapshot_hash_b: case.snapshot_hash_b.clone(),
+        expectations: case.expectations.clone(),
         label: artifact.label,
         provider: artifact.provider,
         model: artifact.model,
         prompt_version: artifact.prompt_version,
         output_schema_version: artifact.output_schema_version,
+        artifact_path: artifact.artifact_path,
+        lineage: artifact.lineage,
         overall_pass,
         graders,
     })
@@ -279,6 +466,8 @@ fn load_eval_artifact(
             let artifact: ReviewArtifactV1 = serde_json::from_str(&raw_json)?;
             Ok(LoadedEvalArtifact {
                 label: fixture.label.clone(),
+                artifact_path: fixture.artifact_path.clone(),
+                lineage: fixture.lineage.clone(),
                 provider: fixture
                     .provider
                     .clone()
@@ -312,6 +501,8 @@ fn load_eval_artifact(
             let artifact: CompareArtifactV1 = serde_json::from_str(&raw_json)?;
             Ok(LoadedEvalArtifact {
                 label: fixture.label.clone(),
+                artifact_path: fixture.artifact_path.clone(),
+                lineage: fixture.lineage.clone(),
                 provider: fixture
                     .provider
                     .clone()
@@ -657,9 +848,13 @@ fn score_summary(outcomes: &[EvalCaseOutcome]) -> EvalScoreSummary {
 fn compare_against_baseline(
     outcomes: &[EvalCaseOutcome],
     baseline_outcomes: Option<&[EvalCaseOutcome]>,
-) -> String {
+) -> RegressionDeltaSummary {
     let Some(baseline_outcomes) = baseline_outcomes else {
-        return "No baseline label selected; candidate scored on its own.".to_owned();
+        return RegressionDeltaSummary {
+            summary: "No baseline label selected; candidate scored on its own.".to_owned(),
+            improvements: Vec::new(),
+            regressions: Vec::new(),
+        };
     };
 
     let mut improvements = Vec::new();
@@ -690,7 +885,7 @@ fn compare_against_baseline(
         }
     }
 
-    if regressions.is_empty() && improvements.is_empty() {
+    let summary = if regressions.is_empty() && improvements.is_empty() {
         "Candidate matched the baseline across all comparable graders.".to_owned()
     } else {
         format!(
@@ -706,35 +901,45 @@ fn compare_against_baseline(
                 regressions.join(", ")
             }
         )
+    };
+
+    RegressionDeltaSummary {
+        summary,
+        improvements,
+        regressions,
     }
 }
 
-fn build_eval_record(
-    details: &EvalRunDetails,
-    fixture_dir: &Path,
-    candidate_label: String,
-    baseline_label: Option<String>,
-) -> Result<AiEvalRunRecord> {
+fn build_eval_record(details: &PersistedEvalRunDetails) -> Result<AiEvalRunRecord> {
     let task_family = single_value_or_mixed(
         details
             .cases
             .iter()
             .map(|outcome| outcome.task_family.clone()),
     );
-    let provider =
-        single_value_or_mixed(details.cases.iter().map(|outcome| outcome.provider.clone()));
-    let model = single_value_or_mixed(details.cases.iter().map(|outcome| outcome.model.clone()));
+    let provider = single_value_or_mixed(
+        details
+            .cases
+            .iter()
+            .map(|outcome| outcome.candidate.provider.clone()),
+    );
+    let model = single_value_or_mixed(
+        details
+            .cases
+            .iter()
+            .map(|outcome| outcome.candidate.model.clone()),
+    );
     let prompt_version = single_value_or_mixed(
         details
             .cases
             .iter()
-            .map(|outcome| outcome.prompt_version.clone()),
+            .map(|outcome| outcome.candidate.prompt_version.clone()),
     );
     let output_schema_version = single_value_or_mixed(
         details
             .cases
             .iter()
-            .map(|outcome| outcome.output_schema_version.clone()),
+            .map(|outcome| outcome.candidate.output_schema_version.clone()),
     );
     let created_at = OffsetDateTime::now_utc()
         .format(&Rfc3339)
@@ -743,21 +948,22 @@ fn build_eval_record(
         })?;
     let eval_run_id = {
         let mut digest = Sha256::new();
-        digest.update(fixture_dir.display().to_string().as_bytes());
-        digest.update(candidate_label.as_bytes());
-        if let Some(baseline_label) = &baseline_label {
+        digest.update(details.fixture_dir.as_bytes());
+        digest.update(details.candidate_label.as_bytes());
+        if let Some(baseline_label) = &details.baseline_label {
             digest.update(baseline_label.as_bytes());
         }
         digest.update(created_at.as_bytes());
         hex::encode(digest.finalize())
     };
+    let details_json = serde_json::to_string(details)?;
 
     Ok(AiEvalRunRecord {
         eval_run_id,
         task_family,
-        fixture_dir: fixture_dir.display().to_string(),
-        candidate_label,
-        baseline_label,
+        fixture_dir: details.fixture_dir.clone(),
+        candidate_label: details.candidate_label.clone(),
+        baseline_label: details.baseline_label.clone(),
         provider,
         model,
         prompt_version,
@@ -774,10 +980,11 @@ fn build_eval_record(
         evidence_score: details.scores.evidence,
         honesty_score: details.scores.honesty,
         regression_summary: details.regression_summary.clone(),
+        details_json,
     })
 }
 
-fn render_eval_summary(details: &EvalRunDetails, export_path: Option<&Path>) -> String {
+fn render_eval_summary(details: &PersistedEvalRunDetails, export_path: Option<&Path>) -> String {
     let mut lines = vec![
         "ringmaster ai eval".to_owned(),
         String::new(),
@@ -808,7 +1015,7 @@ fn render_eval_summary(details: &EvalRunDetails, export_path: Option<&Path>) -> 
         format!(
             "  - {} | {} | {}",
             case.case_id,
-            case.label,
+            case.candidate.label,
             if case.overall_pass { "pass" } else { "fail" }
         )
     }));
@@ -856,7 +1063,7 @@ struct LoadedSnapshotFixture {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::run_eval;
+    use super::{parse_persisted_eval_details, run_eval};
     use crate::cli::AiEvalArgs;
     use crate::config::Config;
     use tempfile::tempdir;
@@ -892,12 +1099,17 @@ mod tests {
       "case_id": "review",
       "task_family": "review",
       "snapshot_a": "snapshot.json",
+      "snapshot_hash_a": "fixture-review-snapshot",
       "artifacts": [
         {
           "label": "candidate",
           "artifact_path": "review-candidate.json",
           "provider": "fixture",
-          "model": "candidate"
+          "model": "candidate",
+          "lineage": {
+            "ai_run_id": "fixture-run-review-candidate",
+            "report_id": "fixture-report-review-candidate"
+          }
         },
         {
           "label": "baseline",
@@ -938,5 +1150,18 @@ mod tests {
         assert!(output.contains("baseline_label: baseline"));
         assert!(output.contains("export_path:"));
         assert!(export_path.exists());
+        let exported = std::fs::read_to_string(&export_path)
+            .unwrap_or_else(|error| panic!("eval export should read: {error}"));
+        let details = parse_persisted_eval_details(&exported)
+            .unwrap_or_else(|| panic!("eval export should parse into persisted details"));
+        assert_eq!(details.cases.len(), 1);
+        assert_eq!(
+            details.cases[0].snapshot_hash_a.as_deref(),
+            Some("fixture-review-snapshot")
+        );
+        assert_eq!(
+            details.cases[0].candidate.lineage.ai_run_id.as_deref(),
+            Some("fixture-run-review-candidate")
+        );
     }
 }

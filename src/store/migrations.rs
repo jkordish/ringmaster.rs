@@ -795,6 +795,13 @@ pub const MIGRATIONS: &[Migration] = &[
             ON ai_runs(artifact_id, created_at DESC);
         ",
     },
+    Migration {
+        version: 16,
+        name: "phase10_ai_eval_details",
+        sql: r"
+        ALTER TABLE ai_eval_runs ADD COLUMN details_json TEXT NOT NULL DEFAULT '';
+        ",
+    },
 ];
 
 pub fn run_migrations(connection: &mut rusqlite::Connection) -> Result<MigrationReport> {
@@ -876,7 +883,7 @@ mod tests {
         assert_eq!(report.current_version, current_version());
         assert_eq!(
             report.applied_versions,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         );
     }
 
@@ -951,7 +958,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("phase-3 migrations should succeed: {error}"));
         assert_eq!(
             report.applied_versions,
-            vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+            vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         );
 
         let (workout_day, workout_title): (String, String) = connection
@@ -1026,7 +1033,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("phase4 migrations should succeed: {error}"));
         assert_eq!(
             report.applied_versions,
-            vec![7, 8, 9, 10, 11, 12, 13, 14, 15]
+            vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         );
 
         let row: (String, String, String) = connection
@@ -1071,7 +1078,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("phase4 migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![9, 10, 11, 12, 13, 14, 15]);
+        assert_eq!(report.applied_versions, vec![9, 10, 11, 12, 13, 14, 15, 16]);
 
         let daily_sleep_columns: Vec<String> = {
             let mut statement = connection
@@ -1114,7 +1121,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("phase5 migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![10, 11, 12, 13, 14, 15]);
+        assert_eq!(report.applied_versions, vec![10, 11, 12, 13, 14, 15, 16]);
 
         let table_names: Vec<String> = {
             let mut statement = connection
@@ -1183,7 +1190,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("review signal migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![11, 12, 13, 14, 15]);
+        assert_eq!(report.applied_versions, vec![11, 12, 13, 14, 15, 16]);
 
         let table_names: Vec<String> = {
             let mut statement = connection
@@ -1253,7 +1260,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("vo2 history migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![12, 13, 14, 15]);
+        assert_eq!(report.applied_versions, vec![12, 13, 14, 15, 16]);
 
         let primary_key_columns: Vec<String> = {
             let mut statement = connection

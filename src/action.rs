@@ -1,5 +1,5 @@
 use crate::ai::GuidedFollowUpKind;
-use crate::app::{AiLaunchIntent, AiPreflightState, LiveSnapshot, Screen};
+use crate::app::{AiBrowserTab, AiLaunchIntent, AiPreflightState, LiveSnapshot, Screen};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -59,6 +59,11 @@ pub enum Action {
     JumpToDayAndScreen {
         day: String,
         screen: Screen,
+        status_line: String,
+    },
+    JumpToAiBrowserRecord {
+        tab: AiBrowserTab,
+        record_id: String,
         status_line: String,
     },
     PreviousAiBrowserTab,

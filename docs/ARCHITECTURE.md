@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document describes the implemented architecture for `ringmaster.rs` as of `2026-04-10`. It reflects the code that exists in the repository today, including the snapshot library, AI run registry, report export workflow, local eval flywheel, and the new top-level AI workbench in the TUI, not the eventual end-state product.
+This document describes the implemented architecture for `ringmaster.rs` as of `2026-04-10`. It reflects the code that exists in the repository today, including the snapshot library, AI run registry, report export workflow, the in-app eval lab/regression console, and the top-level AI workbench in the TUI, not the eventual end-state product.
 
 ## Design goals
 
@@ -71,8 +71,9 @@ ai eval
   -> fixture manifest loading
   -> deterministic snapshot/artifact fixture validation
   -> local grader execution
+  -> persisted manifest/case/grader/lineage detail assembly
   -> optional JSON summary export
-  -> eval summary persistence
+  -> eval summary + detail persistence
 
 webhook serve
   -> axum receiver
@@ -212,8 +213,8 @@ Important implemented state concepts:
 - `review_focus`: readiness, sleep, recovery, stress, or activity within Investigate mode
 - `selected_review_card_index`: selected ranked card within Review
 - `ai_preflight`: explicit in-app send gate state for AI launches
-- `ai_browser_tab`: shared browser state for saved `runs`, `snapshots`, and `reports`
-- `selected_ai_run_index`, `selected_snapshot_catalog_index`, `selected_report_export_index`: stable list/detail selection state inside the AI workbench
+- `ai_browser_tab`: shared browser state for saved `runs`, `snapshots`, `reports`, and `evals`
+- `selected_ai_run_index`, `selected_snapshot_catalog_index`, `selected_report_export_index`, `selected_ai_eval_run_index`: stable list/detail selection state inside the AI workbench
 - `ai_artifacts_by_day`: preloaded day-keyed summaries derived from `ai_artifacts` joined through `snapshot_exports`, used for Review provenance display
 
 ### `src/tui.rs`
@@ -375,12 +376,14 @@ Responsibilities:
 - deterministic local artifact evaluation
 - grader execution and summary scoring
 - eval summary persistence
+- persisted manifest/case/grader/linkage detail payload construction
 - optional JSON export
 
 Boundary rule:
 
 - eval runs do not require live OpenAI calls
 - eval fixtures remain snapshot-first and local-only
+- historical eval browsing reads only persisted local detail; it does not rerun fixtures from the TUI
 
 ### `src/ui/*`
 
@@ -515,7 +518,7 @@ Additional query responsibilities added in this pass:
 - persisted AI review/compare artifact storage and latest-artifact lookup
 - day-scoped AI artifact summary lookup keyed by snapshot `anchor_day`, including compare-side lineage resolution
 - report export manifest persistence and lineage lookup
-- eval summary persistence
+- eval summary and `details_json` persistence
 
 ### `src/review/*`
 

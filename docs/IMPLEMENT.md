@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This file is the execution runbook for the current phase-9 product. It only describes flows that work today, including the AI workbench, inline AI launch points, preflight confirmation, the snapshot library, AI run registry, report export workflow, and the local eval harness.
+This file is the execution runbook for the current phase-10 product. It only describes flows that work today, including the AI workbench, inline AI launch points, preflight confirmation, the snapshot library, AI run registry, report export workflow, the in-app eval browser, and the local eval harness.
 
 ## Commands
 
@@ -14,6 +14,7 @@ cargo run -- tui --demo
 cargo run -- demo
 cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots
 cargo run -- ui snapshot --screen ai --demo --out-dir /tmp/ringmaster-ai-ui
+cargo run -- ui snapshot --screen status --demo --out-dir /tmp/ringmaster-status-ui
 cargo run -- doctor
 cargo run -- auth login
 cargo run -- sync once
@@ -217,6 +218,7 @@ The AI workbench browser is now the canonical in-app artifact surface for:
 - snapshots
 - AI runs
 - exported reports
+- persisted eval runs
 
 The browser uses a consistent list/detail model and keeps provenance visible:
 
@@ -225,6 +227,7 @@ The browser uses a consistent list/detail model and keeps provenance visible:
 - prompt and schema versions
 - linked artifacts and linked reports
 - exported report output path and verification metadata
+- eval fixture manifests, baseline-vs-candidate summaries, and failing graders
 
 ## Report export runtime
 
@@ -274,7 +277,7 @@ Runtime behavior:
 4. run local graders against rendered artifact text and evidence refs
 5. render a compact summary to stdout
 6. optionally export a JSON summary file
-7. persist an `ai_eval_runs` summary row
+7. persist an `ai_eval_runs` row with both rollup metrics and a `details_json` payload for the in-app eval browser
 
 Current graders:
 
@@ -290,7 +293,9 @@ Important rules:
 
 - no live API calls are required for baseline regression coverage
 - fixture directories are deterministic and suitable for CI
-- eval persistence stores summaries, not every case payload by default
+- eval persistence stays local and snapshot-first
+- historical eval browsing reads persisted detail payloads instead of rerunning fixtures from the TUI
+- fixture lineage metadata is optional and is only used when the manifest declares explicit local handles
 
 ## Prompt, schema, and template versioning
 
@@ -358,10 +363,11 @@ Supported sources:
 - `--fixture-dir <dir>` for a fixture-backed temporary store
 - live local store when neither `--demo` nor `--fixture-dir` is passed
 
-Important phase-9 usage:
+Important phase-10 usage:
 
 - `--screen ai` renders deterministic AI workbench snapshots
 - demo AI snapshots cover provider-disabled, preflight, running, success, failure/cancel, and saved-detail paths
+- `--screen status` renders deterministic Status/Ops snapshots, including eval-health diagnostics
 
 ## Verification sequence
 
@@ -377,6 +383,7 @@ cargo run -- snapshot list --demo
 cargo run -- ai review /tmp/ringmaster-snapshot.json --dry-run
 cargo run -- ai runs list --demo
 cargo run -- ui snapshot --screen ai --demo --out-dir /tmp/ringmaster-ai-ui
+cargo run -- ui snapshot --screen status --demo --out-dir /tmp/ringmaster-status-ui
 cargo run -- report export --from-snapshot /tmp/ringmaster-snapshot.json --format markdown --out /tmp/ringmaster-report.md
 cargo run -- ai eval --fixture-dir tests/fixtures/ai
 ```

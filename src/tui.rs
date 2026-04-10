@@ -35,13 +35,14 @@ use crate::components::{
 };
 use crate::config::Config;
 use crate::error::{Result, RingmasterError};
+use crate::eval::parse_persisted_eval_details;
 use crate::oura::{auth, sync::SyncOptions, sync::SyncReport, sync::sync_selected};
 use crate::refresh::{SyncFamily, due_families, next_wake_duration};
 use crate::report;
 use crate::snapshot::{self, LoadedSnapshotArtifact, PrivacyProfile, SnapshotSourceMode};
 use crate::store::Store;
 use crate::store::queries::{
-    AiRunRecord, ReportExportRecord, SnapshotCatalogEntry, SnapshotExportRecord,
+    AiEvalRunRecord, AiRunRecord, ReportExportRecord, SnapshotCatalogEntry, SnapshotExportRecord,
 };
 use crate::ui::chrome::{self, PanelKind};
 use crate::ui::layout::UiContext;
@@ -124,6 +125,7 @@ pub async fn run(config: &Config, app: &mut AppState) -> Result<()> {
                 let selected_run = app.selected_ai_run_record();
                 let selected_snapshot = app.selected_snapshot_catalog_entry();
                 let selected_report = app.selected_report_export_record();
+                let selected_eval = app.selected_ai_eval_run_record();
                 let request_manual_refresh =
                     matches!(action, Action::RefreshRequested) && matches!(app.mode, RunMode::Live);
                 app.handle(action.clone());
@@ -141,6 +143,7 @@ pub async fn run(config: &Config, app: &mut AppState) -> Result<()> {
                     selected_run,
                     selected_snapshot,
                     selected_report,
+                    selected_eval,
                     &ai_action_tx,
                     &mut ai_tasks,
                 )?;
@@ -421,6 +424,7 @@ fn handle_ai_side_effect(
     selected_run: Option<AiRunRecord>,
     selected_snapshot: Option<SnapshotCatalogEntry>,
     _selected_report: Option<ReportExportRecord>,
+    selected_eval: Option<AiEvalRunRecord>,
     ai_action_tx: &UnboundedSender<Action>,
     ai_tasks: &mut HashMap<String, AsyncJoinHandle<()>>,
 ) -> Result<()> {
@@ -594,6 +598,13 @@ fn handle_ai_side_effect(
                 );
             }
             AiBrowserTab::Reports => {}
+            AiBrowserTab::Evals => {
+                let _ = ai_action_tx.send(Action::RefreshFailed {
+                    message:
+                        "Eval entries are read-only history. Compare launches still start from saved runs or snapshots."
+                            .to_owned(),
+                });
+            }
         },
         Action::RequestAiGenerateReport => match selected_tab {
             AiBrowserTab::Runs => {
@@ -625,21 +636,45 @@ fn handle_ai_side_effect(
                 );
             }
             AiBrowserTab::Reports => {}
-        },
-        Action::RequestJumpToAiEvidence => {
-            let Some(run) = selected_run else {
-                return Ok(());
-            };
-            if let Some(jump_action) = build_jump_to_evidence_action(config, &run)? {
-                let _ = ai_action_tx.send(jump_action);
-            } else {
+            AiBrowserTab::Evals => {
                 let _ = ai_action_tx.send(Action::RefreshFailed {
                     message:
-                        "The selected AI run does not have a resolvable evidence reference yet."
+                        "Eval entries are already exported history; generate reports from saved runs or snapshots instead."
                             .to_owned(),
                 });
             }
-        }
+        },
+        Action::RequestJumpToAiEvidence => match selected_tab {
+            AiBrowserTab::Runs => {
+                let Some(run) = selected_run else {
+                    return Ok(());
+                };
+                if let Some(jump_action) = build_jump_to_evidence_action(config, &run)? {
+                    let _ = ai_action_tx.send(jump_action);
+                } else {
+                    let _ = ai_action_tx.send(Action::RefreshFailed {
+                        message:
+                            "The selected AI run does not have a resolvable evidence reference yet."
+                                .to_owned(),
+                    });
+                }
+            }
+            AiBrowserTab::Evals => {
+                let Some(eval) = selected_eval else {
+                    return Ok(());
+                };
+                if let Some(jump_action) = build_eval_jump_action(&eval) {
+                    let _ = ai_action_tx.send(jump_action);
+                } else {
+                    let _ = ai_action_tx.send(Action::RefreshFailed {
+                            message:
+                                "The selected eval does not declare a saved snapshot, AI run, or report link."
+                                    .to_owned(),
+                        });
+                }
+            }
+            AiBrowserTab::Snapshots | AiBrowserTab::Reports => {}
+        },
         _ => {}
     }
     Ok(())
@@ -1793,6 +1828,78 @@ fn build_jump_to_evidence_action(config: &Config, run: &AiRunRecord) -> Result<O
     }))
 }
 
+fn build_eval_jump_action(eval: &AiEvalRunRecord) -> Option<Action> {
+    let details = parse_persisted_eval_details(&eval.details_json)?;
+    let failing_cases = details
+        .cases
+        .iter()
+        .filter(|case| case.graders.iter().any(|grader| !grader.candidate_passed))
+        .collect::<Vec<_>>();
+    let candidate_cases = if failing_cases.is_empty() {
+        details.cases.iter().collect::<Vec<_>>()
+    } else {
+        failing_cases
+    };
+
+    for case in candidate_cases {
+        if let Some(snapshot_hash) = &case.snapshot_hash_a {
+            return Some(Action::JumpToAiBrowserRecord {
+                tab: AiBrowserTab::Snapshots,
+                record_id: snapshot_hash.clone(),
+                status_line: format!("Opened snapshot linked from eval case {}.", case.case_id),
+            });
+        }
+        if let Some(ai_run_id) = &case.candidate.lineage.ai_run_id {
+            return Some(Action::JumpToAiBrowserRecord {
+                tab: AiBrowserTab::Runs,
+                record_id: ai_run_id.clone(),
+                status_line: format!("Opened AI run linked from eval case {}.", case.case_id),
+            });
+        }
+        if let Some(report_id) = &case.candidate.lineage.report_id {
+            return Some(Action::JumpToAiBrowserRecord {
+                tab: AiBrowserTab::Reports,
+                record_id: report_id.clone(),
+                status_line: format!("Opened report linked from eval case {}.", case.case_id),
+            });
+        }
+        if let Some(snapshot_hash) = &case.snapshot_hash_b {
+            return Some(Action::JumpToAiBrowserRecord {
+                tab: AiBrowserTab::Snapshots,
+                record_id: snapshot_hash.clone(),
+                status_line: format!(
+                    "Opened comparison snapshot linked from eval case {}.",
+                    case.case_id
+                ),
+            });
+        }
+        if let Some(baseline) = &case.baseline {
+            if let Some(ai_run_id) = &baseline.lineage.ai_run_id {
+                return Some(Action::JumpToAiBrowserRecord {
+                    tab: AiBrowserTab::Runs,
+                    record_id: ai_run_id.clone(),
+                    status_line: format!(
+                        "Opened baseline AI run linked from eval case {}.",
+                        case.case_id
+                    ),
+                });
+            }
+            if let Some(report_id) = &baseline.lineage.report_id {
+                return Some(Action::JumpToAiBrowserRecord {
+                    tab: AiBrowserTab::Reports,
+                    record_id: report_id.clone(),
+                    status_line: format!(
+                        "Opened baseline report linked from eval case {}.",
+                        case.case_id
+                    ),
+                });
+            }
+        }
+    }
+
+    None
+}
+
 fn first_export_ref_from_artifact(artifact: &ai::StoredArtifact) -> Option<String> {
     match artifact {
         ai::StoredArtifact::Review(review) => review
@@ -2832,7 +2939,7 @@ mod tests {
     }
 
     #[test]
-    fn ai_workbench_browser_tabs_render_snapshot_and_report_details() {
+    fn ai_workbench_browser_tabs_render_snapshot_report_and_eval_details() {
         let config = test_config();
         let mut app = build_demo_state(&config);
         app.active_screen = Screen::Ai;
@@ -2848,6 +2955,26 @@ mod tests {
             .unwrap_or_else(|error| panic!("report browser should render: {error}"));
         assert!(report_output.contains("Report export"));
         assert!(report_output.contains("Daily review briefing"));
+
+        app.handle(Action::NextAiBrowserTab);
+        let eval_output = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| panic!("eval browser should render: {error}"));
+        assert!(eval_output.contains("Eval run"));
+        assert!(eval_output.contains("fixture_manifest: tests/fixtures/ai"));
+        assert!(eval_output.contains("baseline_vs_candidate: regressions=1"));
+    }
+
+    #[test]
+    fn ops_snapshot_renders_eval_health() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Ops;
+
+        let output = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| panic!("ops snapshot should render: {error}"));
+        assert!(output.contains("Latest eval"));
+        assert!(output.contains("Eval health"));
+        assert!(output.contains("failed_cases=1 regressions=1 improvements=1"));
     }
 
     #[tokio::test]

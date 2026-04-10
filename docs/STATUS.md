@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This file is the current truth for the repository after the `ai-workbench-and-first-class-tui` pass completed on `2026-04-10`. It records what landed, what was verified, and what remains intentionally deferred.
+This file is the current truth for the repository after the `ai-eval-lab-and-regression-console` pass completed on `2026-04-10`. It records what landed, what was verified, and what remains intentionally deferred.
 
 ## Baseline before this pass
 
@@ -15,12 +15,10 @@ Verified before implementation:
 
 Primary gaps before this pass:
 
-- AI still felt CLI-first even though snapshots, AI artifacts, reports, and evals were already durable
-- there was no dedicated in-app AI workbench
-- there was no explicit preflight confirmation gate inside the TUI
-- saved snapshots, AI runs, and reports were not browseable together in-app
-- guided follow-up actions were not available from the TUI
-- the ops surface did not clearly expose AI/provider readiness and usage
+- evals still felt CLI-first even though snapshots, AI artifacts, reports, and evals were already durable
+- the AI workbench browser still stopped at runs, snapshots, and reports
+- eval summaries did not persist enough detail for in-app inspection
+- the Status/Ops surface did not clearly expose eval health or regression warnings
 
 ## Current implemented truth
 
@@ -44,7 +42,7 @@ The repository now includes:
 - a local eval flywheel:
   - `ai eval`
   - fixture manifest support
-  - summary persistence in `ai_eval_runs`
+  - summary and detail persistence in `ai_eval_runs`
   - graders for schema validity, completeness, overclaiming, medical safety, privacy, evidence integrity, and stale-data honesty
 - explicit prompt/template/schema versioning with dedicated files under:
   - `src/ai_prompts/*`
@@ -83,8 +81,9 @@ The repository now includes:
   - snapshots
   - AI runs
   - exported reports
+  - persisted eval runs
 - local jump-back routing from saved AI evidence refs to Review / Explain / Patterns / Timeline when the export ref is resolvable
-- richer Ops / doctor summaries for provider readiness, last successful/failed runs, and local artifact counts
+- richer Ops / doctor summaries for provider readiness, last successful/failed runs, local artifact counts, and eval health
 
 ## Snapshot library capabilities that now work
 
@@ -144,6 +143,7 @@ The AI workbench now shows, for the selected browser item:
 - linkage to the source snapshot(s)
 - linkage to exported reports
 - error detail for failed/cancelled/interrupted runs
+- eval fixture manifest summaries, candidate-vs-baseline rollups, failing graders first, and lineage back to saved snapshots, AI runs, and reports when the eval detail payload includes those local handles
 
 ## Report export capabilities that now work
 
@@ -171,6 +171,9 @@ Report exports now include:
 - fixture-manifest driven datasets
 - deterministic local execution with no live API requirement
 - persisted eval summary history in `ai_eval_runs`
+- persisted manifest/case/grader/linkage detail in `ai_eval_runs.details_json`
+- in-app `Evals` browser/detail surface inside the AI workbench
+- Status/Ops latest-eval and eval-health diagnostics with warning-state escalation when the newest eval regresses or fails
 
 ## Privacy and provenance truth
 
@@ -221,7 +224,11 @@ Coverage now includes:
   - provider-disabled workbench rendering
   - preflight overlay rendering
   - saved-run detail rendering
-  - snapshot/report browser tabs
+  - snapshot/report/eval browser tabs
+  - visible Status eval-health diagnostics
+- deterministic eval-browser detail tests for:
+  - failing grader rendering
+  - linked snapshot / AI run / report lineage lines
 - deterministic lifecycle/model tests for:
   - queued
   - running
@@ -236,6 +243,7 @@ Coverage now includes:
   - `report export`
   - `ai eval`
   - `ui snapshot --screen ai --demo`
+  - `ui snapshot --screen status --demo`
 
 ## Verification completed for this pass
 
@@ -247,8 +255,9 @@ The following commands were run and passed for this pass:
 - `cargo run -- doctor`
 - `cargo run -- snapshot export --demo --profile redacted --out /tmp/ringmaster-snapshot.json`
 - `cargo run -- ai review /tmp/ringmaster-snapshot.json --dry-run`
+- `cargo run -- ai eval --fixture-dir tests/fixtures/ai`
 - `cargo run -- ui snapshot --screen ai --demo --out-dir /tmp/ringmaster-ai-ui`
-- `cargo test --lib 'tui::tests::ai_workbench_smoke_path_covers_disabled_preflight_and_saved_run_detail' -- --exact`
+- `cargo run -- ui snapshot --screen status --demo --out-dir /tmp/ringmaster-status-ui`
 
 ## Intentionally deferred
 

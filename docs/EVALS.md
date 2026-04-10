@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document describes the local eval flywheel that ships with the Phase 8 snapshot library and report workflow.
+This document describes the local eval flywheel and in-app eval browser that ship with the snapshot-first AI workflow.
 
 The goal is not to build a hosted eval platform. The goal is to make prompt and model changes safer without changing the local-first privacy posture.
 
@@ -22,7 +22,13 @@ Optional flags:
 
 `ai eval` loads a local fixture manifest, validates the snapshot fixtures, loads candidate and baseline AI artifacts, runs local graders, and writes a compact summary to stdout.
 
-It also persists an `ai_eval_runs` summary row so regressions can be inspected over time.
+It also persists an `ai_eval_runs` row so regressions can be inspected over time.
+
+That persisted row now includes:
+
+- rollup scores and regression summary fields for CLI and Ops summaries
+- a `details_json` payload with fixture-manifest metadata, per-case outcomes, per-grader comparisons, and optional lineage back to saved snapshots, AI runs, artifacts, and reports
+- enough detail for the TUI `AI -> Evals` browser to stay read-only and deterministic without rerunning fixture directories
 
 ## Fixture layout
 
@@ -52,6 +58,8 @@ The manifest declares:
 - snapshot fixture paths
 - artifact fixture paths
 - case expectations
+- optional lineage metadata for candidate and baseline artifacts
+- optional saved snapshot hashes for snapshot A / snapshot B linkage
 
 ## Graders
 
@@ -113,6 +121,24 @@ In practice, this means:
 - model changes can be checked against the same fixture set
 - prompt/schema/model/provider versions remain visible in both AI run records and eval summaries
 
+## In-app eval browser
+
+The top-level `AI` workbench now includes an `Evals` tab.
+
+Selecting a persisted eval run shows:
+
+- fixture manifest summary
+- candidate vs baseline rollup
+- score rollups and regression/improvement summaries
+- failing graders first, rendered natively instead of dumped as raw JSON
+- linked snapshots, AI runs, artifacts, and reports when the manifest declared resolvable lineage metadata
+
+The `Status` screen also surfaces:
+
+- the latest eval timestamp and candidate/baseline labels
+- eval health counts for failed cases, regressions, and improvements
+- a warning when the newest eval needs attention
+
 ## Why this is local-first
 
 The eval workflow intentionally does not depend on:
@@ -128,9 +154,9 @@ That keeps the reliability loop inspectable, deterministic, and compatible with 
 
 The current eval harness does not yet provide:
 
-- a dedicated TUI eval browser
 - batch archive jobs over very large saved snapshot collections
 - PDF report output
 - automatic fixture generation from live runs
+- interactive per-case cursoring inside the TUI detail pane
 
 Those are intentionally deferred until the local artifact workflows settle further.

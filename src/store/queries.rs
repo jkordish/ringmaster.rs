@@ -601,6 +601,7 @@ pub struct AiEvalRunRecord {
     pub evidence_score: f64,
     pub honesty_score: f64,
     pub regression_summary: String,
+    pub details_json: String,
 }
 
 impl Display for SyncRunStatus {
@@ -3217,8 +3218,9 @@ impl<'connection> AnalysisStore<'connection> {
                 privacy_score,
                 evidence_score,
                 honesty_score,
-                regression_summary
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+                regression_summary,
+                details_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
             ON CONFLICT(eval_run_id) DO UPDATE SET
                 task_family = excluded.task_family,
                 fixture_dir = excluded.fixture_dir,
@@ -3239,7 +3241,8 @@ impl<'connection> AnalysisStore<'connection> {
                 privacy_score = excluded.privacy_score,
                 evidence_score = excluded.evidence_score,
                 honesty_score = excluded.honesty_score,
-                regression_summary = excluded.regression_summary",
+                regression_summary = excluded.regression_summary,
+                details_json = excluded.details_json",
             params![
                 record.eval_run_id,
                 record.task_family,
@@ -3262,6 +3265,7 @@ impl<'connection> AnalysisStore<'connection> {
                 record.evidence_score,
                 record.honesty_score,
                 record.regression_summary,
+                record.details_json,
             ],
         )?;
         Ok(())
@@ -3290,7 +3294,8 @@ impl<'connection> AnalysisStore<'connection> {
                 privacy_score,
                 evidence_score,
                 honesty_score,
-                regression_summary
+                regression_summary,
+                details_json
              FROM ai_eval_runs
              ORDER BY created_at DESC, eval_run_id DESC",
         )?;
@@ -3317,6 +3322,7 @@ impl<'connection> AnalysisStore<'connection> {
                 evidence_score: row.get(18)?,
                 honesty_score: row.get(19)?,
                 regression_summary: row.get(20)?,
+                details_json: row.get(21)?,
             })
         })?;
         let mut records = Vec::new();
@@ -5461,6 +5467,7 @@ mod tests {
             evidence_score: 1.0,
             honesty_score: 1.0,
             regression_summary: "Improvements: compare:evidence; regressions: none.".to_owned(),
+            details_json: r#"{"fixture_dir":"tests/fixtures/ai","fixture_schema_version":"ringmaster.ai.eval.fixtures.v1","candidate_label":"candidate","baseline_label":"baseline","total_cases":2,"passed_cases":2,"failed_cases":0,"scores":{"schema_validity":1.0,"completeness":1.0,"overclaiming":1.0,"medical_safety":1.0,"privacy":1.0,"evidence":1.0,"honesty":1.0},"regression_summary":"Improvements: compare:evidence; regressions: none.","improvements":["compare:evidence"],"regressions":[],"cases":[]}"#.to_owned(),
         };
         store
             .analysis()

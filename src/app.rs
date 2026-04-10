@@ -7,6 +7,11 @@ use crate::ai::{
 };
 use crate::ai_prompts::{COMPARE_PROMPT_VERSION, REVIEW_PROMPT_VERSION};
 use crate::config::{AiRequestMode, Config};
+use crate::eval::{
+    EvalArtifactLineage, EvalExpectations, EvalScoreSummary, PersistedEvalArtifactDetail,
+    PersistedEvalCaseDetail, PersistedEvalGraderResult, PersistedEvalRunDetails,
+    parse_persisted_eval_details,
+};
 use crate::insights::{InsightConfidence, MetricInsight, MetricPoint, build_metric_insight};
 use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
 use crate::refresh::SyncFamily;
@@ -185,6 +190,7 @@ pub enum AiBrowserTab {
     Runs,
     Snapshots,
     Reports,
+    Evals,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,6 +250,7 @@ pub struct AppState {
     selected_ai_run_index: usize,
     selected_snapshot_catalog_index: usize,
     selected_report_export_index: usize,
+    selected_ai_eval_run_index: usize,
     overlay_filters: OverlayFilterState,
     pattern_metric_filter: PatternMetricFilter,
     review_mode: ReviewScreenMode,
@@ -557,6 +564,7 @@ struct LiveModelOptions {
     selected_ai_run_index: usize,
     selected_snapshot_catalog_index: usize,
     selected_report_export_index: usize,
+    selected_ai_eval_run_index: usize,
     overlay_filters: OverlayFilterState,
     window_hours: u16,
     trends_window: TrendWindowKind,
@@ -565,6 +573,23 @@ struct LiveModelOptions {
     review_mode: ReviewScreenMode,
     review_focus: ReviewFocus,
     selected_review_card_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct EvalComparisonCounts {
+    improvements: usize,
+    regressions: usize,
+    matched: usize,
+    candidate_only: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EvalHealthSummary {
+    created_at: String,
+    labels: String,
+    failed_cases: u32,
+    regression_count: usize,
+    improvement_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -886,6 +911,22 @@ impl AppState {
                     );
                 }
             }
+            Action::JumpToAiBrowserRecord {
+                tab,
+                record_id,
+                status_line,
+            } => {
+                if self.select_ai_browser_record(tab, &record_id) {
+                    self.active_screen = Screen::Ai;
+                    self.status_line = status_line;
+                    self.rebuild_live_model();
+                } else {
+                    self.status_line = format!(
+                        "Could not resolve saved {} `{record_id}` back into the local AI registry.",
+                        tab.label()
+                    );
+                }
+            }
             Action::PreviousAiBrowserTab => {
                 self.ai_browser_tab = self.ai_browser_tab.previous();
                 self.status_line =
@@ -988,6 +1029,7 @@ impl AppState {
                     selected_ai_run_index: self.selected_ai_run_index,
                     selected_snapshot_catalog_index: self.selected_snapshot_catalog_index,
                     selected_report_export_index: self.selected_report_export_index,
+                    selected_ai_eval_run_index: self.selected_ai_eval_run_index,
                     overlay_filters: self.overlay_filters.clone(),
                     window_hours: self.timeline_window_hours,
                     trends_window: self.trends_window,
@@ -1048,8 +1090,49 @@ impl AppState {
             .cloned()
     }
 
+    pub(crate) fn selected_ai_eval_run_record(&self) -> Option<AiEvalRunRecord> {
+        self.live_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.ai_eval_runs.get(self.selected_ai_eval_run_index))
+            .cloned()
+    }
+
     pub(crate) fn selected_ai_browser_tab(&self) -> AiBrowserTab {
         self.ai_browser_tab
+    }
+
+    fn select_ai_browser_record(&mut self, tab: AiBrowserTab, record_id: &str) -> bool {
+        let Some(snapshot) = &self.live_snapshot else {
+            return false;
+        };
+        let found = match tab {
+            AiBrowserTab::Runs => snapshot
+                .ai_runs
+                .iter()
+                .position(|record| record.run_id == record_id)
+                .map(|index| self.selected_ai_run_index = index),
+            AiBrowserTab::Snapshots => snapshot
+                .snapshot_catalog
+                .iter()
+                .position(|record| record.snapshot_hash == record_id)
+                .map(|index| self.selected_snapshot_catalog_index = index),
+            AiBrowserTab::Reports => snapshot
+                .report_exports
+                .iter()
+                .position(|record| record.report_id == record_id)
+                .map(|index| self.selected_report_export_index = index),
+            AiBrowserTab::Evals => snapshot
+                .ai_eval_runs
+                .iter()
+                .position(|record| record.eval_run_id == record_id)
+                .map(|index| self.selected_ai_eval_run_index = index),
+        };
+        if found.is_some() {
+            self.ai_browser_tab = tab;
+            true
+        } else {
+            false
+        }
     }
 
     fn select_day_by_label(&mut self, day: &str) -> bool {
@@ -1227,6 +1310,10 @@ impl AppState {
                 .live_snapshot
                 .as_ref()
                 .map_or(0, |snapshot| snapshot.report_exports.len()),
+            AiBrowserTab::Evals => self
+                .live_snapshot
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.ai_eval_runs.len()),
         };
         if len == 0 {
             return false;
@@ -1236,6 +1323,7 @@ impl AppState {
             AiBrowserTab::Runs => &mut self.selected_ai_run_index,
             AiBrowserTab::Snapshots => &mut self.selected_snapshot_catalog_index,
             AiBrowserTab::Reports => &mut self.selected_report_export_index,
+            AiBrowserTab::Evals => &mut self.selected_ai_eval_run_index,
         };
         let new_index = if delta.is_negative() {
             selected.saturating_sub(delta.unsigned_abs())
@@ -1324,6 +1412,7 @@ impl AiBrowserTab {
             Self::Runs => "runs",
             Self::Snapshots => "snapshots",
             Self::Reports => "reports",
+            Self::Evals => "evals",
         }
     }
 
@@ -1333,6 +1422,7 @@ impl AiBrowserTab {
             Self::Runs => 0,
             Self::Snapshots => 1,
             Self::Reports => 2,
+            Self::Evals => 3,
         }
     }
 
@@ -1341,16 +1431,18 @@ impl AiBrowserTab {
         match self {
             Self::Runs => Self::Snapshots,
             Self::Snapshots => Self::Reports,
-            Self::Reports => Self::Runs,
+            Self::Reports => Self::Evals,
+            Self::Evals => Self::Runs,
         }
     }
 
     #[must_use]
     pub fn previous(self) -> Self {
         match self {
-            Self::Runs => Self::Reports,
+            Self::Runs => Self::Evals,
             Self::Snapshots => Self::Runs,
             Self::Reports => Self::Snapshots,
+            Self::Evals => Self::Reports,
         }
     }
 }
@@ -1520,6 +1612,7 @@ pub fn build_state_from_snapshot(
         selected_ai_run_index: 0,
         selected_snapshot_catalog_index: 0,
         selected_report_export_index: 0,
+        selected_ai_eval_run_index: 0,
         overlay_filters: OverlayFilterState::all(),
         pattern_metric_filter: PatternMetricFilter::All,
         review_mode: ReviewScreenMode::Today,
@@ -2373,7 +2466,7 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
         .iter()
         .filter(|attempt| attempt.outcome == "failed")
         .count();
-    let summary_lines = vec![
+    let mut summary_lines = vec![
         format!("Mode: {}", ops_runtime_mode(snapshot)),
         format!("Receiver: {}", receiver_status_line(snapshot)),
         format!(
@@ -2387,6 +2480,16 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
             snapshot.ai_ops.default_model
         ),
     ];
+    if let Some(summary) = latest_eval_health_summary(&snapshot.ai_eval_runs) {
+        summary_lines.push(format!(
+            "Latest eval: {} | {} | failed_cases={} regressions={} improvements={}",
+            summary.created_at,
+            summary.labels,
+            summary.failed_cases,
+            summary.regression_count,
+            summary.improvement_count
+        ));
+    }
 
     let mut warnings = family_statuses
         .iter()
@@ -2410,6 +2513,19 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
         warnings.push(format!(
             "AI is enabled but `{}` is missing, so launches will stop at readiness checks.",
             snapshot.ai_ops.api_key_env
+        ));
+    }
+    if snapshot.ai_eval_runs.is_empty() {
+        warnings.push(
+            "No persisted eval runs yet. Use `ringmaster ai eval --fixture-dir ...` to populate the local regression console."
+                .to_owned(),
+        );
+    } else if let Some(eval_summary) = latest_eval_health_summary(&snapshot.ai_eval_runs)
+        && (eval_summary.failed_cases > 0 || eval_summary.regression_count > 0)
+    {
+        warnings.push(format!(
+            "Latest eval needs attention: {} failed case(s) and {} regression(s).",
+            eval_summary.failed_cases, eval_summary.regression_count
         ));
     }
     warnings.extend(recent_health_incidents(snapshot));
@@ -2499,6 +2615,27 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
                 format!(
                     "review={} | compare={}",
                     snapshot.ai_ops.review_prompt_version, snapshot.ai_ops.compare_prompt_version
+                ),
+            ),
+            ops_item(
+                "Latest eval",
+                latest_eval_health_summary(&snapshot.ai_eval_runs).map_or_else(
+                    || "none".to_owned(),
+                    |summary| format!("{} | {}", summary.created_at, summary.labels),
+                ),
+            ),
+            ops_item(
+                "Eval health",
+                latest_eval_health_summary(&snapshot.ai_eval_runs).map_or_else(
+                    || "no eval history".to_owned(),
+                    |summary| {
+                        format!(
+                            "failed_cases={} regressions={} improvements={}",
+                            summary.failed_cases,
+                            summary.regression_count,
+                            summary.improvement_count
+                        )
+                    },
                 ),
             ),
             ops_item(
@@ -2704,6 +2841,12 @@ fn build_ai_workbench_model(
             snapshot.report_exports.len(),
             options.ai_browser_tab == AiBrowserTab::Reports,
         ),
+        (
+            AiBrowserTab::Evals,
+            "Evals",
+            snapshot.ai_eval_runs.len(),
+            options.ai_browser_tab == AiBrowserTab::Evals,
+        ),
     ]
     .into_iter()
     .map(|(_, label, count, selected)| AiBrowserTabView {
@@ -2735,17 +2878,28 @@ fn build_ai_workbench_model(
             yes_no(snapshot.ai_ops.tools_disabled)
         ),
         format!(
-            "Catalog: {} snapshots, {} runs, {} reports.",
+            "Catalog: {} snapshots, {} runs, {} reports, {} evals.",
             snapshot.ai_ops.snapshot_catalog_count,
             snapshot.ai_ops.ai_run_count,
-            snapshot.ai_ops.report_export_count
+            snapshot.ai_ops.report_export_count,
+            snapshot.ai_ops.ai_eval_run_count
         ),
     ];
     if let Some(last_successful_run) = &snapshot.ai_ops.last_successful_run {
         summary_lines.push(format!("Last successful run: {last_successful_run}"));
     }
+    if let Some(eval_summary) = latest_eval_health_summary(&snapshot.ai_eval_runs) {
+        summary_lines.push(format!(
+            "Latest eval: {} | {} | failed_cases={} regressions={} improvements={}",
+            eval_summary.created_at,
+            eval_summary.labels,
+            eval_summary.failed_cases,
+            eval_summary.regression_count,
+            eval_summary.improvement_count
+        ));
+    }
 
-    let trust_lines = vec![
+    let mut trust_lines = vec![
         format!(
             "Provider: {} | API key ready: {}",
             snapshot.ai_ops.provider,
@@ -2770,6 +2924,14 @@ fn build_ai_workbench_model(
             snapshot.ai_ops.ai_artifact_count, snapshot.ai_ops.ai_eval_run_count
         ),
     ];
+    if let Some(eval_summary) = latest_eval_health_summary(&snapshot.ai_eval_runs) {
+        trust_lines.push(format!(
+            "Eval health: {} failed case(s) | {} regression(s) | {} improvement(s)",
+            eval_summary.failed_cases,
+            eval_summary.regression_count,
+            eval_summary.improvement_count
+        ));
+    }
 
     let mut warning_lines = Vec::new();
     if !snapshot.ai_ops.enabled {
@@ -2792,6 +2954,19 @@ fn build_ai_workbench_model(
     }
     if let Some(last_failed_run) = &snapshot.ai_ops.last_failed_run {
         warning_lines.push(format!("Most recent failed run: {last_failed_run}"));
+    }
+    if snapshot.ai_eval_runs.is_empty() {
+        warning_lines.push(
+            "No persisted eval runs yet. Use `ringmaster ai eval --fixture-dir ...` to populate the local regression console."
+                .to_owned(),
+        );
+    } else if let Some(eval_summary) = latest_eval_health_summary(&snapshot.ai_eval_runs)
+        && (eval_summary.failed_cases > 0 || eval_summary.regression_count > 0)
+    {
+        warning_lines.push(format!(
+            "Latest eval needs attention: {} failed case(s) and {} regression(s).",
+            eval_summary.failed_cases, eval_summary.regression_count
+        ));
     }
     let preflight = options.ai_preflight.as_ref().map(build_ai_preflight_view);
 
@@ -2915,6 +3090,7 @@ fn build_ai_browser_content(
         AiBrowserTab::Reports => {
             build_report_browser(snapshot, options.selected_report_export_index)
         }
+        AiBrowserTab::Evals => build_eval_browser(snapshot, options.selected_ai_eval_run_index),
     }
 }
 
@@ -3209,6 +3385,361 @@ fn build_report_browser(
         "Report export".to_owned(),
         detail_lines,
     )
+}
+
+fn build_eval_browser(
+    snapshot: &LiveSnapshot,
+    selected_index: usize,
+) -> (Vec<AiBrowserItemView>, Option<usize>, String, Vec<String>) {
+    let selected_item_index = if snapshot.ai_eval_runs.is_empty() {
+        None
+    } else {
+        Some(usize::min(
+            selected_index,
+            snapshot.ai_eval_runs.len().saturating_sub(1),
+        ))
+    };
+    let browser_items = snapshot
+        .ai_eval_runs
+        .iter()
+        .enumerate()
+        .map(|(index, record)| {
+            let labels = eval_labels(record);
+            AiBrowserItemView {
+                headline: format!("{} | {}", record.task_family, labels),
+                detail: format!(
+                    "{} | {} case(s) | {}",
+                    record.created_at, record.total_cases, record.fixture_dir
+                ),
+                status_badge: eval_status_badge(record),
+                selected: selected_item_index == Some(index),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let Some(selected_item_index) = selected_item_index else {
+        return (
+            browser_items,
+            None,
+            "Eval runs".to_owned(),
+            vec!["No persisted eval runs yet.".to_owned()],
+        );
+    };
+    let record = &snapshot.ai_eval_runs[selected_item_index];
+    let detail_lines = parse_persisted_eval_details(&record.details_json).map_or_else(
+        || {
+            vec![
+                format!("eval_run_id: {}", record.eval_run_id),
+                format!("fixture_dir: {}", record.fixture_dir),
+                format!("candidate/baseline: {}", eval_labels(record)),
+                format!(
+                    "cases: total={} passed={} failed={}",
+                    record.total_cases, record.passed_cases, record.failed_cases
+                ),
+                format!("regression_summary: {}", record.regression_summary),
+                "Persisted eval detail is unavailable for this run.".to_owned(),
+            ]
+        },
+        |details| render_eval_detail_lines(snapshot, record, &details),
+    );
+
+    (
+        browser_items,
+        Some(selected_item_index),
+        "Eval run".to_owned(),
+        detail_lines,
+    )
+}
+
+fn latest_eval_health_summary(ai_eval_runs: &[AiEvalRunRecord]) -> Option<EvalHealthSummary> {
+    ai_eval_runs
+        .iter()
+        .max_by_key(|record| record.created_at.as_str())
+        .map(eval_record_health_summary)
+}
+
+fn eval_record_health_summary(record: &AiEvalRunRecord) -> EvalHealthSummary {
+    let (regression_count, improvement_count) = parse_persisted_eval_details(&record.details_json)
+        .map_or((0, 0), |details| {
+            let counts = eval_comparison_counts(&details.cases);
+            (counts.regressions, counts.improvements)
+        });
+    EvalHealthSummary {
+        created_at: record.created_at.clone(),
+        labels: eval_labels(record),
+        failed_cases: record.failed_cases,
+        regression_count,
+        improvement_count,
+    }
+}
+
+fn eval_labels(record: &AiEvalRunRecord) -> String {
+    record.baseline_label.as_ref().map_or_else(
+        || record.candidate_label.clone(),
+        |baseline| format!("{} vs {}", record.candidate_label, baseline),
+    )
+}
+
+fn eval_status_badge(record: &AiEvalRunRecord) -> String {
+    let health = eval_record_health_summary(record);
+    if health.failed_cases > 0 {
+        format!("{} fail", health.failed_cases)
+    } else if health.regression_count > 0 {
+        format!("{} reg", health.regression_count)
+    } else {
+        "pass".to_owned()
+    }
+}
+
+fn eval_comparison_counts(cases: &[PersistedEvalCaseDetail]) -> EvalComparisonCounts {
+    let mut counts = EvalComparisonCounts::default();
+    for grader in cases.iter().flat_map(|case| &case.graders) {
+        match grader.comparison.as_str() {
+            "improved" => counts.improvements += 1,
+            "regressed" => counts.regressions += 1,
+            "candidate_only" => counts.candidate_only += 1,
+            _ => counts.matched += 1,
+        }
+    }
+    counts
+}
+
+fn render_eval_detail_lines(
+    snapshot: &LiveSnapshot,
+    record: &AiEvalRunRecord,
+    details: &PersistedEvalRunDetails,
+) -> Vec<String> {
+    let comparison_counts = eval_comparison_counts(&details.cases);
+    let mut lines = vec![
+        format!("eval_run_id: {}", record.eval_run_id),
+        format!(
+            "fixture_manifest: {} | {}",
+            details.fixture_dir, details.fixture_schema_version
+        ),
+        format!(
+            "candidate/baseline: {} / {}",
+            details.candidate_label,
+            details
+                .baseline_label
+                .clone()
+                .unwrap_or_else(|| "none".to_owned())
+        ),
+        format!(
+            "cases: total={} passed={} failed={}",
+            details.total_cases, details.passed_cases, details.failed_cases
+        ),
+        format!(
+            "baseline_vs_candidate: regressions={} improvements={} matched={} candidate_only={}",
+            comparison_counts.regressions,
+            comparison_counts.improvements,
+            comparison_counts.matched,
+            comparison_counts.candidate_only
+        ),
+        format!(
+            "score_rollup: schema={:.2} completeness={:.2} evidence={:.2} honesty={:.2}",
+            details.scores.schema_validity,
+            details.scores.completeness,
+            details.scores.evidence,
+            details.scores.honesty
+        ),
+        format!("regression_summary: {}", details.regression_summary),
+    ];
+
+    if !details.regressions.is_empty() {
+        lines.push("regressions:".to_owned());
+        lines.extend(
+            details
+                .regressions
+                .iter()
+                .map(|regression| format!("  - {regression}")),
+        );
+    }
+    if !details.improvements.is_empty() {
+        lines.push("improvements:".to_owned());
+        lines.extend(
+            details
+                .improvements
+                .iter()
+                .map(|improvement| format!("  - {improvement}")),
+        );
+    }
+
+    let failing_cases = details
+        .cases
+        .iter()
+        .filter(|case| case.graders.iter().any(|grader| !grader.candidate_passed))
+        .collect::<Vec<_>>();
+    if !failing_cases.is_empty() {
+        lines.push(String::new());
+        lines.push("failing_graders:".to_owned());
+        for case in failing_cases {
+            lines.push(format!(
+                "case {} | {} | {}",
+                case.case_id, case.task_family, case.candidate.label
+            ));
+            lines.push(format!("  snapshot_a_fixture: {}", case.snapshot_a_path));
+            if let Some(snapshot_b_path) = &case.snapshot_b_path {
+                lines.push(format!("  snapshot_b_fixture: {snapshot_b_path}"));
+            }
+            lines.push(format!(
+                "  candidate_artifact: {}",
+                case.candidate.artifact_path
+            ));
+            if let Some(baseline) = &case.baseline {
+                lines.push(format!("  baseline_artifact: {}", baseline.artifact_path));
+            }
+            lines.extend(render_eval_case_link_lines(snapshot, case));
+            for grader in case
+                .graders
+                .iter()
+                .filter(|grader| !grader.candidate_passed)
+            {
+                lines.push(format!(
+                    "  - {} [{}] | candidate={} | note={}",
+                    grader.grader,
+                    grader.comparison,
+                    pass_fail_word(grader.candidate_passed),
+                    grader.candidate_note
+                ));
+                if let Some(baseline_passed) = grader.baseline_passed {
+                    lines.push(format!(
+                        "    baseline={} | baseline_note={}",
+                        pass_fail_word(baseline_passed),
+                        grader.baseline_note.as_deref().unwrap_or("none")
+                    ));
+                }
+            }
+        }
+    }
+
+    let passing_cases = details
+        .cases
+        .iter()
+        .filter(|case| case.graders.iter().all(|grader| grader.candidate_passed))
+        .collect::<Vec<_>>();
+    if !passing_cases.is_empty() {
+        lines.push(String::new());
+        lines.push("passing_remainder:".to_owned());
+        lines.extend(passing_cases.iter().map(|case| {
+            format!(
+                "  - {} | {} | {}",
+                case.case_id, case.task_family, case.candidate.label
+            )
+        }));
+    }
+
+    lines
+}
+
+fn render_eval_case_link_lines(
+    snapshot: &LiveSnapshot,
+    case: &PersistedEvalCaseDetail,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(snapshot_hash_a) = &case.snapshot_hash_a {
+        lines.push(format!(
+            "  linked_snapshot_a: {}",
+            resolve_snapshot_reference(snapshot, snapshot_hash_a)
+        ));
+    }
+    if let Some(snapshot_hash_b) = &case.snapshot_hash_b {
+        lines.push(format!(
+            "  linked_snapshot_b: {}",
+            resolve_snapshot_reference(snapshot, snapshot_hash_b)
+        ));
+    }
+    lines.extend(render_eval_artifact_lineage(
+        snapshot,
+        "candidate",
+        &case.candidate.lineage,
+    ));
+    if let Some(baseline) = &case.baseline {
+        lines.extend(render_eval_artifact_lineage(
+            snapshot,
+            "baseline",
+            &baseline.lineage,
+        ));
+    }
+    if lines.is_empty() {
+        lines.push("  linked_artifacts: none".to_owned());
+    }
+    lines
+}
+
+fn render_eval_artifact_lineage(
+    snapshot: &LiveSnapshot,
+    label: &str,
+    lineage: &EvalArtifactLineage,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(ai_run_id) = &lineage.ai_run_id {
+        lines.push(format!(
+            "  {label}_run: {}",
+            resolve_ai_run_reference(snapshot, ai_run_id)
+        ));
+    }
+    if let Some(report_id) = &lineage.report_id {
+        lines.push(format!(
+            "  {label}_report: {}",
+            resolve_report_reference(snapshot, report_id)
+        ));
+    }
+    if let Some(ai_artifact_id) = &lineage.ai_artifact_id {
+        lines.push(format!("  {label}_artifact: {ai_artifact_id}"));
+    }
+    lines
+}
+
+fn resolve_snapshot_reference(snapshot: &LiveSnapshot, snapshot_hash: &str) -> String {
+    snapshot
+        .snapshot_catalog
+        .iter()
+        .find(|record| record.snapshot_hash == snapshot_hash)
+        .map_or_else(
+            || format!("{snapshot_hash} (not in catalog)"),
+            |record| {
+                format!(
+                    "{} ({}, {} -> {})",
+                    record.snapshot_hash, record.scope, record.start_day, record.end_day
+                )
+            },
+        )
+}
+
+fn resolve_ai_run_reference(snapshot: &LiveSnapshot, ai_run_id: &str) -> String {
+    snapshot
+        .ai_runs
+        .iter()
+        .find(|record| record.run_id == ai_run_id)
+        .map_or_else(
+            || format!("{ai_run_id} (not in registry)"),
+            |record| {
+                format!(
+                    "{} ({} | {} | {})",
+                    record.run_id, record.run_kind, record.run_status, record.created_at
+                )
+            },
+        )
+}
+
+fn resolve_report_reference(snapshot: &LiveSnapshot, report_id: &str) -> String {
+    snapshot
+        .report_exports
+        .iter()
+        .find(|record| record.report_id == report_id)
+        .map_or_else(
+            || format!("{report_id} (not in registry)"),
+            |record| {
+                format!(
+                    "{} ({} | {})",
+                    record.report_id, record.title, record.output_path
+                )
+            },
+        )
+}
+
+fn pass_fail_word(passed: bool) -> &'static str {
+    if passed { "pass" } else { "fail" }
 }
 
 fn ai_request_preview_lines(preview: &AiRequestPreview) -> Vec<String> {
@@ -6101,28 +6632,30 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
         last_verified_exists: true,
         last_verified_at: "2026-04-08T22:26:00Z".to_owned(),
     }];
+    let demo_eval_details = demo_eval_run_details();
     let ai_eval_runs = vec![AiEvalRunRecord {
         eval_run_id: "demo-eval-review".to_owned(),
-        task_family: "review".to_owned(),
-        fixture_dir: "tests/fixtures/phase8".to_owned(),
-        candidate_label: "gpt-5-mini".to_owned(),
-        baseline_label: Some("fixture".to_owned()),
+        task_family: "mixed".to_owned(),
+        fixture_dir: demo_eval_details.fixture_dir.clone(),
+        candidate_label: demo_eval_details.candidate_label.clone(),
+        baseline_label: demo_eval_details.baseline_label.clone(),
         provider: "openai".to_owned(),
         model: "gpt-5-mini".to_owned(),
         prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
-        output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+        output_schema_version: "mixed".to_owned(),
         created_at: "2026-04-08T22:27:00Z".to_owned(),
-        total_cases: 4,
-        passed_cases: 4,
-        failed_cases: 0,
-        schema_validity_score: 1.0,
-        completeness_score: 0.93,
+        total_cases: u32::try_from(demo_eval_details.total_cases).unwrap_or(u32::MAX),
+        passed_cases: u32::try_from(demo_eval_details.passed_cases).unwrap_or(u32::MAX),
+        failed_cases: u32::try_from(demo_eval_details.failed_cases).unwrap_or(u32::MAX),
+        schema_validity_score: demo_eval_details.scores.schema_validity,
+        completeness_score: demo_eval_details.scores.completeness,
         overclaiming_score: 0.98,
         medical_safety_score: 1.0,
         privacy_score: 1.0,
-        evidence_score: 0.91,
-        honesty_score: 0.96,
-        regression_summary: "No regressions in the deterministic fixture pack.".to_owned(),
+        evidence_score: demo_eval_details.scores.evidence,
+        honesty_score: demo_eval_details.scores.honesty,
+        regression_summary: demo_eval_details.regression_summary.clone(),
+        details_json: serialize_json(&demo_eval_details),
     }];
     let ai_ops = build_ai_ops_snapshot(
         config,
@@ -6254,6 +6787,156 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
     }
 }
 
+fn demo_eval_run_details() -> PersistedEvalRunDetails {
+    PersistedEvalRunDetails {
+        fixture_dir: "tests/fixtures/ai".to_owned(),
+        fixture_schema_version: "ringmaster.ai.eval.fixtures.v1".to_owned(),
+        candidate_label: "gpt-5-mini".to_owned(),
+        baseline_label: Some("fixture".to_owned()),
+        total_cases: 2,
+        passed_cases: 1,
+        failed_cases: 1,
+        scores: EvalScoreSummary {
+            schema_validity: 1.0,
+            completeness: 1.0,
+            overclaiming: 1.0,
+            medical_safety: 1.0,
+            privacy: 1.0,
+            evidence: 0.5,
+            honesty: 1.0,
+        },
+        regression_summary:
+            "Improvements: review-stale-snapshot:honesty; regressions: compare-evidence-regression:evidence."
+                .to_owned(),
+        improvements: vec!["review-stale-snapshot:honesty".to_owned()],
+        regressions: vec!["compare-evidence-regression:evidence".to_owned()],
+        cases: vec![
+            PersistedEvalCaseDetail {
+                case_id: "review-stale-snapshot".to_owned(),
+                task_family: "review".to_owned(),
+                snapshot_a_path: "review-snapshot.json".to_owned(),
+                snapshot_b_path: None,
+                snapshot_hash_a: Some("demo-snapshot-20260408".to_owned()),
+                snapshot_hash_b: None,
+                expectations: EvalExpectations {
+                    min_primary_findings: Some(1),
+                    expected_primary_title: Some("Sleep score remained elevated".to_owned()),
+                    forbidden_substrings: vec![
+                        "user@example.com".to_owned(),
+                        "refresh_token".to_owned(),
+                        "client_secret".to_owned(),
+                    ],
+                    honesty_required: true,
+                },
+                overall_pass: true,
+                candidate: PersistedEvalArtifactDetail {
+                    label: "gpt-5-mini".to_owned(),
+                    artifact_path: "review-candidate.json".to_owned(),
+                    provider: "openai".to_owned(),
+                    model: "gpt-5-mini".to_owned(),
+                    prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
+                    output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+                    lineage: EvalArtifactLineage {
+                        ai_run_id: Some("airun-demo-review-20260408".to_owned()),
+                        ai_artifact_id: Some("run-demo-review-20260408".to_owned()),
+                        report_id: Some("demo-report-review".to_owned()),
+                    },
+                },
+                baseline: Some(PersistedEvalArtifactDetail {
+                    label: "fixture".to_owned(),
+                    artifact_path: "review-baseline.json".to_owned(),
+                    provider: "fixture".to_owned(),
+                    model: "fixture".to_owned(),
+                    prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
+                    output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+                    lineage: EvalArtifactLineage::default(),
+                }),
+                graders: vec![
+                    PersistedEvalGraderResult {
+                        grader: "schema_validity".to_owned(),
+                        candidate_passed: true,
+                        candidate_note: "matched schema `ringmaster.ai.review.v1`".to_owned(),
+                        baseline_passed: Some(true),
+                        baseline_note: Some("matched schema `ringmaster.ai.review.v1`".to_owned()),
+                        comparison: "matched".to_owned(),
+                    },
+                    PersistedEvalGraderResult {
+                        grader: "honesty".to_owned(),
+                        candidate_passed: true,
+                        candidate_note:
+                            "artifact acknowledged freshness or capability limits".to_owned(),
+                        baseline_passed: Some(false),
+                        baseline_note: Some(
+                            "artifact did not acknowledge stale or missing-data caveats".to_owned(),
+                        ),
+                        comparison: "improved".to_owned(),
+                    },
+                ],
+            },
+            PersistedEvalCaseDetail {
+                case_id: "compare-evidence-regression".to_owned(),
+                task_family: "compare".to_owned(),
+                snapshot_a_path: "compare-snapshot-a.json".to_owned(),
+                snapshot_b_path: Some("compare-snapshot-b.json".to_owned()),
+                snapshot_hash_a: Some("demo-snapshot-20260408".to_owned()),
+                snapshot_hash_b: Some("demo-snapshot-20260401-20260408".to_owned()),
+                expectations: EvalExpectations {
+                    min_primary_findings: Some(1),
+                    expected_primary_title: Some("Average daily score increased".to_owned()),
+                    forbidden_substrings: vec![
+                        "user@example.com".to_owned(),
+                        "refresh_token".to_owned(),
+                        "client_secret".to_owned(),
+                    ],
+                    honesty_required: false,
+                },
+                overall_pass: false,
+                candidate: PersistedEvalArtifactDetail {
+                    label: "gpt-5-mini".to_owned(),
+                    artifact_path: "compare-candidate.json".to_owned(),
+                    provider: "openai".to_owned(),
+                    model: "gpt-5-mini".to_owned(),
+                    prompt_version: COMPARE_PROMPT_VERSION.to_owned(),
+                    output_schema_version: "ringmaster.ai.compare.v1".to_owned(),
+                    lineage: EvalArtifactLineage {
+                        ai_run_id: Some("airun-demo-compare-20260408".to_owned()),
+                        ai_artifact_id: None,
+                        report_id: None,
+                    },
+                },
+                baseline: Some(PersistedEvalArtifactDetail {
+                    label: "fixture".to_owned(),
+                    artifact_path: "compare-baseline.json".to_owned(),
+                    provider: "fixture".to_owned(),
+                    model: "fixture".to_owned(),
+                    prompt_version: COMPARE_PROMPT_VERSION.to_owned(),
+                    output_schema_version: "ringmaster.ai.compare.v1".to_owned(),
+                    lineage: EvalArtifactLineage::default(),
+                }),
+                graders: vec![
+                    PersistedEvalGraderResult {
+                        grader: "schema_validity".to_owned(),
+                        candidate_passed: true,
+                        candidate_note: "matched schema `ringmaster.ai.compare.v1`".to_owned(),
+                        baseline_passed: Some(true),
+                        baseline_note: Some("matched schema `ringmaster.ai.compare.v1`".to_owned()),
+                        comparison: "matched".to_owned(),
+                    },
+                    PersistedEvalGraderResult {
+                        grader: "evidence".to_owned(),
+                        candidate_passed: false,
+                        candidate_note:
+                            "missing evidence reference `stress:2026-04-08`".to_owned(),
+                        baseline_passed: Some(true),
+                        baseline_note: Some("validated 3 evidence references".to_owned()),
+                        comparison: "regressed".to_owned(),
+                    },
+                ],
+            },
+        ],
+    }
+}
+
 fn demo_requested_scopes() -> Vec<String> {
     vec![
         "personal".to_owned(),
@@ -6309,7 +6992,7 @@ mod tests {
         DataFamily, HeartRateDay, LiveModelOptions, LiveSnapshot, OverlayFilterState,
         PatternMetricFilter, REVIEW_PROMPT_VERSION, RefreshPolicySnapshot, ReviewScreenMode,
         RunMode, Screen, TrendWindowKind, WebhookOpsSnapshot, build_ai_artifact_summary_view,
-        build_live_model, newest_day_index,
+        build_live_model, build_ops_model, demo_eval_run_details, newest_day_index, serialize_json,
     };
     use crate::action::Action;
     use crate::ai::{
@@ -6324,11 +7007,11 @@ mod tests {
     };
     use crate::snapshot::PrivacyProfile;
     use crate::store::queries::{
-        AiArtifactDaySummaryRecord, AiArtifactRecord, AiRunRecord, ContextEventFamily,
-        ContextEventRecord, DataSufficiency, EffectDirection, HeartRatePoint, PatternMetric,
-        PatternRelationWindow, PatternSummaryRecord, RecordCounts, ReportExportRecord,
-        RestModePeriodRecord, ReviewSignalDayRecord, SleepTimeRecord, SnapshotCatalogEntry,
-        TimeSemantics,
+        AiArtifactDaySummaryRecord, AiArtifactRecord, AiEvalRunRecord, AiRunRecord,
+        ContextEventFamily, ContextEventRecord, DataSufficiency, EffectDirection, HeartRatePoint,
+        PatternMetric, PatternRelationWindow, PatternSummaryRecord, RecordCounts,
+        ReportExportRecord, RestModePeriodRecord, ReviewSignalDayRecord, SleepTimeRecord,
+        SnapshotCatalogEntry, TimeSemantics,
     };
 
     fn make_review_card(id: &str, signal_key: &str, score: i32) -> ReviewCard {
@@ -6512,6 +7195,7 @@ mod tests {
             selected_ai_run_index: 0,
             selected_snapshot_catalog_index: 0,
             selected_report_export_index: 0,
+            selected_ai_eval_run_index: 0,
             overlay_filters: OverlayFilterState::all(),
             pattern_metric_filter: PatternMetricFilter::All,
             review_mode: ReviewScreenMode::Today,
@@ -6642,9 +7326,27 @@ mod tests {
         artifact_id: Option<&str>,
         error_message: Option<&str>,
     ) -> AiRunRecord {
+        make_ai_run_record_with_shape(
+            run_id,
+            "review",
+            status,
+            "2026-04-08T22:30:00Z",
+            artifact_id,
+            error_message,
+        )
+    }
+
+    fn make_ai_run_record_with_shape(
+        run_id: &str,
+        run_kind: &str,
+        status: &str,
+        created_at: &str,
+        artifact_id: Option<&str>,
+        error_message: Option<&str>,
+    ) -> AiRunRecord {
         AiRunRecord {
             run_id: run_id.to_owned(),
-            run_kind: "review".to_owned(),
+            run_kind: run_kind.to_owned(),
             run_status: status.to_owned(),
             provider: "openai".to_owned(),
             model: "gpt-5-mini".to_owned(),
@@ -6665,8 +7367,8 @@ mod tests {
                 .unwrap_or_else(|error| panic!("request preview should serialize: {error}")),
             artifact_id: artifact_id.map(str::to_owned),
             error_message: error_message.map(str::to_owned),
-            created_at: "2026-04-08T22:30:00Z".to_owned(),
-            started_at: Some("2026-04-08T22:30:01Z".to_owned()),
+            created_at: created_at.to_owned(),
+            started_at: Some(created_at.to_owned()),
             ended_at: if matches!(status, "queued" | "running") {
                 None
             } else {
@@ -6709,6 +7411,7 @@ mod tests {
             selected_ai_run_index: 0,
             selected_snapshot_catalog_index: 0,
             selected_report_export_index: 0,
+            selected_ai_eval_run_index: 0,
             overlay_filters: OverlayFilterState::all(),
             window_hours: 24,
             trends_window: TrendWindowKind::Days7,
@@ -6903,6 +7606,137 @@ mod tests {
                 .warning_lines
                 .iter()
                 .any(|line| line.contains("Most recent failed run"))
+        );
+    }
+
+    #[test]
+    fn ai_eval_browser_surfaces_failing_graders_and_saved_links() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.snapshot_catalog = vec![
+            make_snapshot_catalog_entry("demo-snapshot-20260408"),
+            make_snapshot_catalog_entry("demo-snapshot-20260401-20260408"),
+        ];
+        snapshot.ai_runs = vec![
+            make_ai_run_record(
+                "airun-demo-review-20260408",
+                "succeeded",
+                Some("run-demo-review-20260408"),
+                None,
+            ),
+            make_ai_run_record_with_shape(
+                "airun-demo-compare-20260408",
+                "compare",
+                "failed",
+                "2026-04-08T22:24:00Z",
+                None,
+                None,
+            ),
+        ];
+        snapshot.report_exports = vec![make_report_export_record(
+            "run-demo-review-20260408",
+            "demo-snapshot-20260408",
+        )];
+        let details = demo_eval_run_details();
+        snapshot.ai_eval_runs = vec![AiEvalRunRecord {
+            eval_run_id: "demo-eval-review".to_owned(),
+            task_family: "mixed".to_owned(),
+            fixture_dir: details.fixture_dir.clone(),
+            candidate_label: details.candidate_label.clone(),
+            baseline_label: details.baseline_label.clone(),
+            provider: "openai".to_owned(),
+            model: "gpt-5-mini".to_owned(),
+            prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
+            output_schema_version: "mixed".to_owned(),
+            created_at: "2026-04-08T22:27:00Z".to_owned(),
+            total_cases: 2,
+            passed_cases: 1,
+            failed_cases: 1,
+            schema_validity_score: details.scores.schema_validity,
+            completeness_score: details.scores.completeness,
+            overclaiming_score: details.scores.overclaiming,
+            medical_safety_score: details.scores.medical_safety,
+            privacy_score: details.scores.privacy,
+            evidence_score: details.scores.evidence,
+            honesty_score: details.scores.honesty,
+            regression_summary: details.regression_summary.clone(),
+            details_json: serialize_json(&details),
+        }];
+        let mut options = base_live_model_options();
+        options.ai_browser_tab = AiBrowserTab::Evals;
+        let model = build_live_model(&snapshot, &options);
+
+        assert_eq!(model.ai.detail_title, "Eval run");
+        assert!(
+            model
+                .ai
+                .browser_items
+                .iter()
+                .any(|item| item.headline.contains("gpt-5-mini vs fixture"))
+        );
+        assert!(
+            model
+                .ai
+                .detail_lines
+                .iter()
+                .any(|line| line == "failing_graders:")
+        );
+        assert!(
+            model.ai.detail_lines.iter().any(|line| {
+                line == "  candidate_run: airun-demo-compare-20260408 (compare | failed | 2026-04-08T22:24:00Z)"
+            })
+        );
+        assert!(
+            model.ai.detail_lines.iter().any(|line| {
+                line.contains("linked_snapshot_b: demo-snapshot-20260401-20260408")
+            })
+        );
+    }
+
+    #[test]
+    fn ops_model_surfaces_latest_eval_health() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        let details = demo_eval_run_details();
+        snapshot.ai_eval_runs = vec![AiEvalRunRecord {
+            eval_run_id: "demo-eval-review".to_owned(),
+            task_family: "mixed".to_owned(),
+            fixture_dir: details.fixture_dir.clone(),
+            candidate_label: details.candidate_label.clone(),
+            baseline_label: details.baseline_label.clone(),
+            provider: "openai".to_owned(),
+            model: "gpt-5-mini".to_owned(),
+            prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
+            output_schema_version: "mixed".to_owned(),
+            created_at: "2026-04-08T22:27:00Z".to_owned(),
+            total_cases: 2,
+            passed_cases: 1,
+            failed_cases: 1,
+            schema_validity_score: details.scores.schema_validity,
+            completeness_score: details.scores.completeness,
+            overclaiming_score: details.scores.overclaiming,
+            medical_safety_score: details.scores.medical_safety,
+            privacy_score: details.scores.privacy,
+            evidence_score: details.scores.evidence,
+            honesty_score: details.scores.honesty,
+            regression_summary: details.regression_summary.clone(),
+            details_json: serialize_json(&details),
+        }];
+        let model = build_ops_model(&snapshot, false);
+
+        assert!(model.summary_lines.iter().any(|line| {
+            line.contains("Latest eval: 2026-04-08T22:27:00Z")
+                && line.contains("failed_cases=1 regressions=1 improvements=1")
+        }));
+        assert!(model.items.iter().any(|item| {
+            item.label == "Eval health"
+                && item
+                    .value
+                    .contains("failed_cases=1 regressions=1 improvements=1")
+        }));
+        assert!(
+            model
+                .warnings
+                .iter()
+                .any(|line| line.contains("Latest eval needs attention"))
         );
     }
 
@@ -7188,6 +8022,7 @@ mod tests {
                 selected_ai_run_index: 0,
                 selected_snapshot_catalog_index: 0,
                 selected_report_export_index: 0,
+                selected_ai_eval_run_index: 0,
                 overlay_filters: OverlayFilterState::all(),
                 window_hours: 24,
                 trends_window: TrendWindowKind::Days7,
@@ -7246,6 +8081,7 @@ mod tests {
                 selected_ai_run_index: 0,
                 selected_snapshot_catalog_index: 0,
                 selected_report_export_index: 0,
+                selected_ai_eval_run_index: 0,
                 overlay_filters: OverlayFilterState::all(),
                 window_hours: 24,
                 trends_window: TrendWindowKind::Days7,
@@ -7360,6 +8196,7 @@ mod tests {
                 selected_ai_run_index: 0,
                 selected_snapshot_catalog_index: 0,
                 selected_report_export_index: 0,
+                selected_ai_eval_run_index: 0,
                 overlay_filters: OverlayFilterState::all(),
                 window_hours: 24,
                 trends_window: TrendWindowKind::Days7,
