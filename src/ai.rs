@@ -8,6 +8,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::ai_prompts::{
     COMPARE_PROMPT_VERSION, REVIEW_PROMPT_VERSION, compare_system_prompt, compare_task_framing,
@@ -218,6 +219,7 @@ pub async fn review_snapshot(
             snapshot_json: &snapshot.compact_json,
         })
         .await?;
+    let created_at = run_created_at()?;
     let payload_json = serde_json::to_string_pretty(&artifact)?;
     let rendered_briefing = render_review_briefing(&artifact);
     let summary_cache = review_summary_cache(&artifact);
@@ -227,6 +229,7 @@ pub async fn review_snapshot(
             &snapshot.bundle.metadata.snapshot_hash,
             None,
             metadata.run_mode,
+            &created_at,
             &payload_json,
         ),
         artifact_kind: "review",
@@ -238,6 +241,7 @@ pub async fn review_snapshot(
         request_mode: &metadata.request_mode,
         input_transport: &metadata.input_transport,
         run_mode: metadata.run_mode.as_str(),
+        created_at,
         snapshot_hash_a: &snapshot.bundle.metadata.snapshot_hash,
         snapshot_hash_b: None,
         privacy_profile: snapshot.bundle.metadata.privacy_profile,
@@ -281,6 +285,7 @@ pub async fn compare_snapshots(
             snapshot_b_json: &snapshot_b.compact_json,
         })
         .await?;
+    let created_at = run_created_at()?;
     let payload_json = serde_json::to_string_pretty(&artifact)?;
     let rendered_briefing = render_compare_briefing(&artifact);
     let summary_cache = compare_summary_cache(&artifact);
@@ -290,6 +295,7 @@ pub async fn compare_snapshots(
             &snapshot_a.bundle.metadata.snapshot_hash,
             Some(&snapshot_b.bundle.metadata.snapshot_hash),
             metadata.run_mode,
+            &created_at,
             &payload_json,
         ),
         artifact_kind: "compare",
@@ -301,6 +307,7 @@ pub async fn compare_snapshots(
         request_mode: &metadata.request_mode,
         input_transport: &metadata.input_transport,
         run_mode: metadata.run_mode.as_str(),
+        created_at,
         snapshot_hash_a: &snapshot_a.bundle.metadata.snapshot_hash,
         snapshot_hash_b: Some(&snapshot_b.bundle.metadata.snapshot_hash),
         privacy_profile: merged_privacy_profile(
@@ -1130,6 +1137,7 @@ fn artifact_id(
     snapshot_hash_a: &str,
     snapshot_hash_b: Option<&str>,
     run_mode: AiRunMode,
+    run_identity: &str,
     payload_json: &str,
 ) -> String {
     let mut digest = Sha256::new();
@@ -1139,8 +1147,15 @@ fn artifact_id(
         digest.update(value.as_bytes());
     }
     digest.update(run_mode.as_str().as_bytes());
+    digest.update(run_identity.as_bytes());
     digest.update(payload_json.as_bytes());
     hex::encode(digest.finalize())
+}
+
+fn run_created_at() -> Result<String> {
+    OffsetDateTime::now_utc().format(&Rfc3339).map_err(|error| {
+        RingmasterError::Config(format!("failed to format AI run timestamp: {error}"))
+    })
 }
 
 fn request_fingerprint(prompt_version: &str, schema_version: &str, payload: &str) -> String {
@@ -1302,7 +1317,7 @@ mod tests {
     use super::{
         ArtifactStatus, COMPARE_OUTPUT_SCHEMA_VERSION, COMPARE_PROMPT_VERSION, CompareArtifactV1,
         REVIEW_OUTPUT_SCHEMA_VERSION, REVIEW_PROMPT_VERSION, ReviewArtifactV1, SufficiencyLevel,
-        dry_run_compare_artifact, dry_run_review_artifact, render_compare_briefing,
+        artifact_id, dry_run_compare_artifact, dry_run_review_artifact, render_compare_briefing,
         render_review_briefing, review_snapshot, schema_value,
     };
     use crate::config::Config;
@@ -1553,5 +1568,29 @@ mod tests {
             reparsed.metadata.snapshot_hash,
             loaded.bundle.metadata.snapshot_hash
         );
+    }
+
+    #[test]
+    fn artifact_ids_include_run_identity_even_for_identical_payloads() {
+        let payload = "{\"status\":\"dry_run\"}";
+
+        let first = artifact_id(
+            "review",
+            "snapshot-hash",
+            None,
+            super::AiRunMode::DryRun,
+            "2026-04-10T00:05:00Z",
+            payload,
+        );
+        let second = artifact_id(
+            "review",
+            "snapshot-hash",
+            None,
+            super::AiRunMode::DryRun,
+            "2026-04-10T00:05:01Z",
+            payload,
+        );
+
+        assert_ne!(first, second);
     }
 }

@@ -367,26 +367,6 @@ fn build_ai_report_document(
     snapshot_b: Option<&SnapshotBundleV1>,
     provenance_b: &[SnapshotProvenanceRefRecord],
 ) -> ReportDocument {
-    let (scope, privacy_profile, freshness_summary, trust_summary) = snapshot_a.map_or_else(
-        || {
-            (
-                "unknown".to_owned(),
-                record.privacy_profile.clone(),
-                "snapshot record unavailable".to_owned(),
-                "lineage available from persisted AI run metadata".to_owned(),
-            )
-        },
-        |snapshot_a| {
-            let summary = snapshot::summarize_snapshot_bundle(snapshot_a, provenance_a);
-            (
-                snapshot_a.metadata.scope.clone(),
-                record.privacy_profile.clone(),
-                summary.freshness_summary,
-                summary.trust_summary,
-            )
-        },
-    );
-
     let mut artifact_refs = vec![format!("ai_run={}", record.artifact_id)];
     artifact_refs.push(format!("snapshot_a={}", record.snapshot_hash_a));
     if let Some(snapshot_hash_b) = &record.snapshot_hash_b {
@@ -394,64 +374,86 @@ fn build_ai_report_document(
     }
 
     match artifact {
-        StoredArtifact::Review(review) => ReportDocument {
-            report_kind: "ai_review_report".to_owned(),
-            title: "AI review report".to_owned(),
-            generated_at: record.created_at.clone(),
-            scope,
-            privacy_profile,
-            ai_used: true,
-            ai_provider: Some(record.provider.clone()),
-            ai_model: Some(record.model.clone()),
-            prompt_version: Some(record.prompt_version.clone()),
-            output_schema_version: Some(record.output_schema_version.clone()),
-            freshness_summary,
-            trust_summary,
-            key_findings: review
-                .headline_findings
-                .iter()
-                .map(|finding| format!("{}: {}", finding.title, finding.summary))
-                .collect(),
-            supporting_evidence: unique_evidence_refs(
-                review
+        StoredArtifact::Review(review) => {
+            let (scope, freshness_summary, trust_summary) = snapshot_a.map_or_else(
+                || {
+                    (
+                        "unknown".to_owned(),
+                        "snapshot record unavailable".to_owned(),
+                        "lineage available from persisted AI run metadata".to_owned(),
+                    )
+                },
+                |snapshot_a| {
+                    let summary = snapshot::summarize_snapshot_bundle(snapshot_a, provenance_a);
+                    (
+                        snapshot_a.metadata.scope.clone(),
+                        summary.freshness_summary,
+                        summary.trust_summary,
+                    )
+                },
+            );
+
+            ReportDocument {
+                report_kind: "ai_review_report".to_owned(),
+                title: "AI review report".to_owned(),
+                generated_at: record.created_at.clone(),
+                scope,
+                privacy_profile: record.privacy_profile.clone(),
+                ai_used: true,
+                ai_provider: Some(record.provider.clone()),
+                ai_model: Some(record.model.clone()),
+                prompt_version: Some(record.prompt_version.clone()),
+                output_schema_version: Some(record.output_schema_version.clone()),
+                freshness_summary,
+                trust_summary,
+                key_findings: review
                     .headline_findings
                     .iter()
-                    .flat_map(|finding| finding.evidence_refs.iter())
-                    .map(|evidence| format!("{}: {}", evidence.export_ref, evidence.note))
+                    .map(|finding| format!("{}: {}", finding.title, finding.summary))
+                    .collect(),
+                supporting_evidence: unique_evidence_refs(
+                    review
+                        .headline_findings
+                        .iter()
+                        .flat_map(|finding| finding.evidence_refs.iter())
+                        .map(|evidence| format!("{}: {}", evidence.export_ref, evidence.note))
+                        .chain(
+                            review
+                                .positive_findings
+                                .iter()
+                                .flat_map(|finding| finding.evidence_refs.iter())
+                                .map(|evidence| {
+                                    format!("{}: {}", evidence.export_ref, evidence.note)
+                                }),
+                        )
+                        .collect(),
+                ),
+                uncertainty_notes: review
+                    .unresolved_questions
+                    .iter()
+                    .cloned()
                     .chain(
                         review
-                            .positive_findings
+                            .limitations
                             .iter()
-                            .flat_map(|finding| finding.evidence_refs.iter())
-                            .map(|evidence| format!("{}: {}", evidence.export_ref, evidence.note)),
+                            .map(|limitation| limitation.message.clone()),
                     )
                     .collect(),
-            ),
-            uncertainty_notes: review
-                .unresolved_questions
-                .iter()
-                .cloned()
-                .chain(
-                    review
-                        .limitations
-                        .iter()
-                        .map(|limitation| limitation.message.clone()),
-                )
-                .collect(),
-            provenance_refs: provenance_a
-                .iter()
-                .map(|record| {
-                    format!(
-                        "{} [{}:{}]",
-                        record.export_ref, record.local_kind, record.local_locator
-                    )
-                })
-                .collect(),
-            artifact_refs,
-            source_snapshot_hash_a: Some(record.snapshot_hash_a.clone()),
-            source_snapshot_hash_b: None,
-            source_ai_artifact_id: Some(record.artifact_id.clone()),
-        },
+                provenance_refs: provenance_a
+                    .iter()
+                    .map(|record| {
+                        format!(
+                            "{} [{}:{}]",
+                            record.export_ref, record.local_kind, record.local_locator
+                        )
+                    })
+                    .collect(),
+                artifact_refs,
+                source_snapshot_hash_a: Some(record.snapshot_hash_a.clone()),
+                source_snapshot_hash_b: None,
+                source_ai_artifact_id: Some(record.artifact_id.clone()),
+            }
+        }
         StoredArtifact::Compare(compare) => {
             let mut provenance_refs = provenance_a
                 .iter()
@@ -469,25 +471,29 @@ fn build_ai_report_document(
                 )
             }));
 
-            let combined_scope = if let Some(snapshot_b) = snapshot_b {
-                format!("{} vs {}", scope, snapshot_b.metadata.scope)
-            } else {
-                scope
-            };
-
             ReportDocument {
                 report_kind: "ai_compare_report".to_owned(),
                 title: "AI compare report".to_owned(),
                 generated_at: record.created_at.clone(),
-                scope: combined_scope,
-                privacy_profile,
+                scope: compare_report_scope(snapshot_a, snapshot_b),
+                privacy_profile: record.privacy_profile.clone(),
                 ai_used: true,
                 ai_provider: Some(record.provider.clone()),
                 ai_model: Some(record.model.clone()),
                 prompt_version: Some(record.prompt_version.clone()),
                 output_schema_version: Some(record.output_schema_version.clone()),
-                freshness_summary,
-                trust_summary,
+                freshness_summary: compare_report_freshness_summary(
+                    snapshot_a,
+                    provenance_a,
+                    snapshot_b,
+                    provenance_b,
+                ),
+                trust_summary: compare_report_trust_summary(
+                    snapshot_a,
+                    provenance_a,
+                    snapshot_b,
+                    provenance_b,
+                ),
                 key_findings: compare
                     .material_differences
                     .iter()
@@ -508,6 +514,95 @@ fn build_ai_report_document(
                 source_ai_artifact_id: Some(record.artifact_id.clone()),
             }
         }
+    }
+}
+
+fn compare_report_scope(
+    snapshot_a: Option<&SnapshotBundleV1>,
+    snapshot_b: Option<&SnapshotBundleV1>,
+) -> String {
+    match (snapshot_a, snapshot_b) {
+        (Some(snapshot_a), Some(snapshot_b)) => {
+            format!(
+                "{} vs {}",
+                snapshot_a.metadata.scope, snapshot_b.metadata.scope
+            )
+        }
+        (Some(snapshot_a), None) => snapshot_a.metadata.scope.clone(),
+        (None, Some(snapshot_b)) => snapshot_b.metadata.scope.clone(),
+        (None, None) => "unknown".to_owned(),
+    }
+}
+
+fn compare_report_freshness_summary(
+    snapshot_a: Option<&SnapshotBundleV1>,
+    provenance_a: &[SnapshotProvenanceRefRecord],
+    snapshot_b: Option<&SnapshotBundleV1>,
+    provenance_b: &[SnapshotProvenanceRefRecord],
+) -> String {
+    labeled_snapshot_summary(
+        snapshot_a,
+        provenance_a,
+        snapshot_b,
+        provenance_b,
+        |summary| summary.freshness_summary,
+        "snapshot record unavailable",
+    )
+}
+
+fn compare_report_trust_summary(
+    snapshot_a: Option<&SnapshotBundleV1>,
+    provenance_a: &[SnapshotProvenanceRefRecord],
+    snapshot_b: Option<&SnapshotBundleV1>,
+    provenance_b: &[SnapshotProvenanceRefRecord],
+) -> String {
+    labeled_snapshot_summary(
+        snapshot_a,
+        provenance_a,
+        snapshot_b,
+        provenance_b,
+        |summary| summary.trust_summary,
+        "lineage available from persisted AI run metadata",
+    )
+}
+
+fn labeled_snapshot_summary(
+    snapshot_a: Option<&SnapshotBundleV1>,
+    provenance_a: &[SnapshotProvenanceRefRecord],
+    snapshot_b: Option<&SnapshotBundleV1>,
+    provenance_b: &[SnapshotProvenanceRefRecord],
+    map_summary: impl Fn(snapshot::SnapshotCatalogSummary) -> String,
+    missing_label: &str,
+) -> String {
+    match (snapshot_a, snapshot_b) {
+        (Some(snapshot_a), Some(snapshot_b)) => format!(
+            "snapshot_a: {}; snapshot_b: {}",
+            map_summary(snapshot::summarize_snapshot_bundle(
+                snapshot_a,
+                provenance_a
+            )),
+            map_summary(snapshot::summarize_snapshot_bundle(
+                snapshot_b,
+                provenance_b
+            )),
+        ),
+        (Some(snapshot_a), None) => format!(
+            "snapshot_a: {}; snapshot_b: {}",
+            map_summary(snapshot::summarize_snapshot_bundle(
+                snapshot_a,
+                provenance_a
+            )),
+            missing_label,
+        ),
+        (None, Some(snapshot_b)) => format!(
+            "snapshot_a: {}; snapshot_b: {}",
+            missing_label,
+            map_summary(snapshot::summarize_snapshot_bundle(
+                snapshot_b,
+                provenance_b
+            )),
+        ),
+        (None, None) => missing_label.to_owned(),
     }
 }
 
@@ -707,7 +802,16 @@ fn write_text_file(path: &Path, contents: &str, context: &'static str) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{ReportDocument, render_html, render_markdown};
+    use std::collections::BTreeMap;
+
+    use super::{ReportDocument, build_ai_report_document, render_html, render_markdown};
+    use crate::ai::{ArtifactStatus, CompareArtifactV1, StoredArtifact};
+    use crate::snapshot::{
+        PrivacyProfile, SnapshotBundleV1, SnapshotCapabilities, SnapshotCapabilityEntry,
+        SnapshotFollowUpTarget, SnapshotFreshness, SnapshotMetadata, SnapshotMetrics,
+        SnapshotRecordCounts, SnapshotReviewSignal, SnapshotSourceMode, SnapshotSyncState,
+    };
+    use crate::store::queries::{AiArtifactRecord, SnapshotProvenanceRefRecord};
 
     fn sample_document() -> ReportDocument {
         ReportDocument {
@@ -737,6 +841,137 @@ mod tests {
         }
     }
 
+    fn sample_snapshot(
+        scope: &str,
+        latest_source_day: &str,
+        latest_review_day: &str,
+        warnings: &[&str],
+        review_signal_count: usize,
+        strong_signal_count: usize,
+        follow_up_target_count: usize,
+    ) -> SnapshotBundleV1 {
+        let signals = (0..review_signal_count)
+            .map(|index| SnapshotReviewSignal {
+                export_ref: format!("signal:{scope}:{index}"),
+                day: "2026-04-10".to_owned(),
+                signal_key: format!("signal_{index}"),
+                numeric_value: Some(index as f64),
+                text_value: None,
+                delta: Some(index as f64),
+                z_score: Some(index as f64),
+                persistence_days: 1,
+                sufficiency: if index < strong_signal_count {
+                    "strong".to_owned()
+                } else {
+                    "medium".to_owned()
+                },
+                stale_days: usize::from(index + 1 == review_signal_count) as u32,
+            })
+            .collect::<Vec<_>>();
+        let follow_up_targets = (0..follow_up_target_count)
+            .map(|index| SnapshotFollowUpTarget {
+                label: format!("target-{index}"),
+                command: "review investigate --focus readiness --anchor-day 2026-04-10".to_owned(),
+                reason: "Inspect local review output.".to_owned(),
+            })
+            .collect::<Vec<_>>();
+
+        SnapshotBundleV1 {
+            schema_version: crate::snapshot::SNAPSHOT_SCHEMA_VERSION.to_owned(),
+            metadata: SnapshotMetadata {
+                app_version: "0.1.0".to_owned(),
+                generated_at: "2026-04-10T00:00:00Z".to_owned(),
+                snapshot_hash: format!("hash-{scope}"),
+                scope: scope.to_owned(),
+                start_day: "2026-04-10".to_owned(),
+                end_day: "2026-04-10".to_owned(),
+                anchor_day: "2026-04-10".to_owned(),
+                privacy_profile: PrivacyProfile::Redacted,
+                source_mode: SnapshotSourceMode::Demo,
+                schema_version: 13,
+            },
+            freshness: SnapshotFreshness {
+                latest_source_day: Some(latest_source_day.to_owned()),
+                latest_review_day: Some(latest_review_day.to_owned()),
+                warnings: warnings
+                    .iter()
+                    .map(|warning| (*warning).to_owned())
+                    .collect(),
+                sync_states: vec![SnapshotSyncState {
+                    sync_key: "daily".to_owned(),
+                    status: "success".to_owned(),
+                    last_attempted_at: "2026-04-10T00:00:00Z".to_owned(),
+                    last_completed_at: Some("2026-04-10T00:00:00Z".to_owned()),
+                    failure_count: 0,
+                    next_attempt_after: None,
+                    message: None,
+                }],
+            },
+            capabilities: SnapshotCapabilities {
+                requested_scopes: vec!["daily".to_owned()],
+                granted_scopes: vec!["daily".to_owned()],
+                missing_scopes: Vec::new(),
+                entries: vec![SnapshotCapabilityEntry {
+                    key: "daily".to_owned(),
+                    label: "Daily".to_owned(),
+                    requested: true,
+                    granted: true,
+                    note: "available".to_owned(),
+                }],
+            },
+            record_counts: SnapshotRecordCounts {
+                daily_history_days: 1,
+                heartrate_days: 0,
+                context_events: 0,
+                pattern_summaries: 0,
+                review_signals: signals.len(),
+                raw_tables: BTreeMap::default(),
+            },
+            metrics: SnapshotMetrics {
+                daily_scores: Vec::new(),
+                activity: Vec::new(),
+                heartrate_daily_averages: Vec::new(),
+                sleep_windows: Vec::new(),
+                stress: Vec::new(),
+                resilience: Vec::new(),
+                cardiovascular_age: Vec::new(),
+                vo2_max: Vec::new(),
+                rest_mode_periods: Vec::new(),
+            },
+            baselines: Vec::new(),
+            trend_summaries: Vec::new(),
+            context_events: Vec::new(),
+            pattern_summaries: Vec::new(),
+            review_signals: signals,
+            follow_up_targets,
+        }
+    }
+
+    fn sample_compare_record() -> AiArtifactRecord {
+        AiArtifactRecord {
+            artifact_id: "artifact-compare".to_owned(),
+            artifact_kind: "compare".to_owned(),
+            output_schema_version: "ringmaster.ai.compare.v1".to_owned(),
+            prompt_version: "compare_prompt_v1".to_owned(),
+            provider: "dry_run".to_owned(),
+            model: "deterministic".to_owned(),
+            reasoning_effort: None,
+            request_mode: "stateless".to_owned(),
+            input_transport: "inline".to_owned(),
+            run_mode: "dry_run".to_owned(),
+            created_at: "2026-04-10T00:05:00Z".to_owned(),
+            snapshot_hash_a: "hash-today".to_owned(),
+            snapshot_hash_b: Some("hash-week".to_owned()),
+            privacy_profile: "redacted".to_owned(),
+            artifact_status: "dry_run".to_owned(),
+            overview: "compare overview".to_owned(),
+            summary_cache: "compare summary".to_owned(),
+            request_fingerprint: Some("fingerprint-compare".to_owned()),
+            payload_json: "{\"status\":\"dry_run\"}".to_owned(),
+            rendered_briefing: "ringmaster ai compare".to_owned(),
+        }
+    }
+
     #[test]
     fn markdown_renderer_includes_sections() {
         let rendered = render_markdown(&sample_document());
@@ -751,5 +986,63 @@ mod tests {
         assert!(rendered.contains("<h1>Snapshot report: today</h1>"));
         assert!(rendered.contains("Key Findings"));
         assert!(rendered.contains("Provenance References"));
+    }
+
+    #[test]
+    fn compare_reports_surface_freshness_and_trust_for_both_snapshots() {
+        let snapshot_a = sample_snapshot("today", "2026-04-10", "2026-04-10", &[], 1, 1, 1);
+        let snapshot_b = sample_snapshot(
+            "week",
+            "2026-04-07",
+            "2026-04-08",
+            &["stale daily_stress import"],
+            3,
+            1,
+            2,
+        );
+        let document = build_ai_report_document(
+            &sample_compare_record(),
+            &StoredArtifact::Compare(CompareArtifactV1 {
+                schema_version: "ringmaster.ai.compare.v1".to_owned(),
+                prompt_version: "compare_prompt_v1".to_owned(),
+                status: ArtifactStatus::DryRun,
+                overview: "compare overview".to_owned(),
+                material_differences: Vec::new(),
+                supporting_evidence: Vec::new(),
+                uncertainty_warnings: Vec::new(),
+                investigation_targets: Vec::new(),
+                only_in_a: Vec::new(),
+                only_in_b: Vec::new(),
+            }),
+            Some(&snapshot_a),
+            &[SnapshotProvenanceRefRecord {
+                snapshot_hash: "hash-today".to_owned(),
+                export_ref: "daily:2026-04-10".to_owned(),
+                local_kind: "daily_overview".to_owned(),
+                local_locator: "2026-04-10".to_owned(),
+                created_at: "2026-04-10T00:00:00Z".to_owned(),
+            }],
+            Some(&snapshot_b),
+            &[SnapshotProvenanceRefRecord {
+                snapshot_hash: "hash-week".to_owned(),
+                export_ref: "daily:2026-04-08".to_owned(),
+                local_kind: "daily_overview".to_owned(),
+                local_locator: "2026-04-08".to_owned(),
+                created_at: "2026-04-08T00:00:00Z".to_owned(),
+            }],
+        );
+
+        assert_eq!(document.scope, "today vs week");
+        assert!(document.freshness_summary.contains("snapshot_a:"));
+        assert!(document.freshness_summary.contains("snapshot_b:"));
+        assert!(
+            document
+                .freshness_summary
+                .contains("latest_source_day=2026-04-07")
+        );
+        assert!(document.trust_summary.contains("snapshot_a:"));
+        assert!(document.trust_summary.contains("snapshot_b:"));
+        assert!(document.trust_summary.contains("review_signals=3"));
+        assert!(document.trust_summary.contains("follow_up_targets=2"));
     }
 }

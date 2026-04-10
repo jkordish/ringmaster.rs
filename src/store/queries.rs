@@ -1735,6 +1735,7 @@ impl<'connection> AnalysisStore<'connection> {
         record: &SnapshotExportRecord,
         provenance_refs: &[SnapshotProvenanceRefRecord],
     ) -> Result<()> {
+        let replace_provenance = !provenance_refs.is_empty();
         self.connection
             .execute_batch("BEGIN IMMEDIATE TRANSACTION")?;
 
@@ -1773,13 +1774,16 @@ impl<'connection> AnalysisStore<'connection> {
                     day_count = excluded.day_count,
                     privacy_profile = excluded.privacy_profile,
                     source_mode = excluded.source_mode,
-                    fixture_dir = excluded.fixture_dir,
+                    fixture_dir = COALESCE(excluded.fixture_dir, snapshot_exports.fixture_dir),
                     latest_source_day = excluded.latest_source_day,
                     latest_review_day = excluded.latest_review_day,
                     freshness_summary = excluded.freshness_summary,
                     trust_summary = excluded.trust_summary,
                     capability_summary = excluded.capability_summary,
-                    provenance_summary = excluded.provenance_summary,
+                    provenance_summary = CASE
+                        WHEN ?21 = 1 THEN excluded.provenance_summary
+                        ELSE snapshot_exports.provenance_summary
+                    END,
                     snapshot_json = excluded.snapshot_json,
                     created_at = excluded.created_at",
                 params![
@@ -1803,31 +1807,34 @@ impl<'connection> AnalysisStore<'connection> {
                     record.provenance_summary,
                     record.snapshot_json,
                     record.created_at,
+                    replace_provenance,
                 ],
             )?;
 
-            self.connection.execute(
-                "DELETE FROM snapshot_provenance_refs WHERE snapshot_hash = ?1",
-                params![record.snapshot_hash],
-            )?;
+            if replace_provenance {
+                self.connection.execute(
+                    "DELETE FROM snapshot_provenance_refs WHERE snapshot_hash = ?1",
+                    params![record.snapshot_hash],
+                )?;
 
-            let mut statement = self.connection.prepare(
-                "INSERT INTO snapshot_provenance_refs (
-                    snapshot_hash,
-                    export_ref,
-                    local_kind,
-                    local_locator,
-                    created_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            )?;
-            for provenance_ref in provenance_refs {
-                statement.execute(params![
-                    provenance_ref.snapshot_hash,
-                    provenance_ref.export_ref,
-                    provenance_ref.local_kind,
-                    provenance_ref.local_locator,
-                    provenance_ref.created_at,
-                ])?;
+                let mut statement = self.connection.prepare(
+                    "INSERT INTO snapshot_provenance_refs (
+                        snapshot_hash,
+                        export_ref,
+                        local_kind,
+                        local_locator,
+                        created_at
+                    ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                )?;
+                for provenance_ref in provenance_refs {
+                    statement.execute(params![
+                        provenance_ref.snapshot_hash,
+                        provenance_ref.export_ref,
+                        provenance_ref.local_kind,
+                        provenance_ref.local_locator,
+                        provenance_ref.created_at,
+                    ])?;
+                }
             }
 
             Ok(())
@@ -4216,6 +4223,79 @@ mod tests {
 
         assert_eq!(loaded.scope, "today");
         assert_eq!(loaded.privacy_profile, "redacted");
+        assert_eq!(loaded_provenance.len(), 1);
+        assert_eq!(loaded_provenance[0].export_ref, "daily:2026-04-10");
+    }
+
+    #[test]
+    fn analysis_store_preserves_provenance_on_metadata_only_snapshot_upsert() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let record = SnapshotExportRecord {
+            snapshot_hash: "hash-keep".to_owned(),
+            schema_version: "ringmaster.snapshot.v1".to_owned(),
+            app_version: "0.1.0".to_owned(),
+            generated_at: "2026-04-10T00:00:00Z".to_owned(),
+            scope: "today".to_owned(),
+            start_day: "2026-04-10".to_owned(),
+            end_day: "2026-04-10".to_owned(),
+            anchor_day: "2026-04-10".to_owned(),
+            day_count: 1,
+            privacy_profile: "redacted".to_owned(),
+            source_mode: "demo".to_owned(),
+            fixture_dir: Some("tests/fixtures/phase7/strong".to_owned()),
+            latest_source_day: Some("2026-04-10".to_owned()),
+            latest_review_day: Some("2026-04-10".to_owned()),
+            freshness_summary:
+                "latest_source_day=2026-04-10 latest_review_day=2026-04-10 warnings=0".to_owned(),
+            trust_summary: "review_signals=1 strong=1 stale=0 follow_up_targets=1".to_owned(),
+            capability_summary: "granted=3 missing=0 requested=3".to_owned(),
+            provenance_summary: "refs=1 local_kinds=1".to_owned(),
+            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v1\"}".to_owned(),
+            created_at: "2026-04-10T00:00:01Z".to_owned(),
+        };
+        let provenance = vec![SnapshotProvenanceRefRecord {
+            snapshot_hash: "hash-keep".to_owned(),
+            export_ref: "daily:2026-04-10".to_owned(),
+            local_kind: "daily_overview".to_owned(),
+            local_locator: "2026-04-10".to_owned(),
+            created_at: "2026-04-10T00:00:00Z".to_owned(),
+        }];
+
+        store
+            .analysis()
+            .upsert_snapshot_export(&record, &provenance)
+            .unwrap_or_else(|error| panic!("snapshot export should persist: {error}"));
+
+        let metadata_only = SnapshotExportRecord {
+            fixture_dir: None,
+            freshness_summary:
+                "latest_source_day=2026-04-10 latest_review_day=2026-04-10 warnings=1".to_owned(),
+            provenance_summary: "refs=0 local_kinds=0".to_owned(),
+            ..record
+        };
+
+        store
+            .analysis()
+            .upsert_snapshot_export(&metadata_only, &[])
+            .unwrap_or_else(|error| panic!("metadata-only upsert should persist: {error}"));
+
+        let loaded = store
+            .analysis()
+            .snapshot_export("hash-keep")
+            .unwrap_or_else(|error| panic!("snapshot export should load: {error}"))
+            .unwrap_or_else(|| panic!("snapshot export should exist"));
+        let loaded_provenance = store
+            .analysis()
+            .snapshot_provenance_refs("hash-keep")
+            .unwrap_or_else(|error| panic!("provenance refs should load: {error}"));
+
+        assert_eq!(
+            loaded.fixture_dir.as_deref(),
+            Some("tests/fixtures/phase7/strong")
+        );
+        assert_eq!(loaded.provenance_summary, "refs=1 local_kinds=1");
+        assert_eq!(loaded.freshness_summary, metadata_only.freshness_summary);
         assert_eq!(loaded_provenance.len(), 1);
         assert_eq!(loaded_provenance[0].export_ref, "daily:2026-04-10");
     }

@@ -73,6 +73,7 @@ pub struct ArtifactRecordInput<'a> {
     pub request_mode: &'a str,
     pub input_transport: &'a str,
     pub run_mode: &'a str,
+    pub created_at: String,
     pub snapshot_hash_a: &'a str,
     pub snapshot_hash_b: Option<&'a str>,
     pub privacy_profile: PrivacyProfile,
@@ -1083,7 +1084,7 @@ pub fn artifact_record(input: ArtifactRecordInput<'_>) -> Result<AiArtifactRecor
         request_mode: input.request_mode.to_owned(),
         input_transport: input.input_transport.to_owned(),
         run_mode: input.run_mode.to_owned(),
-        created_at: now_rfc3339()?,
+        created_at: input.created_at,
         snapshot_hash_a: input.snapshot_hash_a.to_owned(),
         snapshot_hash_b: input.snapshot_hash_b.map(ToOwned::to_owned),
         privacy_profile: input.privacy_profile.as_str().to_owned(),
@@ -1595,7 +1596,11 @@ fn build_follow_up_targets(
 }
 
 fn signal_focus(signal_key: &str) -> &str {
-    if signal_key.contains("sleep") {
+    if signal_key.contains("stress") {
+        "stress"
+    } else if signal_key.contains("recovery") {
+        "recovery"
+    } else if signal_key.contains("sleep") {
         "sleep"
     } else if signal_key.contains("activity") {
         "activity"
@@ -1757,7 +1762,10 @@ impl From<PatternMetric> for String {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::{PrivacyProfile, SNAPSHOT_SCHEMA_VERSION, resolve_scope};
+    use super::{
+        PrivacyProfile, ResolvedSnapshotScope, SNAPSHOT_SCHEMA_VERSION, SnapshotFollowUpTarget,
+        SnapshotReviewSignal, build_follow_up_targets, resolve_scope,
+    };
     use crate::config::Config;
     use crate::oura::models::{AuthStatus, CapabilityReport};
     use crate::store::Store;
@@ -1902,5 +1910,71 @@ mod tests {
         assert!(!record.capability_summary.contains("user-123"));
         assert!(!record.provenance_summary.contains("callback"));
         assert!(record.freshness_summary.contains("latest_source_day"));
+    }
+
+    #[test]
+    fn follow_up_targets_route_stress_and_recovery_signals_to_matching_focus() {
+        let scope = ResolvedSnapshotScope {
+            raw_spec: "today".to_owned(),
+            normalized_spec: "day:2026-04-10".to_owned(),
+            start_day: "2026-04-10".to_owned(),
+            end_day: "2026-04-10".to_owned(),
+            anchor_day: "2026-04-10".to_owned(),
+            day_count: 1,
+        };
+        let signals = vec![
+            SnapshotReviewSignal {
+                export_ref: "signal:stress".to_owned(),
+                day: "2026-04-10".to_owned(),
+                signal_key: "stress_high".to_owned(),
+                numeric_value: Some(1.0),
+                text_value: None,
+                delta: Some(5.0),
+                z_score: Some(2.0),
+                persistence_days: 2,
+                sufficiency: "strong".to_owned(),
+                stale_days: 0,
+            },
+            SnapshotReviewSignal {
+                export_ref: "signal:recovery".to_owned(),
+                day: "2026-04-10".to_owned(),
+                signal_key: "recovery_high".to_owned(),
+                numeric_value: Some(1.0),
+                text_value: None,
+                delta: Some(4.0),
+                z_score: Some(1.5),
+                persistence_days: 2,
+                sufficiency: "strong".to_owned(),
+                stale_days: 0,
+            },
+            SnapshotReviewSignal {
+                export_ref: "signal:sleep-recovery".to_owned(),
+                day: "2026-04-10".to_owned(),
+                signal_key: "sleep_recovery".to_owned(),
+                numeric_value: Some(78.0),
+                text_value: None,
+                delta: Some(7.0),
+                z_score: Some(1.2),
+                persistence_days: 2,
+                sufficiency: "medium".to_owned(),
+                stale_days: 0,
+            },
+        ];
+
+        let targets = build_follow_up_targets(&scope, &signals);
+        let investigate = targets
+            .into_iter()
+            .skip(2)
+            .map(|target: SnapshotFollowUpTarget| target.command)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            investigate,
+            vec![
+                "review investigate --focus stress --anchor-day 2026-04-10".to_owned(),
+                "review investigate --focus recovery --anchor-day 2026-04-10".to_owned(),
+                "review investigate --focus recovery --anchor-day 2026-04-10".to_owned(),
+            ]
+        );
     }
 }
