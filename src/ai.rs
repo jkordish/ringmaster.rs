@@ -322,10 +322,11 @@ pub(crate) async fn review_snapshot_with_run_identity(
     fixture: Option<&Path>,
     run_identity_override: Option<&str>,
 ) -> Result<ReviewRunOutput> {
-    let request_plan =
+    let mut request_plan =
         build_review_request_plan(&config.ai, &snapshot.bundle, &snapshot.compact_json)?;
     let provider = select_provider(&config.ai, dry_run, fixture)?;
     let metadata = provider.metadata();
+    apply_provider_metadata_to_preview(&mut request_plan.preview, &metadata);
     let artifact = provider
         .review(ReviewProviderRequest {
             snapshot: &snapshot.bundle,
@@ -450,7 +451,7 @@ pub(crate) async fn compare_snapshots_with_run_identity(
     fixture: Option<&Path>,
     run_identity_override: Option<&str>,
 ) -> Result<CompareRunOutput> {
-    let request_plan = build_compare_request_plan(
+    let mut request_plan = build_compare_request_plan(
         &config.ai,
         &snapshot_a.bundle,
         &snapshot_a.compact_json,
@@ -459,6 +460,7 @@ pub(crate) async fn compare_snapshots_with_run_identity(
     )?;
     let provider = select_provider(&config.ai, dry_run, fixture)?;
     let metadata = provider.metadata();
+    apply_provider_metadata_to_preview(&mut request_plan.preview, &metadata);
     let artifact = provider
         .compare(CompareProviderRequest {
             snapshot_a: &snapshot_a.bundle,
@@ -527,7 +529,7 @@ pub(crate) async fn follow_up_from_artifact_with_run_identity(
         .iter()
         .map(|snapshot| (&snapshot.bundle, snapshot.compact_json.as_str()))
         .collect::<Vec<_>>();
-    let request_plan = build_follow_up_request_plan(
+    let mut request_plan = build_follow_up_request_plan(
         &config.ai,
         &snapshot_views,
         &source_record.artifact_kind,
@@ -536,6 +538,7 @@ pub(crate) async fn follow_up_from_artifact_with_run_identity(
     )?;
     let provider = select_provider(&config.ai, dry_run, fixture)?;
     let metadata = provider.metadata();
+    apply_provider_metadata_to_preview(&mut request_plan.preview, &metadata);
     let artifact = provider
         .follow_up(FollowUpProviderRequest {
             snapshots: &snapshot_views,
@@ -1291,6 +1294,16 @@ fn preview_snapshot(label: &str, snapshot: &SnapshotBundleV1) -> AiRequestPrevie
         privacy_profile: snapshot.metadata.privacy_profile,
         day_count: day_span_count(&snapshot.metadata.start_day, &snapshot.metadata.end_day),
     }
+}
+
+fn apply_provider_metadata_to_preview(preview: &mut AiRequestPreview, metadata: &ProviderMetadata) {
+    preview.provider.clone_from(&metadata.provider);
+    preview.model.clone_from(&metadata.model);
+    preview.request_mode.clone_from(&metadata.request_mode);
+    preview
+        .input_transport
+        .clone_from(&metadata.input_transport);
+    preview.stateless = metadata.request_mode == "stateless";
 }
 
 fn request_includes_notes_or_free_text<'a>(
@@ -2361,6 +2374,23 @@ mod tests {
         let rendered = render_request_preview(&plan.preview);
         assert!(rendered.contains("ringmaster ai request preview"));
         assert!(rendered.contains("scope=today"));
+    }
+
+    #[tokio::test]
+    async fn dry_run_review_preview_uses_selected_provider_metadata() {
+        let loaded = loaded_snapshot("today");
+        let output = review_snapshot(
+            &Config::load().unwrap_or_else(|error| panic!("config should load: {error}")),
+            &loaded,
+            true,
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("dry-run review should succeed: {error}"));
+
+        assert_eq!(output.request_preview.provider, "dry_run");
+        assert_eq!(output.request_preview.model, "deterministic");
+        assert!(output.request_preview.stateless);
     }
 
     #[test]

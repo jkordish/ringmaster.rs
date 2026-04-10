@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::io::{self, IsTerminal, Stdout, stdout};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle as ThreadJoinHandle;
 use std::time::Duration;
 use std::{collections::HashMap, env};
@@ -81,6 +82,8 @@ enum ReportSourceSelection {
     Snapshot(String),
     AiArtifact(String),
 }
+
+static REPORT_EXPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub async fn run(config: &Config, app: &mut AppState) -> Result<()> {
     if !(stdout().is_terminal() && io::stdin().is_terminal()) {
@@ -355,10 +358,11 @@ fn map_event(active_screen: Screen, event: Event) -> Option<Action> {
                 Some(Action::RequestAiLaunch(AiLaunchIntent::ReviewSelectedDay))
             }
             KeyCode::Char('c')
-                if matches!(
-                    active_screen,
-                    Screen::Dashboard | Screen::Patterns | Screen::Review | Screen::Ai
-                ) =>
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(
+                        active_screen,
+                        Screen::Dashboard | Screen::Patterns | Screen::Review | Screen::Ai
+                    ) =>
             {
                 Some(Action::RequestAiLaunch(AiLaunchIntent::CompareSelectedWeek))
             }
@@ -792,6 +796,7 @@ fn spawn_report_export_task(
     action_tx: UnboundedSender<Action>,
 ) {
     tokio::spawn(async move {
+        let runtime_handle = tokio::runtime::Handle::current();
         let output_path = match report_output_path(&config, &source) {
             Ok(path) => path,
             Err(error) => {
@@ -824,17 +829,7 @@ fn spawn_report_export_task(
         let export_task = tokio::task::spawn_blocking({
             let config = config.clone();
             let args = args.clone();
-            move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|error| {
-                        RingmasterError::Ui(format!(
-                            "building report export runtime failed: {error}"
-                        ))
-                    })?;
-                runtime.block_on(report::export_report(&config, args))
-            }
+            move || runtime_handle.block_on(report::export_report(&config, args))
         });
 
         match export_task.await {
@@ -1416,10 +1411,12 @@ fn report_output_path(config: &Config, source: &ReportSourceSelection) -> Result
             format!("run-{}", abbreviate_id(artifact_id, 16))
         }
     };
+    let sequence = REPORT_EXPORT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     Ok(report_dir.join(format!(
-        "{}-{}.md",
+        "{}-{}-{}.md",
         slug,
-        OffsetDateTime::now_utc().unix_timestamp()
+        OffsetDateTime::now_utc().unix_timestamp_nanos(),
+        sequence
     )))
 }
 
@@ -1498,6 +1495,7 @@ async fn run_ai_job(
     preflight: AiPreflightState,
     action_tx: UnboundedSender<Action>,
 ) {
+    let mut failed_base_record = queued_record.clone();
     let result = async {
         let started_at = now_rfc3339()?;
         let store = Store::open(&config)?;
@@ -1508,6 +1506,7 @@ async fn run_ai_job(
         running_record.started_at = Some(started_at.clone());
         running_record.updated_at = started_at.clone();
         store.analysis().upsert_ai_run(&running_record)?;
+        failed_base_record = running_record.clone();
         let _ = action_tx.send(reload_live_snapshot_action(
             &config,
             &format!("Running {}.", running_record.run_kind),
@@ -1618,7 +1617,7 @@ async fn run_ai_job(
     if let Err(error) = result {
         if let Ok(store) = Store::open(&config) {
             if let Ok(failed_record) =
-                failed_ai_run_record(&queued_record, AiRunStatus::Failed, error.to_string())
+                failed_ai_run_record(&failed_base_record, AiRunStatus::Failed, error.to_string())
             {
                 let _ = store.analysis().upsert_ai_run(&failed_record);
             }
@@ -3156,6 +3155,70 @@ mod tests {
             super::map_event(Screen::Ai, press(KeyCode::Enter)),
             Some(Action::ConfirmAiPreflight)
         );
+    }
+
+    #[test]
+    fn ctrl_c_keeps_quit_priority_over_compare_shortcut() {
+        let ctrl_c = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        for screen in [
+            Screen::Dashboard,
+            Screen::Patterns,
+            Screen::Review,
+            Screen::Ai,
+        ] {
+            assert_eq!(super::map_event(screen, ctrl_c.clone()), Some(Action::Quit));
+        }
+    }
+
+    #[test]
+    fn report_export_paths_are_unique_per_request() {
+        let config = test_config();
+        let source = super::ReportSourceSelection::Snapshot("snapshot-hash".to_owned());
+
+        let first = super::report_output_path(&config, &source)
+            .unwrap_or_else(|error| panic!("first report path should build: {error}"));
+        let second = super::report_output_path(&config, &source)
+            .unwrap_or_else(|error| panic!("second report path should build: {error}"));
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn failed_run_record_preserves_started_at_from_running_state() {
+        let preflight = AiPreflightState {
+            intent: AiLaunchIntent::ReviewSelectedDay,
+            source_screen: Screen::Review,
+            snapshot_scope: "day:2026-04-08".to_owned(),
+            snapshot_paths: vec!["/tmp/review-20260408-redacted.json".to_owned()],
+            request_preview: sample_request_preview("demo-snapshot-20260408"),
+            privacy_profile: PrivacyProfile::Redacted,
+            model_override: None,
+            source_ai_artifact_id: None,
+            follow_up_kind: None,
+            warning_lines: Vec::new(),
+            confirm_enabled: true,
+        };
+        let running = super::build_ai_run_record(
+            "run-review-1",
+            &preflight,
+            super::AiRunStatus::Running,
+            "2026-04-10T00:00:00Z",
+            Some("2026-04-10T00:01:00Z".to_owned()),
+            None,
+            None,
+            None,
+        )
+        .unwrap_or_else(|error| panic!("running record should build: {error}"));
+
+        let failed =
+            super::failed_ai_run_record(&running, super::AiRunStatus::Failed, "boom".to_owned())
+                .unwrap_or_else(|error| panic!("failed record should build: {error}"));
+
+        assert_eq!(failed.started_at.as_deref(), Some("2026-04-10T00:01:00Z"));
+        assert_eq!(failed.error_message.as_deref(), Some("boom"));
+        assert_eq!(failed.run_status, "failed");
+        assert!(failed.ended_at.is_some());
     }
 
     #[tokio::test]
