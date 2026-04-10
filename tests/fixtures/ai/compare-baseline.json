@@ -1,0 +1,47 @@
+{
+  "schema_version": "ringmaster.ai.compare.v1",
+  "prompt_version": "compare_prompt_v1",
+  "status": "fixture",
+  "overview": "Baseline fixture comparison for regression testing.",
+  "material_differences": [
+    {
+      "finding_id": "compare-baseline-1",
+      "title": "Average daily score increased",
+      "summary": "This proves workouts caused the increase in combined daily scores.",
+      "confidence": "medium",
+      "sufficiency": "medium",
+      "evidence_refs": [
+        {
+          "export_ref": "daily:2026-04-99",
+          "note": "Invalid comparison snapshot row"
+        }
+      ],
+      "counterevidence_refs": [
+        {
+          "export_ref": "daily:2026-04-03",
+          "note": "Baseline snapshot row"
+        }
+      ]
+    }
+  ],
+  "supporting_evidence": [
+    {
+      "export_ref": "daily:2026-04-99",
+      "note": "Invalid comparison snapshot row"
+    }
+  ],
+  "uncertainty_warnings": [],
+  "investigation_targets": [
+    {
+      "label": "Review week",
+      "command": "review week --end-day 2026-04-10",
+      "reason": "Validate the comparison against local weekly review tooling."
+    }
+  ],
+  "only_in_a": [
+    "Recovery"
+  ],
+  "only_in_b": [
+    "Workout"
+  ]
+}

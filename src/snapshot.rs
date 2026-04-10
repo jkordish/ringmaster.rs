@@ -76,8 +76,22 @@ pub struct ArtifactRecordInput<'a> {
     pub snapshot_hash_a: &'a str,
     pub snapshot_hash_b: Option<&'a str>,
     pub privacy_profile: PrivacyProfile,
+    pub artifact_status: &'a str,
+    pub overview: &'a str,
+    pub summary_cache: &'a str,
+    pub request_fingerprint: Option<&'a str>,
     pub payload_json: String,
     pub rendered_briefing: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotCatalogSummary {
+    pub latest_source_day: Option<String>,
+    pub latest_review_day: Option<String>,
+    pub freshness_summary: String,
+    pub trust_summary: String,
+    pub capability_summary: String,
+    pub provenance_summary: String,
 }
 
 struct GeneratedAtInputs<'a> {
@@ -311,6 +325,70 @@ pub struct SnapshotFollowUpTarget {
     pub label: String,
     pub command: String,
     pub reason: String,
+}
+
+pub fn summarize_snapshot_bundle(
+    bundle: &SnapshotBundleV1,
+    provenance_refs: &[SnapshotProvenanceRefRecord],
+) -> SnapshotCatalogSummary {
+    let warning_count = bundle.freshness.warnings.len();
+    let stale_signal_count = bundle
+        .review_signals
+        .iter()
+        .filter(|signal| signal.stale_days > 0)
+        .count();
+    let strong_signal_count = bundle
+        .review_signals
+        .iter()
+        .filter(|signal| signal.sufficiency == "strong")
+        .count();
+    let unique_local_kinds = provenance_refs
+        .iter()
+        .map(|record| record.local_kind.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    let granted_capabilities = bundle
+        .capabilities
+        .entries
+        .iter()
+        .filter(|entry| entry.granted)
+        .count();
+
+    SnapshotCatalogSummary {
+        latest_source_day: bundle.freshness.latest_source_day.clone(),
+        latest_review_day: bundle.freshness.latest_review_day.clone(),
+        freshness_summary: format!(
+            "latest_source_day={} latest_review_day={} warnings={warning_count}",
+            bundle
+                .freshness
+                .latest_source_day
+                .as_deref()
+                .unwrap_or("none"),
+            bundle
+                .freshness
+                .latest_review_day
+                .as_deref()
+                .unwrap_or("none"),
+        ),
+        trust_summary: format!(
+            "review_signals={} strong={} stale={} follow_up_targets={}",
+            bundle.review_signals.len(),
+            strong_signal_count,
+            stale_signal_count,
+            bundle.follow_up_targets.len(),
+        ),
+        capability_summary: format!(
+            "granted={} missing={} requested={}",
+            granted_capabilities,
+            bundle.capabilities.missing_scopes.len(),
+            bundle.capabilities.requested_scopes.len(),
+        ),
+        provenance_summary: format!(
+            "refs={} local_kinds={}",
+            provenance_refs.len(),
+            unique_local_kinds,
+        ),
+    }
 }
 
 pub fn resolve_scope(store: &Store, raw_spec: &str) -> Result<ResolvedSnapshotScope> {
@@ -854,9 +932,19 @@ pub fn export_snapshot(
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
         generated_at,
         scope: scope.normalized_spec.clone(),
+        start_day: String::new(),
+        end_day: String::new(),
+        anchor_day: String::new(),
+        day_count: 0,
         privacy_profile: privacy_profile.as_str().to_owned(),
         source_mode: source_mode.as_str().to_owned(),
         fixture_dir: fixture_dir.map(|path| path.display().to_string()),
+        latest_source_day: None,
+        latest_review_day: None,
+        freshness_summary: String::new(),
+        trust_summary: String::new(),
+        capability_summary: String::new(),
+        provenance_summary: String::new(),
         snapshot_json: compact_json.clone(),
         created_at: now_rfc3339()?,
     };
@@ -866,13 +954,26 @@ pub fn export_snapshot(
             record.snapshot_hash.clone_from(&snapshot_hash);
             record
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let catalog_summary = summarize_snapshot_bundle(&bundle, &provenance_records);
 
     Ok(SnapshotExportOutput {
         bundle,
         compact_json,
         pretty_json,
-        manifest_record,
+        manifest_record: SnapshotExportRecord {
+            start_day: scope.start_day.clone(),
+            end_day: scope.end_day.clone(),
+            anchor_day: scope.anchor_day.clone(),
+            day_count: u32::try_from(scope.day_count).unwrap_or(u32::MAX),
+            latest_source_day: catalog_summary.latest_source_day,
+            latest_review_day: catalog_summary.latest_review_day,
+            freshness_summary: catalog_summary.freshness_summary,
+            trust_summary: catalog_summary.trust_summary,
+            capability_summary: catalog_summary.capability_summary,
+            provenance_summary: catalog_summary.provenance_summary,
+            ..manifest_record
+        },
         provenance_records,
     })
 }
@@ -886,6 +987,50 @@ pub fn load_snapshot_artifact(path: &Path) -> Result<LoadedSnapshotArtifact> {
         bundle,
         compact_json,
     })
+}
+
+pub fn catalog_record_from_loaded_artifact(
+    artifact: &LoadedSnapshotArtifact,
+    fixture_dir: Option<&Path>,
+) -> SnapshotExportRecord {
+    let summary = summarize_snapshot_bundle(&artifact.bundle, &[]);
+    let day_count = Date::parse(
+        &artifact.bundle.metadata.start_day,
+        &time::macros::format_description!("[year]-[month]-[day]"),
+    )
+    .and_then(|start| {
+        Date::parse(
+            &artifact.bundle.metadata.end_day,
+            &time::macros::format_description!("[year]-[month]-[day]"),
+        )
+        .map(|end| (end - start).whole_days() + 1)
+    })
+    .ok()
+    .and_then(|value| u32::try_from(value).ok())
+    .unwrap_or(0);
+
+    SnapshotExportRecord {
+        snapshot_hash: artifact.bundle.metadata.snapshot_hash.clone(),
+        schema_version: artifact.bundle.schema_version.clone(),
+        app_version: artifact.bundle.metadata.app_version.clone(),
+        generated_at: artifact.bundle.metadata.generated_at.clone(),
+        scope: artifact.bundle.metadata.scope.clone(),
+        start_day: artifact.bundle.metadata.start_day.clone(),
+        end_day: artifact.bundle.metadata.end_day.clone(),
+        anchor_day: artifact.bundle.metadata.anchor_day.clone(),
+        day_count,
+        privacy_profile: artifact.bundle.metadata.privacy_profile.as_str().to_owned(),
+        source_mode: artifact.bundle.metadata.source_mode.as_str().to_owned(),
+        fixture_dir: fixture_dir.map(|path| path.display().to_string()),
+        latest_source_day: summary.latest_source_day,
+        latest_review_day: summary.latest_review_day,
+        freshness_summary: summary.freshness_summary,
+        trust_summary: summary.trust_summary,
+        capability_summary: summary.capability_summary,
+        provenance_summary: summary.provenance_summary,
+        snapshot_json: artifact.compact_json.clone(),
+        created_at: artifact.bundle.metadata.generated_at.clone(),
+    }
 }
 
 pub fn deserialize_snapshot_bundle(raw_json: &str) -> Result<SnapshotBundleV1> {
@@ -942,6 +1087,10 @@ pub fn artifact_record(input: ArtifactRecordInput<'_>) -> Result<AiArtifactRecor
         snapshot_hash_a: input.snapshot_hash_a.to_owned(),
         snapshot_hash_b: input.snapshot_hash_b.map(ToOwned::to_owned),
         privacy_profile: input.privacy_profile.as_str().to_owned(),
+        artifact_status: input.artifact_status.to_owned(),
+        overview: input.overview.to_owned(),
+        summary_cache: input.summary_cache.to_owned(),
+        request_fingerprint: input.request_fingerprint.map(ToOwned::to_owned),
         payload_json: input.payload_json,
         rendered_briefing: input.rendered_briefing,
     })
@@ -1718,5 +1867,40 @@ mod tests {
         assert!(!export.pretty_json.contains("user@example.com"));
         assert!(!export.pretty_json.contains("user-123"));
         assert!(!export.pretty_json.contains("callback"));
+    }
+
+    #[test]
+    fn redacted_catalog_metadata_stays_compact_and_safe() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        seed_history(&store);
+        let config = Config::load().unwrap_or_else(|error| panic!("config should load: {error}"));
+        let scope = resolve_scope(&store, "day:2026-04-08")
+            .unwrap_or_else(|error| panic!("scope should resolve: {error}"));
+        let export = super::export_snapshot(
+            &config,
+            &store,
+            &auth_status(),
+            super::SnapshotSourceMode::Live,
+            None,
+            &scope,
+            PrivacyProfile::Redacted,
+        )
+        .unwrap_or_else(|error| panic!("snapshot export should succeed: {error}"));
+        store
+            .analysis()
+            .upsert_snapshot_export(&export.manifest_record, &export.provenance_records)
+            .unwrap_or_else(|error| panic!("snapshot export should persist: {error}"));
+
+        let record = store
+            .analysis()
+            .snapshot_export(&export.bundle.metadata.snapshot_hash)
+            .unwrap_or_else(|error| panic!("snapshot export should load: {error}"))
+            .unwrap_or_else(|| panic!("snapshot export should exist"));
+
+        assert!(!record.freshness_summary.contains("user@example.com"));
+        assert!(!record.capability_summary.contains("user-123"));
+        assert!(!record.provenance_summary.contains("callback"));
+        assert!(record.freshness_summary.contains("latest_source_day"));
     }
 }

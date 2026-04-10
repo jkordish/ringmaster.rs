@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document explains the optional OpenAI integration that landed in the snapshot-first Phase 7 pass. It is intentionally narrow, privacy-aware, and bounded.
+This document explains the optional OpenAI integration that now powers the snapshot library, AI run registry, report export, and eval flywheel. The integration remains intentionally narrow, privacy-aware, and bounded.
 
 ## Core rules
 
@@ -17,14 +17,16 @@ The current design is built around these invariants:
 - no web search, file search, or remote retrieval are enabled in this pass
 - there is no freeform chat surface and no prompt textbox in the TUI
 
-## Commands
-
-Canonical commands:
+## Canonical commands
 
 ```bash
 cargo run -- snapshot export --demo --profile redacted --out /tmp/ringmaster-snapshot.json
+cargo run -- snapshot list --demo
 cargo run -- ai review /tmp/ringmaster-snapshot.json --dry-run
 cargo run -- ai compare /tmp/ringmaster-snapshot.json /tmp/ringmaster-snapshot.json --dry-run
+cargo run -- ai runs list --demo
+cargo run -- report export --from-snapshot /tmp/ringmaster-snapshot.json --format markdown --out /tmp/ringmaster-report.md
+cargo run -- ai eval --fixture-dir tests/fixtures/ai
 ```
 
 ## Snapshot-first design
@@ -39,6 +41,7 @@ This keeps the privacy boundary inspectable and testable. It also means:
 - AI runs can be reproduced from a saved artifact
 - snapshot exports remain useful even when AI is disabled
 - the user can see exactly which file would leave the machine
+- reports and evals can be regenerated without hidden database access
 
 ## What is sent
 
@@ -47,7 +50,8 @@ When a real OpenAI call is enabled and the user runs `ai review` or `ai compare`
 - the compact JSON snapshot artifact for review
 - the compact JSON snapshot artifacts for compare
 - stable system instructions
-- a strict JSON Schema contract for the output
+- stable task framing
+- strict JSON Schema output framing
 - optional provider metadata such as reasoning effort or `safety_identifier`
 
 ## What is not sent
@@ -59,10 +63,10 @@ The current pass does not send:
 - access tokens
 - config files
 - webhook secrets
-- callback URLs and auth internals in the default redacted profile
 - arbitrary freeform user prompts
 - OpenAI tool definitions
 - browsing or remote retrieval instructions
+- hidden file uploads outside the snapshot boundary object
 
 ## Privacy profiles
 
@@ -122,6 +126,32 @@ Important consequences:
 - the local renderer turns structured JSON into the readable briefing
 - schema drift can be tested directly
 
+## Canonical request construction
+
+Request construction is now canonical per task family.
+
+Each request is built in this order:
+
+1. system instructions
+2. task framing
+3. output schema framing
+4. snapshot payload
+
+This keeps the static prefix stable and the snapshot payload variable. That makes request construction easier to inspect and friendlier to future prompt caching without changing product behavior.
+
+Dry-run and fixture execution expose a request preview that records:
+
+- task family
+- provider
+- request mode
+- input transport
+- prompt cache mode
+- prompt version
+- output schema version
+- prefix fingerprint
+- payload fingerprint
+- request fingerprint
+
 ## Stateless mode
 
 The default provider mode is stateless.
@@ -136,7 +166,7 @@ If stateful mode is enabled later through config, that will be a deliberate opt-
 
 ## Prompt and schema versioning
 
-The app persists prompt and schema versions with every AI artifact.
+The app now keeps prompt and template assets in explicit files and persists version metadata with every AI artifact.
 
 Current versions:
 
@@ -145,8 +175,10 @@ Current versions:
 - compare output schema: `ringmaster.ai.compare.v1`
 - review prompt: `review_prompt_v1`
 - compare prompt: `compare_prompt_v1`
+- review task frame: `review_task_frame_v1`
+- compare task frame: `compare_task_frame_v1`
 
-Each persisted artifact also records:
+Each persisted AI artifact also records:
 
 - provider
 - model
@@ -157,6 +189,28 @@ Each persisted artifact also records:
 - privacy profile
 - snapshot hash linkage
 - created timestamp
+- request fingerprint
+
+## AI run registry
+
+OpenAI-backed and local-only runs are persisted into the same AI run registry.
+
+Browse commands:
+
+- `ai runs list`
+- `ai runs show <run-id>`
+
+The registry exists so prompt/model/version drift can be inspected over time instead of disappearing into stdout.
+
+## Report export and eval interplay
+
+OpenAI output is not the end of the workflow anymore.
+
+- `report export` turns snapshots or AI runs into shareable Markdown/HTML reports
+- `ai eval` grades snapshot-based AI behavior locally without requiring live API calls
+- both workflows keep prompt/schema/provider provenance visible
+
+This is why the integration remains narrowly scoped: the product value comes from durable local artifacts, not an unbounded assistant surface.
 
 ## Dry-run and fixture testing
 
@@ -166,6 +220,7 @@ Supported flows:
 
 - `--dry-run`
 - `--fixture <path>`
+- `ai eval --fixture-dir tests/fixtures/ai`
 
 These modes are the default verification path for local development and CI-style checks.
 
@@ -177,7 +232,8 @@ This pass does not include:
 - arbitrary natural-language Q&A over the live database
 - direct database-to-OpenAI access
 - browsing-enabled or tool-enabled OpenAI runs
-- file-upload transport for provider input
+- hosted eval services as a runtime requirement
 - a dedicated AI chat screen in the TUI
+- batch archive processing as the main user-facing workflow
 
 Those behaviors would expand the privacy and product surface significantly and require a separate design pass.

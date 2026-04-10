@@ -2,142 +2,181 @@
 
 ## Purpose
 
-This file is the current truth for the repository during the `snapshot-export-and-openai-briefing` pass completed on `2026-04-10`. It records what landed, what was verified, and what remains intentionally deferred.
+This file is the current truth for the repository during the `snapshot-library-reports-and-eval-flywheel` pass completed on `2026-04-10`. It records what landed, what was verified, and what remains intentionally deferred.
 
 ## Baseline before this pass
 
 Verified before implementation:
 
-- the local-first CLI, sync, derive, review, webhook, and visual-system flows were already working
-- `cargo fmt --all --check` passed
-- `cargo clippy --all-targets --all-features -- -D warnings` passed
-- `cargo test --all` passed
-- `cargo run -- doctor` passed
+- the local-first CLI, sync, derive, review, webhook, UI snapshot, and phase-7 snapshot/OpenAI flows were already working
+- snapshot export already produced canonical hashed artifacts with privacy profiles
+- `ai review` and `ai compare` already persisted structured artifacts locally
 
 Primary gaps before this pass:
 
-- there was no canonical snapshot export artifact
-- there was no privacy-profiled export path
-- there was no optional OpenAI provider seam
-- there was no persisted local store for AI review or compare artifacts
-- there was no bounded machine-safe AI contract on top of the existing review and pattern layers
+- saved snapshots were persisted but not browseable as a first-class local library
+- AI review and compare runs were persisted but not easy to inspect over time
+- there was no canonical report export command
+- prompt framing still lived inline in AI implementation code
+- there was no local eval harness for safe prompt/model iteration
+- there was no durable report or eval lineage registry
 
 ## Current implemented truth
 
 The repository now includes:
 
-- a canonical `snapshot export` command that produces a versioned JSON snapshot bundle
-- explicit privacy profiles:
-  - `redacted` as the default
-  - `balanced`
-  - `full`
-- deterministic snapshot serialization plus stable snapshot hashing
-- snapshot manifest persistence in SQLite
-- opaque local provenance references so exported evidence can map back to local records without leaking identifiers
-- bounded `ai review <snapshot-path>` and `ai compare <snapshot-a> <snapshot-b>` commands
-- a dedicated AI provider seam with:
-  - `dry_run`
-  - fixture-backed replay
-  - optional OpenAI Responses API execution
-- strict Structured Outputs contracts for review and compare artifacts instead of prose parsing
-- locally rendered human-readable briefings derived from structured JSON artifacts
-- local persistence for AI outputs, including:
-  - snapshot linkage
-  - provider/model metadata
-  - prompt/schema versions
-  - run mode
-  - privacy profile
-  - created-at timestamps
-- conservative OpenAI defaults:
-  - disabled unless explicitly enabled
-  - stateless requests by default
-  - no tools enabled
-  - no web search, file search, or remote retrieval
-- fixture-backed and dry-run-friendly CLI tests for export, review, and compare
+- a local snapshot catalog backed by `snapshot_exports`
+- canonical snapshot library commands:
+  - `snapshot list`
+  - `snapshot show`
+- a first-class AI run registry backed by `ai_artifacts`
+- canonical AI run browse commands:
+  - `ai runs list`
+  - `ai runs show`
+- a canonical report workflow:
+  - `report export`
+- Markdown and HTML report rendering from either:
+  - a saved snapshot
+  - a saved AI review run
+  - a saved AI compare run
+- persisted report manifests in `report_exports`
+- a local eval flywheel:
+  - `ai eval`
+  - fixture manifest support
+  - summary persistence in `ai_eval_runs`
+  - graders for schema validity, completeness, overclaiming, medical safety, privacy, evidence integrity, and stale-data honesty
+- explicit prompt/template/schema versioning with dedicated files under:
+  - `src/ai_prompts/*`
+  - `src/report_templates/*`
+- canonical per-task request builders with stable framing and dry-run request previews
+- stronger lineage between snapshots, AI runs, and report exports
 
-## Snapshot/export capabilities that now work
+## Snapshot library capabilities that now work
 
 - `ringmaster snapshot export --demo --profile redacted --out /tmp/ringmaster-snapshot.json`
-- bounded scopes:
-  - `today`
-  - `week`
-  - `day:YYYY-MM-DD`
-  - `range:YYYY-MM-DD..YYYY-MM-DD`
-- deterministic JSON output in:
-  - pretty mode
-  - compact mode
-- export metadata that records:
-  - app version
-  - schema version
-  - generated timestamp
-  - scope
-  - privacy profile
-  - source mode
-  - snapshot hash
-- derived snapshot content that can be useful without AI:
-  - freshness and trust metadata
-  - capability coverage
-  - record counts
-  - selected metrics and baselines
-  - trend summaries
-  - context events
-  - pattern summaries
-  - review signals
-  - local follow-up targets
+- `ringmaster snapshot list --demo`
+- `ringmaster snapshot show /tmp/ringmaster-snapshot.json`
+- `ringmaster snapshot show <snapshot-hash-prefix>`
 
-## OpenAI analysis capabilities that now work
+Snapshot catalog metadata now exposes:
 
-- `ringmaster ai review <snapshot-path>`
-- `ringmaster ai compare <snapshot-a> <snapshot-b>`
-- dry-run mode for both commands without any API call
-- fixture-backed review and compare runs for regression testing
-- persisted local AI artifacts for both review and compare
-- structured outputs that include:
-  - overview
-  - findings
-  - limitations
-  - evidence references
-  - uncertainty markers
-  - local follow-up targets
+- created time
+- stable snapshot hash identity
+- scope and day bounds
+- privacy profile
+- schema version
+- source mode
+- freshness summary
+- trust summary
+- capability summary
+- provenance summary
 
-## Privacy and safety truth
+The catalog stores compact metadata only. It does not leak obvious personal identifiers or secrets in the default redacted path.
 
-The current behavior is intentionally conservative:
+## AI artifact capabilities that now work
+
+- `ringmaster ai review <snapshot-path> --dry-run`
+- `ringmaster ai compare <snapshot-a> <snapshot-b> --dry-run`
+- `ringmaster ai runs list --demo`
+- `ringmaster ai runs show <run-id-prefix>`
+
+Persisted AI run metadata now includes:
+
+- artifact kind and status
+- provider/model metadata
+- prompt version
+- output schema version
+- request mode and input transport
+- privacy profile
+- snapshot linkage
+- run mode (`real`, `dry_run`, `fixture`)
+- request fingerprint
+- summary/overview cache for library rendering
+
+## Report export capabilities that now work
+
+- `ringmaster report export --from-snapshot /tmp/ringmaster-snapshot.json --format markdown --out /tmp/ringmaster-report.md`
+- `ringmaster report export --from-snapshot /tmp/ringmaster-snapshot.json --format html --out /tmp/ringmaster-report.html`
+- `ringmaster report export --from-ai-run <run-id> --format markdown --out /tmp/ringmaster-report.md`
+
+Report exports now include:
+
+- title and source scope
+- generation metadata
+- freshness and trust summaries
+- key findings
+- supporting evidence
+- sufficiency and uncertainty notes
+- provenance references and local lineage handles
+- explicit privacy profile and AI usage markers
+
+## Eval flywheel capabilities that now work
+
+- `ringmaster ai eval --fixture-dir tests/fixtures/ai`
+- optional JSON summary export via `--export`
+- candidate/baseline label selection
+- fixture-manifest driven datasets
+- deterministic local execution with no live API requirement
+- persisted eval summary history in `ai_eval_runs`
+
+The local graders currently cover:
+
+- schema validity
+- required-field completeness
+- overclaiming / unsupported causality
+- medical-advice safety language
+- privacy leakage in rendered text
+- evidence-reference integrity
+- stale or missing data honesty
+
+## Privacy and provenance truth
+
+The current behavior remains intentionally conservative:
 
 - the OpenAI layer is opt-in
 - no user data is uploaded unless the user explicitly runs an AI command against a local snapshot
-- the exported snapshot is the only artifact the provider can inspect
-- `redacted` removes obvious personal/account identifiers and omits free-text review-signal payloads by default
-- provider config lives separately from auth/sync config
-- API keys are read from an env var, not stored in SQLite artifacts
-- logs never need the API key or snapshot payload to explain success or failure
+- the exported snapshot remains the only provider-visible boundary object
+- `redacted` remains the default export profile
+- requests remain stateless by default
+- no tools are enabled by default
+- local reports and AI runs now show their lineage and privacy profile explicitly
+- report/export/eval persistence stores metadata and paths, not hidden background uploads
 
 ## Versioning truth
 
-The pass now persists and documents:
+The repository now has explicit version discipline for:
 
 - snapshot schema version: `ringmaster.snapshot.v1`
 - review output schema version: `ringmaster.ai.review.v1`
 - compare output schema version: `ringmaster.ai.compare.v1`
-- prompt versions:
+- prompt templates:
   - `review_prompt_v1`
   - `compare_prompt_v1`
+  - `review_task_frame_v1`
+  - `compare_task_frame_v1`
+- report templates:
+  - `markdown_v1`
+  - `html_v1`
 
 ## Tests now in place
 
 Coverage now includes:
 
-- snapshot scope resolution
-- redacted export leakage checks
-- snapshot export manifest + provenance persistence
-- AI artifact persistence
-- CLI parsing for snapshot and AI command families
-- dry-run review rendering and persistence
-- fixture-backed review rendering
-- dry-run compare rendering
-- provider-disabled failure behavior
-- schema-generation sanity checks for review and compare outputs
-- full-library regression coverage with the new phase-7 surfaces enabled
+- snapshot catalog tests
+- AI run registry tests
+- report export tests
+- Markdown and HTML renderer tests
+- eval harness tests
+- prompt-version regression fixtures
+- redaction/privacy regression tests
+- lineage and provenance persistence tests
+- CLI parsing and smoke tests for:
+  - `snapshot list`
+  - `snapshot show`
+  - `ai runs list`
+  - `ai runs show`
+  - `report export`
+  - `ai eval`
 
 ## Verification completed for this pass
 
@@ -148,8 +187,11 @@ Verified on `2026-04-10` after implementation:
 - `cargo test --all`
 - `cargo run -- doctor`
 - `cargo run -- snapshot export --demo --profile redacted --out /tmp/ringmaster-snapshot.json`
+- `cargo run -- snapshot list --demo`
 - `cargo run -- ai review /tmp/ringmaster-snapshot.json --dry-run`
-- `cargo run -- ai compare /tmp/ringmaster-snapshot.json /tmp/ringmaster-snapshot.json --dry-run`
+- `cargo run -- ai runs list --demo`
+- `cargo run -- report export --from-snapshot /tmp/ringmaster-snapshot.json --format markdown --out /tmp/ringmaster-report.md`
+- `cargo run -- ai eval --fixture-dir tests/fixtures/ai`
 
 ## Intentionally deferred
 
@@ -157,6 +199,8 @@ Verified on `2026-04-10` after implementation:
 - any direct database-to-OpenAI pipeline
 - tool-enabled or browsing-enabled OpenAI runs
 - a new AI chat screen in the TUI
-- file-upload transport for OpenAI requests
-- richer saved-brief browsing in the TUI beyond the existing CLI and persistence layer
-- hosted relay services, notifications, packaging, installers, and release automation
+- a dedicated TUI artifact browser in this pass
+- PDF export as a required format
+- batch/archive processing as a user-facing feature
+- hosted eval services as a runtime requirement
+- packaging, installers, notifications, and release automation

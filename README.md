@@ -7,7 +7,7 @@ It gives you:
 - a Ratatui interface for browsing recent signals, trends, context, patterns, reviews, and system status
 - a SQLite-backed local cache with deterministic demo and fixture flows
 - real Oura login and sync for supported families
-- an optional snapshot-based OpenAI layer for bounded review and compare workflows
+- an optional snapshot-based OpenAI layer for bounded review, compare, report, and eval workflows
 
 The design goal is simple: useful local insight first, optional external analysis second, and no surprise data sharing.
 
@@ -50,12 +50,17 @@ cargo run -- review week --demo
 cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots
 ```
 
-### Run the snapshot-first AI flow
+### Run the snapshot library and report workflow
 
 ```bash
 cargo run -- snapshot export --demo --profile redacted --out /tmp/ringmaster-snapshot.json
+cargo run -- snapshot list --demo
+cargo run -- snapshot show /tmp/ringmaster-snapshot.json
 cargo run -- ai review /tmp/ringmaster-snapshot.json --dry-run
 cargo run -- ai compare /tmp/ringmaster-snapshot.json /tmp/ringmaster-snapshot.json --dry-run
+cargo run -- ai runs list --demo
+cargo run -- report export --from-snapshot /tmp/ringmaster-snapshot.json --format markdown --out /tmp/ringmaster-report.md
+cargo run -- ai eval --fixture-dir tests/fixtures/ai
 ```
 
 ## Privacy defaults
@@ -66,7 +71,7 @@ The optional OpenAI integration is intentionally narrow.
 - The only outbound artifact is a snapshot you export yourself.
 - `redacted` is the default snapshot profile.
 - API requests are stateless by default.
-- No freeform chat, browsing, or tool-enabled agent behavior is included in this pass.
+- No freeform chat, prompt textbox, browsing, or tool-enabled agent behavior is included in this pass.
 
 If you want the full contract, read [docs/OPENAI_INTEGRATION.md](docs/OPENAI_INTEGRATION.md).
 
@@ -77,7 +82,10 @@ If you want the full contract, read [docs/OPENAI_INTEGRATION.md](docs/OPENAI_INT
 - a seven-screen TUI: Dashboard, Timeline, Trends, Explain, Patterns, Review, Status
 - webhook-aware freshness and ops surfaces where Oura supports it
 - deterministic demo, fixture, and smoke-test paths
-- snapshot export plus structured AI review/compare artifact persistence
+- snapshot export plus a local snapshot catalog
+- structured AI review/compare artifact persistence plus AI run browsing
+- Markdown and HTML report export from snapshots and AI runs
+- a fixture-backed local eval flywheel for prompt/schema/model regressions
 
 ## Minimal config
 
@@ -102,11 +110,12 @@ For the complete config and runtime behavior, use the docs below instead of the 
 - Architecture and boundaries: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - Current shipped status: [docs/STATUS.md](docs/STATUS.md)
 - OpenAI snapshot flow and privacy model: [docs/OPENAI_INTEGRATION.md](docs/OPENAI_INTEGRATION.md)
+- Eval workflow and grading rules: [docs/EVALS.md](docs/EVALS.md)
 - Visual system references:
   - [docs/DESIGN_AUDIT.md](docs/DESIGN_AUDIT.md)
   - [docs/DESIGN_SYSTEM.md](docs/DESIGN_SYSTEM.md)
-- Current execution plan for the snapshot/AI pass:
-  - [docs/execplans/20260410-phase7-snapshot-export-and-openai-briefing.md](docs/execplans/20260410-phase7-snapshot-export-and-openai-briefing.md)
+- Current execution plan for the snapshot library/report/eval pass:
+  - [docs/execplans/20260410-phase8-snapshot-library-reports-and-eval-flywheel.md](docs/execplans/20260410-phase8-snapshot-library-reports-and-eval-flywheel.md)
 
 ## Development notes
 
@@ -118,4 +127,10 @@ cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
 cargo run -- doctor
+cargo run -- snapshot export --demo --profile redacted --out /tmp/ringmaster-snapshot.json
+cargo run -- snapshot list --demo
+cargo run -- ai review /tmp/ringmaster-snapshot.json --dry-run
+cargo run -- ai runs list --demo
+cargo run -- report export --from-snapshot /tmp/ringmaster-snapshot.json --format markdown --out /tmp/ringmaster-report.md
+cargo run -- ai eval --fixture-dir tests/fixtures/ai
 ```

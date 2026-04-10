@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document describes the implemented phase-7 architecture for `ringmaster.rs`. It reflects the code that exists in the repository today, including the snapshot-first optional OpenAI briefing layer, not the eventual end-state product.
+This document describes the implemented phase-8 architecture for `ringmaster.rs`. It reflects the code that exists in the repository today, including the snapshot library, AI run registry, report export workflow, and local eval flywheel, not the eventual end-state product.
 
 ## Design goals
 
@@ -18,6 +18,7 @@ This document describes the implemented phase-7 architecture for `ringmaster.rs`
 - bounded smart reviews and investigations rather than a chat assistant
 - optional external synthesis only through explicit exported snapshots
 - structured machine-safe AI outputs instead of prose parsing
+- durable local artifact workflows instead of transient AI stdout
 
 ## Runtime shape
 
@@ -42,12 +43,36 @@ snapshot export
   -> deterministic versioned JSON bundle
   -> snapshot manifest + provenance persistence
 
+snapshot list / snapshot show
+  -> snapshot catalog queries
+  -> path-or-id resolution
+  -> compact metadata rendering
+  -> lineage and privacy visibility
+
 ai review / ai compare
   -> local snapshot file loading only
   -> provider boundary (`dry_run`, `fixture`, `openai`)
+  -> canonical request builders with versioned prompt/task/schema framing
   -> OpenAI Responses API with strict JSON schema output when enabled
-  -> local artifact persistence
+  -> local artifact persistence + summary cache + request fingerprint
   -> local human-readable briefing rendering
+
+ai runs list / ai runs show
+  -> AI run registry queries
+  -> local artifact inspection over time
+
+report export
+  -> source resolution from snapshot or AI run
+  -> shared report document model
+  -> Markdown / HTML renderers
+  -> report manifest persistence
+
+ai eval
+  -> fixture manifest loading
+  -> deterministic snapshot/artifact fixture validation
+  -> local grader execution
+  -> optional JSON summary export
+  -> eval summary persistence
 
 webhook serve
   -> axum receiver
@@ -253,6 +278,7 @@ Implemented concepts:
 - `ResolvedSnapshotScope`
 - manifest persistence in `snapshot_exports`
 - local export-reference mapping in `snapshot_provenance_refs`
+- catalog summary fields for freshness, trust, capability, and provenance
 
 ### `src/ai.rs`
 
@@ -260,7 +286,7 @@ Responsibilities:
 
 - provider abstraction for snapshot review and compare
 - dry-run, fixture, and OpenAI provider implementations
-- OpenAI Responses API request construction
+- canonical request construction
 - Structured Outputs schema generation
 - local briefing rendering
 - persisted AI artifact record construction
@@ -279,6 +305,48 @@ Implemented concepts:
 - provider metadata and run modes (`real`, `dry_run`, `fixture`)
 - prompt and schema version constants
 - stateless-by-default Responses API usage with no tools
+- request previews and request fingerprints
+
+### `src/ai_prompts.rs` and `src/ai_prompts/*`
+
+Responsibilities:
+
+- versioned prompt and task-frame asset loading
+- centralized prompt/schema version names
+- keeping prompt strings out of unrelated implementation modules
+
+Boundary rule:
+
+- prompt assets define framing, not runtime transport or persistence behavior
+
+### `src/report.rs`
+
+Responsibilities:
+
+- source resolution for report export
+- shared `ReportDocument` view model construction
+- Markdown and HTML rendering
+- report manifest persistence and lineage wiring
+
+Boundary rule:
+
+- report rendering is derived from local snapshots and AI artifacts only
+- no network work happens in report generation
+
+### `src/eval.rs`
+
+Responsibilities:
+
+- fixture manifest loading
+- deterministic local artifact evaluation
+- grader execution and summary scoring
+- eval summary persistence
+- optional JSON export
+
+Boundary rule:
+
+- eval runs do not require live OpenAI calls
+- eval fixtures remain snapshot-first and local-only
 
 ### `src/ui/*`
 
@@ -397,6 +465,8 @@ Current schema families:
 - `snapshot_exports`
 - `snapshot_provenance_refs`
 - `ai_artifacts`
+- `report_exports`
+- `ai_eval_runs`
 
 Important query responsibilities added in phase 5:
 
@@ -406,9 +476,11 @@ Important query responsibilities added in phase 5:
 
 Additional query responsibilities added in this pass:
 
-- snapshot manifest persistence keyed by stable snapshot hash
+- snapshot catalog list/show queries keyed by stable snapshot hash
 - local export-reference provenance lookup for AI evidence mapping
 - persisted AI review/compare artifact storage and latest-artifact lookup
+- report export manifest persistence and lineage lookup
+- eval summary persistence
 
 ### `src/review/*`
 

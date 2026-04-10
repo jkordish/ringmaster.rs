@@ -197,3 +197,140 @@ async fn review_investigate_demo_renders_bounded_focus_output() {
     assert!(output.contains("focus: readiness"));
     assert!(output.contains("look_at:"));
 }
+
+#[tokio::test]
+async fn snapshot_list_demo_renders_catalog_output() {
+    let result = ringmaster::run_from(["ringmaster", "snapshot", "list", "--demo"]).await;
+    assert!(result.is_ok(), "snapshot list demo should run");
+
+    let output = match result {
+        Ok(Some(output)) => output,
+        Ok(None) => panic!("snapshot list demo should render text output"),
+        Err(error) => panic!("unexpected snapshot list failure: {error}"),
+    };
+
+    assert!(output.contains("ringmaster snapshot list"));
+    assert!(output.contains("snapshots:"));
+    assert!(output.contains("profile=redacted"));
+}
+
+#[tokio::test]
+async fn snapshot_show_path_renders_snapshot_detail() {
+    let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
+    let snapshot_path = out_dir.path().join("snapshot.json");
+    let snapshot_arg = snapshot_path.to_string_lossy().into_owned();
+
+    let export_result = ringmaster::run_from([
+        "ringmaster",
+        "snapshot",
+        "export",
+        "--demo",
+        "--profile",
+        "redacted",
+        "--out",
+        &snapshot_arg,
+    ])
+    .await;
+    assert!(export_result.is_ok(), "snapshot export should run");
+
+    let result = ringmaster::run_from(["ringmaster", "snapshot", "show", &snapshot_arg]).await;
+    assert!(result.is_ok(), "snapshot show should run");
+
+    let output = match result {
+        Ok(Some(output)) => output,
+        Ok(None) => panic!("snapshot show should render text output"),
+        Err(error) => panic!("unexpected snapshot show failure: {error}"),
+    };
+
+    assert!(output.contains("ringmaster snapshot show"));
+    assert!(output.contains("source: file:"));
+    assert!(output.contains("snapshot_hash:"));
+}
+
+#[tokio::test]
+async fn ai_runs_list_demo_renders_registry_output() {
+    let result = ringmaster::run_from(["ringmaster", "ai", "runs", "list", "--demo"]).await;
+    assert!(result.is_ok(), "ai runs list demo should run");
+
+    let output = match result {
+        Ok(Some(output)) => output,
+        Ok(None) => panic!("ai runs list demo should render text output"),
+        Err(error) => panic!("unexpected ai runs list failure: {error}"),
+    };
+
+    assert!(output.contains("ringmaster ai runs list"));
+    assert!(output.contains("runs:"));
+    assert!(output.contains("kind=review"));
+}
+
+#[tokio::test]
+async fn report_export_from_snapshot_writes_markdown_report() {
+    let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
+    let snapshot_path = out_dir.path().join("snapshot.json");
+    let snapshot_arg = snapshot_path.to_string_lossy().into_owned();
+    let report_path = out_dir.path().join("report.md");
+    let report_arg = report_path.to_string_lossy().into_owned();
+
+    let export_result = ringmaster::run_from([
+        "ringmaster",
+        "snapshot",
+        "export",
+        "--demo",
+        "--profile",
+        "redacted",
+        "--out",
+        &snapshot_arg,
+    ])
+    .await;
+    assert!(export_result.is_ok(), "snapshot export should run");
+
+    let result = ringmaster::run_from([
+        "ringmaster",
+        "report",
+        "export",
+        "--from-snapshot",
+        &snapshot_arg,
+        "--format",
+        "markdown",
+        "--out",
+        &report_arg,
+    ])
+    .await;
+    assert!(result.is_ok(), "report export should run");
+
+    let output = match result {
+        Ok(Some(output)) => output,
+        Ok(None) => panic!("report export should render text output"),
+        Err(error) => panic!("unexpected report export failure: {error}"),
+    };
+
+    let report_text = std::fs::read_to_string(&report_path)
+        .unwrap_or_else(|error| panic!("report should read: {error}"));
+    assert!(output.contains("ringmaster report export"));
+    assert!(output.contains("format: markdown"));
+    assert!(report_text.contains("# Snapshot report:"));
+}
+
+#[tokio::test]
+async fn ai_eval_fixture_dir_renders_summary() {
+    let result = ringmaster::run_from([
+        "ringmaster",
+        "ai",
+        "eval",
+        "--fixture-dir",
+        "tests/fixtures/ai",
+    ])
+    .await;
+    assert!(result.is_ok(), "ai eval should run");
+
+    let output = match result {
+        Ok(Some(output)) => output,
+        Ok(None) => panic!("ai eval should render text output"),
+        Err(error) => panic!("unexpected ai eval failure: {error}"),
+    };
+
+    assert!(output.contains("ringmaster ai eval"));
+    assert!(output.contains("candidate_label: candidate"));
+    assert!(output.contains("baseline_label: baseline"));
+    assert!(output.contains("scores:"));
+}

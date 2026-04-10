@@ -9,7 +9,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::config::{AiConfig, AiInputTransport, AiRequestMode, Config};
+use crate::ai_prompts::{
+    COMPARE_PROMPT_VERSION, REVIEW_PROMPT_VERSION, compare_system_prompt, compare_task_framing,
+    review_system_prompt, review_task_framing,
+};
+use crate::config::{AiConfig, AiInputTransport, AiRequestMode, Config, PromptCacheMode};
 use crate::error::{Result, RingmasterError};
 use crate::snapshot::{
     ArtifactRecordInput, LoadedSnapshotArtifact, PrivacyProfile, SnapshotBundleV1,
@@ -17,9 +21,7 @@ use crate::snapshot::{
 };
 use crate::store::queries::AiArtifactRecord;
 
-pub const REVIEW_PROMPT_VERSION: &str = "review_prompt_v1";
 pub const REVIEW_OUTPUT_SCHEMA_VERSION: &str = "ringmaster.ai.review.v1";
-pub const COMPARE_PROMPT_VERSION: &str = "compare_prompt_v1";
 pub const COMPARE_OUTPUT_SCHEMA_VERSION: &str = "ringmaster.ai.compare.v1";
 
 type ProviderFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
@@ -126,6 +128,8 @@ pub struct ReviewRunOutput {
     pub artifact: ReviewArtifactV1,
     pub payload_json: String,
     pub rendered_briefing: String,
+    pub request_preview: String,
+    pub request_fingerprint: String,
     pub record: AiArtifactRecord,
 }
 
@@ -134,7 +138,15 @@ pub struct CompareRunOutput {
     pub artifact: CompareArtifactV1,
     pub payload_json: String,
     pub rendered_briefing: String,
+    pub request_preview: String,
+    pub request_fingerprint: String,
     pub record: AiArtifactRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoredArtifact {
+    Review(ReviewArtifactV1),
+    Compare(CompareArtifactV1),
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +169,12 @@ pub struct CompareProviderRequest<'a> {
     pub snapshot_a_json: &'a str,
     pub snapshot_b: &'a SnapshotBundleV1,
     pub snapshot_b_json: &'a str,
+}
+
+struct StructuredOutputRequestPlan {
+    body: Value,
+    preview: String,
+    request_fingerprint: String,
 }
 
 trait AiProvider {
@@ -191,6 +209,7 @@ pub async fn review_snapshot(
     dry_run: bool,
     fixture: Option<&Path>,
 ) -> Result<ReviewRunOutput> {
+    let request_plan = build_review_request_plan(&config.ai, &snapshot.compact_json)?;
     let provider = select_provider(&config.ai, dry_run, fixture)?;
     let metadata = provider.metadata();
     let artifact = provider
@@ -201,6 +220,7 @@ pub async fn review_snapshot(
         .await?;
     let payload_json = serde_json::to_string_pretty(&artifact)?;
     let rendered_briefing = render_review_briefing(&artifact);
+    let summary_cache = review_summary_cache(&artifact);
     let record = artifact_record(ArtifactRecordInput {
         artifact_id: artifact_id(
             "review",
@@ -221,6 +241,10 @@ pub async fn review_snapshot(
         snapshot_hash_a: &snapshot.bundle.metadata.snapshot_hash,
         snapshot_hash_b: None,
         privacy_profile: snapshot.bundle.metadata.privacy_profile,
+        artifact_status: artifact.status.as_str(),
+        overview: &artifact.overview,
+        summary_cache: &summary_cache,
+        request_fingerprint: Some(&request_plan.request_fingerprint),
         payload_json: payload_json.clone(),
         rendered_briefing: rendered_briefing.clone(),
     })?;
@@ -229,6 +253,8 @@ pub async fn review_snapshot(
         artifact,
         payload_json,
         rendered_briefing,
+        request_preview: request_plan.preview,
+        request_fingerprint: request_plan.request_fingerprint,
         record,
     })
 }
@@ -240,6 +266,11 @@ pub async fn compare_snapshots(
     dry_run: bool,
     fixture: Option<&Path>,
 ) -> Result<CompareRunOutput> {
+    let request_plan = build_compare_request_plan(
+        &config.ai,
+        &snapshot_a.compact_json,
+        &snapshot_b.compact_json,
+    )?;
     let provider = select_provider(&config.ai, dry_run, fixture)?;
     let metadata = provider.metadata();
     let artifact = provider
@@ -252,6 +283,7 @@ pub async fn compare_snapshots(
         .await?;
     let payload_json = serde_json::to_string_pretty(&artifact)?;
     let rendered_briefing = render_compare_briefing(&artifact);
+    let summary_cache = compare_summary_cache(&artifact);
     let record = artifact_record(ArtifactRecordInput {
         artifact_id: artifact_id(
             "compare",
@@ -275,6 +307,10 @@ pub async fn compare_snapshots(
             snapshot_a.bundle.metadata.privacy_profile,
             snapshot_b.bundle.metadata.privacy_profile,
         ),
+        artifact_status: artifact.status.as_str(),
+        overview: &artifact.overview,
+        summary_cache: &summary_cache,
+        request_fingerprint: Some(&request_plan.request_fingerprint),
         payload_json: payload_json.clone(),
         rendered_briefing: rendered_briefing.clone(),
     })?;
@@ -283,6 +319,8 @@ pub async fn compare_snapshots(
         artifact,
         payload_json,
         rendered_briefing,
+        request_preview: request_plan.preview,
+        request_fingerprint: request_plan.request_fingerprint,
         record,
     })
 }
@@ -383,6 +421,20 @@ pub fn render_compare_briefing(artifact: &CompareArtifactV1) -> String {
         lines.extend(artifact.only_in_b.iter().map(|item| format!("  - {item}")));
     }
     lines.join("\n")
+}
+
+pub fn parse_stored_artifact(record: &AiArtifactRecord) -> Result<StoredArtifact> {
+    match record.artifact_kind.as_str() {
+        "review" => Ok(StoredArtifact::Review(serde_json::from_str(
+            &record.payload_json,
+        )?)),
+        "compare" => Ok(StoredArtifact::Compare(serde_json::from_str(
+            &record.payload_json,
+        )?)),
+        other => Err(RingmasterError::Ui(format!(
+            "unsupported AI artifact kind `{other}`"
+        ))),
+    }
 }
 
 fn render_findings(findings: &[ArtifactFinding]) -> Vec<String> {
@@ -528,17 +580,9 @@ impl AiProvider for OpenAiProvider {
         request: ReviewProviderRequest<'a>,
     ) -> ProviderFuture<'a, ReviewArtifactV1> {
         Box::pin(async move {
-            let instructions = review_system_prompt();
-            let prompt = format!(
-                "snapshot_artifact_json:\n{}\n\nReturn only the structured review object.",
-                request.snapshot_json
-            );
-            self.invoke_structured_output::<ReviewArtifactV1>(
-                "ringmaster_review_artifact",
-                instructions,
-                &prompt,
-            )
-            .await
+            let plan = build_review_request_plan(&self.config, request.snapshot_json)?;
+            self.invoke_structured_output::<ReviewArtifactV1>(plan)
+                .await
         })
     }
 
@@ -547,28 +591,19 @@ impl AiProvider for OpenAiProvider {
         request: CompareProviderRequest<'a>,
     ) -> ProviderFuture<'a, CompareArtifactV1> {
         Box::pin(async move {
-            let instructions = compare_system_prompt();
-            let prompt = format!(
-                "snapshot_a_json:\n{}\n\nsnapshot_b_json:\n{}\n\nReturn only the structured comparison object.",
-                request.snapshot_a_json, request.snapshot_b_json
-            );
-            self.invoke_structured_output::<CompareArtifactV1>(
-                "ringmaster_compare_artifact",
-                instructions,
-                &prompt,
-            )
-            .await
+            let plan = build_compare_request_plan(
+                &self.config,
+                request.snapshot_a_json,
+                request.snapshot_b_json,
+            )?;
+            self.invoke_structured_output::<CompareArtifactV1>(plan)
+                .await
         })
     }
 }
 
 impl OpenAiProvider {
-    async fn invoke_structured_output<T>(
-        &self,
-        schema_name: &str,
-        instructions: &str,
-        prompt: &str,
-    ) -> Result<T>
+    async fn invoke_structured_output<T>(&self, plan: StructuredOutputRequestPlan) -> Result<T>
     where
         T: for<'de> Deserialize<'de> + JsonSchema,
     {
@@ -585,10 +620,7 @@ impl OpenAiProvider {
         let mut attempts = 0;
         loop {
             attempts += 1;
-            match self
-                .invoke_once::<T>(&client, &api_key, schema_name, instructions, prompt)
-                .await
-            {
+            match self.invoke_once::<T>(&client, &api_key, &plan.body).await {
                 Ok(artifact) => return Ok(artifact),
                 Err(error) if attempts <= self.config.max_retries => {
                     if retryable_error(&error) {
@@ -601,64 +633,17 @@ impl OpenAiProvider {
         }
     }
 
-    async fn invoke_once<T>(
-        &self,
-        client: &Client,
-        api_key: &str,
-        schema_name: &str,
-        instructions: &str,
-        prompt: &str,
-    ) -> Result<T>
+    async fn invoke_once<T>(&self, client: &Client, api_key: &str, body: &Value) -> Result<T>
     where
         T: for<'de> Deserialize<'de> + JsonSchema,
     {
-        let mut body = json!({
-            "model": self.config.model,
-            "store": matches!(self.config.request_mode, AiRequestMode::Stateful),
-            "input": [
-                {
-                    "role": "system",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": instructions
-                        }
-                    ]
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": prompt
-                        }
-                    ]
-                }
-            ],
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": schema_name,
-                    "schema": schema_value::<T>()?,
-                    "strict": true
-                }
-            }
-        });
-
-        if let Some(reasoning_effort) = &self.config.reasoning_effort {
-            body["reasoning"] = json!({ "effort": reasoning_effort });
-        }
-        if let Some(safety_identifier) = &self.config.safety_identifier {
-            body["safety_identifier"] = json!(safety_identifier);
-        }
-
         let response = client
             .post(format!(
                 "{}/responses",
                 self.config.api_base_url.trim_end_matches('/')
             ))
             .bearer_auth(api_key)
-            .json(&body)
+            .json(body)
             .send()
             .await?;
         if !response.status().is_success() {
@@ -673,6 +658,160 @@ impl OpenAiProvider {
         let response_text = extract_output_text(&value)?;
         serde_json::from_str::<T>(&response_text).map_err(Into::into)
     }
+}
+
+fn build_review_request_plan(
+    config: &AiConfig,
+    snapshot_json: &str,
+) -> Result<StructuredOutputRequestPlan> {
+    build_structured_output_request::<ReviewArtifactV1>(
+        config,
+        StructuredOutputRequestSpec {
+            task_family: "review",
+            schema_name: "ringmaster_review_artifact",
+            prompt_version: REVIEW_PROMPT_VERSION,
+            output_schema_version: REVIEW_OUTPUT_SCHEMA_VERSION,
+            system_instructions: review_system_prompt(),
+            task_framing: review_task_framing(),
+            snapshot_payload: format!("snapshot_artifact_json:\n{snapshot_json}\n"),
+        },
+    )
+}
+
+fn build_compare_request_plan(
+    config: &AiConfig,
+    snapshot_a_json: &str,
+    comparison_snapshot_json: &str,
+) -> Result<StructuredOutputRequestPlan> {
+    build_structured_output_request::<CompareArtifactV1>(
+        config,
+        StructuredOutputRequestSpec {
+            task_family: "compare",
+            schema_name: "ringmaster_compare_artifact",
+            prompt_version: COMPARE_PROMPT_VERSION,
+            output_schema_version: COMPARE_OUTPUT_SCHEMA_VERSION,
+            system_instructions: compare_system_prompt(),
+            task_framing: compare_task_framing(),
+            snapshot_payload: format!(
+                "snapshot_a_json:\n{snapshot_a_json}\n\nsnapshot_b_json:\n{comparison_snapshot_json}\n"
+            ),
+        },
+    )
+}
+
+struct StructuredOutputRequestSpec<'a> {
+    task_family: &'a str,
+    schema_name: &'a str,
+    prompt_version: &'a str,
+    output_schema_version: &'a str,
+    system_instructions: &'a str,
+    task_framing: &'a str,
+    snapshot_payload: String,
+}
+
+fn build_structured_output_request<T>(
+    config: &AiConfig,
+    spec: StructuredOutputRequestSpec<'_>,
+) -> Result<StructuredOutputRequestPlan>
+where
+    T: JsonSchema,
+{
+    let StructuredOutputRequestSpec {
+        task_family,
+        schema_name,
+        prompt_version,
+        output_schema_version,
+        system_instructions,
+        task_framing,
+        snapshot_payload,
+    } = spec;
+
+    let user_prompt = format!("{task_framing}\n\n{snapshot_payload}");
+    let prefix_fingerprint = request_fingerprint(
+        prompt_version,
+        output_schema_version,
+        &format!("{system_instructions}\n\n{task_framing}\n\n{schema_name}"),
+    );
+    let payload_fingerprint = content_fingerprint(snapshot_payload.as_bytes());
+    let request_fingerprint = request_fingerprint(
+        prompt_version,
+        output_schema_version,
+        &format!("{task_framing}\n\n{snapshot_payload}"),
+    );
+
+    let mut body = json!({
+        "model": config.model,
+        "store": matches!(config.request_mode, AiRequestMode::Stateful),
+        "input": [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": system_instructions
+                    }
+                ]
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": user_prompt
+                    }
+                ]
+            }
+        ],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": schema_name,
+                "schema": schema_value::<T>()?,
+                "strict": true
+            }
+        }
+    });
+
+    if let Some(reasoning_effort) = &config.reasoning_effort {
+        body["reasoning"] = json!({ "effort": reasoning_effort });
+    }
+    if let Some(safety_identifier) = &config.safety_identifier {
+        body["safety_identifier"] = json!(safety_identifier);
+    }
+
+    Ok(StructuredOutputRequestPlan {
+        body,
+        preview: format!(
+            "\
+ringmaster ai request preview
+
+task_family: {task_family}
+provider: openai
+request_mode: {}
+input_transport: {}
+prompt_cache: {}
+prompt_version: {prompt_version}
+output_schema_version: {output_schema_version}
+prefix_fingerprint: {}
+payload_fingerprint: {}
+request_fingerprint: {}
+sections:
+  - system_instructions
+  - task_framing
+  - output_schema
+  - snapshot_payload
+snapshot_bytes: {}
+",
+            config.request_mode.as_str(),
+            config.input_transport.as_str(),
+            prompt_cache_label(config.prompt_cache),
+            short_fingerprint(&prefix_fingerprint, 16),
+            short_fingerprint(&payload_fingerprint, 16),
+            short_fingerprint(&request_fingerprint, 16),
+            snapshot_payload.len(),
+        ),
+        request_fingerprint,
+    })
 }
 
 fn dry_run_review_artifact(snapshot: &SnapshotBundleV1) -> ReviewArtifactV1 {
@@ -986,14 +1125,6 @@ fn retryable_error(error: &RingmasterError) -> bool {
     }
 }
 
-fn review_system_prompt() -> &'static str {
-    "You are Ringmaster's bounded snapshot reviewer. Analyze only the provided snapshot JSON. Never claim to inspect a live database. Never provide medical advice. Never claim causal certainty. Admit uncertainty when data is thin or stale. If the snapshot is insufficient, return status `insufficient` with concrete limitations instead of improvising."
-}
-
-fn compare_system_prompt() -> &'static str {
-    "You are Ringmaster's bounded snapshot comparison reviewer. Compare only the two provided snapshot JSON documents. Never claim to inspect a live database. Never provide medical advice. Never claim causal certainty. Admit uncertainty when data is thin or stale. If the comparison is insufficient, return status `insufficient` with concrete limitations instead of improvising."
-}
-
 fn artifact_id(
     kind: &str,
     snapshot_hash_a: &str,
@@ -1010,6 +1141,45 @@ fn artifact_id(
     digest.update(run_mode.as_str().as_bytes());
     digest.update(payload_json.as_bytes());
     hex::encode(digest.finalize())
+}
+
+fn request_fingerprint(prompt_version: &str, schema_version: &str, payload: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(prompt_version.as_bytes());
+    digest.update(schema_version.as_bytes());
+    digest.update(payload.as_bytes());
+    hex::encode(digest.finalize())
+}
+
+fn content_fingerprint(contents: &[u8]) -> String {
+    hex::encode(Sha256::digest(contents))
+}
+
+fn short_fingerprint(value: &str, len: usize) -> String {
+    value.chars().take(len).collect()
+}
+
+fn prompt_cache_label(mode: PromptCacheMode) -> &'static str {
+    match mode {
+        PromptCacheMode::Off => "off",
+        PromptCacheMode::Auto => "auto",
+    }
+}
+
+fn review_summary_cache(artifact: &ReviewArtifactV1) -> String {
+    artifact
+        .headline_findings
+        .first()
+        .map(|finding| format!("{}: {}", finding.title, finding.summary))
+        .unwrap_or_else(|| artifact.overview.clone())
+}
+
+fn compare_summary_cache(artifact: &CompareArtifactV1) -> String {
+    artifact
+        .material_differences
+        .first()
+        .map(|finding| format!("{}: {}", finding.title, finding.summary))
+        .unwrap_or_else(|| artifact.overview.clone())
 }
 
 fn merged_privacy_profile(left: PrivacyProfile, right: PrivacyProfile) -> PrivacyProfile {

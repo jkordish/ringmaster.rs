@@ -63,6 +63,11 @@ pub enum Command {
         #[command(subcommand)]
         command: AiCommand,
     },
+    /// Report export commands.
+    Report {
+        #[command(subcommand)]
+        command: ReportCommand,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
@@ -81,6 +86,10 @@ pub enum UiCommand {
 pub enum SnapshotCommand {
     /// Export a versioned snapshot artifact for local inspection or AI analysis.
     Export(SnapshotExportArgs),
+    /// List saved snapshot artifacts from the local catalog.
+    List(SnapshotListArgs),
+    /// Show one saved snapshot artifact or a snapshot JSON file.
+    Show(SnapshotShowArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
@@ -113,6 +122,27 @@ pub enum AiCommand {
     Review(AiReviewArgs),
     /// Run a structured AI comparison between two local snapshot artifacts.
     Compare(AiCompareArgs),
+    /// Browse persisted AI runs.
+    Runs {
+        #[command(subcommand)]
+        command: AiRunsCommand,
+    },
+    /// Run deterministic local evaluations for snapshot-based AI behavior.
+    Eval(AiEvalArgs),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum AiRunsCommand {
+    /// List saved AI runs from the local registry.
+    List(AiRunsListArgs),
+    /// Show one saved AI run.
+    Show(AiRunsShowArgs),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum ReportCommand {
+    /// Export a human-readable report from a snapshot or AI run.
+    Export(ReportExportArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
@@ -169,6 +199,12 @@ pub enum PrivacyProfileArg {
     Full,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ReportFormatArg {
+    Markdown,
+    Html,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct UiSnapshotArgs {
     /// Use deterministic demo-mode screen data.
@@ -208,6 +244,28 @@ pub struct SnapshotExportArgs {
     /// Emit compact JSON instead of pretty JSON.
     #[arg(long)]
     pub compact: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct SnapshotListArgs {
+    /// List deterministic demo snapshots instead of reading the live local catalog.
+    #[arg(long)]
+    pub demo: bool,
+    /// Load Oura payloads from a fixture directory when seeding demo snapshots.
+    #[arg(long)]
+    pub fixture_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct SnapshotShowArgs {
+    /// Snapshot hash from the local catalog, or a path to a local snapshot JSON artifact.
+    pub snapshot: String,
+    /// Resolve demo snapshots instead of reading the live local catalog.
+    #[arg(long)]
+    pub demo: bool,
+    /// Load Oura payloads from a fixture directory when seeding demo snapshots.
+    #[arg(long)]
+    pub fixture_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
@@ -338,6 +396,66 @@ pub struct AiCompareArgs {
     pub out: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct AiRunsListArgs {
+    /// List deterministic demo AI runs instead of reading the live local registry.
+    #[arg(long)]
+    pub demo: bool,
+    /// Load Oura payloads from a fixture directory when seeding demo AI runs.
+    #[arg(long)]
+    pub fixture_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct AiRunsShowArgs {
+    /// Saved AI run id.
+    pub run_id: String,
+    /// Resolve demo AI runs instead of reading the live local registry.
+    #[arg(long)]
+    pub demo: bool,
+    /// Load Oura payloads from a fixture directory when seeding demo AI runs.
+    #[arg(long)]
+    pub fixture_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct ReportExportArgs {
+    /// Export a report directly from a snapshot hash or local snapshot artifact path.
+    #[arg(long)]
+    pub from_snapshot: Option<String>,
+    /// Export a report from a saved AI run id.
+    #[arg(long)]
+    pub from_ai_run: Option<String>,
+    /// Report format to render.
+    #[arg(long, value_enum)]
+    pub format: ReportFormatArg,
+    /// Output path for the rendered report.
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Resolve snapshot or AI run inputs against deterministic demo data.
+    #[arg(long)]
+    pub demo: bool,
+    /// Load Oura payloads from a fixture directory when seeding demo artifacts.
+    #[arg(long)]
+    pub fixture_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct AiEvalArgs {
+    /// Fixture directory containing local eval cases.
+    #[arg(long)]
+    pub fixture_dir: PathBuf,
+    /// Candidate label to annotate in persisted eval summaries.
+    #[arg(long)]
+    pub candidate: Option<String>,
+    /// Baseline label to compare against in the eval summary.
+    #[arg(long)]
+    pub baseline: Option<String>,
+    /// Optional path for writing the detailed eval result JSON.
+    #[arg(long)]
+    pub export: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Args, Default)]
 pub struct WebhookServeArgs {}
 
@@ -399,9 +517,11 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        AiCommand, AiCompareArgs, AiReviewArgs, AuthCommand, Cli, Command, DeriveCommand,
-        DeriveRebuildArgs, PrivacyProfileArg, ReviewCommand, ReviewFocusArg, ReviewInvestigateArgs,
-        ReviewTodayArgs, SnapshotCommand, SnapshotExportArgs, SnapshotScreenArg, SnapshotSizeArg,
+        AiCommand, AiCompareArgs, AiEvalArgs, AiReviewArgs, AiRunsCommand, AiRunsListArgs,
+        AiRunsShowArgs, AuthCommand, Cli, Command, DeriveCommand, DeriveRebuildArgs,
+        PrivacyProfileArg, ReportCommand, ReportExportArgs, ReportFormatArg, ReviewCommand,
+        ReviewFocusArg, ReviewInvestigateArgs, ReviewTodayArgs, SnapshotCommand,
+        SnapshotExportArgs, SnapshotListArgs, SnapshotScreenArg, SnapshotShowArgs, SnapshotSizeArg,
         SyncCommand, SyncOnceArgs, SyncWatchArgs, UiCommand, UiSnapshotArgs, WebhookCommand,
         WebhookReplayArgs, WebhookSubscriptionCommand, WebhookSubscriptionsSyncArgs,
     };
@@ -719,6 +839,45 @@ mod tests {
     }
 
     #[test]
+    fn parses_snapshot_list_args() {
+        let cli =
+            Cli::parse_from(["ringmaster", "snapshot", "list", "--demo"]).unwrap_or_else(|error| {
+                panic!("expected clap parsing to succeed in test: {error}");
+            });
+
+        match cli.command {
+            Some(Command::Snapshot {
+                command:
+                    SnapshotCommand::List(SnapshotListArgs {
+                        demo: true,
+                        fixture_dir: None,
+                    }),
+            }) => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_snapshot_show_args() {
+        let cli = Cli::parse_from(["ringmaster", "snapshot", "show", "snapshot-hash", "--demo"])
+            .unwrap_or_else(|error| {
+                panic!("expected clap parsing to succeed in test: {error}");
+            });
+
+        match cli.command {
+            Some(Command::Snapshot {
+                command:
+                    SnapshotCommand::Show(SnapshotShowArgs {
+                        snapshot,
+                        demo: true,
+                        fixture_dir: None,
+                    }),
+            }) => assert_eq!(snapshot, "snapshot-hash"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_ai_review_args() {
         let cli = Cli::parse_from([
             "ringmaster",
@@ -777,6 +936,129 @@ mod tests {
                     fixture,
                     Some(PathBuf::from("tests/fixtures/ai/compare.json"))
                 );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ai_runs_list_args() {
+        let cli = Cli::parse_from(["ringmaster", "ai", "runs", "list", "--demo"]).unwrap_or_else(
+            |error| {
+                panic!("expected clap parsing to succeed in test: {error}");
+            },
+        );
+
+        match cli.command {
+            Some(Command::Ai {
+                command:
+                    AiCommand::Runs {
+                        command:
+                            AiRunsCommand::List(AiRunsListArgs {
+                                demo: true,
+                                fixture_dir: None,
+                            }),
+                    },
+            }) => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ai_runs_show_args() {
+        let cli = Cli::parse_from(["ringmaster", "ai", "runs", "show", "run-123"]).unwrap_or_else(
+            |error| {
+                panic!("expected clap parsing to succeed in test: {error}");
+            },
+        );
+
+        match cli.command {
+            Some(Command::Ai {
+                command:
+                    AiCommand::Runs {
+                        command:
+                            AiRunsCommand::Show(AiRunsShowArgs {
+                                run_id,
+                                demo: false,
+                                fixture_dir: None,
+                            }),
+                    },
+            }) => assert_eq!(run_id, "run-123"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_report_export_args() {
+        let cli = Cli::parse_from([
+            "ringmaster",
+            "report",
+            "export",
+            "--from-snapshot",
+            "snapshot-123",
+            "--format",
+            "markdown",
+            "--out",
+            "/tmp/report.md",
+        ])
+        .unwrap_or_else(|error| {
+            panic!("expected clap parsing to succeed in test: {error}");
+        });
+
+        match cli.command {
+            Some(Command::Report {
+                command:
+                    ReportCommand::Export(ReportExportArgs {
+                        from_snapshot,
+                        from_ai_run,
+                        format,
+                        out,
+                        demo: false,
+                        fixture_dir: None,
+                    }),
+            }) => {
+                assert_eq!(from_snapshot, Some("snapshot-123".to_owned()));
+                assert_eq!(from_ai_run, None);
+                assert_eq!(format, ReportFormatArg::Markdown);
+                assert_eq!(out, PathBuf::from("/tmp/report.md"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ai_eval_args() {
+        let cli = Cli::parse_from([
+            "ringmaster",
+            "ai",
+            "eval",
+            "--fixture-dir",
+            "tests/fixtures/ai",
+            "--candidate",
+            "candidate",
+            "--baseline",
+            "baseline",
+            "--export",
+            "/tmp/eval.json",
+        ])
+        .unwrap_or_else(|error| {
+            panic!("expected clap parsing to succeed in test: {error}");
+        });
+
+        match cli.command {
+            Some(Command::Ai {
+                command:
+                    AiCommand::Eval(AiEvalArgs {
+                        fixture_dir,
+                        candidate,
+                        baseline,
+                        export,
+                    }),
+            }) => {
+                assert_eq!(fixture_dir, PathBuf::from("tests/fixtures/ai"));
+                assert_eq!(candidate, Some("candidate".to_owned()));
+                assert_eq!(baseline, Some("baseline".to_owned()));
+                assert_eq!(export, Some(PathBuf::from("/tmp/eval.json")));
             }
             other => panic!("unexpected command: {other:?}"),
         }

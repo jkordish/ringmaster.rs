@@ -28,15 +28,18 @@
 
 pub mod action;
 pub mod ai;
+pub mod ai_prompts;
 pub mod app;
 pub mod cli;
 pub mod components;
 pub mod config;
 pub mod derive;
 pub mod error;
+pub mod eval;
 pub mod insights;
 pub mod oura;
 pub mod refresh;
+pub mod report;
 pub mod review;
 pub mod snapshot;
 pub mod store;
@@ -47,17 +50,18 @@ pub mod webhook;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{IsTerminal, stdin, stdout};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use app::{build_demo_state, build_live_state, load_live_snapshot};
 use cli::{
-    AiCommand, AiCompareArgs, AiReviewArgs, AuthCommand, Cli, Command, DeriveCommand,
-    DeriveRebuildArgs, ReviewCommand, ReviewFocusArg, ReviewInvestigateArgs, ReviewTodayArgs,
-    ReviewWeekArgs, SnapshotCommand, SnapshotExportArgs, SnapshotScreenArg, SnapshotSizeArg,
-    SyncCommand, SyncOnceArgs, SyncWatchArgs, TuiArgs, UiCommand, UiSnapshotArgs, WebhookCommand,
-    WebhookReplayArgs, WebhookServeArgs, WebhookSubscriptionCommand, WebhookSubscriptionsListArgs,
-    WebhookSubscriptionsSyncArgs,
+    AiCommand, AiCompareArgs, AiEvalArgs, AiReviewArgs, AiRunsCommand, AiRunsListArgs,
+    AiRunsShowArgs, AuthCommand, Cli, Command, DeriveCommand, DeriveRebuildArgs, ReportCommand,
+    ReportExportArgs, ReviewCommand, ReviewFocusArg, ReviewInvestigateArgs, ReviewTodayArgs,
+    ReviewWeekArgs, SnapshotCommand, SnapshotExportArgs, SnapshotListArgs, SnapshotScreenArg,
+    SnapshotShowArgs, SnapshotSizeArg, SyncCommand, SyncOnceArgs, SyncWatchArgs, TuiArgs,
+    UiCommand, UiSnapshotArgs, WebhookCommand, WebhookReplayArgs, WebhookServeArgs,
+    WebhookSubscriptionCommand, WebhookSubscriptionsListArgs, WebhookSubscriptionsSyncArgs,
 };
 use config::{AppPaths, Config};
 use error::{Result, RingmasterError};
@@ -137,6 +141,8 @@ pub async fn run_cli(cli: Cli) -> Result<Option<String>> {
         Command::Tui(args) => run_tui(&config, args).await,
         Command::Snapshot { command } => match command {
             SnapshotCommand::Export(args) => run_snapshot_export(&config, args).await,
+            SnapshotCommand::List(args) => run_snapshot_list(&config, args).await,
+            SnapshotCommand::Show(args) => run_snapshot_show(&config, args).await,
         },
         Command::Ui { command } => match command {
             UiCommand::Snapshot(args) => run_ui_snapshot(&config, args).await,
@@ -171,6 +177,14 @@ pub async fn run_cli(cli: Cli) -> Result<Option<String>> {
         Command::Ai { command } => match command {
             AiCommand::Review(args) => run_ai_review(&config, args).await,
             AiCommand::Compare(args) => run_ai_compare(&config, args).await,
+            AiCommand::Runs { command } => match command {
+                AiRunsCommand::List(args) => run_ai_runs_list(&config, args).await,
+                AiRunsCommand::Show(args) => run_ai_runs_show(&config, args).await,
+            },
+            AiCommand::Eval(args) => run_ai_eval(&config, args).await,
+        },
+        Command::Report { command } => match command {
+            ReportCommand::Export(args) => run_report_export(&config, args).await,
         },
     }
 }
@@ -1945,11 +1959,11 @@ notes:
 }
 
 #[derive(Debug)]
-struct SnapshotCommandContext {
+pub(crate) struct SnapshotCommandContext {
     _guard: Option<TempRootGuard>,
-    config: Config,
-    store: Store,
-    auth_status: oura::models::AuthStatus,
+    pub(crate) config: Config,
+    pub(crate) store: Store,
+    pub(crate) auth_status: oura::models::AuthStatus,
 }
 
 async fn run_snapshot_export(config: &Config, args: SnapshotExportArgs) -> Result<Option<String>> {
@@ -2003,8 +2017,90 @@ out: {}
     Ok(Some(rendered_json))
 }
 
+async fn run_snapshot_list(config: &Config, args: SnapshotListArgs) -> Result<Option<String>> {
+    let fixture_dir = resolved_demo_fixture_dir(config, args.demo, args.fixture_dir.clone());
+    let context =
+        load_library_command_context(config, args.demo, fixture_dir.clone(), false).await?;
+    let records = context.store.analysis().list_snapshot_exports()?;
+    let mut lines = vec!["ringmaster snapshot list".to_owned(), String::new()];
+    if records.is_empty() {
+        lines.push("snapshots: none".to_owned());
+    } else {
+        lines.push("snapshots:".to_owned());
+        lines.extend(records.iter().map(|record| {
+            format!(
+                "  - {} | {} | scope={} | profile={} | {}",
+                short_id(&record.snapshot_hash, 12),
+                record.created_at,
+                record.scope,
+                record.privacy_profile,
+                record.freshness_summary
+            )
+        }));
+    }
+
+    Ok(Some(lines.join("\n")))
+}
+
+async fn run_snapshot_show(config: &Config, args: SnapshotShowArgs) -> Result<Option<String>> {
+    let path = PathBuf::from(&args.snapshot);
+    let fixture_dir = resolved_demo_fixture_dir(config, args.demo, args.fixture_dir.clone());
+    let context =
+        load_library_command_context(config, args.demo, fixture_dir.clone(), false).await?;
+
+    let (bundle, provenance_records, source_label) = if path.exists() {
+        let artifact = snapshot::load_snapshot_artifact(&path)?;
+        let provenance_records = context
+            .store
+            .analysis()
+            .snapshot_provenance_refs(&artifact.bundle.metadata.snapshot_hash)
+            .unwrap_or_default();
+        (
+            artifact.bundle,
+            provenance_records,
+            format!("file: {}", path.display()),
+        )
+    } else {
+        let Some(record) = resolve_snapshot_record(&context.store, &args.snapshot)? else {
+            return Err(RingmasterError::Ui(format!(
+                "snapshot `{}` was not found in the local catalog and is not a readable file path",
+                args.snapshot
+            )));
+        };
+        let provenance_records = context
+            .store
+            .analysis()
+            .snapshot_provenance_refs(&record.snapshot_hash)?;
+        (
+            snapshot::deserialize_snapshot_bundle(&record.snapshot_json)?,
+            provenance_records,
+            "catalog".to_owned(),
+        )
+    };
+
+    let summary = snapshot::summarize_snapshot_bundle(&bundle, &provenance_records);
+    let linked_runs = context
+        .store
+        .analysis()
+        .list_ai_artifacts_for_snapshot(&bundle.metadata.snapshot_hash)?;
+    let linked_reports = context
+        .store
+        .analysis()
+        .report_exports_for_snapshot(&bundle.metadata.snapshot_hash)?;
+
+    Ok(Some(render_snapshot_show_output(
+        &bundle,
+        &summary,
+        &provenance_records,
+        &linked_runs,
+        &linked_reports,
+        &source_label,
+    )))
+}
+
 async fn run_ai_review(config: &Config, args: AiReviewArgs) -> Result<Option<String>> {
     let snapshot_artifact = snapshot::load_snapshot_artifact(&args.snapshot_path)?;
+    let show_request_preview = args.dry_run || args.fixture.is_some();
     let output = ai::review_snapshot(
         config,
         &snapshot_artifact,
@@ -2013,8 +2109,13 @@ async fn run_ai_review(config: &Config, args: AiReviewArgs) -> Result<Option<Str
     )
     .await?;
     let store = Store::open(config)?;
+    ensure_snapshot_catalog_entry(
+        &store,
+        &snapshot_artifact,
+        args.fixture.as_deref().and_then(|path| path.parent()),
+    )?;
     store.analysis().upsert_ai_artifact(&output.record)?;
-    let rendered = if let Some(out_path) = args.out {
+    let artifact_output = if let Some(out_path) = args.out {
         write_text_file(
             &out_path,
             &output.payload_json,
@@ -2029,6 +2130,11 @@ async fn run_ai_review(config: &Config, args: AiReviewArgs) -> Result<Option<Str
     } else {
         format!("{}\n\n{}", output.rendered_briefing, output.payload_json)
     };
+    let rendered = if show_request_preview {
+        format!("{}\n{}", output.request_preview.trim_end(), artifact_output)
+    } else {
+        artifact_output
+    };
 
     Ok(Some(rendered))
 }
@@ -2036,6 +2142,7 @@ async fn run_ai_review(config: &Config, args: AiReviewArgs) -> Result<Option<Str
 async fn run_ai_compare(config: &Config, args: AiCompareArgs) -> Result<Option<String>> {
     let snapshot_a = snapshot::load_snapshot_artifact(&args.snapshot_a)?;
     let snapshot_b = snapshot::load_snapshot_artifact(&args.snapshot_b)?;
+    let show_request_preview = args.dry_run || args.fixture.is_some();
     let output = ai::compare_snapshots(
         config,
         &snapshot_a,
@@ -2045,8 +2152,18 @@ async fn run_ai_compare(config: &Config, args: AiCompareArgs) -> Result<Option<S
     )
     .await?;
     let store = Store::open(config)?;
+    ensure_snapshot_catalog_entry(
+        &store,
+        &snapshot_a,
+        args.fixture.as_deref().and_then(|path| path.parent()),
+    )?;
+    ensure_snapshot_catalog_entry(
+        &store,
+        &snapshot_b,
+        args.fixture.as_deref().and_then(|path| path.parent()),
+    )?;
     store.analysis().upsert_ai_artifact(&output.record)?;
-    let rendered = if let Some(out_path) = args.out {
+    let artifact_output = if let Some(out_path) = args.out {
         write_text_file(
             &out_path,
             &output.payload_json,
@@ -2061,8 +2178,78 @@ async fn run_ai_compare(config: &Config, args: AiCompareArgs) -> Result<Option<S
     } else {
         format!("{}\n\n{}", output.rendered_briefing, output.payload_json)
     };
+    let rendered = if show_request_preview {
+        format!("{}\n{}", output.request_preview.trim_end(), artifact_output)
+    } else {
+        artifact_output
+    };
 
     Ok(Some(rendered))
+}
+
+async fn run_ai_runs_list(config: &Config, args: AiRunsListArgs) -> Result<Option<String>> {
+    let fixture_dir = resolved_demo_fixture_dir(config, args.demo, args.fixture_dir.clone());
+    let context = load_library_command_context(config, args.demo, fixture_dir, true).await?;
+    let records = context.store.analysis().list_ai_artifacts()?;
+    let mut lines = vec!["ringmaster ai runs list".to_owned(), String::new()];
+    if records.is_empty() {
+        lines.push("runs: none".to_owned());
+    } else {
+        lines.push("runs:".to_owned());
+        lines.extend(records.iter().map(|record| {
+            format!(
+                "  - {} | kind={} | status={} | provider={} | model={} | {}",
+                short_id(&record.artifact_id, 12),
+                record.artifact_kind,
+                record.artifact_status,
+                record.provider,
+                record.model,
+                record.summary_cache
+            )
+        }));
+    }
+
+    Ok(Some(lines.join("\n")))
+}
+
+async fn run_ai_runs_show(config: &Config, args: AiRunsShowArgs) -> Result<Option<String>> {
+    let fixture_dir = resolved_demo_fixture_dir(config, args.demo, args.fixture_dir.clone());
+    let context = load_library_command_context(config, args.demo, fixture_dir, true).await?;
+    let Some(record) = resolve_ai_run_record(&context.store, &args.run_id)? else {
+        return Err(RingmasterError::Ui(format!(
+            "AI run `{}` was not found in the local registry",
+            args.run_id
+        )));
+    };
+    let linked_reports = context
+        .store
+        .analysis()
+        .report_exports_for_ai_artifact(&record.artifact_id)?;
+    let snapshot_a = context
+        .store
+        .analysis()
+        .snapshot_export(&record.snapshot_hash_a)?;
+    let snapshot_b = record
+        .snapshot_hash_b
+        .as_deref()
+        .map(|snapshot_hash| context.store.analysis().snapshot_export(snapshot_hash))
+        .transpose()?
+        .flatten();
+
+    Ok(Some(render_ai_run_show_output(
+        &record,
+        snapshot_a.as_ref(),
+        snapshot_b.as_ref(),
+        &linked_reports,
+    )))
+}
+
+async fn run_report_export(config: &Config, args: ReportExportArgs) -> Result<Option<String>> {
+    report::export_report(config, args).await
+}
+
+async fn run_ai_eval(config: &Config, args: AiEvalArgs) -> Result<Option<String>> {
+    eval::run_eval(config, args).await
 }
 
 #[derive(Debug, Clone)]
@@ -2266,6 +2453,98 @@ async fn load_snapshot_command_context(
         store,
         auth_status,
     })
+}
+
+pub(crate) fn resolved_demo_fixture_dir(
+    config: &Config,
+    demo: bool,
+    fixture_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if demo {
+        Some(
+            fixture_dir
+                .or_else(|| config.refresh.demo_fixture_dir.clone())
+                .unwrap_or_else(|| PathBuf::from("tests/fixtures/phase5")),
+        )
+    } else {
+        fixture_dir
+    }
+}
+
+pub(crate) async fn load_library_command_context(
+    config: &Config,
+    demo: bool,
+    fixture_dir: Option<PathBuf>,
+    include_ai_runs: bool,
+) -> Result<SnapshotCommandContext> {
+    let context = load_snapshot_command_context(config, demo, fixture_dir.clone()).await?;
+    if demo {
+        seed_demo_library_artifacts(
+            &context.config,
+            &context.store,
+            &context.auth_status,
+            fixture_dir.as_deref(),
+            include_ai_runs,
+        )
+        .await?;
+    }
+    Ok(context)
+}
+
+pub(crate) async fn seed_demo_library_artifacts(
+    config: &Config,
+    store: &Store,
+    auth_status: &oura::models::AuthStatus,
+    fixture_dir: Option<&std::path::Path>,
+    include_ai_runs: bool,
+) -> Result<()> {
+    let today_scope = snapshot::resolve_scope(store, "today")?;
+    let week_scope = snapshot::resolve_scope(store, "week")?;
+    let today_export = snapshot::export_snapshot(
+        config,
+        store,
+        auth_status,
+        snapshot::SnapshotSourceMode::Demo,
+        fixture_dir,
+        &today_scope,
+        snapshot::PrivacyProfile::Redacted,
+    )?;
+    store.analysis().upsert_snapshot_export(
+        &today_export.manifest_record,
+        &today_export.provenance_records,
+    )?;
+
+    let week_export = snapshot::export_snapshot(
+        config,
+        store,
+        auth_status,
+        snapshot::SnapshotSourceMode::Demo,
+        fixture_dir,
+        &week_scope,
+        snapshot::PrivacyProfile::Redacted,
+    )?;
+    store.analysis().upsert_snapshot_export(
+        &week_export.manifest_record,
+        &week_export.provenance_records,
+    )?;
+
+    if include_ai_runs {
+        let today_artifact = snapshot::LoadedSnapshotArtifact {
+            bundle: today_export.bundle.clone(),
+            compact_json: today_export.compact_json.clone(),
+        };
+        let week_artifact = snapshot::LoadedSnapshotArtifact {
+            bundle: week_export.bundle.clone(),
+            compact_json: week_export.compact_json.clone(),
+        };
+        let review = ai::review_snapshot(config, &today_artifact, true, None).await?;
+        store.analysis().upsert_ai_artifact(&review.record)?;
+        let compare =
+            ai::compare_snapshots(config, &today_artifact, &week_artifact, true, None).await?;
+        store.analysis().upsert_ai_artifact(&compare.record)?;
+    }
+
+    Ok(())
 }
 
 fn load_review_snapshot_from_artifacts(
@@ -2581,6 +2860,214 @@ fn write_text_file(path: &std::path::Path, contents: &str, context: &'static str
     fs::write(path, contents).map_err(|error| RingmasterError::io(context, error))
 }
 
+fn short_id(value: &str, max_len: usize) -> String {
+    value.chars().take(max_len).collect()
+}
+
+fn render_snapshot_show_output(
+    bundle: &snapshot::SnapshotBundleV1,
+    summary: &snapshot::SnapshotCatalogSummary,
+    provenance_records: &[store::queries::SnapshotProvenanceRefRecord],
+    linked_runs: &[store::queries::AiRunListEntry],
+    linked_reports: &[store::queries::ReportExportRecord],
+    source_label: &str,
+) -> String {
+    let mut lines = vec![
+        "ringmaster snapshot show".to_owned(),
+        String::new(),
+        format!("source: {source_label}"),
+        format!("snapshot_hash: {}", bundle.metadata.snapshot_hash),
+        format!("scope: {}", bundle.metadata.scope),
+        format!(
+            "days: {}..{} (anchor={} count={})",
+            bundle.metadata.start_day,
+            bundle.metadata.end_day,
+            bundle.metadata.anchor_day,
+            day_span_count(&bundle.metadata.start_day, &bundle.metadata.end_day),
+        ),
+        format!(
+            "privacy_profile: {}",
+            bundle.metadata.privacy_profile.as_str()
+        ),
+        format!("schema_version: {}", bundle.schema_version),
+        format!("generated_at: {}", bundle.metadata.generated_at),
+        format!("freshness: {}", summary.freshness_summary),
+        format!("trust: {}", summary.trust_summary),
+        format!("capabilities: {}", summary.capability_summary),
+        format!("provenance: {}", summary.provenance_summary),
+    ];
+    if !provenance_records.is_empty() {
+        lines.push("provenance_refs:".to_owned());
+        lines.extend(provenance_records.iter().map(|record| {
+            format!(
+                "  - {} => {}:{}",
+                record.export_ref, record.local_kind, record.local_locator
+            )
+        }));
+    }
+    if !linked_runs.is_empty() {
+        lines.push("linked_ai_runs:".to_owned());
+        lines.extend(linked_runs.iter().map(|record| {
+            format!(
+                "  - {} | kind={} | status={} | {}",
+                short_id(&record.artifact_id, 12),
+                record.artifact_kind,
+                record.artifact_status,
+                record.summary_cache
+            )
+        }));
+    }
+    if !linked_reports.is_empty() {
+        lines.push("linked_reports:".to_owned());
+        lines.extend(linked_reports.iter().map(|record| {
+            format!(
+                "  - {} | {} | {}",
+                short_id(&record.report_id, 12),
+                record.format,
+                record.output_path
+            )
+        }));
+    }
+    lines.join("\n")
+}
+
+fn render_ai_run_show_output(
+    record: &store::queries::AiArtifactRecord,
+    snapshot_a: Option<&store::queries::SnapshotExportRecord>,
+    snapshot_b: Option<&store::queries::SnapshotExportRecord>,
+    linked_reports: &[store::queries::ReportExportRecord],
+) -> String {
+    let mut lines = vec![
+        "ringmaster ai runs show".to_owned(),
+        String::new(),
+        format!("artifact_id: {}", record.artifact_id),
+        format!("artifact_kind: {}", record.artifact_kind),
+        format!("status: {}", record.artifact_status),
+        format!("provider: {}", record.provider),
+        format!("model: {}", record.model),
+        format!("prompt_version: {}", record.prompt_version),
+        format!("output_schema_version: {}", record.output_schema_version),
+        format!("run_mode: {}", record.run_mode),
+        format!("privacy_profile: {}", record.privacy_profile),
+        format!("created_at: {}", record.created_at),
+        format!("overview: {}", record.overview),
+    ];
+    if let Some(request_fingerprint) = &record.request_fingerprint {
+        lines.push(format!(
+            "request_fingerprint: {}",
+            short_id(request_fingerprint, 16)
+        ));
+    }
+    if let Some(snapshot_a) = snapshot_a {
+        lines.push(format!(
+            "snapshot_a: {} ({})",
+            snapshot_a.snapshot_hash, snapshot_a.scope
+        ));
+    } else {
+        lines.push(format!("snapshot_a: {}", record.snapshot_hash_a));
+    }
+    if let Some(snapshot_b_hash) = &record.snapshot_hash_b {
+        if let Some(snapshot_b) = snapshot_b {
+            lines.push(format!(
+                "snapshot_b: {} ({})",
+                snapshot_b.snapshot_hash, snapshot_b.scope
+            ));
+        } else {
+            lines.push(format!("snapshot_b: {snapshot_b_hash}"));
+        }
+    }
+    lines.push(String::new());
+    lines.push(record.rendered_briefing.clone());
+    if !linked_reports.is_empty() {
+        lines.push(String::new());
+        lines.push("linked_reports:".to_owned());
+        lines.extend(linked_reports.iter().map(|report| {
+            format!(
+                "  - {} | {} | {}",
+                short_id(&report.report_id, 12),
+                report.format,
+                report.output_path
+            )
+        }));
+    }
+    lines.join("\n")
+}
+
+fn resolve_snapshot_record(
+    store: &Store,
+    snapshot_ref: &str,
+) -> Result<Option<store::queries::SnapshotExportRecord>> {
+    if let Some(record) = store.analysis().snapshot_export(snapshot_ref)? {
+        return Ok(Some(record));
+    }
+
+    let matches = store
+        .analysis()
+        .list_snapshot_exports()?
+        .into_iter()
+        .filter(|record| record.snapshot_hash.starts_with(snapshot_ref))
+        .map(|record| store.analysis().snapshot_export(&record.snapshot_hash))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if matches.len() > 1 {
+        return Err(RingmasterError::Ui(format!(
+            "snapshot `{snapshot_ref}` matched multiple catalog entries; use a longer prefix"
+        )));
+    }
+    Ok(matches.into_iter().next())
+}
+
+fn ensure_snapshot_catalog_entry(
+    store: &Store,
+    artifact: &snapshot::LoadedSnapshotArtifact,
+    fixture_dir: Option<&Path>,
+) -> Result<()> {
+    let record = snapshot::catalog_record_from_loaded_artifact(artifact, fixture_dir);
+    store.analysis().upsert_snapshot_export(&record, &[])?;
+    Ok(())
+}
+
+fn resolve_ai_run_record(
+    store: &Store,
+    run_ref: &str,
+) -> Result<Option<store::queries::AiArtifactRecord>> {
+    if let Some(record) = store.analysis().ai_artifact(run_ref)? {
+        return Ok(Some(record));
+    }
+
+    let matches = store
+        .analysis()
+        .list_ai_artifacts()?
+        .into_iter()
+        .filter(|record| record.artifact_id.starts_with(run_ref))
+        .map(|record| store.analysis().ai_artifact(&record.artifact_id))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if matches.len() > 1 {
+        return Err(RingmasterError::Ui(format!(
+            "AI run `{run_ref}` matched multiple registry entries; use a longer prefix"
+        )));
+    }
+    Ok(matches.into_iter().next())
+}
+
+fn day_span_count(start_day: &str, end_day: &str) -> i64 {
+    let parse = |value: &str| {
+        Date::parse(
+            value,
+            &time::macros::format_description!("[year]-[month]-[day]"),
+        )
+    };
+    match (parse(start_day), parse(end_day)) {
+        (Ok(start), Ok(end)) => (end - start).whole_days() + 1,
+        _ => 0,
+    }
+}
+
 impl TempRootGuard {
     fn new(prefix: &str) -> Self {
         let timestamp = OffsetDateTime::now_utc().unix_timestamp_nanos().to_string();
@@ -2628,12 +3115,14 @@ fn interactive_terminal_available() -> bool {
 #[allow(clippy::panic)]
 mod tests {
     use super::{
-        run_ai_compare, run_ai_review, run_doctor, run_review_investigate, run_review_today,
-        run_review_week, run_snapshot_export, run_webhook_replay,
+        run_ai_compare, run_ai_eval, run_ai_review, run_ai_runs_show, run_doctor,
+        run_report_export, run_review_investigate, run_review_today, run_review_week,
+        run_snapshot_export, run_snapshot_show, run_webhook_replay,
     };
     use crate::cli::{
-        AiCompareArgs, AiReviewArgs, ReviewFocusArg, ReviewInvestigateArgs, ReviewTodayArgs,
-        ReviewWeekArgs, SnapshotExportArgs, WebhookReplayArgs,
+        AiCompareArgs, AiEvalArgs, AiReviewArgs, AiRunsShowArgs, ReportExportArgs, ReportFormatArg,
+        ReviewFocusArg, ReviewInvestigateArgs, ReviewTodayArgs, ReviewWeekArgs, SnapshotExportArgs,
+        SnapshotShowArgs, WebhookReplayArgs,
     };
     use crate::config::{
         AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
@@ -3474,6 +3963,209 @@ mod tests {
 
         assert!(dry_run_output.contains("ringmaster ai compare"));
         assert!(fixture_output.contains("Fixture-backed comparison for regression testing."));
+    }
+
+    #[tokio::test]
+    async fn ai_runs_show_resolves_prefix_and_links_report_exports() {
+        let (_tempdir, mut config) =
+            test_config(Some("https://example.test"), Some("verify-token"));
+        config.refresh.demo_fixture_dir =
+            Some(std::path::PathBuf::from("tests/fixtures/phase7/strong"));
+        let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
+        let snapshot_path = out_dir.path().join("snapshot.json");
+        let report_path = out_dir.path().join("report.md");
+
+        run_snapshot_export(
+            &config,
+            SnapshotExportArgs {
+                demo: true,
+                fixture_dir: None,
+                scope: "today".to_owned(),
+                profile: crate::cli::PrivacyProfileArg::Redacted,
+                out: Some(snapshot_path.clone()),
+                compact: false,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("snapshot export should succeed: {error}"));
+
+        let review_output = run_ai_review(
+            &config,
+            AiReviewArgs {
+                snapshot_path: snapshot_path.clone(),
+                dry_run: true,
+                fixture: None,
+                out: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("dry-run review should succeed: {error}"))
+        .unwrap_or_else(|| panic!("dry-run review should render output"));
+        assert!(review_output.contains("ringmaster ai request preview"));
+
+        let store = Store::open(&config)
+            .unwrap_or_else(|error| panic!("store should open for ai runs test: {error}"));
+        let snapshot_artifact = crate::snapshot::load_snapshot_artifact(&snapshot_path)
+            .unwrap_or_else(|error| panic!("snapshot artifact should load: {error}"));
+        let persisted = store
+            .analysis()
+            .latest_ai_artifact("review", &snapshot_artifact.bundle.metadata.snapshot_hash)
+            .unwrap_or_else(|error| panic!("persisted ai review should load: {error}"))
+            .unwrap_or_else(|| panic!("persisted ai review should exist"));
+
+        run_report_export(
+            &config,
+            ReportExportArgs {
+                from_snapshot: None,
+                from_ai_run: Some(persisted.artifact_id.clone()),
+                format: ReportFormatArg::Markdown,
+                out: report_path,
+                demo: false,
+                fixture_dir: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("report export should succeed: {error}"));
+
+        let prefix = persisted.artifact_id[..12].to_owned();
+        let output = run_ai_runs_show(
+            &config,
+            AiRunsShowArgs {
+                run_id: prefix,
+                demo: false,
+                fixture_dir: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("ai runs show should succeed: {error}"))
+        .unwrap_or_else(|| panic!("ai runs show should render output"));
+
+        assert!(output.contains("ringmaster ai runs show"));
+        assert!(output.contains("linked_reports:"));
+        assert!(output.contains("request_fingerprint:"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_show_resolves_catalog_prefix() {
+        let (_tempdir, mut config) =
+            test_config(Some("https://example.test"), Some("verify-token"));
+        config.refresh.demo_fixture_dir =
+            Some(std::path::PathBuf::from("tests/fixtures/phase7/strong"));
+        let store = Store::open(&config)
+            .unwrap_or_else(|error| panic!("store should open for snapshot show test: {error}"));
+        let fixture_dir = std::path::PathBuf::from("tests/fixtures/phase7/strong");
+        crate::oura::sync::sync_once(
+            &config,
+            &store,
+            crate::oura::sync::SyncOptions {
+                dry_run: false,
+                fixture_dir: Some(fixture_dir.clone()),
+                families: crate::SyncFamily::ALL.to_vec(),
+                trigger_source: Some("snapshot_show_test".to_owned()),
+                trigger_detail: Some("seed store for snapshot prefix lookup".to_owned()),
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("fixture sync should succeed: {error}"));
+        crate::derive::rebuild_store(&store)
+            .unwrap_or_else(|error| panic!("derive rebuild should succeed: {error}"));
+        let auth_status = crate::oura::auth::inspect_auth(&config, &store)
+            .unwrap_or_else(|error| panic!("auth status should resolve: {error}"));
+        let scope = crate::snapshot::resolve_scope(&store, "today")
+            .unwrap_or_else(|error| panic!("scope should resolve: {error}"));
+        let export = crate::snapshot::export_snapshot(
+            &config,
+            &store,
+            &auth_status,
+            crate::snapshot::SnapshotSourceMode::Demo,
+            Some(fixture_dir.as_path()),
+            &scope,
+            crate::snapshot::PrivacyProfile::Redacted,
+        )
+        .unwrap_or_else(|error| panic!("snapshot export should succeed: {error}"));
+        store
+            .analysis()
+            .upsert_snapshot_export(&export.manifest_record, &export.provenance_records)
+            .unwrap_or_else(|error| panic!("snapshot export should persist: {error}"));
+
+        let output = run_snapshot_show(
+            &config,
+            SnapshotShowArgs {
+                snapshot: export.manifest_record.snapshot_hash[..12].to_owned(),
+                demo: false,
+                fixture_dir: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("snapshot show should succeed: {error}"))
+        .unwrap_or_else(|| panic!("snapshot show should render output"));
+
+        assert!(output.contains("ringmaster snapshot show"));
+        assert!(output.contains("source: catalog"));
+        assert!(output.contains("snapshot_hash:"));
+    }
+
+    #[tokio::test]
+    async fn report_export_from_snapshot_and_ai_eval_render_outputs() {
+        let (_tempdir, mut config) =
+            test_config(Some("https://example.test"), Some("verify-token"));
+        config.refresh.demo_fixture_dir =
+            Some(std::path::PathBuf::from("tests/fixtures/phase7/strong"));
+        let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
+        let snapshot_path = out_dir.path().join("snapshot.json");
+        let report_path = out_dir.path().join("report.html");
+        let eval_export_path = out_dir.path().join("eval.json");
+
+        run_snapshot_export(
+            &config,
+            SnapshotExportArgs {
+                demo: true,
+                fixture_dir: None,
+                scope: "today".to_owned(),
+                profile: crate::cli::PrivacyProfileArg::Redacted,
+                out: Some(snapshot_path.clone()),
+                compact: false,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("snapshot export should succeed: {error}"));
+
+        let report_output = run_report_export(
+            &config,
+            ReportExportArgs {
+                from_snapshot: Some(snapshot_path.display().to_string()),
+                from_ai_run: None,
+                format: ReportFormatArg::Html,
+                out: report_path.clone(),
+                demo: false,
+                fixture_dir: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("report export should succeed: {error}"))
+        .unwrap_or_else(|| panic!("report export should render output"));
+
+        let eval_output = run_ai_eval(
+            &config,
+            AiEvalArgs {
+                fixture_dir: std::path::PathBuf::from("tests/fixtures/ai"),
+                candidate: None,
+                baseline: None,
+                export: Some(eval_export_path.clone()),
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("ai eval should succeed: {error}"))
+        .unwrap_or_else(|| panic!("ai eval should render output"));
+
+        assert!(report_output.contains("ringmaster report export"));
+        assert!(
+            std::fs::read_to_string(&report_path)
+                .unwrap_or_else(|error| panic!("report should read: {error}"))
+                .contains("<!DOCTYPE html>")
+        );
+        assert!(eval_output.contains("ringmaster ai eval"));
+        assert!(eval_export_path.exists());
     }
 
     #[tokio::test]

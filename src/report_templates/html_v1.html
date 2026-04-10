@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{title}}</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f8f6ef;
+      --surface: #fffdf8;
+      --ink: #1f1d1a;
+      --muted: #5f5a53;
+      --accent: #135d66;
+      --border: #d9d1c5;
+    }
+
+    body {
+      margin: 0;
+      padding: 2rem;
+      background: linear-gradient(180deg, #f4efe6 0%, var(--bg) 100%);
+      color: var(--ink);
+      font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, serif;
+      line-height: 1.6;
+    }
+
+    main {
+      max-width: 54rem;
+      margin: 0 auto;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 2rem;
+      box-shadow: 0 18px 48px rgba(36, 33, 28, 0.08);
+    }
+
+    h1, h2 {
+      font-family: "Avenir Next", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      letter-spacing: 0.02em;
+    }
+
+    h1 {
+      margin-top: 0;
+      margin-bottom: 1rem;
+      font-size: 2rem;
+    }
+
+    h2 {
+      margin-top: 2rem;
+      margin-bottom: 0.75rem;
+      font-size: 1.1rem;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+
+    dl {
+      display: grid;
+      grid-template-columns: minmax(10rem, 14rem) 1fr;
+      gap: 0.35rem 1rem;
+      margin: 0;
+    }
+
+    dt {
+      font-weight: 700;
+      color: var(--muted);
+    }
+
+    dd {
+      margin: 0;
+    }
+
+    p {
+      margin: 0.5rem 0;
+    }
+
+    ul {
+      margin: 0;
+      padding-left: 1.25rem;
+    }
+
+    li + li {
+      margin-top: 0.35rem;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>{{title}}</h1>
+
+    <dl>
+      <dt>Generated at</dt>
+      <dd>{{generated_at}}</dd>
+      <dt>Scope</dt>
+      <dd>{{scope}}</dd>
+      <dt>Privacy profile</dt>
+      <dd>{{privacy_profile}}</dd>
+      <dt>AI used</dt>
+      <dd>{{ai_used}}</dd>
+      <dt>AI provider</dt>
+      <dd>{{ai_provider}}</dd>
+      <dt>AI model</dt>
+      <dd>{{ai_model}}</dd>
+      <dt>Prompt version</dt>
+      <dd>{{prompt_version}}</dd>
+      <dt>Output schema version</dt>
+      <dd>{{output_schema_version}}</dd>
+      <dt>Template version</dt>
+      <dd>{{template_version}}</dd>
+    </dl>
+
+    <h2>Freshness And Trust</h2>
+    <p><strong>Freshness summary:</strong> {{freshness_summary}}</p>
+    <p><strong>Trust summary:</strong> {{trust_summary}}</p>
+
+    <h2>Key Findings</h2>
+    <ul>{{key_findings}}</ul>
+
+    <h2>Supporting Evidence</h2>
+    <ul>{{supporting_evidence}}</ul>
+
+    <h2>Uncertainty And Sufficiency</h2>
+    <ul>{{uncertainty_notes}}</ul>
+
+    <h2>Provenance References</h2>
+    <ul>{{provenance_refs}}</ul>
+
+    <h2>Artifact References</h2>
+    <ul>{{artifact_refs}}</ul>
+  </main>
+</body>
+</html>

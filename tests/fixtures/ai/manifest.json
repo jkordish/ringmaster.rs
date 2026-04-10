@@ -1,0 +1,66 @@
+{
+  "schema_version": "ringmaster.ai.eval.fixtures.v1",
+  "default_candidate_label": "candidate",
+  "default_baseline_label": "baseline",
+  "cases": [
+    {
+      "case_id": "review-stale-snapshot",
+      "task_family": "review",
+      "snapshot_a": "review-snapshot.json",
+      "artifacts": [
+        {
+          "label": "candidate",
+          "artifact_path": "review-candidate.json",
+          "provider": "fixture",
+          "model": "review-candidate"
+        },
+        {
+          "label": "baseline",
+          "artifact_path": "review-baseline.json",
+          "provider": "fixture",
+          "model": "review-baseline"
+        }
+      ],
+      "expectations": {
+        "min_primary_findings": 1,
+        "expected_primary_title": "Sleep score remained elevated",
+        "honesty_required": true,
+        "forbidden_substrings": [
+          "user@example.com",
+          "refresh_token",
+          "client_secret"
+        ]
+      }
+    },
+    {
+      "case_id": "compare-evidence-regression",
+      "task_family": "compare",
+      "snapshot_a": "compare-snapshot-a.json",
+      "snapshot_b": "compare-snapshot-b.json",
+      "artifacts": [
+        {
+          "label": "candidate",
+          "artifact_path": "compare-candidate.json",
+          "provider": "fixture",
+          "model": "compare-candidate"
+        },
+        {
+          "label": "baseline",
+          "artifact_path": "compare-baseline.json",
+          "provider": "fixture",
+          "model": "compare-baseline"
+        }
+      ],
+      "expectations": {
+        "min_primary_findings": 1,
+        "expected_primary_title": "Average daily score increased",
+        "honesty_required": false,
+        "forbidden_substrings": [
+          "user@example.com",
+          "refresh_token",
+          "client_secret"
+        ]
+      }
+    }
+  ]
+}
