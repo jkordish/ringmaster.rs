@@ -214,10 +214,21 @@ fn resolve_snapshot_source(store: &Store, spec: &str) -> Result<ReportSource> {
 }
 
 fn resolve_ai_run_source(store: &Store, run_id: &str) -> Result<ReportSource> {
-    let Some(record) = store.analysis().ai_artifact(run_id)? else {
-        return Err(RingmasterError::Ui(format!(
-            "AI run `{run_id}` was not found in the local registry"
-        )));
+    let record = if let Some(record) = store.analysis().ai_artifact(run_id)? {
+        record
+    } else {
+        let matches = store.analysis().ai_artifacts_with_prefix(run_id)?;
+        if matches.len() > 1 {
+            return Err(RingmasterError::Ui(format!(
+                "AI run `{run_id}` matched multiple registry entries; use a longer prefix"
+            )));
+        }
+        let Some(record) = matches.into_iter().next() else {
+            return Err(RingmasterError::Ui(format!(
+                "AI run `{run_id}` was not found in the local registry"
+            )));
+        };
+        record
     };
     let artifact = ai::parse_stored_artifact(&record)?;
 
@@ -503,6 +514,18 @@ fn build_ai_report_document(
                     compare
                         .supporting_evidence
                         .iter()
+                        .chain(
+                            compare
+                                .material_differences
+                                .iter()
+                                .flat_map(|finding| finding.evidence_refs.iter()),
+                        )
+                        .chain(
+                            compare
+                                .material_differences
+                                .iter()
+                                .flat_map(|finding| finding.counterevidence_refs.iter()),
+                        )
                         .map(|evidence| format!("{}: {}", evidence.export_ref, evidence.note))
                         .collect(),
                 ),
@@ -805,7 +828,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{ReportDocument, build_ai_report_document, render_html, render_markdown};
-    use crate::ai::{ArtifactStatus, CompareArtifactV1, StoredArtifact};
+    use crate::ai::{
+        ArtifactEvidenceRef, ArtifactFinding, ArtifactStatus, CompareArtifactV1, ConfidenceLevel,
+        StoredArtifact, SufficiencyLevel,
+    };
     use crate::snapshot::{
         PrivacyProfile, SnapshotBundleV1, SnapshotCapabilities, SnapshotCapabilityEntry,
         SnapshotFollowUpTarget, SnapshotFreshness, SnapshotMetadata, SnapshotMetrics,
@@ -1044,5 +1070,54 @@ mod tests {
         assert!(document.trust_summary.contains("snapshot_b:"));
         assert!(document.trust_summary.contains("review_signals=3"));
         assert!(document.trust_summary.contains("follow_up_targets=2"));
+    }
+
+    #[test]
+    fn compare_reports_include_per_difference_evidence_when_top_level_evidence_is_empty() {
+        let document = build_ai_report_document(
+            &sample_compare_record(),
+            &StoredArtifact::Compare(CompareArtifactV1 {
+                schema_version: "ringmaster.ai.compare.v1".to_owned(),
+                prompt_version: "compare_prompt_v1".to_owned(),
+                status: ArtifactStatus::DryRun,
+                overview: "compare overview".to_owned(),
+                material_differences: vec![ArtifactFinding {
+                    finding_id: "diff-1".to_owned(),
+                    title: "Training load changed".to_owned(),
+                    summary: "Activity load differs between snapshots.".to_owned(),
+                    confidence: ConfidenceLevel::Medium,
+                    sufficiency: SufficiencyLevel::Medium,
+                    evidence_refs: vec![ArtifactEvidenceRef {
+                        export_ref: "daily:2026-04-10".to_owned(),
+                        note: "Snapshot A activity score".to_owned(),
+                    }],
+                    counterevidence_refs: vec![ArtifactEvidenceRef {
+                        export_ref: "daily:2026-04-08".to_owned(),
+                        note: "Snapshot B recovery trend".to_owned(),
+                    }],
+                }],
+                supporting_evidence: Vec::new(),
+                uncertainty_warnings: Vec::new(),
+                investigation_targets: Vec::new(),
+                only_in_a: Vec::new(),
+                only_in_b: Vec::new(),
+            }),
+            None,
+            &[],
+            None,
+            &[],
+        );
+
+        assert_eq!(document.supporting_evidence.len(), 2);
+        assert!(
+            document
+                .supporting_evidence
+                .contains(&"daily:2026-04-10: Snapshot A activity score".to_owned())
+        );
+        assert!(
+            document
+                .supporting_evidence
+                .contains(&"daily:2026-04-08: Snapshot B recovery trend".to_owned())
+        );
     }
 }

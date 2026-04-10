@@ -1141,8 +1141,14 @@ fn extract_output_text(value: &Value) -> Result<String> {
 
 fn retryable_error(error: &RingmasterError) -> bool {
     match error {
-        RingmasterError::Transport(source) => source.is_timeout() || source.is_connect(),
-        RingmasterError::Ui(message) => message.contains(StatusCode::TOO_MANY_REQUESTS.as_str()),
+        RingmasterError::Transport(source) => {
+            source.is_timeout()
+                || source.is_connect()
+                || source.status().is_some_and(retryable_status_code)
+        }
+        RingmasterError::Ui(message) => retryable_status_codes()
+            .iter()
+            .any(|status| message.contains(status.as_str())),
         RingmasterError::Config(_)
         | RingmasterError::Cli(_)
         | RingmasterError::Io { .. }
@@ -1152,6 +1158,21 @@ fn retryable_error(error: &RingmasterError) -> bool {
         | RingmasterError::Auth(_)
         | RingmasterError::OuraApi(_) => false,
     }
+}
+
+fn retryable_status_code(status: StatusCode) -> bool {
+    retryable_status_codes().contains(&status)
+}
+
+fn retryable_status_codes() -> &'static [StatusCode] {
+    &[
+        StatusCode::REQUEST_TIMEOUT,
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::BAD_GATEWAY,
+        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::GATEWAY_TIMEOUT,
+    ]
 }
 
 fn artifact_id(
@@ -1337,15 +1358,17 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
 
+    use reqwest::StatusCode;
     use sha2::Digest;
 
     use super::{
         ArtifactStatus, COMPARE_OUTPUT_SCHEMA_VERSION, COMPARE_PROMPT_VERSION, CompareArtifactV1,
         REVIEW_OUTPUT_SCHEMA_VERSION, REVIEW_PROMPT_VERSION, ReviewArtifactV1, SufficiencyLevel,
         artifact_id, dry_run_compare_artifact, dry_run_review_artifact, render_compare_briefing,
-        render_review_briefing, review_snapshot, schema_value,
+        render_review_briefing, retryable_error, review_snapshot, schema_value,
     };
     use crate::config::Config;
+    use crate::error::RingmasterError;
     use crate::snapshot::{
         PrivacyProfile, SnapshotBundleV1, SnapshotCapabilities, SnapshotCapabilityEntry,
         SnapshotContextEvent, SnapshotFreshness, SnapshotMetadata, SnapshotMetrics,
@@ -1617,5 +1640,33 @@ mod tests {
         );
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn retryable_error_includes_transient_status_codes() {
+        for status in [
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            let error =
+                RingmasterError::Ui(format!("OpenAI Responses API request failed with {status}"));
+            assert!(
+                retryable_error(&error),
+                "status {status} should be treated as retryable"
+            );
+        }
+
+        let error = RingmasterError::Ui(format!(
+            "OpenAI Responses API request failed with {}",
+            StatusCode::BAD_REQUEST
+        ));
+        assert!(
+            !retryable_error(&error),
+            "permanent client errors should not be retried"
+        );
     }
 }

@@ -2238,6 +2238,65 @@ impl<'connection> AnalysisStore<'connection> {
             .map_err(Into::into)
     }
 
+    pub fn ai_artifacts_with_prefix(&self, artifact_prefix: &str) -> Result<Vec<AiArtifactRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                artifact_id,
+                artifact_kind,
+                output_schema_version,
+                prompt_version,
+                provider,
+                model,
+                reasoning_effort,
+                request_mode,
+                input_transport,
+                run_mode,
+                created_at,
+                snapshot_hash_a,
+                snapshot_hash_b,
+                privacy_profile,
+                artifact_status,
+                overview,
+                summary_cache,
+                request_fingerprint,
+                payload_json,
+                rendered_briefing
+             FROM ai_artifacts
+             WHERE artifact_id LIKE ?1
+             ORDER BY created_at DESC, artifact_id DESC",
+        )?;
+        let rows = statement.query_map(params![format!("{artifact_prefix}%")], |row| {
+            Ok(AiArtifactRecord {
+                artifact_id: row.get(0)?,
+                artifact_kind: row.get(1)?,
+                output_schema_version: row.get(2)?,
+                prompt_version: row.get(3)?,
+                provider: row.get(4)?,
+                model: row.get(5)?,
+                reasoning_effort: row.get(6)?,
+                request_mode: row.get(7)?,
+                input_transport: row.get(8)?,
+                run_mode: row.get(9)?,
+                created_at: row.get(10)?,
+                snapshot_hash_a: row.get(11)?,
+                snapshot_hash_b: row.get(12)?,
+                privacy_profile: row.get(13)?,
+                artifact_status: row.get(14)?,
+                overview: row.get(15)?,
+                summary_cache: row.get(16)?,
+                request_fingerprint: row.get(17)?,
+                payload_json: row.get(18)?,
+                rendered_briefing: row.get(19)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
     pub fn list_ai_artifacts(&self) -> Result<Vec<AiRunListEntry>> {
         let mut statement = self.connection.prepare(
             "SELECT

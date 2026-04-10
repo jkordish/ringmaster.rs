@@ -436,7 +436,7 @@ pub fn resolve_scope(store: &Store, raw_spec: &str) -> Result<ResolvedSnapshotSc
 }
 
 pub fn export_snapshot(
-    config: &Config,
+    _config: &Config,
     store: &Store,
     auth_status: &AuthStatus,
     source_mode: SnapshotSourceMode,
@@ -471,51 +471,14 @@ pub fn export_snapshot(
     let rest_mode_periods = store
         .views()
         .rest_mode_periods_between_days(&scope.start_day, &scope.end_day)?;
-    let materialized_context_events = store
-        .views()
-        .context_events_between_days(&scope.start_day, &scope.end_day)?;
-    let materialized_pattern_summaries = store.views().pattern_summaries(None, None)?;
-    let materialized_review_signals = store
-        .views()
-        .review_signal_days_between_days(&scope.start_day, &scope.end_day)?;
-    let derived = crate::derive::derive_review_artifacts_for_anchor_day(
+    let derived = crate::derive::derive_review_artifacts_between_days(
         store,
-        config,
-        Some(scope.anchor_day.as_str()),
+        &scope.start_day,
+        &scope.end_day,
     )?;
-
-    let context_events = derived
-        .as_ref()
-        .map(|artifacts| {
-            artifacts
-                .context_events
-                .iter()
-                .filter(|record| {
-                    record.anchor_day.as_str() >= scope.start_day.as_str()
-                        && record.anchor_day.as_str() <= scope.end_day.as_str()
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or(materialized_context_events);
-    let pattern_summaries = derived
-        .as_ref()
-        .map(|artifacts| artifacts.pattern_summaries.clone())
-        .unwrap_or(materialized_pattern_summaries);
-    let review_signals = derived
-        .as_ref()
-        .map(|artifacts| {
-            artifacts
-                .review_signal_days
-                .iter()
-                .filter(|record| {
-                    record.day.as_str() >= scope.start_day.as_str()
-                        && record.day.as_str() <= scope.end_day.as_str()
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or(materialized_review_signals);
+    let context_events = derived.context_events;
+    let pattern_summaries = derived.pattern_summaries;
+    let review_signals = derived.review_signal_days;
     let heartrate_daily_averages =
         load_heartrate_daily_averages(store, &scope.start_day, &scope.end_day)?;
     let latest_source_day = store.views().latest_source_day()?;
@@ -1769,7 +1732,9 @@ mod tests {
     use crate::config::Config;
     use crate::oura::models::{AuthStatus, CapabilityReport};
     use crate::store::Store;
-    use crate::store::queries::{DailyActivityRecord, DailyReadinessRecord, DailySleepRecord};
+    use crate::store::queries::{
+        DailyActivityRecord, DailyReadinessRecord, DailySleepRecord, WorkoutRecord,
+    };
 
     fn seed_history(store: &Store) {
         for (day, sleep, readiness, activity) in [
@@ -1812,6 +1777,81 @@ mod tests {
                     updated_at: format!("{day}T06:02:00Z"),
                 })
                 .unwrap_or_else(|error| panic!("activity row should seed: {error}"));
+        }
+    }
+
+    fn seed_wide_history(store: &Store) {
+        let updated_at = "2026-04-08T12:00:00Z";
+        for (day, sleep, readiness, activity) in [
+            ("2026-01-01", 82, 79, 60),
+            ("2026-01-02", 83, 80, 63),
+            ("2026-01-03", 84, 81, 58),
+            ("2026-01-04", 85, 82, 64),
+            ("2026-01-05", 83, 79, 59),
+            ("2026-01-06", 86, 83, 65),
+            ("2026-01-07", 82, 78, 57),
+            ("2026-01-08", 87, 84, 66),
+            ("2026-04-08", 80, 76, 61),
+        ] {
+            store
+                .imports()
+                .upsert_daily_sleep(&DailySleepRecord {
+                    oura_id: None,
+                    day: day.to_owned(),
+                    sleep_score: Some(sleep),
+                    raw_cache_key: None,
+                    updated_at: updated_at.to_owned(),
+                })
+                .unwrap_or_else(|error| panic!("sleep row should seed: {error}"));
+            store
+                .imports()
+                .upsert_daily_readiness(&DailyReadinessRecord {
+                    oura_id: None,
+                    day: day.to_owned(),
+                    readiness_score: Some(readiness),
+                    temperature_deviation: None,
+                    temperature_trend_deviation: None,
+                    raw_cache_key: None,
+                    updated_at: updated_at.to_owned(),
+                })
+                .unwrap_or_else(|error| panic!("readiness row should seed: {error}"));
+            store
+                .imports()
+                .upsert_daily_activity(&DailyActivityRecord {
+                    oura_id: None,
+                    day: day.to_owned(),
+                    activity_score: Some(activity),
+                    active_calories: 420,
+                    steps: 8_400,
+                    total_calories: 2_300,
+                    raw_cache_key: None,
+                    updated_at: updated_at.to_owned(),
+                })
+                .unwrap_or_else(|error| panic!("activity row should seed: {error}"));
+        }
+
+        for (index, day) in ["2026-01-02", "2026-01-04", "2026-01-06", "2026-01-08"]
+            .into_iter()
+            .enumerate()
+        {
+            store
+                .imports()
+                .upsert_workout(&WorkoutRecord {
+                    workout_id: format!("workout-{index}"),
+                    day: day.to_owned(),
+                    started_at: format!("{day}T18:00:00Z"),
+                    ended_at: Some(format!("{day}T18:30:00Z")),
+                    timezone: Some("UTC".to_owned()),
+                    sport: Some("running".to_owned()),
+                    activity: Some("cardio".to_owned()),
+                    intensity: Some("moderate".to_owned()),
+                    title: "Run".to_owned(),
+                    notes: None,
+                    source: Some("manual".to_owned()),
+                    raw_cache_key: None,
+                    updated_at: updated_at.to_owned(),
+                })
+                .unwrap_or_else(|error| panic!("workout row should seed: {error}"));
         }
     }
 
@@ -1910,6 +1950,48 @@ mod tests {
         assert!(!record.capability_summary.contains("user-123"));
         assert!(!record.provenance_summary.contains("callback"));
         assert!(record.freshness_summary.contains("latest_source_day"));
+    }
+
+    #[test]
+    fn snapshot_export_derives_artifacts_across_requested_range() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        seed_wide_history(&store);
+        let config = Config::load().unwrap_or_else(|error| panic!("config should load: {error}"));
+        let scope = resolve_scope(&store, "range:2026-01-01..2026-04-08")
+            .unwrap_or_else(|error| panic!("scope should resolve: {error}"));
+
+        let export = super::export_snapshot(
+            &config,
+            &store,
+            &auth_status(),
+            super::SnapshotSourceMode::Live,
+            None,
+            &scope,
+            PrivacyProfile::Redacted,
+        )
+        .unwrap_or_else(|error| panic!("snapshot export should succeed: {error}"));
+
+        assert!(
+            export
+                .bundle
+                .context_events
+                .iter()
+                .any(|event| event.anchor_day == "2026-01-02"),
+            "wide-range export should include early derived context events"
+        );
+        assert!(
+            !export.bundle.pattern_summaries.is_empty(),
+            "wide-range export should include pattern summaries derived from the full range"
+        );
+        assert!(
+            export
+                .bundle
+                .review_signals
+                .iter()
+                .any(|signal| signal.day == "2026-01-01"),
+            "wide-range export should include early review signals from the requested range"
+        );
     }
 
     #[test]

@@ -3058,16 +3058,7 @@ fn resolve_ai_run_record(
         return Ok(Some(record));
     }
 
-    let matches = store
-        .analysis()
-        .list_ai_artifacts()?
-        .into_iter()
-        .filter(|record| record.artifact_id.starts_with(run_ref))
-        .map(|record| store.analysis().ai_artifact(&record.artifact_id))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+    let matches = store.analysis().ai_artifacts_with_prefix(run_ref)?;
     if matches.len() > 1 {
         return Err(RingmasterError::Ui(format!(
             "AI run `{run_ref}` matched multiple registry entries; use a longer prefix"
@@ -4064,6 +4055,75 @@ mod tests {
         assert!(output.contains("ringmaster ai runs show"));
         assert!(output.contains("linked_reports:"));
         assert!(output.contains("request_fingerprint:"));
+    }
+
+    #[tokio::test]
+    async fn report_export_from_ai_run_accepts_unique_prefixes() {
+        let (_tempdir, mut config) =
+            test_config(Some("https://example.test"), Some("verify-token"));
+        config.refresh.demo_fixture_dir =
+            Some(std::path::PathBuf::from("tests/fixtures/phase7/strong"));
+        let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
+        let snapshot_path = out_dir.path().join("snapshot.json");
+        let report_path = out_dir.path().join("report.md");
+
+        run_snapshot_export(
+            &config,
+            SnapshotExportArgs {
+                demo: true,
+                fixture_dir: None,
+                scope: "today".to_owned(),
+                profile: crate::cli::PrivacyProfileArg::Redacted,
+                out: Some(snapshot_path.clone()),
+                compact: false,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("snapshot export should succeed: {error}"));
+
+        run_ai_review(
+            &config,
+            AiReviewArgs {
+                snapshot_path: snapshot_path.clone(),
+                dry_run: true,
+                fixture: None,
+                out: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("dry-run review should succeed: {error}"));
+
+        let store = Store::open(&config)
+            .unwrap_or_else(|error| panic!("store should open for ai runs test: {error}"));
+        let snapshot_artifact = crate::snapshot::load_snapshot_artifact(&snapshot_path)
+            .unwrap_or_else(|error| panic!("snapshot artifact should load: {error}"));
+        let persisted = store
+            .analysis()
+            .latest_ai_artifact("review", &snapshot_artifact.bundle.metadata.snapshot_hash)
+            .unwrap_or_else(|error| panic!("persisted ai review should load: {error}"))
+            .unwrap_or_else(|| panic!("persisted ai review should exist"));
+        let prefix = persisted.artifact_id[..12].to_owned();
+
+        run_report_export(
+            &config,
+            ReportExportArgs {
+                from_snapshot: None,
+                from_ai_run: Some(prefix),
+                format: ReportFormatArg::Markdown,
+                out: report_path.clone(),
+                demo: false,
+                fixture_dir: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("report export should succeed with a unique prefix: {error}")
+        });
+
+        let report_contents = std::fs::read_to_string(&report_path)
+            .unwrap_or_else(|error| panic!("report output should be readable: {error}"));
+        assert!(report_contents.contains("AI review report"));
+        assert!(report_contents.contains(&persisted.artifact_id[..12]));
     }
 
     #[tokio::test]

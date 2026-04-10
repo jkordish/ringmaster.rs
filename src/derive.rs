@@ -180,6 +180,45 @@ pub fn derive_review_artifacts_for_anchor_day(
         .transpose()
 }
 
+pub fn derive_review_artifacts_between_days(
+    store: &Store,
+    start_day: &str,
+    end_day: &str,
+) -> Result<DerivedReviewArtifacts> {
+    let start_date = Date::parse(
+        start_day,
+        &time::macros::format_description!("[year]-[month]-[day]"),
+    )
+    .map_err(|error| {
+        RingmasterError::Config(format!(
+            "failed to parse derive start_day `{start_day}`: {error}"
+        ))
+    })?;
+    let end_date = Date::parse(
+        end_day,
+        &time::macros::format_description!("[year]-[month]-[day]"),
+    )
+    .map_err(|error| {
+        RingmasterError::Config(format!(
+            "failed to parse derive end_day `{end_day}`: {error}"
+        ))
+    })?;
+    if end_date < start_date {
+        return Err(RingmasterError::Config(format!(
+            "derive end_day `{end_day}` must be on or after start_day `{start_day}`"
+        )));
+    }
+
+    derive_review_artifacts_with_bounds(
+        store,
+        DeriveBounds {
+            start_day: start_day.to_owned(),
+            end_day: end_day.to_owned(),
+            note: None,
+        },
+    )
+}
+
 fn rebuild_store_with_bounds(store: &Store, bounds: DeriveBounds) -> Result<DeriveReport> {
     let derived = derive_review_artifacts_with_bounds(store, bounds.clone())?;
     store
