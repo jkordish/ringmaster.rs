@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document describes the implemented architecture for `ringmaster.rs` as of `2026-04-10`. It reflects the code that exists in the repository today, including the snapshot library, AI run registry, report export workflow, local eval flywheel, and the Review-screen AI artifact viewer, not the eventual end-state product.
+This document describes the implemented architecture for `ringmaster.rs` as of `2026-04-10`. It reflects the code that exists in the repository today, including the snapshot library, AI run registry, report export workflow, local eval flywheel, and the new top-level AI workbench in the TUI, not the eventual end-state product.
 
 ## Design goals
 
@@ -96,12 +96,15 @@ tui / tui --demo
   -> app state builder
   -> Event -> Action -> State -> Render loop
   -> background refresh worker
+  -> background AI launch/preflight/report side-effect worker tasks
+  -> top-level AI workbench + inline launch points
   -> pure screen renderers
 
 ui snapshot
   -> app state builder
   -> deterministic screen + size matrix selection
   -> optional phase-7 scenario matrix expansion
+  -> AI workbench smoke rendering
   -> shared Ratatui render path
   -> text artifact writing for visual QA
 ```
@@ -208,7 +211,10 @@ Important implemented state concepts:
 - `review_mode`: Today, Week, or Investigate within the Review screen
 - `review_focus`: readiness, sleep, recovery, stress, or activity within Investigate mode
 - `selected_review_card_index`: selected ranked card within Review
-- `ai_artifacts_by_day`: preloaded day-keyed summaries derived from `ai_artifacts` joined through `snapshot_exports`, used only for read-only Review provenance display
+- `ai_preflight`: explicit in-app send gate state for AI launches
+- `ai_browser_tab`: shared browser state for saved `runs`, `snapshots`, and `reports`
+- `selected_ai_run_index`, `selected_snapshot_catalog_index`, `selected_report_export_index`: stable list/detail selection state inside the AI workbench
+- `ai_artifacts_by_day`: preloaded day-keyed summaries derived from `ai_artifacts` joined through `snapshot_exports`, used for Review provenance display
 
 ### `src/tui.rs`
 
@@ -218,6 +224,7 @@ Responsibilities:
 - terminal session lifecycle
 - keyboard-to-action mapping
 - live background refresh worker wiring
+- AI preflight preparation, launch orchestration, cancellation, report-export side effects, and local evidence jump routing
 - deterministic snapshot rendering via `TestBackend`
 - shared frame chrome driven by semantic theme and viewport context
 
@@ -243,6 +250,15 @@ How background refresh works:
 - when new persisted data is available, the worker rebuilds a `LiveSnapshot` and sends `Action::LiveSnapshotLoaded` back to the UI loop
 - this keeps blocking store/auth/sync work off the render path and avoids `Send` pressure on the SQLite + sync stack
 
+How background AI work works:
+
+- widgets only emit `Action`s such as launch, confirm, rerun, follow-up, report export, and evidence jump
+- `handle_ai_side_effect(...)` in `src/tui.rs` owns the non-render-path orchestration for AI preflight generation, AI execution, cancellation, and report export
+- expensive preflight preparation runs inside `spawn_blocking(...)`
+- AI execution runs in async tasks and persists lifecycle transitions through `ai_runs`
+- report export is executed off the render path through a blocking worker boundary so SQLite-backed context loading never stalls the frame loop
+- running tasks communicate back to the reducer exclusively through `Action`s such as `AiPreflightPrepared`, `AiPreflightFailed`, `RefreshFailed`, and `LiveSnapshotLoaded`
+
 Implemented screen set:
 
 - Dashboard
@@ -251,9 +267,26 @@ Implemented screen set:
 - Explain
 - Patterns
 - Review
+- AI
 - Status
 
-There is intentionally no freeform AI chat screen in this pass. The TUI remains a pure consumer of persisted local state.
+There is intentionally no freeform AI chat screen in this pass. The `AI` screen is a guided workbench for snapshot-bounded review, compare, follow-up, and report flows, and the TUI remains a pure consumer of persisted local state plus explicit user-triggered side effects.
+
+### `src/components/ai.rs`
+
+Responsibilities:
+
+- render the dedicated AI workbench surface
+- render the unified list/detail browser for snapshots, AI runs, and reports
+- render launch points and trust defaults
+- render the preflight overlay as a compact, legible confirmation gate
+
+Non-responsibilities:
+
+- provider calls
+- database reads or writes
+- token refresh
+- file export side effects
 
 ### `src/snapshot.rs`
 

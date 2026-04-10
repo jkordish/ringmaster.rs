@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::future::Future;
 use std::path::Path;
@@ -8,11 +9,12 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{Date, OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::ai_prompts::{
-    COMPARE_PROMPT_VERSION, REVIEW_PROMPT_VERSION, compare_system_prompt, compare_task_framing,
-    review_system_prompt, review_task_framing,
+    COMPARE_PROMPT_VERSION, FOLLOW_UP_PROMPT_VERSION, REVIEW_PROMPT_VERSION, compare_system_prompt,
+    compare_task_framing, follow_up_system_prompt, follow_up_task_framing, review_system_prompt,
+    review_task_framing,
 };
 use crate::config::{AiConfig, AiInputTransport, AiRequestMode, Config, PromptCacheMode};
 use crate::error::{Result, RingmasterError};
@@ -24,6 +26,7 @@ use crate::store::queries::AiArtifactRecord;
 
 pub const REVIEW_OUTPUT_SCHEMA_VERSION: &str = "ringmaster.ai.review.v1";
 pub const COMPARE_OUTPUT_SCHEMA_VERSION: &str = "ringmaster.ai.compare.v1";
+pub const FOLLOW_UP_OUTPUT_SCHEMA_VERSION: &str = "ringmaster.ai.follow_up.v1";
 
 type ProviderFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
@@ -41,6 +44,26 @@ pub enum ArtifactStatus {
     Insufficient,
     DryRun,
     Fixture,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AiRunStatus {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GuidedFollowUpKind {
+    ExpandEvidence,
+    ShowCounterevidence,
+    ExplainRanking,
+    SuggestLocalDrilldown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -124,12 +147,26 @@ pub struct CompareArtifactV1 {
     pub only_in_b: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct FollowUpArtifactV1 {
+    pub schema_version: String,
+    pub prompt_version: String,
+    pub status: ArtifactStatus,
+    pub follow_up_kind: GuidedFollowUpKind,
+    pub overview: String,
+    pub focal_findings: Vec<ArtifactFinding>,
+    pub reasoning_steps: Vec<String>,
+    pub unresolved_questions: Vec<String>,
+    pub suggested_local_targets: Vec<ArtifactFollowUpTarget>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ReviewRunOutput {
     pub artifact: ReviewArtifactV1,
     pub payload_json: String,
     pub rendered_briefing: String,
-    pub request_preview: String,
+    pub request_preview: AiRequestPreview,
     pub request_fingerprint: String,
     pub record: AiArtifactRecord,
 }
@@ -139,7 +176,17 @@ pub struct CompareRunOutput {
     pub artifact: CompareArtifactV1,
     pub payload_json: String,
     pub rendered_briefing: String,
-    pub request_preview: String,
+    pub request_preview: AiRequestPreview,
+    pub request_fingerprint: String,
+    pub record: AiArtifactRecord,
+}
+
+#[derive(Debug, Clone)]
+pub struct FollowUpRunOutput {
+    pub artifact: FollowUpArtifactV1,
+    pub payload_json: String,
+    pub rendered_briefing: String,
+    pub request_preview: AiRequestPreview,
     pub request_fingerprint: String,
     pub record: AiArtifactRecord,
 }
@@ -148,6 +195,7 @@ pub struct CompareRunOutput {
 pub enum StoredArtifact {
     Review(ReviewArtifactV1),
     Compare(CompareArtifactV1),
+    FollowUp(FollowUpArtifactV1),
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +206,40 @@ pub struct ProviderMetadata {
     pub request_mode: String,
     pub input_transport: String,
     pub run_mode: AiRunMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct AiRequestPreviewSnapshot {
+    pub label: String,
+    pub snapshot_hash: String,
+    pub scope: String,
+    pub anchor_day: String,
+    pub privacy_profile: PrivacyProfile,
+    pub day_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct AiRequestPreview {
+    pub task_family: String,
+    pub provider: String,
+    pub model: String,
+    pub request_mode: String,
+    pub input_transport: String,
+    pub prompt_cache: String,
+    pub prompt_version: String,
+    pub output_schema_version: String,
+    pub snapshots: Vec<AiRequestPreviewSnapshot>,
+    pub snapshot_bytes: usize,
+    pub approximate_input_tokens: usize,
+    pub stateless: bool,
+    pub tools_disabled: bool,
+    pub includes_notes_or_free_text: bool,
+    pub content_classes: Vec<String>,
+    pub prefix_fingerprint: String,
+    pub payload_fingerprint: String,
+    pub request_fingerprint: String,
 }
 
 pub struct ReviewProviderRequest<'a> {
@@ -172,9 +254,16 @@ pub struct CompareProviderRequest<'a> {
     pub snapshot_b_json: &'a str,
 }
 
+pub struct FollowUpProviderRequest<'a> {
+    pub snapshots: &'a [(&'a SnapshotBundleV1, &'a str)],
+    pub source_artifact_json: &'a str,
+    pub source_artifact_kind: &'a str,
+    pub follow_up_kind: GuidedFollowUpKind,
+}
+
 struct StructuredOutputRequestPlan {
     body: Value,
-    preview: String,
+    preview: AiRequestPreview,
     request_fingerprint: String,
 }
 
@@ -190,6 +279,11 @@ trait AiProvider {
         &'a self,
         request: CompareProviderRequest<'a>,
     ) -> ProviderFuture<'a, CompareArtifactV1>;
+
+    fn follow_up<'a>(
+        &'a self,
+        request: FollowUpProviderRequest<'a>,
+    ) -> ProviderFuture<'a, FollowUpArtifactV1>;
 }
 
 struct DryRunProvider {
@@ -213,6 +307,14 @@ pub async fn review_snapshot(
     review_snapshot_with_run_identity(config, snapshot, dry_run, fixture, None).await
 }
 
+pub fn preview_review_request(
+    config: &Config,
+    snapshot: &LoadedSnapshotArtifact,
+) -> Result<AiRequestPreview> {
+    build_review_request_plan(&config.ai, &snapshot.bundle, &snapshot.compact_json)
+        .map(|plan| plan.preview)
+}
+
 pub(crate) async fn review_snapshot_with_run_identity(
     config: &Config,
     snapshot: &LoadedSnapshotArtifact,
@@ -220,7 +322,8 @@ pub(crate) async fn review_snapshot_with_run_identity(
     fixture: Option<&Path>,
     run_identity_override: Option<&str>,
 ) -> Result<ReviewRunOutput> {
-    let request_plan = build_review_request_plan(&config.ai, &snapshot.compact_json)?;
+    let request_plan =
+        build_review_request_plan(&config.ai, &snapshot.bundle, &snapshot.compact_json)?;
     let provider = select_provider(&config.ai, dry_run, fixture)?;
     let metadata = provider.metadata();
     let artifact = provider
@@ -284,6 +387,61 @@ pub async fn compare_snapshots(
         .await
 }
 
+pub async fn follow_up_from_artifact(
+    config: &Config,
+    snapshots: &[LoadedSnapshotArtifact],
+    source_record: &AiArtifactRecord,
+    follow_up_kind: GuidedFollowUpKind,
+    dry_run: bool,
+    fixture: Option<&Path>,
+) -> Result<FollowUpRunOutput> {
+    follow_up_from_artifact_with_run_identity(
+        config,
+        snapshots,
+        source_record,
+        follow_up_kind,
+        dry_run,
+        fixture,
+        None,
+    )
+    .await
+}
+
+pub fn preview_follow_up_request(
+    config: &Config,
+    snapshots: &[LoadedSnapshotArtifact],
+    source_record: &AiArtifactRecord,
+    follow_up_kind: GuidedFollowUpKind,
+) -> Result<AiRequestPreview> {
+    let snapshot_views = snapshots
+        .iter()
+        .map(|snapshot| (&snapshot.bundle, snapshot.compact_json.as_str()))
+        .collect::<Vec<_>>();
+    build_follow_up_request_plan(
+        &config.ai,
+        &snapshot_views,
+        &source_record.artifact_kind,
+        &source_record.payload_json,
+        follow_up_kind,
+    )
+    .map(|plan| plan.preview)
+}
+
+pub fn preview_compare_request(
+    config: &Config,
+    snapshot_a: &LoadedSnapshotArtifact,
+    snapshot_b: &LoadedSnapshotArtifact,
+) -> Result<AiRequestPreview> {
+    build_compare_request_plan(
+        &config.ai,
+        &snapshot_a.bundle,
+        &snapshot_a.compact_json,
+        &snapshot_b.bundle,
+        &snapshot_b.compact_json,
+    )
+    .map(|plan| plan.preview)
+}
+
 pub(crate) async fn compare_snapshots_with_run_identity(
     config: &Config,
     snapshot_a: &LoadedSnapshotArtifact,
@@ -294,7 +452,9 @@ pub(crate) async fn compare_snapshots_with_run_identity(
 ) -> Result<CompareRunOutput> {
     let request_plan = build_compare_request_plan(
         &config.ai,
+        &snapshot_a.bundle,
         &snapshot_a.compact_json,
+        &snapshot_b.bundle,
         &snapshot_b.compact_json,
     )?;
     let provider = select_provider(&config.ai, dry_run, fixture)?;
@@ -345,6 +505,80 @@ pub(crate) async fn compare_snapshots_with_run_identity(
     })?;
 
     Ok(CompareRunOutput {
+        artifact,
+        payload_json,
+        rendered_briefing,
+        request_preview: request_plan.preview,
+        request_fingerprint: request_plan.request_fingerprint,
+        record,
+    })
+}
+
+pub(crate) async fn follow_up_from_artifact_with_run_identity(
+    config: &Config,
+    snapshots: &[LoadedSnapshotArtifact],
+    source_record: &AiArtifactRecord,
+    follow_up_kind: GuidedFollowUpKind,
+    dry_run: bool,
+    fixture: Option<&Path>,
+    run_identity_override: Option<&str>,
+) -> Result<FollowUpRunOutput> {
+    let snapshot_views = snapshots
+        .iter()
+        .map(|snapshot| (&snapshot.bundle, snapshot.compact_json.as_str()))
+        .collect::<Vec<_>>();
+    let request_plan = build_follow_up_request_plan(
+        &config.ai,
+        &snapshot_views,
+        &source_record.artifact_kind,
+        &source_record.payload_json,
+        follow_up_kind,
+    )?;
+    let provider = select_provider(&config.ai, dry_run, fixture)?;
+    let metadata = provider.metadata();
+    let artifact = provider
+        .follow_up(FollowUpProviderRequest {
+            snapshots: &snapshot_views,
+            source_artifact_json: &source_record.payload_json,
+            source_artifact_kind: &source_record.artifact_kind,
+            follow_up_kind,
+        })
+        .await?;
+    let created_at = resolve_run_created_at(run_identity_override)?;
+    let payload_json = serde_json::to_string_pretty(&artifact)?;
+    let rendered_briefing = render_follow_up_briefing(&artifact);
+    let summary_cache = follow_up_summary_cache(&artifact);
+    let record = artifact_record(ArtifactRecordInput {
+        artifact_id: artifact_id(
+            "follow_up",
+            &source_record.snapshot_hash_a,
+            source_record.snapshot_hash_b.as_deref(),
+            metadata.run_mode,
+            &created_at,
+            &payload_json,
+        ),
+        artifact_kind: "follow_up",
+        output_schema_version: FOLLOW_UP_OUTPUT_SCHEMA_VERSION,
+        prompt_version: FOLLOW_UP_PROMPT_VERSION,
+        provider: &metadata.provider,
+        model: &metadata.model,
+        reasoning_effort: metadata.reasoning_effort.as_deref(),
+        request_mode: &metadata.request_mode,
+        input_transport: &metadata.input_transport,
+        run_mode: metadata.run_mode.as_str(),
+        created_at,
+        snapshot_hash_a: &source_record.snapshot_hash_a,
+        snapshot_hash_b: source_record.snapshot_hash_b.as_deref(),
+        privacy_profile: parse_privacy_profile(&source_record.privacy_profile)?,
+        artifact_status: artifact.status.as_str(),
+        overview: &artifact.overview,
+        summary_cache: &summary_cache,
+        request_fingerprint: Some(&request_plan.request_fingerprint),
+        payload_json: payload_json.clone(),
+        rendered_briefing: rendered_briefing.clone(),
+    })?;
+
+    Ok(FollowUpRunOutput {
         artifact,
         payload_json,
         rendered_briefing,
@@ -452,12 +686,57 @@ pub fn render_compare_briefing(artifact: &CompareArtifactV1) -> String {
     lines.join("\n")
 }
 
+pub fn render_follow_up_briefing(artifact: &FollowUpArtifactV1) -> String {
+    let mut lines = vec![
+        "ringmaster ai follow-up".to_owned(),
+        String::new(),
+        format!("status: {}", artifact.status.as_str()),
+        format!("follow_up_kind: {}", artifact.follow_up_kind.as_str()),
+        format!("overview: {}", artifact.overview),
+    ];
+    if !artifact.focal_findings.is_empty() {
+        lines.push("focal_findings:".to_owned());
+        lines.extend(render_findings(&artifact.focal_findings));
+    }
+    if !artifact.reasoning_steps.is_empty() {
+        lines.push("reasoning_steps:".to_owned());
+        lines.extend(
+            artifact
+                .reasoning_steps
+                .iter()
+                .map(|step| format!("  - {step}")),
+        );
+    }
+    if !artifact.unresolved_questions.is_empty() {
+        lines.push("unresolved_questions:".to_owned());
+        lines.extend(
+            artifact
+                .unresolved_questions
+                .iter()
+                .map(|question| format!("  - {question}")),
+        );
+    }
+    if !artifact.suggested_local_targets.is_empty() {
+        lines.push("suggested_local_targets:".to_owned());
+        lines.extend(artifact.suggested_local_targets.iter().map(|target| {
+            format!(
+                "  - {} => {} ({})",
+                target.label, target.command, target.reason
+            )
+        }));
+    }
+    lines.join("\n")
+}
+
 pub fn parse_stored_artifact(record: &AiArtifactRecord) -> Result<StoredArtifact> {
     match record.artifact_kind.as_str() {
         "review" => Ok(StoredArtifact::Review(serde_json::from_str(
             &record.payload_json,
         )?)),
         "compare" => Ok(StoredArtifact::Compare(serde_json::from_str(
+            &record.payload_json,
+        )?)),
+        "follow_up" => Ok(StoredArtifact::FollowUp(serde_json::from_str(
             &record.payload_json,
         )?)),
         other => Err(RingmasterError::Ui(format!(
@@ -563,6 +842,19 @@ impl AiProvider for DryRunProvider {
             ))
         })
     }
+
+    fn follow_up<'a>(
+        &'a self,
+        request: FollowUpProviderRequest<'a>,
+    ) -> ProviderFuture<'a, FollowUpArtifactV1> {
+        Box::pin(async move {
+            dry_run_follow_up_artifact(
+                request.snapshots,
+                request.source_artifact_json,
+                request.follow_up_kind,
+            )
+        })
+    }
 }
 
 impl AiProvider for FixtureProvider {
@@ -590,6 +882,13 @@ impl AiProvider for FixtureProvider {
     ) -> ProviderFuture<'a, CompareArtifactV1> {
         Box::pin(async move { read_fixture_artifact::<CompareArtifactV1>(&self.fixture_path) })
     }
+
+    fn follow_up<'a>(
+        &'a self,
+        _request: FollowUpProviderRequest<'a>,
+    ) -> ProviderFuture<'a, FollowUpArtifactV1> {
+        Box::pin(async move { read_fixture_artifact::<FollowUpArtifactV1>(&self.fixture_path) })
+    }
 }
 
 impl AiProvider for OpenAiProvider {
@@ -609,7 +908,8 @@ impl AiProvider for OpenAiProvider {
         request: ReviewProviderRequest<'a>,
     ) -> ProviderFuture<'a, ReviewArtifactV1> {
         Box::pin(async move {
-            let plan = build_review_request_plan(&self.config, request.snapshot_json)?;
+            let plan =
+                build_review_request_plan(&self.config, request.snapshot, request.snapshot_json)?;
             self.invoke_structured_output::<ReviewArtifactV1>(plan)
                 .await
         })
@@ -622,10 +922,29 @@ impl AiProvider for OpenAiProvider {
         Box::pin(async move {
             let plan = build_compare_request_plan(
                 &self.config,
+                request.snapshot_a,
                 request.snapshot_a_json,
+                request.snapshot_b,
                 request.snapshot_b_json,
             )?;
             self.invoke_structured_output::<CompareArtifactV1>(plan)
+                .await
+        })
+    }
+
+    fn follow_up<'a>(
+        &'a self,
+        request: FollowUpProviderRequest<'a>,
+    ) -> ProviderFuture<'a, FollowUpArtifactV1> {
+        Box::pin(async move {
+            let plan = build_follow_up_request_plan(
+                &self.config,
+                request.snapshots,
+                request.source_artifact_kind,
+                request.source_artifact_json,
+                request.follow_up_kind,
+            )?;
+            self.invoke_structured_output::<FollowUpArtifactV1>(plan)
                 .await
         })
     }
@@ -691,12 +1010,16 @@ impl OpenAiProvider {
 
 fn build_review_request_plan(
     config: &AiConfig,
+    snapshot: &SnapshotBundleV1,
     snapshot_json: &str,
 ) -> Result<StructuredOutputRequestPlan> {
     build_structured_output_request::<ReviewArtifactV1>(
         config,
         StructuredOutputRequestSpec {
             task_family: "review",
+            snapshots: vec![preview_snapshot("primary", snapshot)],
+            content_classes: request_content_classes_from_snapshots([snapshot]),
+            includes_notes_or_free_text: request_includes_notes_or_free_text([snapshot]),
             schema_name: "ringmaster_review_artifact",
             prompt_version: REVIEW_PROMPT_VERSION,
             output_schema_version: REVIEW_OUTPUT_SCHEMA_VERSION,
@@ -709,13 +1032,27 @@ fn build_review_request_plan(
 
 fn build_compare_request_plan(
     config: &AiConfig,
+    snapshot_a: &SnapshotBundleV1,
     snapshot_a_json: &str,
+    comparison_snapshot: &SnapshotBundleV1,
     comparison_snapshot_json: &str,
 ) -> Result<StructuredOutputRequestPlan> {
     build_structured_output_request::<CompareArtifactV1>(
         config,
         StructuredOutputRequestSpec {
             task_family: "compare",
+            snapshots: vec![
+                preview_snapshot("snapshot_a", snapshot_a),
+                preview_snapshot("snapshot_b", comparison_snapshot),
+            ],
+            content_classes: request_content_classes_from_snapshots([
+                snapshot_a,
+                comparison_snapshot,
+            ]),
+            includes_notes_or_free_text: request_includes_notes_or_free_text([
+                snapshot_a,
+                comparison_snapshot,
+            ]),
             schema_name: "ringmaster_compare_artifact",
             prompt_version: COMPARE_PROMPT_VERSION,
             output_schema_version: COMPARE_OUTPUT_SCHEMA_VERSION,
@@ -728,8 +1065,62 @@ fn build_compare_request_plan(
     )
 }
 
+fn build_follow_up_request_plan(
+    config: &AiConfig,
+    snapshots: &[(&SnapshotBundleV1, &str)],
+    source_artifact_kind: &str,
+    source_artifact_json: &str,
+    follow_up_kind: GuidedFollowUpKind,
+) -> Result<StructuredOutputRequestPlan> {
+    let snapshot_payload = snapshots
+        .iter()
+        .enumerate()
+        .map(|(index, (_, json))| format!("snapshot_{}_json:\n{}\n", index + 1, json))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    build_structured_output_request::<FollowUpArtifactV1>(
+        config,
+        StructuredOutputRequestSpec {
+            task_family: "follow_up",
+            snapshots: snapshots
+                .iter()
+                .enumerate()
+                .map(|(index, (snapshot, _))| {
+                    preview_snapshot(&format!("snapshot_{}", index + 1), snapshot)
+                })
+                .collect(),
+            content_classes: {
+                let mut classes = request_content_classes_from_snapshots(
+                    snapshots.iter().map(|(snapshot, _)| *snapshot),
+                );
+                classes.push("stored_artifact_context".to_owned());
+                classes
+            },
+            includes_notes_or_free_text: request_includes_notes_or_free_text(
+                snapshots.iter().map(|(snapshot, _)| *snapshot),
+            ),
+            schema_name: "ringmaster_follow_up_artifact",
+            prompt_version: FOLLOW_UP_PROMPT_VERSION,
+            output_schema_version: FOLLOW_UP_OUTPUT_SCHEMA_VERSION,
+            system_instructions: follow_up_system_prompt(),
+            task_framing: follow_up_task_framing(),
+            snapshot_payload: format!(
+                "follow_up_kind: {}\nsource_artifact_kind: {}\nsource_artifact_json:\n{}\n\n{}",
+                follow_up_kind.as_str(),
+                source_artifact_kind,
+                source_artifact_json,
+                snapshot_payload
+            ),
+        },
+    )
+}
+
 struct StructuredOutputRequestSpec<'a> {
     task_family: &'a str,
+    snapshots: Vec<AiRequestPreviewSnapshot>,
+    content_classes: Vec<String>,
+    includes_notes_or_free_text: bool,
     schema_name: &'a str,
     prompt_version: &'a str,
     output_schema_version: &'a str,
@@ -747,6 +1138,9 @@ where
 {
     let StructuredOutputRequestSpec {
         task_family,
+        snapshots,
+        content_classes,
+        includes_notes_or_free_text,
         schema_name,
         prompt_version,
         output_schema_version,
@@ -810,37 +1204,177 @@ where
 
     Ok(StructuredOutputRequestPlan {
         body,
-        preview: format!(
-            "\
-ringmaster ai request preview
-
-task_family: {task_family}
-provider: openai
-request_mode: {}
-input_transport: {}
-prompt_cache: {}
-prompt_version: {prompt_version}
-output_schema_version: {output_schema_version}
-prefix_fingerprint: {}
-payload_fingerprint: {}
-request_fingerprint: {}
-sections:
-  - system_instructions
-  - task_framing
-  - output_schema
-  - snapshot_payload
-snapshot_bytes: {}
-",
-            config.request_mode.as_str(),
-            config.input_transport.as_str(),
-            prompt_cache_label(config.prompt_cache),
-            short_fingerprint(&prefix_fingerprint, 16),
-            short_fingerprint(&payload_fingerprint, 16),
-            short_fingerprint(&request_fingerprint, 16),
-            snapshot_payload.len(),
-        ),
+        preview: AiRequestPreview {
+            task_family: task_family.to_owned(),
+            provider: "openai".to_owned(),
+            model: config.model.clone(),
+            request_mode: config.request_mode.as_str().to_owned(),
+            input_transport: config.input_transport.as_str().to_owned(),
+            prompt_cache: prompt_cache_label(config.prompt_cache).to_owned(),
+            prompt_version: prompt_version.to_owned(),
+            output_schema_version: output_schema_version.to_owned(),
+            snapshots,
+            snapshot_bytes: snapshot_payload.len(),
+            approximate_input_tokens: snapshot_payload.len().div_ceil(4),
+            stateless: matches!(config.request_mode, AiRequestMode::Stateless),
+            tools_disabled: true,
+            includes_notes_or_free_text,
+            content_classes,
+            prefix_fingerprint: short_fingerprint(&prefix_fingerprint, 16),
+            payload_fingerprint: short_fingerprint(&payload_fingerprint, 16),
+            request_fingerprint: short_fingerprint(&request_fingerprint, 16),
+        },
         request_fingerprint,
     })
+}
+
+#[must_use]
+pub fn render_request_preview(preview: &AiRequestPreview) -> String {
+    let mut lines = vec![
+        "ringmaster ai request preview".to_owned(),
+        String::new(),
+        format!("task_family: {}", preview.task_family),
+        format!("provider: {}", preview.provider),
+        format!("model: {}", preview.model),
+        format!("request_mode: {}", preview.request_mode),
+        format!("input_transport: {}", preview.input_transport),
+        format!("prompt_cache: {}", preview.prompt_cache),
+        format!("prompt_version: {}", preview.prompt_version),
+        format!("output_schema_version: {}", preview.output_schema_version),
+        format!("stateless: {}", yes_no(preview.stateless)),
+        format!("tools_disabled: {}", yes_no(preview.tools_disabled)),
+        format!(
+            "includes_notes_or_free_text: {}",
+            yes_no(preview.includes_notes_or_free_text)
+        ),
+        format!("snapshot_bytes: {}", preview.snapshot_bytes),
+        format!(
+            "approximate_input_tokens: {}",
+            preview.approximate_input_tokens
+        ),
+        format!("prefix_fingerprint: {}", preview.prefix_fingerprint),
+        format!("payload_fingerprint: {}", preview.payload_fingerprint),
+        format!("request_fingerprint: {}", preview.request_fingerprint),
+    ];
+    if !preview.content_classes.is_empty() {
+        lines.push("content_classes:".to_owned());
+        lines.extend(
+            preview
+                .content_classes
+                .iter()
+                .map(|content_class| format!("  - {content_class}")),
+        );
+    }
+    if !preview.snapshots.is_empty() {
+        lines.push("snapshots:".to_owned());
+        lines.extend(preview.snapshots.iter().map(|snapshot| {
+            format!(
+                "  - {} | hash={} | scope={} | anchor_day={} | profile={} | days={}",
+                snapshot.label,
+                snapshot.snapshot_hash,
+                snapshot.scope,
+                snapshot.anchor_day,
+                snapshot.privacy_profile.as_str(),
+                snapshot.day_count
+            )
+        }));
+    }
+    lines.join("\n")
+}
+
+fn preview_snapshot(label: &str, snapshot: &SnapshotBundleV1) -> AiRequestPreviewSnapshot {
+    AiRequestPreviewSnapshot {
+        label: label.to_owned(),
+        snapshot_hash: snapshot.metadata.snapshot_hash.clone(),
+        scope: snapshot.metadata.scope.clone(),
+        anchor_day: snapshot.metadata.anchor_day.clone(),
+        privacy_profile: snapshot.metadata.privacy_profile,
+        day_count: day_span_count(&snapshot.metadata.start_day, &snapshot.metadata.end_day),
+    }
+}
+
+fn request_includes_notes_or_free_text<'a>(
+    snapshots: impl IntoIterator<Item = &'a SnapshotBundleV1>,
+) -> bool {
+    snapshots.into_iter().any(|bundle| {
+        bundle.context_events.iter().any(|event| {
+            event
+                .summary
+                .as_ref()
+                .is_some_and(|summary| !summary.trim().is_empty())
+        })
+    })
+}
+
+fn request_content_classes_from_snapshots<'a>(
+    snapshots: impl IntoIterator<Item = &'a SnapshotBundleV1>,
+) -> Vec<String> {
+    let mut classes = BTreeSet::new();
+    for bundle in snapshots {
+        if !bundle.metrics.daily_scores.is_empty() {
+            classes.insert("daily_scores");
+        }
+        if !bundle.metrics.activity.is_empty() {
+            classes.insert("activity");
+        }
+        if !bundle.metrics.heartrate_daily_averages.is_empty() {
+            classes.insert("heartrate_daily_averages");
+        }
+        if !bundle.metrics.sleep_windows.is_empty() {
+            classes.insert("sleep_windows");
+        }
+        if !bundle.metrics.stress.is_empty() {
+            classes.insert("stress");
+        }
+        if !bundle.metrics.resilience.is_empty() {
+            classes.insert("resilience");
+        }
+        if !bundle.metrics.cardiovascular_age.is_empty() {
+            classes.insert("cardiovascular_age");
+        }
+        if !bundle.metrics.vo2_max.is_empty() {
+            classes.insert("vo2_max");
+        }
+        if !bundle.metrics.rest_mode_periods.is_empty() {
+            classes.insert("rest_mode_periods");
+        }
+        if !bundle.baselines.is_empty() {
+            classes.insert("baselines");
+        }
+        if !bundle.trend_summaries.is_empty() {
+            classes.insert("trend_summaries");
+        }
+        if !bundle.context_events.is_empty() {
+            classes.insert("context_events");
+        }
+        if !bundle.pattern_summaries.is_empty() {
+            classes.insert("pattern_summaries");
+        }
+        if !bundle.review_signals.is_empty() {
+            classes.insert("review_signals");
+        }
+        if !bundle.follow_up_targets.is_empty() {
+            classes.insert("follow_up_targets");
+        }
+    }
+    classes.into_iter().map(str::to_owned).collect()
+}
+
+const fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+fn day_span_count(start_day: &str, end_day: &str) -> usize {
+    let parse = |value: &str| {
+        Date::parse(
+            value,
+            &time::macros::format_description!("[year]-[month]-[day]"),
+        )
+    };
+    match (parse(start_day), parse(end_day)) {
+        (Ok(start), Ok(end)) if end >= start => ((end - start).whole_days() + 1) as usize,
+        _ => 0,
+    }
 }
 
 fn dry_run_review_artifact(snapshot: &SnapshotBundleV1) -> ReviewArtifactV1 {
@@ -944,6 +1478,150 @@ fn dry_run_compare_artifact(
         only_in_a,
         only_in_b,
     }
+}
+
+fn dry_run_follow_up_artifact(
+    snapshots: &[(&SnapshotBundleV1, &str)],
+    source_artifact_json: &str,
+    follow_up_kind: GuidedFollowUpKind,
+) -> Result<FollowUpArtifactV1> {
+    let source_snapshot = snapshots
+        .first()
+        .map(|(snapshot, _)| *snapshot)
+        .ok_or_else(|| {
+            RingmasterError::Ui("follow-up requests require at least one snapshot".to_owned())
+        })?;
+    let stored_artifact = match serde_json::from_str::<ReviewArtifactV1>(source_artifact_json) {
+        Ok(review) => StoredArtifact::Review(review),
+        Err(_) => match serde_json::from_str::<CompareArtifactV1>(source_artifact_json) {
+            Ok(compare) => StoredArtifact::Compare(compare),
+            Err(_) => StoredArtifact::FollowUp(serde_json::from_str::<FollowUpArtifactV1>(
+                source_artifact_json,
+            )?),
+        },
+    };
+
+    let (overview, focal_findings, reasoning_steps, unresolved_questions) = match (&stored_artifact, follow_up_kind) {
+        (StoredArtifact::Review(review), GuidedFollowUpKind::ExpandEvidence) => (
+            format!("Expanded evidence for the saved review over {}.", source_snapshot.metadata.scope),
+            review
+                .headline_findings
+                .iter()
+                .chain(review.positive_findings.iter())
+                .chain(review.negative_findings.iter())
+                .take(3)
+                .cloned()
+                .collect(),
+            vec![
+                "Replayed the saved review findings against the exported snapshot payload.".to_owned(),
+                "Kept the strongest evidence refs visible so the next local drill-down stays explicit.".to_owned(),
+            ],
+            review.unresolved_questions.clone(),
+        ),
+        (StoredArtifact::Review(review), GuidedFollowUpKind::ShowCounterevidence) => (
+            "Surfaced the strongest counterevidence already present in the saved review artifact.".to_owned(),
+            review
+                .headline_findings
+                .iter()
+                .chain(review.positive_findings.iter())
+                .chain(review.negative_findings.iter())
+                .filter(|finding| !finding.counterevidence_refs.is_empty())
+                .take(3)
+                .cloned()
+                .collect(),
+            vec![
+                "Prioritized findings that already contain explicit counterevidence refs.".to_owned(),
+                "If a claim had no stored counterevidence, it was left out rather than padded.".to_owned(),
+            ],
+            review.unresolved_questions.clone(),
+        ),
+        (StoredArtifact::Review(review), GuidedFollowUpKind::ExplainRanking) => (
+            "Explained why the saved review findings ranked the way they did.".to_owned(),
+            review
+                .headline_findings
+                .iter()
+                .take(3)
+                .cloned()
+                .collect(),
+            vec![
+                "Headline findings stay first because they combine stronger sufficiency with explicit evidence refs.".to_owned(),
+                "Positive and negative findings remain secondary when their evidence is thinner or less recent.".to_owned(),
+            ],
+            review.unresolved_questions.clone(),
+        ),
+        (StoredArtifact::Review(review), GuidedFollowUpKind::SuggestLocalDrilldown) => (
+            "Suggested the next local investigation targets from the saved review.".to_owned(),
+            review.headline_findings.iter().take(2).cloned().collect(),
+            vec![
+                "Recommended local drill-downs stay inside Review, Explain, Patterns, and Timeline.".to_owned(),
+            ],
+            review.unresolved_questions.clone(),
+        ),
+        (StoredArtifact::Compare(compare), GuidedFollowUpKind::ExpandEvidence) => (
+            "Expanded evidence for the saved comparison artifact.".to_owned(),
+            compare.material_differences.iter().take(3).cloned().collect(),
+            vec![
+                "Material differences remain the anchor for compare follow-ups.".to_owned(),
+                "Supporting evidence from both compared windows stays attached to each finding.".to_owned(),
+            ],
+            compare.uncertainty_warnings.clone(),
+        ),
+        (StoredArtifact::Compare(compare), GuidedFollowUpKind::ShowCounterevidence) => (
+            "Surfaced the strongest counterevidence captured in the saved comparison artifact.".to_owned(),
+            compare
+                .material_differences
+                .iter()
+                .filter(|finding| !finding.counterevidence_refs.is_empty())
+                .take(3)
+                .cloned()
+                .collect(),
+            vec![
+                "Counterevidence stays tied to the original comparison findings, not ad hoc prose.".to_owned(),
+            ],
+            compare.uncertainty_warnings.clone(),
+        ),
+        (StoredArtifact::Compare(compare), GuidedFollowUpKind::ExplainRanking) => (
+            "Explained the ranking of material differences in the saved comparison.".to_owned(),
+            compare.material_differences.iter().take(3).cloned().collect(),
+            vec![
+                "Findings with stronger evidence and clearer cross-window deltas rank first.".to_owned(),
+                "Thin or stale comparisons remain lower-ranked and carry their uncertainty forward.".to_owned(),
+            ],
+            compare.uncertainty_warnings.clone(),
+        ),
+        (StoredArtifact::Compare(compare), GuidedFollowUpKind::SuggestLocalDrilldown) => (
+            "Suggested the next local investigation targets from the saved comparison.".to_owned(),
+            compare.material_differences.iter().take(2).cloned().collect(),
+            vec![
+                "Comparison follow-ups stay local by routing into the underlying day or week views.".to_owned(),
+            ],
+            compare.uncertainty_warnings.clone(),
+        ),
+        (StoredArtifact::FollowUp(follow_up), _) => (
+            format!("Extended the saved {} follow-up with another bounded pass.", follow_up.follow_up_kind.as_str()),
+            follow_up.focal_findings.iter().take(3).cloned().collect(),
+            follow_up.reasoning_steps.clone(),
+            follow_up.unresolved_questions.clone(),
+        ),
+    };
+
+    let suggested_local_targets = match &stored_artifact {
+        StoredArtifact::Review(review) => review.follow_up_targets.clone(),
+        StoredArtifact::Compare(compare) => compare.investigation_targets.clone(),
+        StoredArtifact::FollowUp(follow_up) => follow_up.suggested_local_targets.clone(),
+    };
+
+    Ok(FollowUpArtifactV1 {
+        schema_version: FOLLOW_UP_OUTPUT_SCHEMA_VERSION.to_owned(),
+        prompt_version: FOLLOW_UP_PROMPT_VERSION.to_owned(),
+        status: ArtifactStatus::DryRun,
+        follow_up_kind,
+        overview,
+        focal_findings,
+        reasoning_steps,
+        unresolved_questions,
+        suggested_local_targets,
+    })
 }
 
 fn review_findings_from_snapshot(snapshot: &SnapshotBundleV1) -> Vec<ArtifactFinding> {
@@ -1243,12 +1921,31 @@ fn compare_summary_cache(artifact: &CompareArtifactV1) -> String {
         .unwrap_or_else(|| artifact.overview.clone())
 }
 
+fn follow_up_summary_cache(artifact: &FollowUpArtifactV1) -> String {
+    artifact
+        .focal_findings
+        .first()
+        .map(|finding| format!("{}: {}", finding.title, finding.summary))
+        .unwrap_or_else(|| artifact.overview.clone())
+}
+
 fn merged_privacy_profile(left: PrivacyProfile, right: PrivacyProfile) -> PrivacyProfile {
     use PrivacyProfile::{Balanced, Full, Redacted};
     match (left, right) {
         (Full, _) | (_, Full) => Full,
         (Balanced, _) | (_, Balanced) => Balanced,
         (Redacted, Redacted) => Redacted,
+    }
+}
+
+fn parse_privacy_profile(value: &str) -> Result<PrivacyProfile> {
+    match value {
+        "redacted" => Ok(PrivacyProfile::Redacted),
+        "balanced" => Ok(PrivacyProfile::Balanced),
+        "full" => Ok(PrivacyProfile::Full),
+        other => Err(RingmasterError::Ui(format!(
+            "unsupported privacy profile `{other}` in saved AI artifact metadata"
+        ))),
     }
 }
 
@@ -1331,6 +2028,39 @@ impl ArtifactStatus {
     }
 }
 
+impl AiRunStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+        }
+    }
+}
+
+impl GuidedFollowUpKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExpandEvidence => "expand_evidence",
+            Self::ShowCounterevidence => "show_counterevidence",
+            Self::ExplainRanking => "explain_ranking",
+            Self::SuggestLocalDrilldown => "suggest_local_drilldown",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ExpandEvidence => "Expand evidence",
+            Self::ShowCounterevidence => "Show strongest counterevidence",
+            Self::ExplainRanking => "Explain ranking",
+            Self::SuggestLocalDrilldown => "Suggest next local drill-down",
+        }
+    }
+}
+
 impl ConfidenceLevel {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -1364,8 +2094,9 @@ mod tests {
     use super::{
         ArtifactStatus, COMPARE_OUTPUT_SCHEMA_VERSION, COMPARE_PROMPT_VERSION, CompareArtifactV1,
         REVIEW_OUTPUT_SCHEMA_VERSION, REVIEW_PROMPT_VERSION, ReviewArtifactV1, SufficiencyLevel,
-        artifact_id, dry_run_compare_artifact, dry_run_review_artifact, render_compare_briefing,
-        render_review_briefing, retryable_error, review_snapshot, schema_value,
+        artifact_id, build_review_request_plan, dry_run_compare_artifact, dry_run_review_artifact,
+        render_compare_briefing, render_request_preview, render_review_briefing, retryable_error,
+        review_snapshot, schema_value,
     };
     use crate::config::Config;
     use crate::error::RingmasterError;
@@ -1605,6 +2336,31 @@ mod tests {
         let schema = schema_value::<CompareArtifactV1>()
             .unwrap_or_else(|error| panic!("schema generation should succeed: {error}"));
         assert!(schema.to_string().contains("material_differences"));
+    }
+
+    #[test]
+    fn request_preview_summarizes_snapshot_scope_and_content_classes() {
+        let loaded = loaded_snapshot("today");
+        let plan = build_review_request_plan(
+            &Config::load()
+                .unwrap_or_else(|error| panic!("config should load: {error}"))
+                .ai,
+            &loaded.bundle,
+            &loaded.compact_json,
+        )
+        .unwrap_or_else(|error| panic!("request preview plan should build: {error}"));
+
+        assert_eq!(plan.preview.task_family, "review");
+        assert_eq!(plan.preview.snapshots.len(), 1);
+        assert!(
+            plan.preview
+                .content_classes
+                .iter()
+                .any(|class| class == "daily_scores")
+        );
+        let rendered = render_request_preview(&plan.preview);
+        assert!(rendered.contains("ringmaster ai request preview"));
+        assert!(rendered.contains("scope=today"));
     }
 
     #[test]

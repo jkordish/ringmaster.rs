@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
@@ -22,7 +23,7 @@ use crate::store::queries::{
 
 pub const SNAPSHOT_SCHEMA_VERSION: &str = "ringmaster.snapshot.v1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PrivacyProfile {
     Redacted,
@@ -1008,6 +1009,16 @@ pub fn canonicalize_snapshot_bundle(bundle: &SnapshotBundleV1) -> Result<String>
     serde_json::to_string(bundle).map_err(Into::into)
 }
 
+pub fn write_snapshot_artifact(path: &Path, compact_json: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| RingmasterError::io("creating snapshot artifact directory", error))?;
+    }
+    fs::write(path, compact_json)
+        .map_err(|error| RingmasterError::io("writing snapshot artifact", error))?;
+    Ok(())
+}
+
 pub fn validate_snapshot_bundle(bundle: &SnapshotBundleV1) -> Result<()> {
     if bundle.schema_version != SNAPSHOT_SCHEMA_VERSION {
         return Err(RingmasterError::Config(format!(
@@ -1685,6 +1696,15 @@ impl PrivacyProfile {
             Self::Redacted => "redacted",
             Self::Balanced => "balanced",
             Self::Full => "full",
+        }
+    }
+
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::Redacted => Self::Balanced,
+            Self::Balanced => Self::Full,
+            Self::Full => Self::Redacted,
         }
     }
 }

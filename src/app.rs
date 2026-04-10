@@ -1,7 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 
 use crate::action::Action;
-use crate::config::Config;
+use crate::ai::{
+    self, AiRequestPreview, AiRequestPreviewSnapshot, GuidedFollowUpKind, StoredArtifact,
+};
+use crate::ai_prompts::{COMPARE_PROMPT_VERSION, REVIEW_PROMPT_VERSION};
+use crate::config::{AiRequestMode, Config};
 use crate::insights::{InsightConfidence, MetricInsight, MetricPoint, build_metric_insight};
 use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
 use crate::refresh::SyncFamily;
@@ -9,18 +14,21 @@ use crate::review::{
     InvestigationReport, ReviewCard, ReviewDeck, ReviewFocus, ReviewInputs, ReviewMode,
     build_investigation_report, build_review_deck, ranked_cards,
 };
+use crate::snapshot::PrivacyProfile;
 use crate::store::Store;
 use crate::store::queries::{
-    AiArtifactDaySummaryRecord, ContextEventFamily, ContextEventRecord, DailyOverviewRow,
-    EffectDirection, HeartRatePoint, PatternMetric, PatternRelationWindow, PatternSummaryRecord,
-    PersonalInfoRecord, RecordCounts, RestModePeriodRecord, ReviewSignalDayRecord, SleepTimeRecord,
-    SyncRunStatus, SyncStateRecord, TimeSemantics,
+    AiArtifactDaySummaryRecord, AiArtifactRecord, AiEvalRunRecord, AiRunRecord, ContextEventFamily,
+    ContextEventRecord, DailyOverviewRow, EffectDirection, HeartRatePoint, PatternMetric,
+    PatternRelationWindow, PatternSummaryRecord, PersonalInfoRecord, RecordCounts,
+    ReportExportRecord, RestModePeriodRecord, ReviewSignalDayRecord, SleepTimeRecord,
+    SnapshotCatalogEntry, SyncRunStatus, SyncStateRecord, TimeSemantics,
 };
 use crate::store::webhook_store::{
     AcceptedWebhookDeliveryRecord, DesiredWebhookSubscriptionRecord, InvalidationRecord,
     ProcessingAttemptRecord, RejectedWebhookDeliveryRecord, RemoteWebhookSubscriptionRecord,
     RuntimeHeartbeatRecord,
 };
+use serde::Serialize;
 use time::{Date, OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
 const LIVE_REVIEW_SIGNAL_LOOKBACK_DAYS: i64 = 60;
@@ -65,6 +73,7 @@ pub struct LiveSnapshot {
     pub captured_at: String,
     pub refresh_policy: RefreshPolicySnapshot,
     pub auth_status: AuthStatus,
+    pub ai_ops: AiOpsSnapshot,
     pub webhook: WebhookOpsSnapshot,
     pub personal_info: Option<PersonalInfoRecord>,
     pub daily_history: Vec<DailyOverviewRow>,
@@ -76,11 +85,41 @@ pub struct LiveSnapshot {
     pub sleep_time: Vec<SleepTimeRecord>,
     pub rest_mode_periods: Vec<RestModePeriodRecord>,
     pub ai_artifacts_by_day: BTreeMap<String, AiArtifactDaySummaryRecord>,
+    pub snapshot_catalog: Vec<SnapshotCatalogEntry>,
+    pub ai_runs: Vec<AiRunRecord>,
+    pub ai_artifact_records: Vec<AiArtifactRecord>,
+    pub report_exports: Vec<ReportExportRecord>,
+    pub ai_eval_runs: Vec<AiEvalRunRecord>,
     pub sync_states: Vec<SyncStateRecord>,
     pub record_counts: RecordCounts,
     pub schema_version: u32,
     pub database_path: String,
     pub config_path: String,
+}
+
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiOpsSnapshot {
+    pub enabled: bool,
+    pub provider: String,
+    pub api_key_env: String,
+    pub api_key_ready: bool,
+    pub default_model: String,
+    pub reasoning_effort: String,
+    pub request_mode: String,
+    pub input_transport: String,
+    pub prompt_cache: String,
+    pub review_prompt_version: String,
+    pub compare_prompt_version: String,
+    pub stateless_default: bool,
+    pub tools_disabled: bool,
+    pub snapshot_catalog_count: usize,
+    pub ai_run_count: usize,
+    pub ai_artifact_count: usize,
+    pub report_export_count: usize,
+    pub ai_eval_run_count: usize,
+    pub last_successful_run: Option<String>,
+    pub last_failed_run: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -136,8 +175,23 @@ pub enum Screen {
     Trends,
     Explain,
     Patterns,
-    Ops,
     Review,
+    Ai,
+    Ops,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiBrowserTab {
+    Runs,
+    Snapshots,
+    Reports,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiLaunchIntent {
+    ReviewSelectedDay,
+    CompareSelectedWeek,
+    ChallengeSelectedDay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +239,11 @@ pub struct AppState {
     trends_window: TrendWindowKind,
     selected_event_id: Option<String>,
     selected_review_card_index: usize,
+    ai_preflight: Option<AiPreflightState>,
+    ai_browser_tab: AiBrowserTab,
+    selected_ai_run_index: usize,
+    selected_snapshot_catalog_index: usize,
+    selected_report_export_index: usize,
     overlay_filters: OverlayFilterState,
     pattern_metric_filter: PatternMetricFilter,
     review_mode: ReviewScreenMode,
@@ -200,8 +259,9 @@ pub struct AppModel {
     pub trends: TrendsModel,
     pub explain: ExplainModel,
     pub patterns: PatternsModel,
-    pub ops: OpsModel,
     pub review: ReviewModel,
+    pub ai: AiWorkbenchModel,
+    pub ops: OpsModel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,6 +272,7 @@ pub struct DashboardModel {
     pub capabilities: Vec<CapabilityView>,
     pub change_summary: String,
     pub highlights: Vec<String>,
+    pub ai_actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,6 +313,7 @@ pub struct ExplainModel {
     pub evidence_lines: Vec<String>,
     pub caveat_lines: Vec<String>,
     pub context_lines: Vec<String>,
+    pub ai_actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,6 +323,7 @@ pub struct PatternsModel {
     pub rows: Vec<PatternRowView>,
     pub notes: Vec<String>,
     pub empty_message: String,
+    pub ai_actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,6 +349,69 @@ pub struct ReviewModel {
     pub detail_lines: Vec<String>,
     pub warning_lines: Vec<String>,
     pub empty_message: String,
+    pub ai_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiWorkbenchModel {
+    pub headline: String,
+    pub summary_lines: Vec<String>,
+    pub launch_points: Vec<AiLaunchPointView>,
+    pub browser_tabs: Vec<AiBrowserTabView>,
+    pub selected_tab_index: usize,
+    pub browser_items: Vec<AiBrowserItemView>,
+    pub selected_item_index: Option<usize>,
+    pub detail_title: String,
+    pub detail_lines: Vec<String>,
+    pub trust_lines: Vec<String>,
+    pub warning_lines: Vec<String>,
+    pub preflight: Option<AiPreflightView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiLaunchPointView {
+    pub intent: AiLaunchIntent,
+    pub label: String,
+    pub detail: String,
+    pub key_hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiPreflightState {
+    pub intent: AiLaunchIntent,
+    pub source_screen: Screen,
+    pub snapshot_scope: String,
+    pub snapshot_paths: Vec<String>,
+    pub request_preview: AiRequestPreview,
+    pub privacy_profile: PrivacyProfile,
+    pub model_override: Option<String>,
+    pub source_ai_artifact_id: Option<String>,
+    pub follow_up_kind: Option<GuidedFollowUpKind>,
+    pub warning_lines: Vec<String>,
+    pub confirm_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiPreflightView {
+    pub title: String,
+    pub body_lines: Vec<String>,
+    pub warning_lines: Vec<String>,
+    pub confirm_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiBrowserTabView {
+    pub label: String,
+    pub count: usize,
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiBrowserItemView {
+    pub headline: String,
+    pub detail: String,
+    pub status_badge: String,
+    pub selected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -426,6 +552,11 @@ struct LiveModelOptions {
     selected_day_index: usize,
     selected_point_index: usize,
     selected_event_id: Option<String>,
+    ai_preflight: Option<AiPreflightState>,
+    ai_browser_tab: AiBrowserTab,
+    selected_ai_run_index: usize,
+    selected_snapshot_catalog_index: usize,
+    selected_report_export_index: usize,
     overlay_filters: OverlayFilterState,
     window_hours: u16,
     trends_window: TrendWindowKind,
@@ -664,6 +795,123 @@ impl AppState {
                     self.rebuild_live_model();
                 }
             }
+            Action::RequestAiLaunch(intent) => {
+                self.active_screen = Screen::Ai;
+                self.status_line = format!("Preparing {} preflight.", intent.label());
+                self.ai_preflight = None;
+                self.rebuild_live_model();
+            }
+            Action::AiPreflightPrepared {
+                preflight,
+                status_line,
+            } => {
+                self.active_screen = Screen::Ai;
+                self.ai_preflight = Some(*preflight);
+                self.status_line = status_line;
+                self.rebuild_live_model();
+            }
+            Action::AiPreflightFailed { message } => {
+                self.active_screen = Screen::Ai;
+                self.ai_preflight = None;
+                self.status_line = message;
+                self.rebuild_live_model();
+            }
+            Action::DismissAiPreflight => {
+                if self.ai_preflight.take().is_some() {
+                    "AI preflight dismissed.".clone_into(&mut self.status_line);
+                    self.rebuild_live_model();
+                }
+            }
+            Action::CycleAiPreflightPrivacyProfile => {
+                if self.ai_preflight.is_some() {
+                    "Cycling AI preflight privacy profile.".clone_into(&mut self.status_line);
+                }
+            }
+            Action::ConfirmAiPreflight => {
+                if self
+                    .ai_preflight
+                    .as_ref()
+                    .is_some_and(|preflight| preflight.confirm_enabled)
+                {
+                    self.ai_preflight = None;
+                    self.rebuild_live_model();
+                    "Queueing AI run from preflight.".clone_into(&mut self.status_line);
+                } else if self.ai_preflight.is_some() {
+                    "AI preflight is blocked until provider readiness issues are resolved."
+                        .clone_into(&mut self.status_line);
+                }
+            }
+            Action::RequestCancelAiRun => {
+                "Requesting AI run cancellation.".clone_into(&mut self.status_line);
+            }
+            Action::RequestAiGuidedFollowUp(kind) => {
+                self.active_screen = Screen::Ai;
+                self.status_line = format!("Preparing {} follow-up.", kind.label());
+            }
+            Action::RequestAiRerunNextPrivacy => {
+                self.active_screen = Screen::Ai;
+                "Preparing rerun with another privacy profile.".clone_into(&mut self.status_line);
+            }
+            Action::RequestAiRerunNextModel => {
+                self.active_screen = Screen::Ai;
+                "Preparing rerun with another model.".clone_into(&mut self.status_line);
+            }
+            Action::RequestAiComparePreviousSnapshot => {
+                self.active_screen = Screen::Ai;
+                "Preparing compare against the nearest previous similar snapshot."
+                    .clone_into(&mut self.status_line);
+            }
+            Action::RequestAiGenerateReport => {
+                self.active_screen = Screen::Ai;
+                "Exporting a local report for the selected AI artifact."
+                    .clone_into(&mut self.status_line);
+            }
+            Action::RequestJumpToAiEvidence => {
+                self.active_screen = Screen::Ai;
+                "Resolving saved evidence back into the local investigation views."
+                    .clone_into(&mut self.status_line);
+            }
+            Action::JumpToDayAndScreen {
+                day,
+                screen,
+                status_line,
+            } => {
+                if self.select_day_by_label(&day) {
+                    self.active_screen = screen;
+                    self.status_line = status_line;
+                    self.rebuild_live_model();
+                } else {
+                    self.status_line = format!(
+                        "Could not resolve saved evidence day `{day}` back into the local views."
+                    );
+                }
+            }
+            Action::PreviousAiBrowserTab => {
+                self.ai_browser_tab = self.ai_browser_tab.previous();
+                self.status_line =
+                    format!("AI browser switched to {}.", self.ai_browser_tab.label());
+                self.rebuild_live_model();
+            }
+            Action::NextAiBrowserTab => {
+                self.ai_browser_tab = self.ai_browser_tab.next();
+                self.status_line =
+                    format!("AI browser switched to {}.", self.ai_browser_tab.label());
+                self.rebuild_live_model();
+            }
+            Action::PreviousAiBrowserItem => {
+                if self.adjust_ai_browser_index(-1) {
+                    self.status_line =
+                        format!("AI selection moved within {}.", self.ai_browser_tab.label());
+                    self.rebuild_live_model();
+                }
+            }
+            Action::NextAiBrowserItem => {
+                if self.adjust_ai_browser_index(1) {
+                    self.status_line =
+                        format!("AI selection moved within {}.", self.ai_browser_tab.label());
+                    self.rebuild_live_model();
+                }
+            }
         }
     }
 
@@ -671,13 +919,19 @@ impl AppState {
     pub fn footer(&self) -> String {
         let spinner = ["·", "o", "O", "o"][(self.tick_count % 4) as usize];
         let screen_hint = match self.active_screen {
-            Screen::Dashboard => "[ ] day | 1-7 jump",
+            Screen::Dashboard => "[ ] day | a review | c compare | 1-8 jump",
             Screen::Timeline => "[ ] day | , . hr | j k event | -/= zoom | w/t/s filters",
             Screen::Trends => "[ ] window",
-            Screen::Explain => "[ ] day | j k event | w/t/s filters",
-            Screen::Patterns => "w/t/s family | m metric",
-            Screen::Review => "[ ] day | v mode | f focus | j k cards",
-            Screen::Ops => "1-7 jump",
+            Screen::Explain => "[ ] day | j k event | a review | w/t/s filters",
+            Screen::Patterns => "w/t/s family | m metric | c compare",
+            Screen::Review => "[ ] day | v mode | f focus | j k cards | a/c AI",
+            Screen::Ai if self.ai_preflight.is_some() => {
+                "enter confirm | n cancel | p privacy | 1-8 jump"
+            }
+            Screen::Ai => {
+                "[ ] tab | j k select | a/c launch | e/y/i/d follow-up | g report | u/m rerun | b baseline | o evidence | x cancel run"
+            }
+            Screen::Ops => "1-8 jump",
         };
         let refresh_hint = if self.refresh_in_flight {
             "refreshing"
@@ -729,6 +983,11 @@ impl AppState {
                     selected_day_index: self.selected_day_index,
                     selected_point_index: self.selected_timeline_point,
                     selected_event_id: self.selected_event_id.clone(),
+                    ai_preflight: self.ai_preflight.clone(),
+                    ai_browser_tab: self.ai_browser_tab,
+                    selected_ai_run_index: self.selected_ai_run_index,
+                    selected_snapshot_catalog_index: self.selected_snapshot_catalog_index,
+                    selected_report_export_index: self.selected_report_export_index,
                     overlay_filters: self.overlay_filters.clone(),
                     window_hours: self.timeline_window_hours,
                     trends_window: self.trends_window,
@@ -748,12 +1007,65 @@ impl AppState {
             .map_or(0, |snapshot| available_days(snapshot).len())
     }
 
-    fn selected_day_label(&self) -> Option<String> {
+    pub(crate) fn selected_day_label(&self) -> Option<String> {
         self.live_snapshot.as_ref().and_then(|snapshot| {
             available_days(snapshot)
                 .get(self.selected_day_index)
                 .cloned()
         })
+    }
+
+    pub(crate) fn ai_preflight_state(&self) -> Option<&AiPreflightState> {
+        self.ai_preflight.as_ref()
+    }
+
+    pub(crate) fn selected_ai_run_record(&self) -> Option<AiRunRecord> {
+        self.live_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.ai_runs.get(self.selected_ai_run_index))
+            .cloned()
+    }
+
+    pub(crate) fn selected_snapshot_catalog_entry(&self) -> Option<SnapshotCatalogEntry> {
+        self.live_snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                snapshot
+                    .snapshot_catalog
+                    .get(self.selected_snapshot_catalog_index)
+            })
+            .cloned()
+    }
+
+    pub(crate) fn selected_report_export_record(&self) -> Option<ReportExportRecord> {
+        self.live_snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                snapshot
+                    .report_exports
+                    .get(self.selected_report_export_index)
+            })
+            .cloned()
+    }
+
+    pub(crate) fn selected_ai_browser_tab(&self) -> AiBrowserTab {
+        self.ai_browser_tab
+    }
+
+    fn select_day_by_label(&mut self, day: &str) -> bool {
+        let Some(snapshot) = &self.live_snapshot else {
+            return false;
+        };
+        let day_labels = available_days(snapshot);
+        let Some(index) = day_labels.iter().position(|candidate| candidate == day) else {
+            return false;
+        };
+        self.selected_day_index = index;
+        self.selected_timeline_point = 0;
+        self.selected_review_card_index = 0;
+        self.select_default_event_for_selected_day();
+        self.align_point_to_selected_event();
+        true
     }
 
     fn visible_timeline_point_count(&self) -> usize {
@@ -900,16 +1212,54 @@ impl AppState {
         self.selected_event_id = Some(events[new_index].context_event_id.clone());
         true
     }
+
+    fn adjust_ai_browser_index(&mut self, delta: isize) -> bool {
+        let len = match self.ai_browser_tab {
+            AiBrowserTab::Runs => self
+                .live_snapshot
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.ai_runs.len()),
+            AiBrowserTab::Snapshots => self
+                .live_snapshot
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.snapshot_catalog.len()),
+            AiBrowserTab::Reports => self
+                .live_snapshot
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.report_exports.len()),
+        };
+        if len == 0 {
+            return false;
+        }
+
+        let selected = match self.ai_browser_tab {
+            AiBrowserTab::Runs => &mut self.selected_ai_run_index,
+            AiBrowserTab::Snapshots => &mut self.selected_snapshot_catalog_index,
+            AiBrowserTab::Reports => &mut self.selected_report_export_index,
+        };
+        let new_index = if delta.is_negative() {
+            selected.saturating_sub(delta.unsigned_abs())
+        } else {
+            usize::min(
+                selected.saturating_add(delta as usize),
+                len.saturating_sub(1),
+            )
+        };
+        let changed = *selected != new_index;
+        *selected = new_index;
+        changed
+    }
 }
 
 impl Screen {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Dashboard,
         Self::Timeline,
         Self::Trends,
         Self::Explain,
         Self::Patterns,
         Self::Review,
+        Self::Ai,
         Self::Ops,
     ];
 
@@ -922,6 +1272,7 @@ impl Screen {
             Self::Explain => "Explain",
             Self::Patterns => "Patterns",
             Self::Review => "Review",
+            Self::Ai => "AI",
             Self::Ops => "Status",
         }
     }
@@ -934,7 +1285,8 @@ impl Screen {
             Self::Explain => 3,
             Self::Patterns => 4,
             Self::Review => 5,
-            Self::Ops => 6,
+            Self::Ai => 6,
+            Self::Ops => 7,
         }
     }
 
@@ -945,7 +1297,8 @@ impl Screen {
             Self::Trends => Self::Explain,
             Self::Explain => Self::Patterns,
             Self::Patterns => Self::Review,
-            Self::Review => Self::Ops,
+            Self::Review => Self::Ai,
+            Self::Ai => Self::Ops,
             Self::Ops => Self::Dashboard,
         }
     }
@@ -958,7 +1311,64 @@ impl Screen {
             Self::Explain => Self::Trends,
             Self::Patterns => Self::Explain,
             Self::Review => Self::Patterns,
-            Self::Ops => Self::Review,
+            Self::Ai => Self::Review,
+            Self::Ops => Self::Ai,
+        }
+    }
+}
+
+impl AiBrowserTab {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Runs => "runs",
+            Self::Snapshots => "snapshots",
+            Self::Reports => "reports",
+        }
+    }
+
+    #[must_use]
+    pub fn index(self) -> usize {
+        match self {
+            Self::Runs => 0,
+            Self::Snapshots => 1,
+            Self::Reports => 2,
+        }
+    }
+
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::Runs => Self::Snapshots,
+            Self::Snapshots => Self::Reports,
+            Self::Reports => Self::Runs,
+        }
+    }
+
+    #[must_use]
+    pub fn previous(self) -> Self {
+        match self {
+            Self::Runs => Self::Reports,
+            Self::Snapshots => Self::Runs,
+            Self::Reports => Self::Snapshots,
+        }
+    }
+}
+
+impl AiLaunchIntent {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ReviewSelectedDay => "AI review for the selected day",
+            Self::CompareSelectedWeek => "AI compare for the selected week",
+            Self::ChallengeSelectedDay => "AI challenge for the selected day",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::ReviewSelectedDay => "Review this day",
+            Self::CompareSelectedWeek => "Compare this week",
+            Self::ChallengeSelectedDay => "Challenge this view",
         }
     }
 }
@@ -1105,6 +1515,11 @@ pub fn build_state_from_snapshot(
         trends_window: TrendWindowKind::Days7,
         selected_event_id: None,
         selected_review_card_index: 0,
+        ai_preflight: None,
+        ai_browser_tab: AiBrowserTab::Runs,
+        selected_ai_run_index: 0,
+        selected_snapshot_catalog_index: 0,
+        selected_report_export_index: 0,
         overlay_filters: OverlayFilterState::all(),
         pattern_metric_filter: PatternMetricFilter::All,
         review_mode: ReviewScreenMode::Today,
@@ -1126,12 +1541,31 @@ pub fn build_live_state(
     store: &Store,
     auth_status: &AuthStatus,
 ) -> crate::error::Result<AppState> {
+    interrupt_stale_ai_runs(store)?;
     let snapshot = load_live_snapshot(config, store, auth_status)?;
     Ok(build_state_from_snapshot(
         RunMode::Live,
         "Live mode is reading from the local store.",
         snapshot,
     ))
+}
+
+fn interrupt_stale_ai_runs(store: &Store) -> crate::error::Result<()> {
+    let interrupted_at = now_rfc3339();
+    for mut run in store.analysis().list_ai_run_records()? {
+        if matches!(run.run_status.as_str(), "queued" | "running") {
+            ai::AiRunStatus::Interrupted
+                .as_str()
+                .clone_into(&mut run.run_status);
+            run.error_message.get_or_insert_with(|| {
+                "Interrupted when a previous TUI session ended before the run completed.".to_owned()
+            });
+            run.ended_at.get_or_insert_with(|| interrupted_at.clone());
+            run.updated_at.clone_from(&interrupted_at);
+            store.analysis().upsert_ai_run(&run)?;
+        }
+    }
+    Ok(())
 }
 
 /// Load the live snapshot that drives the terminal UI from local persisted state.
@@ -1189,11 +1623,25 @@ pub fn load_live_snapshot(
             ai_artifacts_by_day.insert(day, artifact);
         }
     }
+    let snapshot_catalog = store.analysis().list_snapshot_exports()?;
+    let ai_runs = store.analysis().list_ai_run_records()?;
+    let ai_artifact_records = store.analysis().list_ai_artifact_records()?;
+    let report_exports = store.analysis().list_report_exports()?;
+    let ai_eval_runs = store.analysis().list_ai_eval_runs()?;
+    let ai_ops = build_ai_ops_snapshot(
+        config,
+        &snapshot_catalog,
+        &ai_runs,
+        &ai_artifact_records,
+        &report_exports,
+        &ai_eval_runs,
+    );
 
     Ok(LiveSnapshot {
         captured_at: now_rfc3339(),
         refresh_policy: RefreshPolicySnapshot::from_config(config),
         auth_status: auth_status.clone(),
+        ai_ops,
         webhook: WebhookOpsSnapshot {
             bind_address: config.webhook.bind.to_string(),
             path: config.webhook.path.clone(),
@@ -1220,6 +1668,11 @@ pub fn load_live_snapshot(
         sleep_time,
         rest_mode_periods,
         ai_artifacts_by_day,
+        snapshot_catalog,
+        ai_runs,
+        ai_artifact_records,
+        report_exports,
+        ai_eval_runs,
         sync_states: store.sync_state().list()?,
         record_counts: store.views().record_counts()?,
         schema_version: store.metadata().schema_version()?,
@@ -1231,6 +1684,73 @@ pub fn load_live_snapshot(
 pub fn build_demo_state(config: &Config) -> AppState {
     let snapshot = demo_snapshot(config);
     build_state_from_snapshot(RunMode::Demo, "Demo mode ready.", snapshot)
+}
+
+fn serialize_json<T: Serialize>(value: &T) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "{}".to_owned())
+}
+
+fn serialize_pretty_json<T: Serialize>(value: &T) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_owned())
+}
+
+fn build_ai_ops_snapshot(
+    config: &Config,
+    snapshot_catalog: &[SnapshotCatalogEntry],
+    ai_runs: &[AiRunRecord],
+    ai_artifact_records: &[AiArtifactRecord],
+    report_exports: &[ReportExportRecord],
+    ai_eval_runs: &[AiEvalRunRecord],
+) -> AiOpsSnapshot {
+    let last_successful_run = ai_runs
+        .iter()
+        .find(|run| run.run_status == "succeeded")
+        .map(|run| format!("{} {}", run.run_kind, run.created_at));
+    let last_failed_run = ai_runs
+        .iter()
+        .find(|run| {
+            matches!(
+                run.run_status.as_str(),
+                "failed" | "cancelled" | "interrupted"
+            )
+        })
+        .map(|run| format!("{} {} ({})", run.run_kind, run.created_at, run.run_status));
+
+    AiOpsSnapshot {
+        enabled: config.ai.enabled,
+        provider: format!("{:?}", config.ai.provider).to_ascii_lowercase(),
+        api_key_env: config.ai.api_key_env.clone(),
+        api_key_ready: env::var_os(&config.ai.api_key_env).is_some(),
+        default_model: config.ai.model.clone(),
+        reasoning_effort: config
+            .ai
+            .reasoning_effort
+            .clone()
+            .unwrap_or_else(|| "default".to_owned()),
+        request_mode: match config.ai.request_mode {
+            AiRequestMode::Stateless => "stateless".to_owned(),
+            AiRequestMode::Stateful => "stateful".to_owned(),
+        },
+        input_transport: match config.ai.input_transport {
+            crate::config::AiInputTransport::Inline => "inline".to_owned(),
+            crate::config::AiInputTransport::FileUpload => "file_upload".to_owned(),
+        },
+        prompt_cache: match config.ai.prompt_cache {
+            crate::config::PromptCacheMode::Off => "off".to_owned(),
+            crate::config::PromptCacheMode::Auto => "auto".to_owned(),
+        },
+        review_prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
+        compare_prompt_version: COMPARE_PROMPT_VERSION.to_owned(),
+        stateless_default: matches!(config.ai.request_mode, AiRequestMode::Stateless),
+        tools_disabled: true,
+        snapshot_catalog_count: snapshot_catalog.len(),
+        ai_run_count: ai_runs.len(),
+        ai_artifact_count: ai_artifact_records.len(),
+        report_export_count: report_exports.len(),
+        ai_eval_run_count: ai_eval_runs.len(),
+        last_successful_run,
+        last_failed_run,
+    }
 }
 
 fn build_live_model(snapshot: &LiveSnapshot, options: &LiveModelOptions) -> AppModel {
@@ -1294,8 +1814,9 @@ fn build_live_model(snapshot: &LiveSnapshot, options: &LiveModelOptions) -> AppM
             &options.overlay_filters,
             options.pattern_metric_filter,
         ),
-        ops: build_ops_model(snapshot, options.refresh_in_flight),
         review: build_review_model(&today_review, &week_review, &investigation, &review_context),
+        ai: build_ai_workbench_model(snapshot, options),
+        ops: build_ops_model(snapshot, options.refresh_in_flight),
     }
 }
 
@@ -1412,6 +1933,11 @@ fn build_dashboard_model(
         capabilities: capability_views(&snapshot.auth_status.capability_report),
         change_summary,
         highlights,
+        ai_actions: vec![
+            "[ai] a review this day".to_owned(),
+            "[ai] c compare this week to the previous week".to_owned(),
+            "[ai] 7 open the AI workbench".to_owned(),
+        ],
     }
 }
 
@@ -1729,6 +2255,10 @@ fn build_explain_model(
             lines.push("Press 2 to open Timeline with the same selected event.".to_owned());
             lines
         },
+        ai_actions: vec![
+            "[ai] a review this day inside the AI workbench".to_owned(),
+            "[ai] 7 open the AI workbench for saved runs and reports".to_owned(),
+        ],
     }
 }
 
@@ -1763,6 +2293,10 @@ fn build_patterns_model(
         ],
         empty_message:
             "Not enough data yet. Patterns appear after at least 3 comparable days.".to_owned(),
+        ai_actions: vec![
+            "[ai] c compare this week to the previous week".to_owned(),
+            "[ai] 7 open the AI workbench".to_owned(),
+        ],
     }
 }
 
@@ -1846,6 +2380,12 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
             "Queue: pending={} oldest={} failed_attempts={}",
             queue_depth, queue_oldest, recent_failures
         ),
+        format!(
+            "AI: enabled={} key_ready={} model={}",
+            yes_no(snapshot.ai_ops.enabled),
+            yes_no(snapshot.ai_ops.api_key_ready),
+            snapshot.ai_ops.default_model
+        ),
     ];
 
     let mut warnings = family_statuses
@@ -1865,6 +2405,12 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
             "Patterns are currently empty; run `cargo run -- derive rebuild` or sync more history."
                 .to_owned(),
         );
+    }
+    if snapshot.ai_ops.enabled && !snapshot.ai_ops.api_key_ready {
+        warnings.push(format!(
+            "AI is enabled but `{}` is missing, so launches will stop at readiness checks.",
+            snapshot.ai_ops.api_key_env
+        ));
     }
     warnings.extend(recent_health_incidents(snapshot));
 
@@ -1928,6 +2474,59 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
             ops_item(
                 "Secret backend",
                 snapshot.auth_status.secret_backend.clone(),
+            ),
+            ops_item(
+                "AI provider",
+                format!(
+                    "{} | enabled={} | key_ready={}",
+                    snapshot.ai_ops.provider,
+                    yes_no(snapshot.ai_ops.enabled),
+                    yes_no(snapshot.ai_ops.api_key_ready)
+                ),
+            ),
+            ops_item("AI default model", snapshot.ai_ops.default_model.clone()),
+            ops_item(
+                "AI request mode",
+                format!(
+                    "{} | transport={} | prompt_cache={}",
+                    snapshot.ai_ops.request_mode,
+                    snapshot.ai_ops.input_transport,
+                    snapshot.ai_ops.prompt_cache
+                ),
+            ),
+            ops_item(
+                "AI prompt/schema",
+                format!(
+                    "review={} | compare={}",
+                    snapshot.ai_ops.review_prompt_version, snapshot.ai_ops.compare_prompt_version
+                ),
+            ),
+            ops_item(
+                "AI last successful run",
+                snapshot
+                    .ai_ops
+                    .last_successful_run
+                    .clone()
+                    .unwrap_or_else(|| "none".to_owned()),
+            ),
+            ops_item(
+                "AI last failed run",
+                snapshot
+                    .ai_ops
+                    .last_failed_run
+                    .clone()
+                    .unwrap_or_else(|| "none".to_owned()),
+            ),
+            ops_item(
+                "Artifact registry",
+                format!(
+                    "snapshots={} runs={} artifacts={} reports={} evals={}",
+                    snapshot.ai_ops.snapshot_catalog_count,
+                    snapshot.ai_ops.ai_run_count,
+                    snapshot.ai_ops.ai_artifact_count,
+                    snapshot.ai_ops.report_export_count,
+                    snapshot.ai_ops.ai_eval_run_count,
+                ),
             ),
             ops_item(
                 "Receiver heartbeat",
@@ -2071,6 +2670,725 @@ fn build_review_model(
             investigation,
         ),
         empty_message: review_empty_message(context.review_mode, context.review_focus),
+        ai_actions: vec![
+            "[ai] a review this day in the AI workbench".to_owned(),
+            "[ai] c compare this week to the previous week".to_owned(),
+            "[ai] 7 open the dedicated AI workbench".to_owned(),
+        ],
+    }
+}
+
+fn build_ai_workbench_model(
+    snapshot: &LiveSnapshot,
+    options: &LiveModelOptions,
+) -> AiWorkbenchModel {
+    let selected_day = selected_day_label(snapshot, options.selected_day_index)
+        .unwrap_or_else(|| latest_review_anchor_day(snapshot));
+    let launch_points = build_ai_launch_points(&selected_day);
+    let browser_tabs = [
+        (
+            AiBrowserTab::Runs,
+            "Runs",
+            snapshot.ai_runs.len(),
+            options.ai_browser_tab == AiBrowserTab::Runs,
+        ),
+        (
+            AiBrowserTab::Snapshots,
+            "Snapshots",
+            snapshot.snapshot_catalog.len(),
+            options.ai_browser_tab == AiBrowserTab::Snapshots,
+        ),
+        (
+            AiBrowserTab::Reports,
+            "Reports",
+            snapshot.report_exports.len(),
+            options.ai_browser_tab == AiBrowserTab::Reports,
+        ),
+    ]
+    .into_iter()
+    .map(|(_, label, count, selected)| AiBrowserTabView {
+        label: label.to_owned(),
+        count,
+        selected,
+    })
+    .collect::<Vec<_>>();
+
+    let (browser_items, selected_item_index, detail_title, detail_lines) =
+        build_ai_browser_content(snapshot, options);
+
+    let mut summary_lines = vec![
+        format!(
+            "Snapshot-first AI is {} and {} by default.",
+            if snapshot.ai_ops.enabled {
+                "available"
+            } else {
+                "disabled"
+            },
+            if snapshot.ai_ops.stateless_default {
+                "stateless"
+            } else {
+                "stateful"
+            }
+        ),
+        format!(
+            "Tools disabled: {} | payload path always starts from an exported snapshot artifact.",
+            yes_no(snapshot.ai_ops.tools_disabled)
+        ),
+        format!(
+            "Catalog: {} snapshots, {} runs, {} reports.",
+            snapshot.ai_ops.snapshot_catalog_count,
+            snapshot.ai_ops.ai_run_count,
+            snapshot.ai_ops.report_export_count
+        ),
+    ];
+    if let Some(last_successful_run) = &snapshot.ai_ops.last_successful_run {
+        summary_lines.push(format!("Last successful run: {last_successful_run}"));
+    }
+
+    let trust_lines = vec![
+        format!(
+            "Provider: {} | API key ready: {}",
+            snapshot.ai_ops.provider,
+            yes_no(snapshot.ai_ops.api_key_ready)
+        ),
+        format!(
+            "Model: {} | reasoning_effort: {}",
+            snapshot.ai_ops.default_model, snapshot.ai_ops.reasoning_effort
+        ),
+        format!(
+            "Request mode: {} | transport: {} | prompt cache: {}",
+            snapshot.ai_ops.request_mode,
+            snapshot.ai_ops.input_transport,
+            snapshot.ai_ops.prompt_cache
+        ),
+        format!(
+            "Prompt/schema: review={} compare={}",
+            snapshot.ai_ops.review_prompt_version, snapshot.ai_ops.compare_prompt_version
+        ),
+        format!(
+            "Artifacts: {} structured outputs | {} eval summaries",
+            snapshot.ai_ops.ai_artifact_count, snapshot.ai_ops.ai_eval_run_count
+        ),
+    ];
+
+    let mut warning_lines = Vec::new();
+    if !snapshot.ai_ops.enabled {
+        warning_lines.push(
+            "Provider is disabled. The workbench remains browseable, but launches stay local-only until AI is enabled."
+                .to_owned(),
+        );
+    }
+    if snapshot.ai_ops.enabled && !snapshot.ai_ops.api_key_ready {
+        warning_lines.push(format!(
+            "The configured API key env `{}` is not present, so new AI runs will fail preflight.",
+            snapshot.ai_ops.api_key_env
+        ));
+    }
+    if snapshot.ai_runs.is_empty() {
+        warning_lines.push(
+            "No persisted AI runs yet. Launch from Review, Explain, Patterns, Dashboard, or this workbench to seed the local registry."
+                .to_owned(),
+        );
+    }
+    if let Some(last_failed_run) = &snapshot.ai_ops.last_failed_run {
+        warning_lines.push(format!("Most recent failed run: {last_failed_run}"));
+    }
+    let preflight = options.ai_preflight.as_ref().map(build_ai_preflight_view);
+
+    AiWorkbenchModel {
+        headline: format!("AI workbench for {}", selected_day),
+        summary_lines,
+        launch_points,
+        browser_tabs,
+        selected_tab_index: options.ai_browser_tab.index(),
+        browser_items,
+        selected_item_index,
+        detail_title,
+        detail_lines,
+        trust_lines,
+        warning_lines,
+        preflight,
+    }
+}
+
+fn build_ai_launch_points(selected_day: &str) -> Vec<AiLaunchPointView> {
+    vec![
+        AiLaunchPointView {
+            intent: AiLaunchIntent::ReviewSelectedDay,
+            label: "Review this day".to_owned(),
+            detail: format!(
+                "Prepare a snapshot-scoped review for day:{selected_day}, then confirm the exact payload in preflight before any upload."
+            ),
+            key_hint: "a".to_owned(),
+        },
+        AiLaunchPointView {
+            intent: AiLaunchIntent::CompareSelectedWeek,
+            label: "Compare this week".to_owned(),
+            detail:
+                "Prepare a week-to-week compare with explicit snapshot A/B provenance and model/privacy choices."
+                    .to_owned(),
+            key_hint: "c".to_owned(),
+        },
+        AiLaunchPointView {
+            intent: AiLaunchIntent::ChallengeSelectedDay,
+            label: "Challenge a saved finding".to_owned(),
+            detail:
+                "Launch a bounded follow-up that expands evidence, surfaces counterevidence, or suggests the next local drill-down."
+                    .to_owned(),
+            key_hint: "e/y/i/d on saved run".to_owned(),
+        },
+        AiLaunchPointView {
+            intent: AiLaunchIntent::ChallengeSelectedDay,
+            label: "Generate a report".to_owned(),
+            detail:
+                "Export a human-readable report from the selected snapshot or saved AI run without leaving the TUI flow."
+                    .to_owned(),
+            key_hint: "g on saved item".to_owned(),
+        },
+    ]
+}
+
+fn build_ai_preflight_view(preflight: &AiPreflightState) -> AiPreflightView {
+    let mut body_lines = vec![
+        format!("intent: {}", preflight.intent.label()),
+        format!("source: {}", preflight.source_screen.title()),
+        format!("scope: {}", preflight.snapshot_scope),
+        format!("privacy profile: {}", preflight.privacy_profile.as_str()),
+        format!(
+            "provider/model: {} / {}",
+            preflight.request_preview.provider, preflight.request_preview.model
+        ),
+        format!(
+            "request mode: {} | stateless: {} | tools disabled: {}",
+            preflight.request_preview.request_mode,
+            yes_no(preflight.request_preview.stateless),
+            yes_no(preflight.request_preview.tools_disabled)
+        ),
+        format!(
+            "artifact payload: {} byte(s) (~{} tokens)",
+            preflight.request_preview.snapshot_bytes,
+            preflight.request_preview.approximate_input_tokens
+        ),
+        format!(
+            "notes/free-text included: {}",
+            yes_no(preflight.request_preview.includes_notes_or_free_text)
+        ),
+        format!(
+            "content classes: {}",
+            preflight.request_preview.content_classes.join(", ")
+        ),
+    ];
+    if let Some(model_override) = &preflight.model_override {
+        body_lines.push(format!("model override: {model_override}"));
+    }
+    if let Some(follow_up_kind) = preflight.follow_up_kind {
+        body_lines.push(format!("follow_up_kind: {}", follow_up_kind.as_str()));
+    }
+    if !preflight.snapshot_paths.is_empty() {
+        body_lines.push("artifact paths:".to_owned());
+        body_lines.extend(
+            preflight
+                .snapshot_paths
+                .iter()
+                .map(|path| format!("  - {path}")),
+        );
+    }
+    body_lines.push("confirm with Enter | cancel with n | cycle privacy with p".to_owned());
+
+    AiPreflightView {
+        title: format!("Preflight | {}", preflight.intent.short_label()),
+        body_lines,
+        warning_lines: preflight.warning_lines.clone(),
+        confirm_enabled: preflight.confirm_enabled,
+    }
+}
+
+fn build_ai_browser_content(
+    snapshot: &LiveSnapshot,
+    options: &LiveModelOptions,
+) -> (Vec<AiBrowserItemView>, Option<usize>, String, Vec<String>) {
+    match options.ai_browser_tab {
+        AiBrowserTab::Runs => build_ai_run_browser(snapshot, options.selected_ai_run_index),
+        AiBrowserTab::Snapshots => {
+            build_snapshot_browser(snapshot, options.selected_snapshot_catalog_index)
+        }
+        AiBrowserTab::Reports => {
+            build_report_browser(snapshot, options.selected_report_export_index)
+        }
+    }
+}
+
+fn build_ai_run_browser(
+    snapshot: &LiveSnapshot,
+    selected_index: usize,
+) -> (Vec<AiBrowserItemView>, Option<usize>, String, Vec<String>) {
+    let selected_item_index = if snapshot.ai_runs.is_empty() {
+        None
+    } else {
+        Some(usize::min(
+            selected_index,
+            snapshot.ai_runs.len().saturating_sub(1),
+        ))
+    };
+
+    let browser_items = snapshot
+        .ai_runs
+        .iter()
+        .enumerate()
+        .map(|(index, run)| AiBrowserItemView {
+            headline: format!(
+                "{} | {} | {}",
+                run.run_kind,
+                run.run_status,
+                abbreviate_id(&run.run_id, 12)
+            ),
+            detail: format!(
+                "{} | {} | {}",
+                run.created_at, run.privacy_profile, run.snapshot_scope
+            ),
+            status_badge: run.run_status.clone(),
+            selected: selected_item_index == Some(index),
+        })
+        .collect::<Vec<_>>();
+
+    let Some(selected_item_index) = selected_item_index else {
+        return (
+            browser_items,
+            None,
+            "Saved AI runs".to_owned(),
+            vec!["No persisted AI runs yet.".to_owned()],
+        );
+    };
+    let run = &snapshot.ai_runs[selected_item_index];
+    let mut detail_lines = vec![
+        format!("run_id: {}", run.run_id),
+        format!("kind: {} | status: {}", run.run_kind, run.run_status),
+        format!("provider/model: {} / {}", run.provider, run.model),
+        format!(
+            "privacy/profile: {} | scope: {}",
+            run.privacy_profile, run.snapshot_scope
+        ),
+        format!(
+            "request mode: {} | transport: {} | run mode: {}",
+            run.request_mode, run.input_transport, run.run_mode
+        ),
+        format!(
+            "prompt/schema: {} / {}",
+            run.prompt_version, run.output_schema_version
+        ),
+        format!("snapshot_a: {}", run.snapshot_hash_a),
+    ];
+    if let Some(snapshot_hash_b) = &run.snapshot_hash_b {
+        detail_lines.push(format!("snapshot_b: {snapshot_hash_b}"));
+    }
+    if let Some(source_ai_artifact_id) = &run.source_ai_artifact_id {
+        detail_lines.push(format!("source_run: {source_ai_artifact_id}"));
+    }
+    if let Some(follow_up_kind) = &run.follow_up_kind {
+        detail_lines.push(format!("follow_up_kind: {follow_up_kind}"));
+    }
+    if let Some(request_fingerprint) = &run.request_fingerprint {
+        detail_lines.push(format!(
+            "request_fingerprint: {}",
+            abbreviate_id(request_fingerprint, 16)
+        ));
+    }
+    detail_lines.push(format!("created_at: {}", run.created_at));
+    if let Some(started_at) = &run.started_at {
+        detail_lines.push(format!("started_at: {started_at}"));
+    }
+    if let Some(ended_at) = &run.ended_at {
+        detail_lines.push(format!("ended_at: {ended_at}"));
+    }
+    if let Some(error_message) = &run.error_message {
+        detail_lines.push(String::new());
+        detail_lines.push(format!("error: {error_message}"));
+    }
+    if let Ok(preview) = serde_json::from_str::<AiRequestPreview>(&run.request_preview_json) {
+        detail_lines.push(String::new());
+        detail_lines.push("request preview:".to_owned());
+        detail_lines.extend(ai_request_preview_lines(&preview));
+    }
+    if let Some(artifact_id) = &run.artifact_id {
+        detail_lines.push(String::new());
+        detail_lines.push(format!("linked_artifact: {artifact_id}"));
+        if let Some(artifact_record) = snapshot
+            .ai_artifact_records
+            .iter()
+            .find(|record| &record.artifact_id == artifact_id)
+        {
+            detail_lines.extend(ai_artifact_detail_lines(artifact_record));
+        }
+        let linked_reports = snapshot
+            .report_exports
+            .iter()
+            .filter(|record| record.source_ai_artifact_id.as_deref() == Some(artifact_id.as_str()))
+            .collect::<Vec<_>>();
+        if !linked_reports.is_empty() {
+            detail_lines.push(String::new());
+            detail_lines.push("linked_reports:".to_owned());
+            detail_lines.extend(linked_reports.iter().map(|report| {
+                format!(
+                    "  - {} | {} | {}",
+                    report.title, report.format, report.output_path
+                )
+            }));
+        }
+    }
+    detail_lines.push(String::new());
+    detail_lines.push(
+        "actions: e expand evidence | y counterevidence | i explain ranking | d next drill-down | g report | u rerun privacy | m rerun model | b compare previous | o open local evidence"
+            .to_owned(),
+    );
+
+    (
+        browser_items,
+        Some(selected_item_index),
+        "Saved AI run".to_owned(),
+        detail_lines,
+    )
+}
+
+fn build_snapshot_browser(
+    snapshot: &LiveSnapshot,
+    selected_index: usize,
+) -> (Vec<AiBrowserItemView>, Option<usize>, String, Vec<String>) {
+    let selected_item_index = if snapshot.snapshot_catalog.is_empty() {
+        None
+    } else {
+        Some(usize::min(
+            selected_index,
+            snapshot.snapshot_catalog.len().saturating_sub(1),
+        ))
+    };
+    let browser_items = snapshot
+        .snapshot_catalog
+        .iter()
+        .enumerate()
+        .map(|(index, record)| AiBrowserItemView {
+            headline: format!(
+                "{} | {}",
+                record.scope,
+                abbreviate_id(&record.snapshot_hash, 12)
+            ),
+            detail: format!(
+                "{} | {} | {} day(s)",
+                record.generated_at, record.privacy_profile, record.day_count
+            ),
+            status_badge: record.freshness_summary.clone(),
+            selected: selected_item_index == Some(index),
+        })
+        .collect::<Vec<_>>();
+
+    let Some(selected_item_index) = selected_item_index else {
+        return (
+            browser_items,
+            None,
+            "Snapshot catalog".to_owned(),
+            vec!["No snapshot exports are cataloged yet.".to_owned()],
+        );
+    };
+    let record = &snapshot.snapshot_catalog[selected_item_index];
+    let run_count = snapshot
+        .ai_runs
+        .iter()
+        .filter(|run| {
+            run.snapshot_hash_a == record.snapshot_hash
+                || run.snapshot_hash_b.as_deref() == Some(record.snapshot_hash.as_str())
+        })
+        .count();
+    let report_count = snapshot
+        .report_exports
+        .iter()
+        .filter(|report| {
+            report.source_snapshot_hash_a.as_deref() == Some(record.snapshot_hash.as_str())
+                || report.source_snapshot_hash_b.as_deref() == Some(record.snapshot_hash.as_str())
+        })
+        .count();
+
+    (
+        browser_items,
+        Some(selected_item_index),
+        "Snapshot artifact".to_owned(),
+        vec![
+            format!("snapshot_hash: {}", record.snapshot_hash),
+            format!("scope: {}", record.scope),
+            format!(
+                "day_range: {} -> {} (anchor {})",
+                record.start_day, record.end_day, record.anchor_day
+            ),
+            format!("privacy_profile: {}", record.privacy_profile),
+            format!("source_mode: {}", record.source_mode),
+            format!("freshness: {}", record.freshness_summary),
+            format!("trust: {}", record.trust_summary),
+            format!("capabilities: {}", record.capability_summary),
+            format!("provenance: {}", record.provenance_summary),
+            format!(
+                "linked_runs: {} | linked_reports: {}",
+                run_count, report_count
+            ),
+        ],
+    )
+}
+
+fn build_report_browser(
+    snapshot: &LiveSnapshot,
+    selected_index: usize,
+) -> (Vec<AiBrowserItemView>, Option<usize>, String, Vec<String>) {
+    let selected_item_index = if snapshot.report_exports.is_empty() {
+        None
+    } else {
+        Some(usize::min(
+            selected_index,
+            snapshot.report_exports.len().saturating_sub(1),
+        ))
+    };
+    let browser_items = snapshot
+        .report_exports
+        .iter()
+        .enumerate()
+        .map(|(index, report)| AiBrowserItemView {
+            headline: format!("{} | {}", report.report_kind, report.title),
+            detail: format!(
+                "{} | {} | {}",
+                report.created_at, report.format, report.output_path
+            ),
+            status_badge: report.export_status.clone(),
+            selected: selected_item_index == Some(index),
+        })
+        .collect::<Vec<_>>();
+
+    let Some(selected_item_index) = selected_item_index else {
+        return (
+            browser_items,
+            None,
+            "Exported reports".to_owned(),
+            vec!["No report exports are cataloged yet.".to_owned()],
+        );
+    };
+    let report = &snapshot.report_exports[selected_item_index];
+    let mut detail_lines = vec![
+        format!("report_id: {}", report.report_id),
+        format!("title: {}", report.title),
+        format!("kind/format: {} / {}", report.report_kind, report.format),
+        format!("status: {}", report.export_status),
+        format!("output_path: {}", report.output_path),
+        format!("privacy_profile: {}", report.privacy_profile),
+        format!("content_hash: {}", abbreviate_id(&report.content_hash, 16)),
+        format!(
+            "last_verified: {} ({})",
+            yes_no(report.last_verified_exists),
+            report.last_verified_at
+        ),
+    ];
+    if let Some(source_snapshot_hash_a) = &report.source_snapshot_hash_a {
+        detail_lines.push(format!("source_snapshot_a: {source_snapshot_hash_a}"));
+    }
+    if let Some(source_snapshot_hash_b) = &report.source_snapshot_hash_b {
+        detail_lines.push(format!("source_snapshot_b: {source_snapshot_hash_b}"));
+    }
+    if let Some(source_ai_artifact_id) = &report.source_ai_artifact_id {
+        detail_lines.push(format!("source_ai_artifact: {source_ai_artifact_id}"));
+    }
+    if let Some(provider) = &report.provider {
+        detail_lines.push(format!("provider: {provider}"));
+    }
+    if let Some(model) = &report.model {
+        detail_lines.push(format!("model: {model}"));
+    }
+    if let Some(prompt_version) = &report.prompt_version {
+        detail_lines.push(format!("prompt_version: {prompt_version}"));
+    }
+    if let Some(output_schema_version) = &report.output_schema_version {
+        detail_lines.push(format!("output_schema_version: {output_schema_version}"));
+    }
+
+    (
+        browser_items,
+        Some(selected_item_index),
+        "Report export".to_owned(),
+        detail_lines,
+    )
+}
+
+fn ai_request_preview_lines(preview: &AiRequestPreview) -> Vec<String> {
+    let mut lines = vec![
+        format!("task_family: {}", preview.task_family),
+        format!("provider/model: {} / {}", preview.provider, preview.model),
+        format!(
+            "mode: {} | transport: {} | stateless: {}",
+            preview.request_mode,
+            preview.input_transport,
+            yes_no(preview.stateless)
+        ),
+        format!(
+            "tools_disabled: {} | notes/free-text: {}",
+            yes_no(preview.tools_disabled),
+            yes_no(preview.includes_notes_or_free_text)
+        ),
+        format!(
+            "payload size: {} bytes (~{} tokens)",
+            preview.snapshot_bytes, preview.approximate_input_tokens
+        ),
+        format!("content classes: {}", preview.content_classes.join(", ")),
+    ];
+    if !preview.snapshots.is_empty() {
+        lines.push("snapshots:".to_owned());
+        lines.extend(preview.snapshots.iter().map(|snapshot| {
+            format!(
+                "  - {} | {} | {} | {} day(s) | {}",
+                snapshot.label,
+                snapshot.scope,
+                snapshot.anchor_day,
+                snapshot.day_count,
+                snapshot.privacy_profile.as_str()
+            )
+        }));
+    }
+    lines
+}
+
+fn ai_artifact_detail_lines(record: &AiArtifactRecord) -> Vec<String> {
+    let mut lines = vec![format!("overview: {}", record.overview)];
+    if !record.summary_cache.is_empty() {
+        lines.push(format!("summary: {}", record.summary_cache));
+    }
+    match ai::parse_stored_artifact(record) {
+        Ok(StoredArtifact::Review(artifact)) => {
+            lines.push(String::new());
+            lines.push("review findings:".to_owned());
+            lines.extend(render_structured_findings(&artifact.headline_findings));
+            lines.extend(render_structured_findings(&artifact.positive_findings));
+            lines.extend(render_structured_findings(&artifact.negative_findings));
+            if !artifact.unresolved_questions.is_empty() {
+                lines.push("unresolved_questions:".to_owned());
+                lines.extend(
+                    artifact
+                        .unresolved_questions
+                        .iter()
+                        .map(|question| format!("  - {question}")),
+                );
+            }
+            if !artifact.follow_up_targets.is_empty() {
+                lines.push("guided_follow_ups:".to_owned());
+                lines.extend(artifact.follow_up_targets.iter().map(|target| {
+                    format!(
+                        "  - {} => {} ({})",
+                        target.label, target.command, target.reason
+                    )
+                }));
+            }
+        }
+        Ok(StoredArtifact::Compare(artifact)) => {
+            lines.push(String::new());
+            lines.push("material_differences:".to_owned());
+            lines.extend(render_structured_findings(&artifact.material_differences));
+            if !artifact.uncertainty_warnings.is_empty() {
+                lines.push("uncertainty_warnings:".to_owned());
+                lines.extend(
+                    artifact
+                        .uncertainty_warnings
+                        .iter()
+                        .map(|warning| format!("  - {warning}")),
+                );
+            }
+            if !artifact.investigation_targets.is_empty() {
+                lines.push("guided_follow_ups:".to_owned());
+                lines.extend(artifact.investigation_targets.iter().map(|target| {
+                    format!(
+                        "  - {} => {} ({})",
+                        target.label, target.command, target.reason
+                    )
+                }));
+            }
+        }
+        Ok(StoredArtifact::FollowUp(artifact)) => {
+            lines.push(String::new());
+            lines.push(format!(
+                "follow_up_kind: {}",
+                artifact.follow_up_kind.as_str()
+            ));
+            lines.extend(render_structured_findings(&artifact.focal_findings));
+            if !artifact.reasoning_steps.is_empty() {
+                lines.push("reasoning_steps:".to_owned());
+                lines.extend(
+                    artifact
+                        .reasoning_steps
+                        .iter()
+                        .map(|step| format!("  - {step}")),
+                );
+            }
+            if !artifact.unresolved_questions.is_empty() {
+                lines.push("unresolved_questions:".to_owned());
+                lines.extend(
+                    artifact
+                        .unresolved_questions
+                        .iter()
+                        .map(|question| format!("  - {question}")),
+                );
+            }
+            if !artifact.suggested_local_targets.is_empty() {
+                lines.push("guided_follow_ups:".to_owned());
+                lines.extend(artifact.suggested_local_targets.iter().map(|target| {
+                    format!(
+                        "  - {} => {} ({})",
+                        target.label, target.command, target.reason
+                    )
+                }));
+            }
+        }
+        Err(error) => {
+            lines.push(format!("artifact_parse_error: {error}"));
+        }
+    }
+    lines
+}
+
+fn render_structured_findings(findings: &[ai::ArtifactFinding]) -> Vec<String> {
+    findings
+        .iter()
+        .flat_map(|finding| {
+            let mut lines = vec![format!(
+                "  - {} | confidence={} | sufficiency={}",
+                finding.title,
+                finding.confidence.as_str(),
+                finding.sufficiency.as_str()
+            )];
+            if !finding.summary.is_empty() {
+                lines.push(format!("    {}", finding.summary));
+            }
+            if !finding.evidence_refs.is_empty() {
+                lines.push(format!(
+                    "    evidence: {}",
+                    finding
+                        .evidence_refs
+                        .iter()
+                        .map(|reference| reference.export_ref.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if !finding.counterevidence_refs.is_empty() {
+                lines.push(format!(
+                    "    counterevidence: {}",
+                    finding
+                        .counterevidence_refs
+                        .iter()
+                        .map(|reference| reference.export_ref.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            lines
+        })
+        .collect()
+}
+
+fn abbreviate_id(value: &str, max_len: usize) -> String {
+    if value.chars().count() <= max_len {
+        value.to_owned()
+    } else {
+        value.chars().take(max_len).collect()
     }
 }
 
@@ -3903,6 +5221,10 @@ fn toggle_state(enabled: bool) -> &'static str {
     if enabled { "on" } else { "off" }
 }
 
+const fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
 fn score_card(
     label: &'static str,
     value: Option<u8>,
@@ -4146,6 +5468,7 @@ impl AppModel {
                 capabilities: Vec::new(),
                 change_summary: String::new(),
                 highlights: Vec::new(),
+                ai_actions: Vec::new(),
             },
             timeline: TimelineModel {
                 summary: String::new(),
@@ -4180,6 +5503,7 @@ impl AppModel {
                 evidence_lines: Vec::new(),
                 caveat_lines: Vec::new(),
                 context_lines: Vec::new(),
+                ai_actions: Vec::new(),
             },
             patterns: PatternsModel {
                 header: String::new(),
@@ -4187,6 +5511,7 @@ impl AppModel {
                 rows: Vec::new(),
                 notes: Vec::new(),
                 empty_message: String::new(),
+                ai_actions: Vec::new(),
             },
             ops: OpsModel {
                 mode_label: String::new(),
@@ -4208,12 +5533,27 @@ impl AppModel {
                 detail_lines: Vec::new(),
                 warning_lines: Vec::new(),
                 empty_message: String::new(),
+                ai_actions: Vec::new(),
+            },
+            ai: AiWorkbenchModel {
+                headline: String::new(),
+                summary_lines: Vec::new(),
+                launch_points: Vec::new(),
+                browser_tabs: Vec::new(),
+                selected_tab_index: 0,
+                browser_items: Vec::new(),
+                selected_item_index: None,
+                detail_title: String::new(),
+                detail_lines: Vec::new(),
+                trust_lines: Vec::new(),
+                warning_lines: Vec::new(),
+                preflight: None,
             },
         }
     }
 }
 
-fn demo_snapshot(_config: &Config) -> LiveSnapshot {
+fn demo_snapshot(config: &Config) -> LiveSnapshot {
     let capability_report = CapabilityReport::demo();
     let auth_status = AuthStatus {
         configured: true,
@@ -4498,11 +5838,306 @@ fn demo_snapshot(_config: &Config) -> LiveSnapshot {
         raw_cache_key: None,
         updated_at: "2026-04-08T08:00:00Z".to_owned(),
     }];
+    let demo_review_preview = AiRequestPreview {
+        task_family: "review".to_owned(),
+        provider: "openai".to_owned(),
+        model: "gpt-5-mini".to_owned(),
+        request_mode: "stateless".to_owned(),
+        input_transport: "inline".to_owned(),
+        prompt_cache: "auto".to_owned(),
+        prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
+        output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+        snapshots: vec![AiRequestPreviewSnapshot {
+            label: "primary".to_owned(),
+            snapshot_hash: "demo-snapshot-20260408".to_owned(),
+            scope: "day:2026-04-08".to_owned(),
+            anchor_day: "2026-04-08".to_owned(),
+            privacy_profile: PrivacyProfile::Redacted,
+            day_count: 1,
+        }],
+        snapshot_bytes: 52_000,
+        approximate_input_tokens: 13_000,
+        stateless: true,
+        tools_disabled: true,
+        includes_notes_or_free_text: true,
+        content_classes: vec![
+            "summary".to_owned(),
+            "review_signals".to_owned(),
+            "follow_up_targets".to_owned(),
+        ],
+        prefix_fingerprint: "demo-review-prefix".to_owned(),
+        payload_fingerprint: "demo-review-payload".to_owned(),
+        request_fingerprint: "demo-review-request".to_owned(),
+    };
+    let demo_review_artifact = AiArtifactRecord {
+        artifact_id: "run-demo-review-20260408".to_owned(),
+        artifact_kind: "review".to_owned(),
+        artifact_status: "dry_run".to_owned(),
+        provider: "openai".to_owned(),
+        model: "gpt-5-mini".to_owned(),
+        reasoning_effort: Some("medium".to_owned()),
+        request_mode: "stateless".to_owned(),
+        input_transport: "inline".to_owned(),
+        run_mode: "dry_run".to_owned(),
+        prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
+        output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+        created_at: "2026-04-08T22:20:00Z".to_owned(),
+        snapshot_hash_a: "demo-snapshot-20260408".to_owned(),
+        snapshot_hash_b: None,
+        privacy_profile: "redacted".to_owned(),
+        overview: "Sleep debt and elevated stress likely drove the readiness dip.".to_owned(),
+        summary_cache: "Saved review: bedtime drift plus higher stress load explained the weaker morning readiness."
+            .to_owned(),
+        request_fingerprint: Some("demo-review-request".to_owned()),
+        payload_json: serialize_pretty_json(&ai::ReviewArtifactV1 {
+            schema_version: "ringmaster.ai.review.v1".to_owned(),
+            prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
+            status: ai::ArtifactStatus::DryRun,
+            overview: "Sleep debt and elevated stress likely drove the readiness dip.".to_owned(),
+            headline_findings: vec![ai::ArtifactFinding {
+                finding_id: "sleep-drift".to_owned(),
+                title: "Bedtime drift undercut readiness".to_owned(),
+                summary:
+                    "The selected day closed later than the surrounding baseline and the saved review linked that drift to weaker next-morning readiness."
+                        .to_owned(),
+                confidence: ai::ConfidenceLevel::Medium,
+                sufficiency: ai::SufficiencyLevel::Medium,
+                evidence_refs: vec![ai::ArtifactEvidenceRef {
+                    export_ref: "sleep_time:2026-04-08".to_owned(),
+                    note: "Late sleep window".to_owned(),
+                }],
+                counterevidence_refs: vec![ai::ArtifactEvidenceRef {
+                    export_ref: "daily_activity:2026-04-08".to_owned(),
+                    note: "Activity held steady, so the downturn was not purely load-driven."
+                        .to_owned(),
+                }],
+            }],
+            positive_findings: Vec::new(),
+            negative_findings: vec![ai::ArtifactFinding {
+                finding_id: "stress".to_owned(),
+                title: "Stress remained elevated".to_owned(),
+                summary: "The saved run still flags stress carryover as a compounding factor."
+                    .to_owned(),
+                confidence: ai::ConfidenceLevel::Medium,
+                sufficiency: ai::SufficiencyLevel::Thin,
+                evidence_refs: vec![ai::ArtifactEvidenceRef {
+                    export_ref: "daily_stress:2026-04-08".to_owned(),
+                    note: "Stress score remained soft.".to_owned(),
+                }],
+                counterevidence_refs: Vec::new(),
+            }],
+            unresolved_questions: vec!["Would an earlier wind-down reverse the readiness dip over the next three days?".to_owned()],
+            limitations: vec![ai::ArtifactLimitation {
+                code: "thin_window".to_owned(),
+                message: "The review only had one directly comparable late bedtime in the recent window.".to_owned(),
+            }],
+            follow_up_targets: vec![ai::ArtifactFollowUpTarget {
+                label: "Expand evidence".to_owned(),
+                command: "ai follow-up expand-evidence".to_owned(),
+                reason: "Show the strongest supporting export refs before rerunning.".to_owned(),
+            }],
+        }),
+        rendered_briefing:
+            "ringmaster ai review\n\nstatus: dry_run\noverview: Sleep debt and elevated stress likely drove the readiness dip."
+                .to_owned(),
+    };
+    let demo_compare_preview = AiRequestPreview {
+        task_family: "compare".to_owned(),
+        provider: "openai".to_owned(),
+        model: "gpt-5-mini".to_owned(),
+        request_mode: "stateless".to_owned(),
+        input_transport: "inline".to_owned(),
+        prompt_cache: "auto".to_owned(),
+        prompt_version: COMPARE_PROMPT_VERSION.to_owned(),
+        output_schema_version: "ringmaster.ai.compare.v1".to_owned(),
+        snapshots: vec![
+            AiRequestPreviewSnapshot {
+                label: "snapshot_a".to_owned(),
+                snapshot_hash: "demo-snapshot-20260408".to_owned(),
+                scope: "day:2026-04-08".to_owned(),
+                anchor_day: "2026-04-08".to_owned(),
+                privacy_profile: PrivacyProfile::Redacted,
+                day_count: 1,
+            },
+            AiRequestPreviewSnapshot {
+                label: "snapshot_b".to_owned(),
+                snapshot_hash: "demo-snapshot-20260401-20260408".to_owned(),
+                scope: "week".to_owned(),
+                anchor_day: "2026-04-08".to_owned(),
+                privacy_profile: PrivacyProfile::Redacted,
+                day_count: 7,
+            },
+        ],
+        snapshot_bytes: 96_000,
+        approximate_input_tokens: 24_000,
+        stateless: true,
+        tools_disabled: true,
+        includes_notes_or_free_text: true,
+        content_classes: vec![
+            "summary".to_owned(),
+            "findings".to_owned(),
+            "follow_up_targets".to_owned(),
+        ],
+        prefix_fingerprint: "demo-compare-prefix".to_owned(),
+        payload_fingerprint: "demo-compare-payload".to_owned(),
+        request_fingerprint: "demo-compare-request".to_owned(),
+    };
+    let snapshot_catalog = vec![
+        SnapshotCatalogEntry {
+            snapshot_hash: "demo-snapshot-20260408".to_owned(),
+            schema_version: "ringmaster.snapshot.v1".to_owned(),
+            generated_at: "2026-04-08T22:18:00Z".to_owned(),
+            scope: "day:2026-04-08".to_owned(),
+            start_day: "2026-04-08".to_owned(),
+            end_day: "2026-04-08".to_owned(),
+            anchor_day: "2026-04-08".to_owned(),
+            day_count: 1,
+            privacy_profile: "redacted".to_owned(),
+            source_mode: "demo".to_owned(),
+            fixture_dir: None,
+            latest_source_day: Some("2026-04-08".to_owned()),
+            latest_review_day: Some("2026-04-08".to_owned()),
+            freshness_summary: "current day with local sync coverage".to_owned(),
+            trust_summary: "explicit snapshot export, redacted profile".to_owned(),
+            capability_summary: "personal,daily,heartrate,workout,enhanced_tag,session".to_owned(),
+            provenance_summary: "sleep_time + review_signal + context refs".to_owned(),
+            created_at: "2026-04-08T22:18:00Z".to_owned(),
+        },
+        SnapshotCatalogEntry {
+            snapshot_hash: "demo-snapshot-20260401-20260408".to_owned(),
+            schema_version: "ringmaster.snapshot.v1".to_owned(),
+            generated_at: "2026-04-08T22:19:00Z".to_owned(),
+            scope: "week".to_owned(),
+            start_day: "2026-04-02".to_owned(),
+            end_day: "2026-04-08".to_owned(),
+            anchor_day: "2026-04-08".to_owned(),
+            day_count: 7,
+            privacy_profile: "redacted".to_owned(),
+            source_mode: "demo".to_owned(),
+            fixture_dir: None,
+            latest_source_day: Some("2026-04-08".to_owned()),
+            latest_review_day: Some("2026-04-08".to_owned()),
+            freshness_summary: "seven-day comparison window".to_owned(),
+            trust_summary: "explicit snapshot export, redacted profile".to_owned(),
+            capability_summary: "daily + heartrate + contextual overlays".to_owned(),
+            provenance_summary: "review refs + pattern summaries".to_owned(),
+            created_at: "2026-04-08T22:19:00Z".to_owned(),
+        },
+    ];
+    let ai_runs = vec![
+        AiRunRecord {
+            run_id: "airun-demo-review-20260408".to_owned(),
+            run_kind: "review".to_owned(),
+            run_status: "succeeded".to_owned(),
+            provider: "openai".to_owned(),
+            model: "gpt-5-mini".to_owned(),
+            reasoning_effort: Some("medium".to_owned()),
+            request_mode: "stateless".to_owned(),
+            input_transport: "inline".to_owned(),
+            run_mode: "dry_run".to_owned(),
+            prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
+            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            privacy_profile: "redacted".to_owned(),
+            snapshot_scope: "day:2026-04-08".to_owned(),
+            snapshot_hash_a: "demo-snapshot-20260408".to_owned(),
+            snapshot_hash_b: None,
+            source_ai_artifact_id: None,
+            follow_up_kind: None,
+            request_fingerprint: Some("demo-review-request".to_owned()),
+            request_preview_json: serialize_json(&demo_review_preview),
+            artifact_id: Some("run-demo-review-20260408".to_owned()),
+            error_message: None,
+            created_at: "2026-04-08T22:20:00Z".to_owned(),
+            started_at: Some("2026-04-08T22:20:00Z".to_owned()),
+            ended_at: Some("2026-04-08T22:20:04Z".to_owned()),
+            updated_at: "2026-04-08T22:20:04Z".to_owned(),
+        },
+        AiRunRecord {
+            run_id: "airun-demo-compare-20260408".to_owned(),
+            run_kind: "compare".to_owned(),
+            run_status: "failed".to_owned(),
+            provider: "openai".to_owned(),
+            model: "gpt-5-mini".to_owned(),
+            reasoning_effort: Some("medium".to_owned()),
+            request_mode: "stateless".to_owned(),
+            input_transport: "inline".to_owned(),
+            run_mode: "dry_run".to_owned(),
+            prompt_version: COMPARE_PROMPT_VERSION.to_owned(),
+            output_schema_version: "ringmaster.ai.compare.v1".to_owned(),
+            privacy_profile: "redacted".to_owned(),
+            snapshot_scope: "week".to_owned(),
+            snapshot_hash_a: "demo-snapshot-20260408".to_owned(),
+            snapshot_hash_b: Some("demo-snapshot-20260401-20260408".to_owned()),
+            source_ai_artifact_id: None,
+            follow_up_kind: Some("explain_ranking".to_owned()),
+            request_fingerprint: Some("demo-compare-request".to_owned()),
+            request_preview_json: serialize_json(&demo_compare_preview),
+            artifact_id: None,
+            error_message: Some("Provider disabled in this deterministic fixture.".to_owned()),
+            created_at: "2026-04-08T22:24:00Z".to_owned(),
+            started_at: Some("2026-04-08T22:24:00Z".to_owned()),
+            ended_at: Some("2026-04-08T22:24:02Z".to_owned()),
+            updated_at: "2026-04-08T22:24:02Z".to_owned(),
+        },
+    ];
+    let ai_artifact_records = vec![demo_review_artifact];
+    let report_exports = vec![ReportExportRecord {
+        report_id: "demo-report-review".to_owned(),
+        report_kind: "ai_review".to_owned(),
+        title: "Daily review briefing".to_owned(),
+        format: "markdown".to_owned(),
+        output_path: "/tmp/ringmaster-demo-review.md".to_owned(),
+        content_hash: "report-hash-demo-review".to_owned(),
+        privacy_profile: "redacted".to_owned(),
+        created_at: "2026-04-08T22:26:00Z".to_owned(),
+        source_snapshot_hash_a: Some("demo-snapshot-20260408".to_owned()),
+        source_snapshot_hash_b: None,
+        source_ai_artifact_id: Some("run-demo-review-20260408".to_owned()),
+        provider: Some("openai".to_owned()),
+        model: Some("gpt-5-mini".to_owned()),
+        prompt_version: Some(REVIEW_PROMPT_VERSION.to_owned()),
+        output_schema_version: Some("ringmaster.ai.review.v1".to_owned()),
+        export_status: "written".to_owned(),
+        last_verified_exists: true,
+        last_verified_at: "2026-04-08T22:26:00Z".to_owned(),
+    }];
+    let ai_eval_runs = vec![AiEvalRunRecord {
+        eval_run_id: "demo-eval-review".to_owned(),
+        task_family: "review".to_owned(),
+        fixture_dir: "tests/fixtures/phase8".to_owned(),
+        candidate_label: "gpt-5-mini".to_owned(),
+        baseline_label: Some("fixture".to_owned()),
+        provider: "openai".to_owned(),
+        model: "gpt-5-mini".to_owned(),
+        prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
+        output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+        created_at: "2026-04-08T22:27:00Z".to_owned(),
+        total_cases: 4,
+        passed_cases: 4,
+        failed_cases: 0,
+        schema_validity_score: 1.0,
+        completeness_score: 0.93,
+        overclaiming_score: 0.98,
+        medical_safety_score: 1.0,
+        privacy_score: 1.0,
+        evidence_score: 0.91,
+        honesty_score: 0.96,
+        regression_summary: "No regressions in the deterministic fixture pack.".to_owned(),
+    }];
+    let ai_ops = build_ai_ops_snapshot(
+        config,
+        &snapshot_catalog,
+        &ai_runs,
+        &ai_artifact_records,
+        &report_exports,
+        &ai_eval_runs,
+    );
 
     LiveSnapshot {
         captured_at: "2026-04-08T22:30:00Z".to_owned(),
         refresh_policy: demo_refresh_policy_snapshot(),
         auth_status,
+        ai_ops,
         webhook: WebhookOpsSnapshot {
             bind_address: "127.0.0.1:8799".to_owned(),
             path: "/webhooks/oura".to_owned(),
@@ -4555,8 +6190,13 @@ fn demo_snapshot(_config: &Config) -> LiveSnapshot {
                         .to_owned(),
                 matched_snapshot_hash: "demo-snapshot-20260408".to_owned(),
                 peer_snapshot_hash: None,
-            },
+                },
         )]),
+        snapshot_catalog,
+        ai_runs,
+        ai_artifact_records,
+        report_exports,
+        ai_eval_runs,
         sync_states: vec![
             demo_sync_state(
                 SyncFamily::Personal,
@@ -4665,23 +6305,30 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        AppState, DataFamily, HeartRateDay, LiveModelOptions, LiveSnapshot, OverlayFilterState,
-        PatternMetricFilter, RefreshPolicySnapshot, ReviewScreenMode, RunMode, Screen,
-        TrendWindowKind, WebhookOpsSnapshot, build_ai_artifact_summary_view, build_live_model,
-        newest_day_index,
+        AiBrowserTab, AiOpsSnapshot, AiPreflightState, AppState, COMPARE_PROMPT_VERSION,
+        DataFamily, HeartRateDay, LiveModelOptions, LiveSnapshot, OverlayFilterState,
+        PatternMetricFilter, REVIEW_PROMPT_VERSION, RefreshPolicySnapshot, ReviewScreenMode,
+        RunMode, Screen, TrendWindowKind, WebhookOpsSnapshot, build_ai_artifact_summary_view,
+        build_live_model, newest_day_index,
     };
     use crate::action::Action;
+    use crate::ai::{
+        AiRequestPreview, AiRequestPreviewSnapshot, ArtifactFinding, ArtifactFollowUpTarget,
+        ArtifactStatus, ConfidenceLevel, GuidedFollowUpKind, ReviewArtifactV1, SufficiencyLevel,
+    };
     use crate::insights::MetricPoint;
     use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
     use crate::review::{
         InvestigationReport, ReviewCard, ReviewConfidence, ReviewDeck, ReviewFocus, ReviewMode,
         ReviewSection, ReviewSufficiency,
     };
+    use crate::snapshot::PrivacyProfile;
     use crate::store::queries::{
-        AiArtifactDaySummaryRecord, ContextEventFamily, ContextEventRecord, DataSufficiency,
-        EffectDirection, HeartRatePoint, PatternMetric, PatternRelationWindow,
-        PatternSummaryRecord, RecordCounts, RestModePeriodRecord, ReviewSignalDayRecord,
-        SleepTimeRecord, TimeSemantics,
+        AiArtifactDaySummaryRecord, AiArtifactRecord, AiRunRecord, ContextEventFamily,
+        ContextEventRecord, DataSufficiency, EffectDirection, HeartRatePoint, PatternMetric,
+        PatternRelationWindow, PatternSummaryRecord, RecordCounts, ReportExportRecord,
+        RestModePeriodRecord, ReviewSignalDayRecord, SleepTimeRecord, SnapshotCatalogEntry,
+        TimeSemantics,
     };
 
     fn make_review_card(id: &str, signal_key: &str, score: i32) -> ReviewCard {
@@ -4765,6 +6412,28 @@ mod tests {
                 account_email: None,
                 last_error: None,
             },
+            ai_ops: AiOpsSnapshot {
+                enabled: false,
+                provider: "openai".to_owned(),
+                api_key_env: "OPENAI_API_KEY".to_owned(),
+                api_key_ready: false,
+                default_model: "gpt-5-mini".to_owned(),
+                reasoning_effort: "default".to_owned(),
+                request_mode: "stateless".to_owned(),
+                input_transport: "inline".to_owned(),
+                prompt_cache: "off".to_owned(),
+                review_prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
+                compare_prompt_version: COMPARE_PROMPT_VERSION.to_owned(),
+                stateless_default: true,
+                tools_disabled: true,
+                snapshot_catalog_count: 0,
+                ai_run_count: 0,
+                ai_artifact_count: 0,
+                report_export_count: 0,
+                ai_eval_run_count: 0,
+                last_successful_run: None,
+                last_failed_run: None,
+            },
             webhook: WebhookOpsSnapshot::default(),
             personal_info: None,
             daily_history: days
@@ -4805,6 +6474,11 @@ mod tests {
             sleep_time: Vec::new(),
             rest_mode_periods: Vec::new(),
             ai_artifacts_by_day: BTreeMap::new(),
+            snapshot_catalog: Vec::new(),
+            ai_runs: Vec::new(),
+            ai_artifact_records: Vec::new(),
+            report_exports: Vec::new(),
+            ai_eval_runs: Vec::new(),
             sync_states: Vec::new(),
             record_counts: RecordCounts {
                 workouts: 1,
@@ -4833,6 +6507,11 @@ mod tests {
             trends_window: TrendWindowKind::Days7,
             selected_event_id: None,
             selected_review_card_index: 0,
+            ai_preflight: None,
+            ai_browser_tab: AiBrowserTab::Runs,
+            selected_ai_run_index: 0,
+            selected_snapshot_catalog_index: 0,
+            selected_report_export_index: 0,
             overlay_filters: OverlayFilterState::all(),
             pattern_metric_filter: PatternMetricFilter::All,
             review_mode: ReviewScreenMode::Today,
@@ -4843,6 +6522,204 @@ mod tests {
         app
     }
 
+    fn make_ai_preview(snapshot_hash: &str) -> AiRequestPreview {
+        AiRequestPreview {
+            task_family: "review".to_owned(),
+            provider: "openai".to_owned(),
+            model: "gpt-5-mini".to_owned(),
+            request_mode: "stateless".to_owned(),
+            input_transport: "inline".to_owned(),
+            prompt_cache: "auto".to_owned(),
+            prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
+            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            snapshots: vec![AiRequestPreviewSnapshot {
+                label: "primary".to_owned(),
+                snapshot_hash: snapshot_hash.to_owned(),
+                scope: "day:2026-04-08".to_owned(),
+                anchor_day: "2026-04-08".to_owned(),
+                privacy_profile: PrivacyProfile::Redacted,
+                day_count: 1,
+            }],
+            snapshot_bytes: 48_000,
+            approximate_input_tokens: 12_000,
+            stateless: true,
+            tools_disabled: true,
+            includes_notes_or_free_text: true,
+            content_classes: vec![
+                "summary".to_owned(),
+                "review_signals".to_owned(),
+                "follow_up_targets".to_owned(),
+            ],
+            prefix_fingerprint: "test-preview-prefix".to_owned(),
+            payload_fingerprint: "test-preview-payload".to_owned(),
+            request_fingerprint: "test-preview-request".to_owned(),
+        }
+    }
+
+    fn make_snapshot_catalog_entry(snapshot_hash: &str) -> SnapshotCatalogEntry {
+        SnapshotCatalogEntry {
+            snapshot_hash: snapshot_hash.to_owned(),
+            schema_version: "ringmaster.snapshot.v1".to_owned(),
+            generated_at: "2026-04-08T22:18:00Z".to_owned(),
+            scope: "day:2026-04-08".to_owned(),
+            start_day: "2026-04-08".to_owned(),
+            end_day: "2026-04-08".to_owned(),
+            anchor_day: "2026-04-08".to_owned(),
+            day_count: 1,
+            privacy_profile: "redacted".to_owned(),
+            source_mode: "demo".to_owned(),
+            fixture_dir: None,
+            latest_source_day: Some("2026-04-08".to_owned()),
+            latest_review_day: Some("2026-04-08".to_owned()),
+            freshness_summary: "current day with local sync coverage".to_owned(),
+            trust_summary: "explicit snapshot export, redacted profile".to_owned(),
+            capability_summary: "personal,daily,heartrate,workout,enhanced_tag,session".to_owned(),
+            provenance_summary: "review_signal + context refs".to_owned(),
+            created_at: "2026-04-08T22:18:00Z".to_owned(),
+        }
+    }
+
+    fn make_ai_artifact_record(artifact_id: &str, snapshot_hash: &str) -> AiArtifactRecord {
+        let payload = ReviewArtifactV1 {
+            schema_version: "ringmaster.ai.review.v1".to_owned(),
+            prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
+            status: ArtifactStatus::Success,
+            overview: "Stress softened after an earlier wind-down.".to_owned(),
+            headline_findings: vec![ArtifactFinding {
+                finding_id: "earlier-bedtime".to_owned(),
+                title: "Earlier bedtime improved readiness".to_owned(),
+                summary: "The saved artifact links a steadier wind-down to stronger readiness."
+                    .to_owned(),
+                confidence: ConfidenceLevel::Medium,
+                sufficiency: SufficiencyLevel::Medium,
+                evidence_refs: vec![crate::ai::ArtifactEvidenceRef {
+                    export_ref: "sleep_time:2026-04-08".to_owned(),
+                    note: "Earlier sleep window".to_owned(),
+                }],
+                counterevidence_refs: Vec::new(),
+            }],
+            positive_findings: Vec::new(),
+            negative_findings: Vec::new(),
+            unresolved_questions: vec!["Would this hold across a full week?".to_owned()],
+            limitations: Vec::new(),
+            follow_up_targets: vec![ArtifactFollowUpTarget {
+                label: "Expand evidence".to_owned(),
+                command: "ai follow-up expand-evidence".to_owned(),
+                reason: "Inspect the strongest local export refs before rerunning.".to_owned(),
+            }],
+        };
+
+        AiArtifactRecord {
+            artifact_id: artifact_id.to_owned(),
+            artifact_kind: "review".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
+            provider: "openai".to_owned(),
+            model: "gpt-5-mini".to_owned(),
+            reasoning_effort: Some("medium".to_owned()),
+            request_mode: "stateless".to_owned(),
+            input_transport: "inline".to_owned(),
+            run_mode: "real".to_owned(),
+            created_at: "2026-04-08T22:20:00Z".to_owned(),
+            snapshot_hash_a: snapshot_hash.to_owned(),
+            snapshot_hash_b: None,
+            privacy_profile: "redacted".to_owned(),
+            artifact_status: "succeeded".to_owned(),
+            overview: "Stress softened after an earlier wind-down.".to_owned(),
+            summary_cache: "Saved review: steadier bedtime correlated with stronger readiness."
+                .to_owned(),
+            request_fingerprint: Some("test-preview-request".to_owned()),
+            payload_json: serde_json::to_string(&payload)
+                .unwrap_or_else(|error| panic!("artifact payload should serialize: {error}")),
+            rendered_briefing: "ringmaster ai review\n\noverview: steadier bedtime correlated with stronger readiness."
+                .to_owned(),
+        }
+    }
+
+    fn make_ai_run_record(
+        run_id: &str,
+        status: &str,
+        artifact_id: Option<&str>,
+        error_message: Option<&str>,
+    ) -> AiRunRecord {
+        AiRunRecord {
+            run_id: run_id.to_owned(),
+            run_kind: "review".to_owned(),
+            run_status: status.to_owned(),
+            provider: "openai".to_owned(),
+            model: "gpt-5-mini".to_owned(),
+            reasoning_effort: Some("medium".to_owned()),
+            request_mode: "stateless".to_owned(),
+            input_transport: "inline".to_owned(),
+            run_mode: "real".to_owned(),
+            prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
+            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            privacy_profile: "redacted".to_owned(),
+            snapshot_scope: "day:2026-04-08".to_owned(),
+            snapshot_hash_a: "snapshot-ai-20260408".to_owned(),
+            snapshot_hash_b: None,
+            source_ai_artifact_id: None,
+            follow_up_kind: None,
+            request_fingerprint: Some("test-preview-request".to_owned()),
+            request_preview_json: serde_json::to_string(&make_ai_preview("snapshot-ai-20260408"))
+                .unwrap_or_else(|error| panic!("request preview should serialize: {error}")),
+            artifact_id: artifact_id.map(str::to_owned),
+            error_message: error_message.map(str::to_owned),
+            created_at: "2026-04-08T22:30:00Z".to_owned(),
+            started_at: Some("2026-04-08T22:30:01Z".to_owned()),
+            ended_at: if matches!(status, "queued" | "running") {
+                None
+            } else {
+                Some("2026-04-08T22:30:05Z".to_owned())
+            },
+            updated_at: "2026-04-08T22:30:05Z".to_owned(),
+        }
+    }
+
+    fn make_report_export_record(artifact_id: &str, snapshot_hash: &str) -> ReportExportRecord {
+        ReportExportRecord {
+            report_id: "report-ai-20260408".to_owned(),
+            report_kind: "ai_review".to_owned(),
+            title: "Daily review briefing".to_owned(),
+            format: "markdown".to_owned(),
+            output_path: "/tmp/ringmaster-test-ai-report.md".to_owned(),
+            content_hash: "content-hash".to_owned(),
+            privacy_profile: "redacted".to_owned(),
+            created_at: "2026-04-08T22:35:00Z".to_owned(),
+            source_snapshot_hash_a: Some(snapshot_hash.to_owned()),
+            source_snapshot_hash_b: None,
+            source_ai_artifact_id: Some(artifact_id.to_owned()),
+            provider: Some("openai".to_owned()),
+            model: Some("gpt-5-mini".to_owned()),
+            prompt_version: Some(REVIEW_PROMPT_VERSION.to_owned()),
+            output_schema_version: Some("ringmaster.ai.review.v1".to_owned()),
+            export_status: "written".to_owned(),
+            last_verified_exists: true,
+            last_verified_at: "2026-04-08T22:35:00Z".to_owned(),
+        }
+    }
+
+    fn base_live_model_options() -> LiveModelOptions {
+        LiveModelOptions {
+            selected_day_index: 0,
+            selected_point_index: 0,
+            selected_event_id: None,
+            ai_preflight: None,
+            ai_browser_tab: AiBrowserTab::Runs,
+            selected_ai_run_index: 0,
+            selected_snapshot_catalog_index: 0,
+            selected_report_export_index: 0,
+            overlay_filters: OverlayFilterState::all(),
+            window_hours: 24,
+            trends_window: TrendWindowKind::Days7,
+            pattern_metric_filter: PatternMetricFilter::All,
+            refresh_in_flight: false,
+            review_mode: ReviewScreenMode::Today,
+            review_focus: ReviewFocus::Readiness,
+            selected_review_card_index: 0,
+        }
+    }
+
     #[test]
     fn live_selection_defaults_to_newest_available_day() {
         let snapshot = make_snapshot(&["2026-04-06", "2026-04-07", "2026-04-08"]);
@@ -4850,6 +6727,183 @@ mod tests {
 
         assert_eq!(app.selected_day_index, 2);
         assert_eq!(app.model.timeline.selected_day_label, "2026-04-08");
+    }
+
+    #[test]
+    fn ai_run_browser_surfaces_lifecycle_statuses_and_saved_actions() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.ai_ops.enabled = true;
+        snapshot.ai_ops.api_key_ready = true;
+        snapshot.ai_ops.ai_run_count = 5;
+        snapshot.ai_ops.ai_artifact_count = 1;
+        snapshot.ai_ops.report_export_count = 1;
+        snapshot.snapshot_catalog = vec![make_snapshot_catalog_entry("snapshot-ai-20260408")];
+        snapshot.ai_artifact_records = vec![make_ai_artifact_record(
+            "artifact-ai-succeeded",
+            "snapshot-ai-20260408",
+        )];
+        snapshot.report_exports = vec![make_report_export_record(
+            "artifact-ai-succeeded",
+            "snapshot-ai-20260408",
+        )];
+        snapshot.ai_runs = vec![
+            make_ai_run_record("run-ai-queued", "queued", None, None),
+            make_ai_run_record("run-ai-running", "running", None, None),
+            make_ai_run_record(
+                "run-ai-succeeded",
+                "succeeded",
+                Some("artifact-ai-succeeded"),
+                None,
+            ),
+            make_ai_run_record(
+                "run-ai-failed",
+                "failed",
+                None,
+                Some("Provider returned a structured error."),
+            ),
+            make_ai_run_record(
+                "run-ai-cancelled",
+                "cancelled",
+                None,
+                Some("Cancelled from the AI workbench."),
+            ),
+        ];
+
+        for (index, status) in ["queued", "running", "succeeded", "failed", "cancelled"]
+            .iter()
+            .enumerate()
+        {
+            let mut options = base_live_model_options();
+            options.ai_browser_tab = AiBrowserTab::Runs;
+            options.selected_ai_run_index = index;
+            let model = build_live_model(&snapshot, &options);
+
+            assert_eq!(model.ai.browser_items[index].status_badge, *status);
+            assert!(
+                model
+                    .ai
+                    .detail_lines
+                    .iter()
+                    .any(|line| line.contains(&format!("status: {status}"))),
+                "detail should mention the selected run status `{status}`"
+            );
+        }
+
+        let mut succeeded_options = base_live_model_options();
+        succeeded_options.selected_ai_run_index = 2;
+        let succeeded_model = build_live_model(&snapshot, &succeeded_options);
+        assert!(
+            succeeded_model
+                .ai
+                .detail_lines
+                .iter()
+                .any(|line| line == "linked_artifact: artifact-ai-succeeded")
+        );
+        assert!(
+            succeeded_model
+                .ai
+                .detail_lines
+                .iter()
+                .any(|line| line == "guided_follow_ups:")
+        );
+        assert!(
+            succeeded_model
+                .ai
+                .detail_lines
+                .iter()
+                .any(|line| line.contains("actions: e expand evidence"))
+        );
+
+        let mut failed_options = base_live_model_options();
+        failed_options.selected_ai_run_index = 3;
+        let failed_model = build_live_model(&snapshot, &failed_options);
+        assert!(
+            failed_model
+                .ai
+                .detail_lines
+                .iter()
+                .any(|line| line == "error: Provider returned a structured error.")
+        );
+
+        let mut cancelled_options = base_live_model_options();
+        cancelled_options.selected_ai_run_index = 4;
+        let cancelled_model = build_live_model(&snapshot, &cancelled_options);
+        assert!(
+            cancelled_model
+                .ai
+                .detail_lines
+                .iter()
+                .any(|line| line == "error: Cancelled from the AI workbench.")
+        );
+    }
+
+    #[test]
+    fn ai_workbench_preflight_view_surfaces_model_override_and_follow_up_kind() {
+        let snapshot = make_snapshot(&["2026-04-08"]);
+        let mut options = base_live_model_options();
+        options.ai_preflight = Some(AiPreflightState {
+            intent: super::AiLaunchIntent::ReviewSelectedDay,
+            source_screen: Screen::Review,
+            snapshot_scope: "day:2026-04-08".to_owned(),
+            snapshot_paths: vec![
+                "/tmp/cache/ringmaster/ai-workbench/snapshots/review-20260408-redacted.json"
+                    .to_owned(),
+            ],
+            request_preview: make_ai_preview("snapshot-ai-20260408"),
+            privacy_profile: PrivacyProfile::Redacted,
+            model_override: Some("gpt-5-mini".to_owned()),
+            source_ai_artifact_id: Some("artifact-ai-succeeded".to_owned()),
+            follow_up_kind: Some(GuidedFollowUpKind::ExpandEvidence),
+            warning_lines: Vec::new(),
+            confirm_enabled: true,
+        });
+        let model = build_live_model(&snapshot, &options);
+        let preflight = model
+            .ai
+            .preflight
+            .unwrap_or_else(|| panic!("preflight view should be present"));
+
+        assert_eq!(preflight.title, "Preflight | Review this day");
+        assert!(
+            preflight
+                .body_lines
+                .iter()
+                .any(|line| line == "model override: gpt-5-mini")
+        );
+        assert!(
+            preflight
+                .body_lines
+                .iter()
+                .any(|line| line == "follow_up_kind: expand_evidence")
+        );
+        assert!(
+            preflight
+                .body_lines
+                .iter()
+                .any(|line| line.contains("/tmp/cache/ringmaster/ai-workbench/snapshots"))
+        );
+    }
+
+    #[test]
+    fn ai_workbench_warning_lines_call_out_disabled_provider_and_recent_failures() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.ai_ops.last_failed_run = Some("2026-04-08T22:24:02Z compare failed".to_owned());
+        let model = build_live_model(&snapshot, &base_live_model_options());
+
+        assert!(
+            model
+                .ai
+                .warning_lines
+                .iter()
+                .any(|line| line.contains("Provider is disabled."))
+        );
+        assert!(
+            model
+                .ai
+                .warning_lines
+                .iter()
+                .any(|line| line.contains("Most recent failed run"))
+        );
     }
 
     #[test]
@@ -5129,6 +7183,11 @@ mod tests {
                 selected_day_index: 1,
                 selected_point_index: 0,
                 selected_event_id: None,
+                ai_preflight: None,
+                ai_browser_tab: AiBrowserTab::Runs,
+                selected_ai_run_index: 0,
+                selected_snapshot_catalog_index: 0,
+                selected_report_export_index: 0,
                 overlay_filters: OverlayFilterState::all(),
                 window_hours: 24,
                 trends_window: TrendWindowKind::Days7,
@@ -5182,6 +7241,11 @@ mod tests {
                 selected_day_index: 1,
                 selected_point_index: 0,
                 selected_event_id: None,
+                ai_preflight: None,
+                ai_browser_tab: AiBrowserTab::Runs,
+                selected_ai_run_index: 0,
+                selected_snapshot_catalog_index: 0,
+                selected_report_export_index: 0,
                 overlay_filters: OverlayFilterState::all(),
                 window_hours: 24,
                 trends_window: TrendWindowKind::Days7,
@@ -5291,6 +7355,11 @@ mod tests {
                 selected_day_index: 0,
                 selected_point_index: 0,
                 selected_event_id: None,
+                ai_preflight: None,
+                ai_browser_tab: AiBrowserTab::Runs,
+                selected_ai_run_index: 0,
+                selected_snapshot_catalog_index: 0,
+                selected_report_export_index: 0,
                 overlay_filters: OverlayFilterState::all(),
                 window_hours: 24,
                 trends_window: TrendWindowKind::Days7,

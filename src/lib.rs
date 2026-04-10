@@ -361,6 +361,20 @@ webhook_receiver_heartbeat: {}
 webhook_watch_heartbeat: {}
 webhook_runtime_mode: {}
 webhook_missing_public_prereq: {}
+ai_provider_enabled: {}
+ai_provider: {}
+ai_api_key_env: {}
+ai_api_key_ready: {}
+ai_default_model: {}
+ai_request_mode: {}
+ai_input_transport: {}
+ai_prompt_cache: {}
+ai_stateless_default: {}
+ai_tools_disabled_by_default: {}
+ai_prompt_versions: review={} compare={}
+ai_last_successful_run: {}
+ai_last_failed_run: {}
+ai_artifact_registry: snapshots={} runs={} artifacts={} reports={} evals={}
 webhook_desired_subscriptions: {}
 webhook_remote_subscriptions: {}
 webhook_remote_healthy: {}
@@ -457,6 +471,33 @@ record_counts:
         doctor_heartbeat_status(&snapshot, "sync.watch"),
         doctor_runtime_mode(&snapshot),
         snapshot.webhook.callback_url.is_none(),
+        snapshot.ai_ops.enabled,
+        snapshot.ai_ops.provider,
+        snapshot.ai_ops.api_key_env,
+        snapshot.ai_ops.api_key_ready,
+        snapshot.ai_ops.default_model,
+        snapshot.ai_ops.request_mode,
+        snapshot.ai_ops.input_transport,
+        snapshot.ai_ops.prompt_cache,
+        snapshot.ai_ops.stateless_default,
+        snapshot.ai_ops.tools_disabled,
+        snapshot.ai_ops.review_prompt_version,
+        snapshot.ai_ops.compare_prompt_version,
+        snapshot
+            .ai_ops
+            .last_successful_run
+            .clone()
+            .unwrap_or_else(|| "none".to_owned()),
+        snapshot
+            .ai_ops
+            .last_failed_run
+            .clone()
+            .unwrap_or_else(|| "none".to_owned()),
+        snapshot.ai_ops.snapshot_catalog_count,
+        snapshot.ai_ops.ai_run_count,
+        snapshot.ai_ops.ai_artifact_count,
+        snapshot.ai_ops.report_export_count,
+        snapshot.ai_ops.ai_eval_run_count,
         webhook_desired_enabled,
         snapshot.webhook.remote_subscriptions.len(),
         webhook_remote_healthy,
@@ -718,6 +759,7 @@ fn snapshot_screens(args: &UiSnapshotArgs) -> Vec<app::Screen> {
                 SnapshotScreenArg::Explain => app::Screen::Explain,
                 SnapshotScreenArg::Patterns => app::Screen::Patterns,
                 SnapshotScreenArg::Review => app::Screen::Review,
+                SnapshotScreenArg::Ai => app::Screen::Ai,
                 SnapshotScreenArg::Status => app::Screen::Ops,
             })
             .collect()
@@ -2115,6 +2157,17 @@ async fn run_ai_review(config: &Config, args: AiReviewArgs) -> Result<Option<Str
         args.fixture.as_deref().and_then(|path| path.parent()),
     )?;
     store.analysis().upsert_ai_artifact(&output.record)?;
+    store.analysis().upsert_ai_run(&completed_ai_run_record(
+        "review",
+        &snapshot_artifact.bundle.metadata.scope,
+        &snapshot_artifact.bundle.metadata.snapshot_hash,
+        None,
+        &output.request_preview,
+        &output.request_fingerprint,
+        &output.record,
+        None,
+        None,
+    )?)?;
     let artifact_output = if let Some(out_path) = args.out {
         write_text_file(
             &out_path,
@@ -2131,7 +2184,11 @@ async fn run_ai_review(config: &Config, args: AiReviewArgs) -> Result<Option<Str
         format!("{}\n\n{}", output.rendered_briefing, output.payload_json)
     };
     let rendered = if show_request_preview {
-        format!("{}\n{}", output.request_preview.trim_end(), artifact_output)
+        format!(
+            "{}\n{}",
+            ai::render_request_preview(&output.request_preview).trim_end(),
+            artifact_output
+        )
     } else {
         artifact_output
     };
@@ -2163,6 +2220,17 @@ async fn run_ai_compare(config: &Config, args: AiCompareArgs) -> Result<Option<S
         args.fixture.as_deref().and_then(|path| path.parent()),
     )?;
     store.analysis().upsert_ai_artifact(&output.record)?;
+    store.analysis().upsert_ai_run(&completed_ai_run_record(
+        "compare",
+        &snapshot_b.bundle.metadata.scope,
+        &snapshot_a.bundle.metadata.snapshot_hash,
+        Some(&snapshot_b.bundle.metadata.snapshot_hash),
+        &output.request_preview,
+        &output.request_fingerprint,
+        &output.record,
+        None,
+        None,
+    )?)?;
     let artifact_output = if let Some(out_path) = args.out {
         write_text_file(
             &out_path,
@@ -2179,12 +2247,57 @@ async fn run_ai_compare(config: &Config, args: AiCompareArgs) -> Result<Option<S
         format!("{}\n\n{}", output.rendered_briefing, output.payload_json)
     };
     let rendered = if show_request_preview {
-        format!("{}\n{}", output.request_preview.trim_end(), artifact_output)
+        format!(
+            "{}\n{}",
+            ai::render_request_preview(&output.request_preview).trim_end(),
+            artifact_output
+        )
     } else {
         artifact_output
     };
 
     Ok(Some(rendered))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn completed_ai_run_record(
+    run_kind: &str,
+    snapshot_scope: &str,
+    snapshot_hash_a: &str,
+    snapshot_hash_b: Option<&str>,
+    request_preview: &ai::AiRequestPreview,
+    request_fingerprint: &str,
+    artifact_record: &store::queries::AiArtifactRecord,
+    source_ai_artifact_id: Option<&str>,
+    follow_up_kind: Option<&str>,
+) -> Result<store::queries::AiRunRecord> {
+    Ok(store::queries::AiRunRecord {
+        run_id: format!("run-{}", artifact_record.artifact_id),
+        run_kind: run_kind.to_owned(),
+        run_status: ai::AiRunStatus::Succeeded.as_str().to_owned(),
+        provider: artifact_record.provider.clone(),
+        model: artifact_record.model.clone(),
+        reasoning_effort: artifact_record.reasoning_effort.clone(),
+        request_mode: artifact_record.request_mode.clone(),
+        input_transport: artifact_record.input_transport.clone(),
+        run_mode: artifact_record.run_mode.clone(),
+        prompt_version: artifact_record.prompt_version.clone(),
+        output_schema_version: artifact_record.output_schema_version.clone(),
+        privacy_profile: artifact_record.privacy_profile.clone(),
+        snapshot_scope: snapshot_scope.to_owned(),
+        snapshot_hash_a: snapshot_hash_a.to_owned(),
+        snapshot_hash_b: snapshot_hash_b.map(ToOwned::to_owned),
+        source_ai_artifact_id: source_ai_artifact_id.map(ToOwned::to_owned),
+        follow_up_kind: follow_up_kind.map(ToOwned::to_owned),
+        request_fingerprint: Some(request_fingerprint.to_owned()),
+        request_preview_json: serde_json::to_string(request_preview)?,
+        artifact_id: Some(artifact_record.artifact_id.clone()),
+        error_message: None,
+        created_at: artifact_record.created_at.clone(),
+        started_at: Some(artifact_record.created_at.clone()),
+        ended_at: Some(artifact_record.created_at.clone()),
+        updated_at: artifact_record.created_at.clone(),
+    })
 }
 
 async fn run_ai_runs_list(config: &Config, args: AiRunsListArgs) -> Result<Option<String>> {
@@ -2552,6 +2665,18 @@ pub(crate) async fn seed_demo_library_artifacts(
         .await?;
         DEMO_REVIEW_RUN_ID.clone_into(&mut review.record.artifact_id);
         store.analysis().upsert_ai_artifact(&review.record)?;
+        let review_run = completed_ai_run_record(
+            "review",
+            &today_artifact.bundle.metadata.scope,
+            &today_artifact.bundle.metadata.snapshot_hash,
+            None,
+            &review.request_preview,
+            &review.request_fingerprint,
+            &review.record,
+            None,
+            None,
+        )?;
+        store.analysis().upsert_ai_run(&review_run)?;
         let mut compare = ai::compare_snapshots_with_run_identity(
             config,
             &today_artifact,
@@ -2563,6 +2688,18 @@ pub(crate) async fn seed_demo_library_artifacts(
         .await?;
         DEMO_COMPARE_RUN_ID.clone_into(&mut compare.record.artifact_id);
         store.analysis().upsert_ai_artifact(&compare.record)?;
+        let compare_run = completed_ai_run_record(
+            "compare",
+            &week_artifact.bundle.metadata.scope,
+            &today_artifact.bundle.metadata.snapshot_hash,
+            Some(&week_artifact.bundle.metadata.snapshot_hash),
+            &compare.request_preview,
+            &compare.request_fingerprint,
+            &compare.record,
+            None,
+            None,
+        )?;
+        store.analysis().upsert_ai_run(&compare_run)?;
     }
 
     Ok(())

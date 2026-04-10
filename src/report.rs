@@ -548,6 +548,73 @@ fn build_ai_report_document(
                 source_ai_artifact_id: Some(record.artifact_id.clone()),
             }
         }
+        StoredArtifact::FollowUp(follow_up) => {
+            let (scope, freshness_summary, trust_summary) = snapshot_a.map_or_else(
+                || {
+                    (
+                        "unknown".to_owned(),
+                        "snapshot record unavailable".to_owned(),
+                        "lineage available from persisted AI run metadata".to_owned(),
+                    )
+                },
+                |snapshot_a| {
+                    let summary = snapshot::summarize_snapshot_bundle(snapshot_a, provenance_a);
+                    (
+                        snapshot_a.metadata.scope.clone(),
+                        summary.freshness_summary,
+                        summary.trust_summary,
+                    )
+                },
+            );
+
+            ReportDocument {
+                report_kind: "ai_follow_up_report".to_owned(),
+                title: format!("AI follow-up report: {}", follow_up.follow_up_kind.as_str()),
+                generated_at: record.created_at.clone(),
+                scope,
+                privacy_profile: record.privacy_profile.clone(),
+                ai_used: true,
+                ai_provider: Some(record.provider.clone()),
+                ai_model: Some(record.model.clone()),
+                prompt_version: Some(record.prompt_version.clone()),
+                output_schema_version: Some(record.output_schema_version.clone()),
+                freshness_summary,
+                trust_summary,
+                key_findings: follow_up
+                    .focal_findings
+                    .iter()
+                    .map(|finding| format!("{}: {}", finding.title, finding.summary))
+                    .collect(),
+                supporting_evidence: unique_evidence_refs(
+                    follow_up
+                        .focal_findings
+                        .iter()
+                        .flat_map(|finding| finding.evidence_refs.iter())
+                        .chain(
+                            follow_up
+                                .focal_findings
+                                .iter()
+                                .flat_map(|finding| finding.counterevidence_refs.iter()),
+                        )
+                        .map(|evidence| format!("{}: {}", evidence.export_ref, evidence.note))
+                        .collect(),
+                ),
+                uncertainty_notes: follow_up.unresolved_questions.clone(),
+                provenance_refs: provenance_a
+                    .iter()
+                    .map(|record| {
+                        format!(
+                            "{} [{}:{}]",
+                            record.export_ref, record.local_kind, record.local_locator
+                        )
+                    })
+                    .collect(),
+                artifact_refs,
+                source_snapshot_hash_a: Some(record.snapshot_hash_a.clone()),
+                source_snapshot_hash_b: record.snapshot_hash_b.clone(),
+                source_ai_artifact_id: Some(record.artifact_id.clone()),
+            }
+        }
     }
 }
 

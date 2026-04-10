@@ -140,6 +140,7 @@ fn draw_wide(frame: &mut Frame<'_>, area: Rect, model: &DashboardModel, theme: &
             let prefix = if index == 0 { "[lead]" } else { "[note]" };
             ListItem::new(format!("{prefix} {line}"))
         })
+        .chain(model.ai_actions.iter().cloned().map(ListItem::new))
         .collect::<Vec<_>>();
     frame.render_widget(
         List::new(highlights).block(chrome::panel(
@@ -212,6 +213,7 @@ fn draw_compact(frame: &mut Frame<'_>, area: Rect, model: &DashboardModel, theme
             ))
         })
         .chain(model.highlights.iter().cloned().map(ListItem::new))
+        .chain(model.ai_actions.iter().cloned().map(ListItem::new))
         .collect::<Vec<_>>();
     frame.render_widget(
         List::new(detail_items).block(chrome::panel(

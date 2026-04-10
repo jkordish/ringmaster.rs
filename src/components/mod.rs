@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod dashboard;
 pub mod explain;
 pub mod ops;

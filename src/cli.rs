@@ -181,6 +181,7 @@ pub enum SnapshotScreenArg {
     Explain,
     Patterns,
     Review,
+    Ai,
     #[value(alias = "ops")]
     Status,
 }
@@ -423,7 +424,7 @@ pub struct ReportExportArgs {
     /// Export a report directly from a snapshot hash or local snapshot artifact path.
     #[arg(long)]
     pub from_snapshot: Option<String>,
-    /// Export a report from a saved AI run id.
+    /// Export a report from a saved AI artifact id or unique prefix from the local AI registry.
     #[arg(long)]
     pub from_ai_run: Option<String>,
     /// Report format to render.

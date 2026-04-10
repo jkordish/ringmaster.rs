@@ -1,4 +1,5 @@
-use crate::app::{LiveSnapshot, Screen};
+use crate::ai::GuidedFollowUpKind;
+use crate::app::{AiLaunchIntent, AiPreflightState, LiveSnapshot, Screen};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -37,4 +38,31 @@ pub enum Action {
     CycleReviewFocus,
     PreviousReviewCard,
     NextReviewCard,
+    RequestAiLaunch(AiLaunchIntent),
+    AiPreflightPrepared {
+        preflight: Box<AiPreflightState>,
+        status_line: String,
+    },
+    AiPreflightFailed {
+        message: String,
+    },
+    DismissAiPreflight,
+    CycleAiPreflightPrivacyProfile,
+    ConfirmAiPreflight,
+    RequestCancelAiRun,
+    RequestAiGuidedFollowUp(GuidedFollowUpKind),
+    RequestAiRerunNextPrivacy,
+    RequestAiRerunNextModel,
+    RequestAiComparePreviousSnapshot,
+    RequestAiGenerateReport,
+    RequestJumpToAiEvidence,
+    JumpToDayAndScreen {
+        day: String,
+        screen: Screen,
+        status_line: String,
+    },
+    PreviousAiBrowserTab,
+    NextAiBrowserTab,
+    PreviousAiBrowserItem,
+    NextAiBrowserItem,
 }
