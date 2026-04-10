@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This file is the current truth for the repository during the `snapshot-library-reports-and-eval-flywheel` pass completed on `2026-04-10`. It records what landed, what was verified, and what remains intentionally deferred.
+This file is the current truth for the repository after the `snapshot-library-reports-and-eval-flywheel` pass and the same-day Review-screen AI artifact viewer follow-up completed on `2026-04-10`. It records what landed, what was verified, and what remains intentionally deferred.
 
 ## Baseline before this pass
 
@@ -30,6 +30,7 @@ The repository now includes:
   - `snapshot list`
   - `snapshot show`
 - a first-class AI run registry backed by `ai_artifacts`
+- a Review-screen AI artifact panel backed by day-scoped local artifact summaries
 - canonical AI run browse commands:
   - `ai runs list`
   - `ai runs show`
@@ -92,6 +93,13 @@ Persisted AI run metadata now includes:
 - run mode (`real`, `dry_run`, `fixture`)
 - request fingerprint
 - summary/overview cache for library rendering
+
+The Review screen now also shows, for the currently selected day:
+
+- whether a saved AI artifact exists
+- whether the latest saved run was a `review` or `compare`
+- compact saved summary text derived from local `summary_cache` and `overview`
+- provenance-first lineage including run id, matched snapshot hash, compare peer hash when present, provider/model, prompt version, schema version, and privacy profile
 
 ## Report export capabilities that now work
 
@@ -199,7 +207,7 @@ Verified on `2026-04-10` after implementation:
 - any direct database-to-OpenAI pipeline
 - tool-enabled or browsing-enabled OpenAI runs
 - a new AI chat screen in the TUI
-- a dedicated TUI artifact browser in this pass
+- a dedicated TUI artifact browser in this pass beyond the shipped Review-only read-only artifact panel
 - PDF export as a required format
 - batch/archive processing as a user-facing feature
 - hosted eval services as a runtime requirement

@@ -3,10 +3,10 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     prelude::Rect,
     text::Line,
-    widgets::{List, ListItem, Paragraph, Tabs},
+    widgets::{List, ListItem, Paragraph, Tabs, Wrap},
 };
 
-use crate::app::ReviewModel;
+use crate::app::{AiArtifactSummaryView, ReviewModel};
 use crate::ui::{
     chrome::{self, PanelKind},
     layout::UiContext,
@@ -41,9 +41,14 @@ fn draw_wide(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, theme: &The
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
         .split(layout[3]);
+    let detail = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(11), Constraint::Min(8)])
+        .split(body[1]);
 
     draw_cards(frame, body[0], model, theme);
-    draw_details(frame, body[1], model, theme);
+    draw_ai_artifact(frame, detail[0], &model.ai_artifact, theme);
+    draw_details(frame, detail[1], model, theme);
     draw_warnings(frame, layout[4], model, theme);
 }
 
@@ -71,9 +76,13 @@ fn draw_compact(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, theme: &
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
         .split(layout[2]);
+    let detail = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(5)])
+        .split(body[1]);
     draw_cards(frame, body[0], model, theme);
-    draw_details(frame, body[1], model, theme);
-
+    draw_details(frame, detail[0], model, theme);
+    draw_ai_artifact(frame, detail[1], &model.ai_artifact, theme);
     draw_warnings(frame, layout[3], model, theme);
 }
 
@@ -209,6 +218,43 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, theme: &
             Line::from("Briefing detail"),
             PanelKind::Hero,
         )),
+        area,
+    );
+}
+
+fn draw_ai_artifact(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    artifact: &AiArtifactSummaryView,
+    theme: &Theme,
+) {
+    let badge_tone = if artifact.status_label == "available" {
+        Tone::Positive
+    } else {
+        Tone::Muted
+    };
+    let mut lines = vec![format!("AI artifact: {}", artifact.status_label)];
+    lines.extend(artifact.metadata_lines.iter().cloned());
+
+    if !artifact.summary_text.is_empty() {
+        lines.push(String::new());
+        lines.push("Saved summary:".to_owned());
+        lines.push(artifact.summary_text.clone());
+    }
+
+    if !artifact.lineage_lines.is_empty() {
+        lines.push(String::new());
+        lines.extend(artifact.lineage_lines.iter().cloned());
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines.join("\n"))
+            .wrap(Wrap { trim: true })
+            .block(chrome::panel(
+                theme,
+                chrome::title_with_badge(theme, "AI artifact", &artifact.status_label, badge_tone),
+                PanelKind::Diagnostic,
+            )),
         area,
     );
 }

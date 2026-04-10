@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::action::Action;
 use crate::config::Config;
@@ -11,10 +11,10 @@ use crate::review::{
 };
 use crate::store::Store;
 use crate::store::queries::{
-    ContextEventFamily, ContextEventRecord, DailyOverviewRow, EffectDirection, HeartRatePoint,
-    PatternMetric, PatternRelationWindow, PatternSummaryRecord, PersonalInfoRecord, RecordCounts,
-    RestModePeriodRecord, ReviewSignalDayRecord, SleepTimeRecord, SyncRunStatus, SyncStateRecord,
-    TimeSemantics,
+    AiArtifactDaySummaryRecord, ContextEventFamily, ContextEventRecord, DailyOverviewRow,
+    EffectDirection, HeartRatePoint, PatternMetric, PatternRelationWindow, PatternSummaryRecord,
+    PersonalInfoRecord, RecordCounts, RestModePeriodRecord, ReviewSignalDayRecord, SleepTimeRecord,
+    SyncRunStatus, SyncStateRecord, TimeSemantics,
 };
 use crate::store::webhook_store::{
     AcceptedWebhookDeliveryRecord, DesiredWebhookSubscriptionRecord, InvalidationRecord,
@@ -75,6 +75,7 @@ pub struct LiveSnapshot {
     pub review_signal_days: Vec<ReviewSignalDayRecord>,
     pub sleep_time: Vec<SleepTimeRecord>,
     pub rest_mode_periods: Vec<RestModePeriodRecord>,
+    pub ai_artifacts_by_day: BTreeMap<String, AiArtifactDaySummaryRecord>,
     pub sync_states: Vec<SyncStateRecord>,
     pub record_counts: RecordCounts,
     pub schema_version: u32,
@@ -281,6 +282,7 @@ pub struct ReviewModel {
     pub selected_focus_index: usize,
     pub cards: Vec<ReviewCardView>,
     pub selected_card_index: Option<usize>,
+    pub ai_artifact: AiArtifactSummaryView,
     pub detail_lines: Vec<String>,
     pub warning_lines: Vec<String>,
     pub empty_message: String,
@@ -298,6 +300,14 @@ pub struct ReviewCardView {
     pub confidence_label: String,
     pub section_label: String,
     pub selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiArtifactSummaryView {
+    pub status_label: String,
+    pub metadata_lines: Vec<String>,
+    pub summary_text: String,
+    pub lineage_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -421,6 +431,15 @@ struct LiveModelOptions {
     trends_window: TrendWindowKind,
     pattern_metric_filter: PatternMetricFilter,
     refresh_in_flight: bool,
+    review_mode: ReviewScreenMode,
+    review_focus: ReviewFocus,
+    selected_review_card_index: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ReviewViewContext<'a> {
+    selected_day: &'a str,
+    ai_artifact: &'a AiArtifactSummaryView,
     review_mode: ReviewScreenMode,
     review_focus: ReviewFocus,
     selected_review_card_index: usize,
@@ -1158,6 +1177,18 @@ pub fn load_live_snapshot(
     } else {
         (Vec::new(), Vec::new(), Vec::new(), Vec::new())
     };
+    let candidate_days = live_snapshot_day_candidates(
+        &daily_history,
+        &heartrate_days,
+        &context_events,
+        latest_review_day.as_deref(),
+    );
+    let mut ai_artifacts_by_day = BTreeMap::new();
+    for day in candidate_days {
+        if let Some(artifact) = store.analysis().latest_ai_artifact_for_anchor_day(&day)? {
+            ai_artifacts_by_day.insert(day, artifact);
+        }
+    }
 
     Ok(LiveSnapshot {
         captured_at: now_rfc3339(),
@@ -1188,6 +1219,7 @@ pub fn load_live_snapshot(
         review_signal_days,
         sleep_time,
         rest_mode_periods,
+        ai_artifacts_by_day,
         sync_states: store.sync_state().list()?,
         record_counts: store.views().record_counts()?,
         schema_version: store.metadata().schema_version()?,
@@ -1204,6 +1236,10 @@ pub fn build_demo_state(config: &Config) -> AppState {
 fn build_live_model(snapshot: &LiveSnapshot, options: &LiveModelOptions) -> AppModel {
     let selected_day = selected_day_label(snapshot, options.selected_day_index)
         .unwrap_or_else(|| latest_review_anchor_day(snapshot));
+    let ai_artifact = snapshot.ai_artifacts_by_day.get(&selected_day).map_or_else(
+        empty_ai_artifact_summary_view,
+        build_ai_artifact_summary_view,
+    );
     let review_inputs = ReviewInputs {
         auth_status: &snapshot.auth_status,
         signal_days: &snapshot.review_signal_days,
@@ -1221,6 +1257,13 @@ fn build_live_model(snapshot: &LiveSnapshot, options: &LiveModelOptions) -> AppM
             .unwrap_or_else(|error| {
                 empty_investigation_report(options.review_focus, &selected_day, error)
             });
+    let review_context = ReviewViewContext {
+        selected_day: &selected_day,
+        ai_artifact: &ai_artifact,
+        review_mode: options.review_mode,
+        review_focus: options.review_focus,
+        selected_review_card_index: options.selected_review_card_index,
+    };
 
     AppModel {
         title: build_app_title(snapshot, &selected_day, options.refresh_in_flight),
@@ -1252,15 +1295,7 @@ fn build_live_model(snapshot: &LiveSnapshot, options: &LiveModelOptions) -> AppM
             options.pattern_metric_filter,
         ),
         ops: build_ops_model(snapshot, options.refresh_in_flight),
-        review: build_review_model(
-            &selected_day,
-            &today_review,
-            &week_review,
-            &investigation,
-            options.review_mode,
-            options.review_focus,
-            options.selected_review_card_index,
-        ),
+        review: build_review_model(&today_review, &week_review, &investigation, &review_context),
     }
 }
 
@@ -1959,20 +1994,22 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
 }
 
 fn build_review_model(
-    selected_day: &str,
     today_review: &ReviewDeck,
     week_review: &ReviewDeck,
     investigation: &InvestigationReport,
-    review_mode: ReviewScreenMode,
-    review_focus: ReviewFocus,
-    selected_review_card_index: usize,
+    context: &ReviewViewContext<'_>,
 ) -> ReviewModel {
-    let cards = review_cards_for_mode(review_mode, today_review, week_review, investigation);
+    let cards = review_cards_for_mode(
+        context.review_mode,
+        today_review,
+        week_review,
+        investigation,
+    );
     let selected_card_index = if cards.is_empty() {
         None
     } else {
         Some(usize::min(
-            selected_review_card_index,
+            context.selected_review_card_index,
             cards.len().saturating_sub(1),
         ))
     };
@@ -1989,12 +2026,12 @@ fn build_review_model(
         .collect::<Vec<_>>();
 
     ReviewModel {
-        selected_day_label: selected_day.to_owned(),
+        selected_day_label: context.selected_day.to_owned(),
         breadcrumb: format!(
             "Day {} -> {} mode -> focus {}",
-            selected_day,
-            review_mode.label(),
-            review_focus.label()
+            context.selected_day,
+            context.review_mode.label(),
+            context.review_focus.label()
         ),
         mode_tabs: [
             ReviewScreenMode::Today,
@@ -2004,30 +2041,36 @@ fn build_review_model(
         .into_iter()
         .map(|mode| ReviewTab {
             label: mode.label().to_owned(),
-            selected: mode == review_mode,
+            selected: mode == context.review_mode,
         })
         .collect(),
-        selected_mode_index: review_mode.index(),
+        selected_mode_index: context.review_mode.index(),
         focus_tabs: ReviewFocus::ALL
             .into_iter()
             .map(|focus| ReviewTab {
                 label: focus.label().to_owned(),
-                selected: focus == review_focus,
+                selected: focus == context.review_focus,
             })
             .collect(),
         selected_focus_index: ReviewFocus::ALL
             .iter()
-            .position(|focus| *focus == review_focus)
+            .position(|focus| *focus == context.review_focus)
             .unwrap_or_default(),
         cards: card_views,
         selected_card_index,
+        ai_artifact: context.ai_artifact.clone(),
         detail_lines: review_detail_lines(
-            review_mode,
+            context.review_mode,
             selected_card_index.and_then(|index| cards.get(index).copied()),
             investigation,
         ),
-        warning_lines: review_warning_lines(review_mode, today_review, week_review, investigation),
-        empty_message: review_empty_message(review_mode, review_focus),
+        warning_lines: review_warning_lines(
+            context.review_mode,
+            today_review,
+            week_review,
+            investigation,
+        ),
+        empty_message: review_empty_message(context.review_mode, context.review_focus),
     }
 }
 
@@ -2178,6 +2221,62 @@ fn review_section_label(card: &ReviewCard) -> String {
         crate::review::engine::ReviewSection::PositiveChange => "Positive".to_owned(),
         crate::review::engine::ReviewSection::NegativeDrift => "Drift".to_owned(),
         crate::review::engine::ReviewSection::UnresolvedAnomaly => "Anomaly".to_owned(),
+    }
+}
+
+fn empty_ai_artifact_summary_view() -> AiArtifactSummaryView {
+    AiArtifactSummaryView {
+        status_label: "none".to_owned(),
+        metadata_lines: Vec::new(),
+        summary_text: "No saved AI artifact is linked to this day yet.".to_owned(),
+        lineage_lines: Vec::new(),
+    }
+}
+
+fn build_ai_artifact_summary_view(record: &AiArtifactDaySummaryRecord) -> AiArtifactSummaryView {
+    let mut summary_parts = Vec::new();
+    if !record.summary_cache.trim().is_empty() {
+        summary_parts.push(record.summary_cache.trim().to_owned());
+    }
+    if !record.overview.trim().is_empty()
+        && summary_parts
+            .last()
+            .is_none_or(|summary| summary.as_str() != record.overview.trim())
+    {
+        summary_parts.push(record.overview.trim().to_owned());
+    }
+
+    let summary_text = if summary_parts.is_empty() {
+        "Saved artifact text is unavailable for this run.".to_owned()
+    } else {
+        summary_parts.join("\n")
+    };
+
+    let mut lineage_lines = vec![
+        format!("Run id: {}", record.artifact_id),
+        format!("Snapshot hash: {}", record.matched_snapshot_hash),
+    ];
+    if let Some(peer_snapshot_hash) = &record.peer_snapshot_hash {
+        lineage_lines.push(format!("Peer snapshot: {peer_snapshot_hash}"));
+    }
+
+    AiArtifactSummaryView {
+        status_label: "available".to_owned(),
+        metadata_lines: vec![
+            format!(
+                "Kind / created: {} / {}",
+                record.artifact_kind,
+                trim_date_time(&record.created_at)
+            ),
+            format!("Provider / model: {} / {}", record.provider, record.model),
+            format!(
+                "Prompt / schema: {} / {}",
+                record.prompt_version, record.output_schema_version
+            ),
+            format!("Privacy profile: {}", record.privacy_profile),
+        ],
+        summary_text,
+        lineage_lines,
     }
 }
 
@@ -3628,6 +3727,28 @@ fn available_days(snapshot: &LiveSnapshot) -> Vec<String> {
     days.into_iter().collect()
 }
 
+fn live_snapshot_day_candidates(
+    daily_history: &[DailyOverviewRow],
+    heartrate_days: &[HeartRateDay],
+    context_events: &[ContextEventRecord],
+    latest_review_day: Option<&str>,
+) -> Vec<String> {
+    let mut days = BTreeSet::new();
+    for row in daily_history {
+        days.insert(row.day.clone());
+    }
+    for day in heartrate_days {
+        days.insert(day.day.clone());
+    }
+    for event in context_events {
+        days.insert(event.anchor_day.clone());
+    }
+    if let Some(latest_review_day) = latest_review_day {
+        days.insert(latest_review_day.to_owned());
+    }
+    days.into_iter().collect()
+}
+
 fn restored_day_index(day_labels: &[String], selected_day: &str) -> usize {
     if let Some(index) = day_labels.iter().position(|day| day == selected_day) {
         return index;
@@ -4083,6 +4204,7 @@ impl AppModel {
                 selected_focus_index: 0,
                 cards: Vec::new(),
                 selected_card_index: None,
+                ai_artifact: empty_ai_artifact_summary_view(),
                 detail_lines: Vec::new(),
                 warning_lines: Vec::new(),
                 empty_message: String::new(),
@@ -4415,6 +4537,26 @@ fn demo_snapshot(_config: &Config) -> LiveSnapshot {
         review_signal_days,
         sleep_time,
         rest_mode_periods,
+        ai_artifacts_by_day: BTreeMap::from([(
+            "2026-04-08".to_owned(),
+            AiArtifactDaySummaryRecord {
+                artifact_id: "run-demo-review-20260408".to_owned(),
+                artifact_kind: "review".to_owned(),
+                created_at: "2026-04-08T22:20:00Z".to_owned(),
+                provider: "openai".to_owned(),
+                model: "gpt-4o-2024-08-06".to_owned(),
+                prompt_version: "review_prompt_v1".to_owned(),
+                output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+                privacy_profile: "redacted".to_owned(),
+                summary_cache: "Sleep debt and elevated stress likely drove the readiness dip."
+                    .to_owned(),
+                overview:
+                    "Workout load held up, but the bedtime drift means the saved review still recommends an earlier wind-down tonight."
+                        .to_owned(),
+                matched_snapshot_hash: "demo-snapshot-20260408".to_owned(),
+                peer_snapshot_hash: None,
+            },
+        )]),
         sync_states: vec![
             demo_sync_state(
                 SyncFamily::Personal,
@@ -4520,10 +4662,13 @@ fn demo_sync_state(family: SyncFamily, message: &str, status: SyncRunStatus) -> 
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
         AppState, DataFamily, HeartRateDay, LiveModelOptions, LiveSnapshot, OverlayFilterState,
         PatternMetricFilter, RefreshPolicySnapshot, ReviewScreenMode, RunMode, Screen,
-        TrendWindowKind, WebhookOpsSnapshot, build_live_model, newest_day_index,
+        TrendWindowKind, WebhookOpsSnapshot, build_ai_artifact_summary_view, build_live_model,
+        newest_day_index,
     };
     use crate::action::Action;
     use crate::insights::MetricPoint;
@@ -4533,9 +4678,10 @@ mod tests {
         ReviewSection, ReviewSufficiency,
     };
     use crate::store::queries::{
-        ContextEventFamily, ContextEventRecord, DataSufficiency, EffectDirection, HeartRatePoint,
-        PatternMetric, PatternRelationWindow, PatternSummaryRecord, RecordCounts,
-        RestModePeriodRecord, ReviewSignalDayRecord, SleepTimeRecord, TimeSemantics,
+        AiArtifactDaySummaryRecord, ContextEventFamily, ContextEventRecord, DataSufficiency,
+        EffectDirection, HeartRatePoint, PatternMetric, PatternRelationWindow,
+        PatternSummaryRecord, RecordCounts, RestModePeriodRecord, ReviewSignalDayRecord,
+        SleepTimeRecord, TimeSemantics,
     };
 
     fn make_review_card(id: &str, signal_key: &str, score: i32) -> ReviewCard {
@@ -4658,6 +4804,7 @@ mod tests {
             review_signal_days: Vec::new(),
             sleep_time: Vec::new(),
             rest_mode_periods: Vec::new(),
+            ai_artifacts_by_day: BTreeMap::new(),
             sync_states: Vec::new(),
             record_counts: RecordCounts {
                 workouts: 1,
@@ -4707,16 +4854,99 @@ mod tests {
 
     #[test]
     fn day_actions_update_shared_selected_day() {
-        let snapshot = make_snapshot(&["2026-04-06", "2026-04-07", "2026-04-08"]);
+        let mut snapshot = make_snapshot(&["2026-04-06", "2026-04-07", "2026-04-08"]);
+        snapshot.ai_artifacts_by_day = BTreeMap::from([
+            (
+                "2026-04-07".to_owned(),
+                AiArtifactDaySummaryRecord {
+                    artifact_id: "run-20260407".to_owned(),
+                    artifact_kind: "review".to_owned(),
+                    created_at: "2026-04-07T12:00:00Z".to_owned(),
+                    provider: "openai".to_owned(),
+                    model: "gpt-4o-mini".to_owned(),
+                    prompt_version: "review_prompt_v1".to_owned(),
+                    output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+                    privacy_profile: "redacted".to_owned(),
+                    summary_cache: "Readiness recovered after a quieter evening.".to_owned(),
+                    overview: "The saved review still notes a mild activity dip.".to_owned(),
+                    matched_snapshot_hash: "snapshot-20260407".to_owned(),
+                    peer_snapshot_hash: None,
+                },
+            ),
+            (
+                "2026-04-08".to_owned(),
+                AiArtifactDaySummaryRecord {
+                    artifact_id: "run-20260408".to_owned(),
+                    artifact_kind: "compare".to_owned(),
+                    created_at: "2026-04-08T12:00:00Z".to_owned(),
+                    provider: "openai".to_owned(),
+                    model: "gpt-4o-mini".to_owned(),
+                    prompt_version: "compare_prompt_v1".to_owned(),
+                    output_schema_version: "ringmaster.ai.compare.v1".to_owned(),
+                    privacy_profile: "redacted".to_owned(),
+                    summary_cache: "Stress softened versus the previous snapshot.".to_owned(),
+                    overview: "Sleep remains the main explanation for the day-to-day drift."
+                        .to_owned(),
+                    matched_snapshot_hash: "snapshot-20260408".to_owned(),
+                    peer_snapshot_hash: Some("snapshot-20260407".to_owned()),
+                },
+            ),
+        ]);
         let mut app = make_live_app(snapshot);
 
         app.handle(Action::PreviousDay);
         assert_eq!(app.model.timeline.selected_day_label, "2026-04-07");
         assert_eq!(app.model.dashboard.selected_day_label, "2026-04-07");
         assert_eq!(app.model.explain.selected_day_label, "2026-04-07");
+        assert_eq!(app.model.review.ai_artifact.status_label, "available");
+        assert!(
+            app.model
+                .review
+                .ai_artifact
+                .lineage_lines
+                .iter()
+                .any(|line| line == "Run id: run-20260407")
+        );
 
         app.handle(Action::NextDay);
         assert_eq!(app.model.timeline.selected_day_label, "2026-04-08");
+        assert!(
+            app.model
+                .review
+                .ai_artifact
+                .lineage_lines
+                .iter()
+                .any(|line| line == "Peer snapshot: snapshot-20260407")
+        );
+    }
+
+    #[test]
+    fn ai_artifact_summary_view_prefers_summary_cache_and_distinct_overview() {
+        let view = build_ai_artifact_summary_view(&AiArtifactDaySummaryRecord {
+            artifact_id: "run-1".to_owned(),
+            artifact_kind: "review".to_owned(),
+            created_at: "2026-04-08T22:20:00Z".to_owned(),
+            provider: "openai".to_owned(),
+            model: "gpt-4o-mini".to_owned(),
+            prompt_version: "review_prompt_v1".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            privacy_profile: "redacted".to_owned(),
+            summary_cache: "Primary saved summary.".to_owned(),
+            overview: "Secondary overview.".to_owned(),
+            matched_snapshot_hash: "snapshot-1".to_owned(),
+            peer_snapshot_hash: None,
+        });
+
+        assert_eq!(view.status_label, "available");
+        assert_eq!(
+            view.metadata_lines[0],
+            "Kind / created: review / 2026-04-08 22:20"
+        );
+        assert_eq!(
+            view.summary_text,
+            "Primary saved summary.\nSecondary overview."
+        );
+        assert_eq!(view.lineage_lines[0], "Run id: run-1");
     }
 
     #[test]

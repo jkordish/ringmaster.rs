@@ -895,8 +895,39 @@ mod tests {
             .unwrap_or_else(|error| panic!("review snapshot should render: {error}"));
 
         assert!(output.contains("Ranked observations"));
+        assert!(output.contains("AI artifact"));
+        assert!(output.contains("AI artifact: available"));
+        assert!(output.contains("Provider / model: openai / gpt-4o-2024-08-06"));
         assert!(output.contains("Briefing detail"));
         assert!(output.contains("Readiness score"));
+    }
+
+    #[test]
+    fn renders_review_screen_without_ai_artifact_when_none_is_saved() {
+        let config = test_config();
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let auth_status = test_auth_status(
+            &config,
+            vec![
+                "personal".to_owned(),
+                "daily".to_owned(),
+                "heartrate".to_owned(),
+                "workout".to_owned(),
+                "enhanced_tag".to_owned(),
+                "session".to_owned(),
+            ],
+        );
+        let mut app = build_live_state(&config, &store, &auth_status)
+            .unwrap_or_else(|error| panic!("live state should build: {error}"));
+        app.active_screen = Screen::Review;
+
+        let output = render_snapshot(&app, 120, 40)
+            .unwrap_or_else(|error| panic!("review snapshot should render: {error}"));
+
+        assert!(output.contains("AI artifact"));
+        assert!(output.contains("AI artifact: none"));
+        assert!(output.contains("No saved AI artifact is linked to this day yet."));
     }
 
     #[test]
@@ -1052,6 +1083,7 @@ mod tests {
         assert!(output.contains("Readiness   Sleep   Recovery"));
         assert!(output.contains("> #1"));
         assert!(output.contains("#2"));
+        assert!(output.contains("AI artifact: available"));
     }
 
     #[tokio::test]

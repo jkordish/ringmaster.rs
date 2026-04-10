@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document describes the implemented phase-8 architecture for `ringmaster.rs`. It reflects the code that exists in the repository today, including the snapshot library, AI run registry, report export workflow, and local eval flywheel, not the eventual end-state product.
+This document describes the implemented architecture for `ringmaster.rs` as of `2026-04-10`. It reflects the code that exists in the repository today, including the snapshot library, AI run registry, report export workflow, local eval flywheel, and the Review-screen AI artifact viewer, not the eventual end-state product.
 
 ## Design goals
 
@@ -208,6 +208,7 @@ Important implemented state concepts:
 - `review_mode`: Today, Week, or Investigate within the Review screen
 - `review_focus`: readiness, sleep, recovery, stress, or activity within Investigate mode
 - `selected_review_card_index`: selected ranked card within Review
+- `ai_artifacts_by_day`: preloaded day-keyed summaries derived from `ai_artifacts` joined through `snapshot_exports`, used only for read-only Review provenance display
 
 ### `src/tui.rs`
 
@@ -399,7 +400,7 @@ Component responsibilities today:
 - Timeline, Explain, and Review include lightweight breadcrumbs only when they keep shared day or event context visible
 - Patterns renders grouped associations and interpretive notes distinct from Explain
 - Status renders the utilitarian operator console with summary, family status, diagnostics, and warnings without reaching back into the store
-- Review renders ranked briefing cards plus bounded investigation detail without making network or database calls
+- Review renders ranked briefing cards, bounded investigation detail, and a small read-only AI artifact panel without making network or database calls
 
 ### `src/refresh.rs`
 
@@ -479,6 +480,7 @@ Additional query responsibilities added in this pass:
 - snapshot catalog list/show queries keyed by stable snapshot hash
 - local export-reference provenance lookup for AI evidence mapping
 - persisted AI review/compare artifact storage and latest-artifact lookup
+- day-scoped AI artifact summary lookup keyed by snapshot `anchor_day`, including compare-side lineage resolution
 - report export manifest persistence and lineage lookup
 - eval summary persistence
 

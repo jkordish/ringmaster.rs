@@ -449,6 +449,22 @@ pub struct AiArtifactRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiArtifactDaySummaryRecord {
+    pub artifact_id: String,
+    pub artifact_kind: String,
+    pub created_at: String,
+    pub provider: String,
+    pub model: String,
+    pub prompt_version: String,
+    pub output_schema_version: String,
+    pub privacy_profile: String,
+    pub summary_cache: String,
+    pub overview: String,
+    pub matched_snapshot_hash: String,
+    pub peer_snapshot_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotCatalogEntry {
     pub snapshot_hash: String,
     pub schema_version: String,
@@ -2103,6 +2119,62 @@ impl<'connection> AnalysisStore<'connection> {
             .map_err(Into::into)
     }
 
+    pub fn latest_ai_artifact_for_anchor_day(
+        &self,
+        anchor_day: &str,
+    ) -> Result<Option<AiArtifactDaySummaryRecord>> {
+        self.connection
+            .query_row(
+                "SELECT
+                    ai_artifacts.artifact_id,
+                    ai_artifacts.artifact_kind,
+                    ai_artifacts.created_at,
+                    ai_artifacts.provider,
+                    ai_artifacts.model,
+                    ai_artifacts.prompt_version,
+                    ai_artifacts.output_schema_version,
+                    ai_artifacts.privacy_profile,
+                    ai_artifacts.summary_cache,
+                    ai_artifacts.overview,
+                    CASE
+                        WHEN snapshot_a.anchor_day = ?1 THEN ai_artifacts.snapshot_hash_a
+                        ELSE ai_artifacts.snapshot_hash_b
+                    END AS matched_snapshot_hash,
+                    CASE
+                        WHEN snapshot_a.anchor_day = ?1 THEN ai_artifacts.snapshot_hash_b
+                        ELSE ai_artifacts.snapshot_hash_a
+                    END AS peer_snapshot_hash
+                 FROM ai_artifacts
+                 LEFT JOIN snapshot_exports AS snapshot_a
+                    ON snapshot_a.snapshot_hash = ai_artifacts.snapshot_hash_a
+                 LEFT JOIN snapshot_exports AS snapshot_b
+                    ON snapshot_b.snapshot_hash = ai_artifacts.snapshot_hash_b
+                 WHERE ai_artifacts.artifact_kind IN ('review', 'compare')
+                   AND (snapshot_a.anchor_day = ?1 OR snapshot_b.anchor_day = ?1)
+                 ORDER BY ai_artifacts.created_at DESC, ai_artifacts.artifact_id DESC
+                 LIMIT 1",
+                params![anchor_day],
+                |row| {
+                    Ok(AiArtifactDaySummaryRecord {
+                        artifact_id: row.get(0)?,
+                        artifact_kind: row.get(1)?,
+                        created_at: row.get(2)?,
+                        provider: row.get(3)?,
+                        model: row.get(4)?,
+                        prompt_version: row.get(5)?,
+                        output_schema_version: row.get(6)?,
+                        privacy_profile: row.get(7)?,
+                        summary_cache: row.get(8)?,
+                        overview: row.get(9)?,
+                        matched_snapshot_hash: row.get(10)?,
+                        peer_snapshot_hash: row.get(11)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn ai_artifact(&self, artifact_id: &str) -> Result<Option<AiArtifactRecord>> {
         self.connection
             .query_row(
@@ -3745,10 +3817,10 @@ mod tests {
     use crate::review::features::ReviewSufficiency;
     use crate::store::Store;
     use crate::store::queries::{
-        AiArtifactRecord, ContextEventFamily, ContextEventRecord, DailyActivityRecord,
-        DailyReadinessRecord, DailySleepRecord, HeartrateSampleRecord, RestModePeriodRecord,
-        ReviewSignalDayRecord, SnapshotExportRecord, SnapshotProvenanceRefRecord, SyncRunStatus,
-        SyncStateRecord, TimeSemantics, Vo2MaxRecord,
+        AiArtifactDaySummaryRecord, AiArtifactRecord, ContextEventFamily, ContextEventRecord,
+        DailyActivityRecord, DailyReadinessRecord, DailySleepRecord, HeartrateSampleRecord,
+        RestModePeriodRecord, ReviewSignalDayRecord, SnapshotExportRecord,
+        SnapshotProvenanceRefRecord, SyncRunStatus, SyncStateRecord, TimeSemantics, Vo2MaxRecord,
     };
 
     fn seed_daily_history(store: &Store) {
@@ -3792,6 +3864,64 @@ mod tests {
                     updated_at: format!("{day}T06:10:00Z"),
                 })
                 .unwrap_or_else(|error| panic!("activity row should seed: {error}"));
+        }
+    }
+
+    fn make_snapshot_export(snapshot_hash: &str, anchor_day: &str) -> SnapshotExportRecord {
+        SnapshotExportRecord {
+            snapshot_hash: snapshot_hash.to_owned(),
+            schema_version: "ringmaster.snapshot.v1".to_owned(),
+            app_version: "0.1.0".to_owned(),
+            generated_at: format!("{anchor_day}T00:00:00Z"),
+            scope: "today".to_owned(),
+            start_day: anchor_day.to_owned(),
+            end_day: anchor_day.to_owned(),
+            anchor_day: anchor_day.to_owned(),
+            day_count: 1,
+            privacy_profile: "redacted".to_owned(),
+            source_mode: "demo".to_owned(),
+            fixture_dir: None,
+            latest_source_day: Some(anchor_day.to_owned()),
+            latest_review_day: Some(anchor_day.to_owned()),
+            freshness_summary: format!(
+                "latest_source_day={anchor_day} latest_review_day={anchor_day} warnings=0"
+            ),
+            trust_summary: "review_signals=1 strong=1 stale=0 follow_up_targets=1".to_owned(),
+            capability_summary: "granted=1 missing=0 requested=1".to_owned(),
+            provenance_summary: "refs=0 local_kinds=0".to_owned(),
+            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v1\"}".to_owned(),
+            created_at: format!("{anchor_day}T00:00:01Z"),
+        }
+    }
+
+    fn make_ai_artifact(
+        artifact_id: &str,
+        artifact_kind: &str,
+        created_at: &str,
+        snapshot_hash_a: &str,
+        snapshot_hash_b: Option<&str>,
+    ) -> AiArtifactRecord {
+        AiArtifactRecord {
+            artifact_id: artifact_id.to_owned(),
+            artifact_kind: artifact_kind.to_owned(),
+            output_schema_version: format!("ringmaster.ai.{artifact_kind}.v1"),
+            prompt_version: format!("{artifact_kind}_prompt_v1"),
+            provider: "dry_run".to_owned(),
+            model: "deterministic".to_owned(),
+            reasoning_effort: None,
+            request_mode: "stateless".to_owned(),
+            input_transport: "inline".to_owned(),
+            run_mode: "dry_run".to_owned(),
+            created_at: created_at.to_owned(),
+            snapshot_hash_a: snapshot_hash_a.to_owned(),
+            snapshot_hash_b: snapshot_hash_b.map(str::to_owned),
+            privacy_profile: "redacted".to_owned(),
+            artifact_status: "dry_run".to_owned(),
+            overview: format!("{artifact_kind} overview"),
+            summary_cache: format!("{artifact_kind} summary"),
+            request_fingerprint: Some(format!("fingerprint-{artifact_id}")),
+            payload_json: format!("{{\"artifact_id\":\"{artifact_id}\"}}"),
+            rendered_briefing: format!("{artifact_kind} rendered briefing"),
         }
     }
 
@@ -4130,6 +4260,126 @@ mod tests {
 
         assert_eq!(loaded.provider, "dry_run");
         assert_eq!(loaded.payload_json, "{\"status\":\"dry_run\"}");
+    }
+
+    #[test]
+    fn latest_ai_artifact_for_anchor_day_returns_none_when_day_has_no_snapshot_artifact() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+
+        assert_eq!(
+            store
+                .analysis()
+                .latest_ai_artifact_for_anchor_day("2026-04-10")
+                .unwrap_or_else(|error| panic!("ai artifact day summary should load: {error}")),
+            None
+        );
+    }
+
+    #[test]
+    fn latest_ai_artifact_for_anchor_day_prefers_newest_review_for_matching_day() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+
+        store
+            .analysis()
+            .upsert_snapshot_export(&make_snapshot_export("hash-older", "2026-04-10"), &[])
+            .unwrap_or_else(|error| panic!("older snapshot should persist: {error}"));
+        store
+            .analysis()
+            .upsert_snapshot_export(&make_snapshot_export("hash-newer", "2026-04-10"), &[])
+            .unwrap_or_else(|error| panic!("newer snapshot should persist: {error}"));
+        store
+            .analysis()
+            .upsert_ai_artifact(&make_ai_artifact(
+                "artifact-older",
+                "review",
+                "2026-04-10T00:05:00Z",
+                "hash-older",
+                None,
+            ))
+            .unwrap_or_else(|error| panic!("older artifact should persist: {error}"));
+        store
+            .analysis()
+            .upsert_ai_artifact(&make_ai_artifact(
+                "artifact-newer",
+                "review",
+                "2026-04-10T00:06:00Z",
+                "hash-newer",
+                None,
+            ))
+            .unwrap_or_else(|error| panic!("newer artifact should persist: {error}"));
+
+        let loaded = store
+            .analysis()
+            .latest_ai_artifact_for_anchor_day("2026-04-10")
+            .unwrap_or_else(|error| panic!("ai artifact day summary should load: {error}"))
+            .unwrap_or_else(|| panic!("ai artifact day summary should exist"));
+
+        assert_eq!(
+            loaded,
+            AiArtifactDaySummaryRecord {
+                artifact_id: "artifact-newer".to_owned(),
+                artifact_kind: "review".to_owned(),
+                created_at: "2026-04-10T00:06:00Z".to_owned(),
+                provider: "dry_run".to_owned(),
+                model: "deterministic".to_owned(),
+                prompt_version: "review_prompt_v1".to_owned(),
+                output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+                privacy_profile: "redacted".to_owned(),
+                summary_cache: "review summary".to_owned(),
+                overview: "review overview".to_owned(),
+                matched_snapshot_hash: "hash-newer".to_owned(),
+                peer_snapshot_hash: None,
+            }
+        );
+    }
+
+    #[test]
+    fn latest_ai_artifact_for_anchor_day_matches_compare_runs_on_either_snapshot_side() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+
+        store
+            .analysis()
+            .upsert_snapshot_export(&make_snapshot_export("hash-left", "2026-04-09"), &[])
+            .unwrap_or_else(|error| panic!("left snapshot should persist: {error}"));
+        store
+            .analysis()
+            .upsert_snapshot_export(&make_snapshot_export("hash-right", "2026-04-10"), &[])
+            .unwrap_or_else(|error| panic!("right snapshot should persist: {error}"));
+        store
+            .analysis()
+            .upsert_ai_artifact(&make_ai_artifact(
+                "artifact-compare",
+                "compare",
+                "2026-04-10T00:08:00Z",
+                "hash-left",
+                Some("hash-right"),
+            ))
+            .unwrap_or_else(|error| panic!("compare artifact should persist: {error}"));
+
+        let loaded = store
+            .analysis()
+            .latest_ai_artifact_for_anchor_day("2026-04-10")
+            .unwrap_or_else(|error| panic!("ai artifact day summary should load: {error}"))
+            .unwrap_or_else(|| panic!("compare artifact day summary should exist"));
+
+        assert_eq!(loaded.artifact_kind, "compare");
+        assert_eq!(loaded.matched_snapshot_hash, "hash-right");
+        assert_eq!(loaded.peer_snapshot_hash.as_deref(), Some("hash-left"));
+
+        let loaded_left = store
+            .analysis()
+            .latest_ai_artifact_for_anchor_day("2026-04-09")
+            .unwrap_or_else(|error| panic!("ai artifact day summary should load: {error}"))
+            .unwrap_or_else(|| panic!("compare artifact day summary should exist"));
+
+        assert_eq!(loaded_left.matched_snapshot_hash, "hash-left");
+        assert_eq!(
+            loaded_left.peer_snapshot_hash.as_deref(),
+            Some("hash-right")
+        );
     }
 
     #[test]

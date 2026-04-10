@@ -84,6 +84,7 @@ If you want the full contract, read [docs/OPENAI_INTEGRATION.md](docs/OPENAI_INT
 - deterministic demo, fixture, and smoke-test paths
 - snapshot export plus a local snapshot catalog
 - structured AI review/compare artifact persistence plus AI run browsing
+- a Review-screen read-only AI artifact panel with local summary and provenance context
 - Markdown and HTML report export from snapshots and AI runs
 - a fixture-backed local eval flywheel for prompt/schema/model regressions
 
@@ -116,6 +117,8 @@ For the complete config and runtime behavior, use the docs below instead of the 
   - [docs/DESIGN_SYSTEM.md](docs/DESIGN_SYSTEM.md)
 - Current execution plan for the snapshot library/report/eval pass:
   - [docs/execplans/20260410-phase8-snapshot-library-reports-and-eval-flywheel.md](docs/execplans/20260410-phase8-snapshot-library-reports-and-eval-flywheel.md)
+- Current execution plan for the Review AI artifact panel follow-up:
+  - [docs/execplans/20260410-phase9-review-ai-artifact-panel.md](docs/execplans/20260410-phase9-review-ai-artifact-panel.md)
 
 ## Development notes
 
