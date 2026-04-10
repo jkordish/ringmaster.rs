@@ -946,9 +946,11 @@ fn map_oauth_exchange_error(
 mod tests {
     use std::collections::VecDeque;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::Mutex;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     use axum::{Json, extract::Form, routing::post};
     use serde_json::json;
@@ -1285,21 +1287,27 @@ mod tests {
             .unwrap_or_else(|| panic!("token file should contain a payload"));
         assert_eq!(loaded, tokens);
 
-        let file_mode = fs::metadata(&path)
-            .unwrap_or_else(|error| panic!("metadata should be readable: {error}"))
+        #[cfg(unix)]
+        {
+            let file_mode = fs::metadata(&path)
+                .unwrap_or_else(|error| panic!("metadata should be readable: {error}"))
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(file_mode, 0o600);
+        }
+
+        #[cfg(unix)]
+        {
+            let parent_mode = fs::metadata(
+                path.parent()
+                    .unwrap_or_else(|| panic!("token file should have a parent directory")),
+            )
+            .unwrap_or_else(|error| panic!("parent directory metadata should be readable: {error}"))
             .permissions()
             .mode()
-            & 0o777;
-        assert_eq!(file_mode, 0o600);
-
-        let parent_mode = fs::metadata(
-            path.parent()
-                .unwrap_or_else(|| panic!("token file should have a parent directory")),
-        )
-        .unwrap_or_else(|error| panic!("parent directory metadata should be readable: {error}"))
-        .permissions()
-        .mode()
-            & 0o777;
-        assert_eq!(parent_mode, 0o700);
+                & 0o777;
+            assert_eq!(parent_mode, 0o700);
+        }
     }
 }
