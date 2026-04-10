@@ -1066,6 +1066,22 @@ fn fixture_snapshot_granted_scopes(fixture_dir: &std::path::Path) -> Vec<String>
     if daily_files.iter().any(|path| path.is_file()) {
         scopes.push("daily".to_owned());
     }
+    let stress_files = [
+        fixture_dir.join("sleep_time.json"),
+        fixture_dir.join("rest_mode_periods.json"),
+        fixture_dir.join("daily_stress.json"),
+    ];
+    if stress_files.iter().any(|path| path.is_file()) {
+        scopes.push("stress".to_owned());
+    }
+    let heart_health_files = [
+        fixture_dir.join("daily_resilience.json"),
+        fixture_dir.join("daily_cardiovascular_age.json"),
+        fixture_dir.join("vo2_max.json"),
+    ];
+    if heart_health_files.iter().any(|path| path.is_file()) {
+        scopes.push("heart_health".to_owned());
+    }
     if fixture_dir.join("heartrate.json").is_file() {
         scopes.push("heartrate".to_owned());
     }
@@ -4796,8 +4812,8 @@ mod tests {
         );
         assert!(first_snapshot.contains("Auth state: authenticated"));
         assert!(
-            first_snapshot
-                .contains("Granted scopes: personal, daily, heartrate, workout, tag, session")
+            first_snapshot.contains("Granted scopes: email, personal, daily, heartrate, tag"),
+            "status snapshot should surface the expanded Oura scope line"
         );
         assert!(first_snapshot.contains("Secret backend: demo-memory"));
         assert_eq!(

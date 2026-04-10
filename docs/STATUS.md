@@ -25,6 +25,7 @@ Primary gaps before this pass:
 The repository now includes:
 
 - a local snapshot catalog backed by `snapshot_exports`
+- an expanded Oura auth capability surface that now tracks `email`, `spo2`, `ring_configuration`, `stress`, and `heart_health` alongside the original baseline scopes
 - canonical snapshot library commands:
   - `snapshot list`
   - `snapshot show`

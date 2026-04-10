@@ -8,6 +8,7 @@ use crate::error::OuraProblem;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CapabilityKind {
+    Email,
     Personal,
     Daily,
     Heartrate,
@@ -15,6 +16,10 @@ pub enum CapabilityKind {
     Session,
     Tag,
     EnhancedTag,
+    Spo2,
+    RingConfiguration,
+    Stress,
+    HeartHealth,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,10 +334,12 @@ impl CapabilityReport {
                     .iter()
                     .any(|scope| kind.matches_scope(scope));
                 let granted = granted_scopes.iter().any(|scope| kind.matches_scope(scope));
-                let note = match (requested, granted) {
-                    (true, true) => "granted".to_owned(),
-                    (true, false) => "missing scope".to_owned(),
-                    (false, _) => "not requested".to_owned(),
+                let note = match (requested, granted, kind.is_local_sync_ready()) {
+                    (true, true, true) => "granted".to_owned(),
+                    (true, true, false) => "granted for future support".to_owned(),
+                    (true, false, true) => "missing scope".to_owned(),
+                    (true, false, false) => "missing scope; future support only".to_owned(),
+                    (false, _, _) => "not requested".to_owned(),
                 };
 
                 CapabilityEntry {
@@ -390,8 +397,9 @@ impl CapabilityReport {
 }
 
 impl CapabilityKind {
-    pub fn all() -> [Self; 7] {
+    pub fn all() -> [Self; 12] {
         [
+            Self::Email,
             Self::Personal,
             Self::Daily,
             Self::Heartrate,
@@ -399,11 +407,16 @@ impl CapabilityKind {
             Self::Session,
             Self::Tag,
             Self::EnhancedTag,
+            Self::Spo2,
+            Self::RingConfiguration,
+            Self::Stress,
+            Self::HeartHealth,
         ]
     }
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Email => "Email",
             Self::Personal => "Personal",
             Self::Daily => "Daily",
             Self::Heartrate => "Heartrate",
@@ -411,17 +424,26 @@ impl CapabilityKind {
             Self::Session => "Sessions",
             Self::Tag => "Tags",
             Self::EnhancedTag => "Enhanced Tags",
+            Self::Spo2 => "SpO2",
+            Self::RingConfiguration => "Ring Configuration",
+            Self::Stress => "Stress",
+            Self::HeartHealth => "Heart Health",
         }
     }
 
     pub fn scope_name(self) -> &'static str {
         match self {
+            Self::Email => "email",
             Self::Personal => "personal",
             Self::Daily => "daily",
             Self::Heartrate => "heartrate",
             Self::Workout => "workout",
             Self::Session => "session",
             Self::Tag | Self::EnhancedTag => "tag",
+            Self::Spo2 => "spo2",
+            Self::RingConfiguration => "ring_configuration",
+            Self::Stress => "stress",
+            Self::HeartHealth => "heart_health",
         }
     }
 
@@ -430,6 +452,10 @@ impl CapabilityKind {
             Self::EnhancedTag => scope == "tag" || scope == "enhanced_tag",
             _ => scope == self.scope_name(),
         }
+    }
+
+    pub fn is_local_sync_ready(self) -> bool {
+        !matches!(self, Self::Email | Self::Spo2 | Self::RingConfiguration)
     }
 }
 
@@ -581,5 +607,39 @@ mod tests {
 
         assert!(report.is_granted(CapabilityKind::Tag));
         assert!(report.is_granted(CapabilityKind::EnhancedTag));
+    }
+
+    #[test]
+    fn future_ready_capabilities_have_descriptive_notes() {
+        let report = CapabilityReport::from_scopes(
+            &["email".to_owned(), "spo2".to_owned()],
+            &["email".to_owned()],
+        );
+
+        assert_eq!(
+            report
+                .status_for(CapabilityKind::Email)
+                .unwrap_or_else(|| panic!("email capability should exist"))
+                .note,
+            "granted for future support"
+        );
+        assert_eq!(
+            report
+                .status_for(CapabilityKind::Spo2)
+                .unwrap_or_else(|| panic!("spo2 capability should exist"))
+                .note,
+            "missing scope; future support only"
+        );
+    }
+
+    #[test]
+    fn stress_and_heart_health_capabilities_map_to_new_scope_names() {
+        let report = CapabilityReport::from_scopes(
+            &["stress".to_owned(), "heart_health".to_owned()],
+            &["stress".to_owned(), "heart_health".to_owned()],
+        );
+
+        assert!(report.is_granted(CapabilityKind::Stress));
+        assert!(report.is_granted(CapabilityKind::HeartHealth));
     }
 }

@@ -20,6 +20,9 @@ pub enum Action {
     RefreshFailed {
         message: String,
     },
+    StatusMessage {
+        message: String,
+    },
     PreviousDay,
     NextDay,
     PreviousTimelinePoint,

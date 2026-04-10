@@ -645,7 +645,7 @@ impl AppState {
                 self.replace_live_snapshot(*snapshot);
                 self.status_line = summary;
             }
-            Action::RefreshFailed { message } => {
+            Action::RefreshFailed { message } | Action::StatusMessage { message } => {
                 self.refresh_in_flight = false;
                 self.status_line = message;
                 self.rebuild_live_model();
@@ -6939,12 +6939,17 @@ fn demo_eval_run_details() -> PersistedEvalRunDetails {
 
 fn demo_requested_scopes() -> Vec<String> {
     vec![
+        "email".to_owned(),
         "personal".to_owned(),
         "daily".to_owned(),
         "heartrate".to_owned(),
-        "workout".to_owned(),
         "tag".to_owned(),
+        "workout".to_owned(),
         "session".to_owned(),
+        "spo2".to_owned(),
+        "ring_configuration".to_owned(),
+        "stress".to_owned(),
+        "heart_health".to_owned(),
     ]
 }
 
@@ -7067,20 +7072,30 @@ mod tests {
                 configured: true,
                 callback_url: "http://localhost:8788/callback".to_owned(),
                 requested_scopes: vec![
+                    "email".to_owned(),
                     "personal".to_owned(),
                     "daily".to_owned(),
                     "heartrate".to_owned(),
-                    "workout".to_owned(),
                     "tag".to_owned(),
+                    "workout".to_owned(),
                     "session".to_owned(),
+                    "spo2".to_owned(),
+                    "ring_configuration".to_owned(),
+                    "stress".to_owned(),
+                    "heart_health".to_owned(),
                 ],
                 granted_scopes: vec![
+                    "email".to_owned(),
                     "personal".to_owned(),
                     "daily".to_owned(),
                     "heartrate".to_owned(),
-                    "workout".to_owned(),
                     "tag".to_owned(),
+                    "workout".to_owned(),
                     "session".to_owned(),
+                    "spo2".to_owned(),
+                    "ring_configuration".to_owned(),
+                    "stress".to_owned(),
+                    "heart_health".to_owned(),
                 ],
                 missing_fields: Vec::new(),
                 capability_report: CapabilityReport::demo(),

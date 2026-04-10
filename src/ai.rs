@@ -551,6 +551,9 @@ pub(crate) async fn follow_up_from_artifact_with_run_identity(
     let payload_json = serde_json::to_string_pretty(&artifact)?;
     let rendered_briefing = render_follow_up_briefing(&artifact);
     let summary_cache = follow_up_summary_cache(&artifact);
+    let privacy_profile = merged_snapshot_privacy_profile(snapshots).unwrap_or_else(|| {
+        parse_privacy_profile(&source_record.privacy_profile).unwrap_or(PrivacyProfile::Redacted)
+    });
     let record = artifact_record(ArtifactRecordInput {
         artifact_id: artifact_id(
             "follow_up",
@@ -572,7 +575,7 @@ pub(crate) async fn follow_up_from_artifact_with_run_identity(
         created_at,
         snapshot_hash_a: &source_record.snapshot_hash_a,
         snapshot_hash_b: source_record.snapshot_hash_b.as_deref(),
-        privacy_profile: parse_privacy_profile(&source_record.privacy_profile)?,
+        privacy_profile,
         artifact_status: artifact.status.as_str(),
         overview: &artifact.overview,
         summary_cache: &summary_cache,
@@ -1951,6 +1954,13 @@ fn merged_privacy_profile(left: PrivacyProfile, right: PrivacyProfile) -> Privac
     }
 }
 
+fn merged_snapshot_privacy_profile(snapshots: &[LoadedSnapshotArtifact]) -> Option<PrivacyProfile> {
+    snapshots
+        .iter()
+        .map(|snapshot| snapshot.bundle.metadata.privacy_profile)
+        .reduce(merged_privacy_profile)
+}
+
 fn parse_privacy_profile(value: &str) -> Result<PrivacyProfile> {
     match value {
         "redacted" => Ok(PrivacyProfile::Redacted),
@@ -2100,18 +2110,23 @@ impl SufficiencyLevel {
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    use std::path::PathBuf;
 
     use reqwest::StatusCode;
     use sha2::Digest;
 
     use super::{
         ArtifactStatus, COMPARE_OUTPUT_SCHEMA_VERSION, COMPARE_PROMPT_VERSION, CompareArtifactV1,
+        FOLLOW_UP_OUTPUT_SCHEMA_VERSION, FOLLOW_UP_PROMPT_VERSION, GuidedFollowUpKind,
         REVIEW_OUTPUT_SCHEMA_VERSION, REVIEW_PROMPT_VERSION, ReviewArtifactV1, SufficiencyLevel,
         artifact_id, build_review_request_plan, dry_run_compare_artifact, dry_run_review_artifact,
-        render_compare_briefing, render_request_preview, render_review_briefing, retryable_error,
-        review_snapshot, schema_value,
+        follow_up_from_artifact_with_run_identity, render_compare_briefing, render_request_preview,
+        render_review_briefing, retryable_error, review_snapshot, schema_value,
     };
-    use crate::config::Config;
+    use crate::config::{
+        AiConfig, AiInputTransport, AiProviderKind, AiRequestMode, AppPaths, Config, LoggingConfig,
+        OuraConfig, OuraSecretBackend, RefreshConfig, WebhookConfig,
+    };
     use crate::error::RingmasterError;
     use crate::snapshot::{
         PrivacyProfile, SnapshotBundleV1, SnapshotCapabilities, SnapshotCapabilityEntry,
@@ -2119,6 +2134,7 @@ mod tests {
         SnapshotRecordCounts, SnapshotReviewSignal, SnapshotSourceMode, SnapshotSyncState,
         deserialize_snapshot_bundle,
     };
+    use crate::store::queries::AiArtifactRecord;
 
     fn snapshot_bundle(scope: &str) -> SnapshotBundleV1 {
         let mut bundle = SnapshotBundleV1 {
@@ -2244,6 +2260,89 @@ mod tests {
         }
     }
 
+    fn test_config() -> Config {
+        Config {
+            app_name: "ringmaster",
+            paths: AppPaths::from_roots(
+                PathBuf::from("/home/tester"),
+                PathBuf::from("/tmp/config"),
+                PathBuf::from("/tmp/state"),
+                PathBuf::from("/tmp/cache"),
+            )
+            .unwrap_or_else(|error| panic!("paths should resolve: {error}")),
+            logging: LoggingConfig {
+                filter: "ringmaster=info".to_owned(),
+            },
+            oura: OuraConfig {
+                client_id: Some("test-client".to_owned()),
+                client_secret: None,
+                authorize_url: "https://example.invalid/auth".to_owned(),
+                token_url: "https://example.invalid/token".to_owned(),
+                api_base_url: "https://example.invalid/api".to_owned(),
+                secret_backend: OuraSecretBackend::Keyring,
+                secret_file: PathBuf::from("/tmp/state/ringmaster/secrets/oura-tokens.json"),
+                callback_bind: "127.0.0.1:8788"
+                    .parse()
+                    .unwrap_or_else(|error| panic!("socket address should parse: {error}")),
+                callback_path: "/callback".to_owned(),
+                requested_scopes: vec!["daily".to_owned()],
+                auth_timeout_secs: 120,
+            },
+            refresh: RefreshConfig {
+                personal_interval_secs: 3_600,
+                daily_interval_secs: 300,
+                heartrate_interval_secs: 60,
+                workout_interval_secs: 600,
+                enhanced_tag_interval_secs: 300,
+                session_interval_secs: 300,
+                personal_stale_after_secs: 259_200,
+                daily_stale_after_secs: 43_200,
+                heartrate_stale_after_secs: 900,
+                workout_stale_after_secs: 86_400,
+                enhanced_tag_stale_after_secs: 43_200,
+                session_stale_after_secs: 43_200,
+                daily_history_days: 30,
+                daily_overlap_days: 7,
+                heartrate_history_days: 14,
+                heartrate_overlap_minutes: 180,
+                workout_history_days: 30,
+                workout_overlap_days: 7,
+                enhanced_tag_history_days: 30,
+                enhanced_tag_overlap_days: 7,
+                session_history_days: 30,
+                session_overlap_days: 7,
+                max_backoff_secs: 3_600,
+                demo_fixture_dir: None,
+            },
+            webhook: WebhookConfig {
+                bind: "127.0.0.1:8799"
+                    .parse()
+                    .unwrap_or_else(|error| panic!("socket address should parse: {error}")),
+                path: "/webhooks/oura".to_owned(),
+                public_base_url: None,
+                verification_token: None,
+                signature_tolerance_secs: 300,
+                heartbeat_secs: 30,
+                renewal_lead_secs: 86_400,
+                subscriptions: Vec::new(),
+            },
+            ai: AiConfig {
+                enabled: false,
+                provider: AiProviderKind::OpenAi,
+                api_base_url: "https://api.openai.com/v1".to_owned(),
+                api_key_env: "OPENAI_API_KEY".to_owned(),
+                model: "gpt-5-mini".to_owned(),
+                reasoning_effort: None,
+                timeout_secs: 30,
+                max_retries: 1,
+                request_mode: AiRequestMode::Stateless,
+                input_transport: AiInputTransport::Inline,
+                prompt_cache: crate::config::PromptCacheMode::Off,
+                safety_identifier: None,
+            },
+        }
+    }
+
     #[test]
     fn dry_run_review_is_versioned_and_renderable() {
         let artifact = dry_run_review_artifact(&snapshot_bundle("today"));
@@ -2335,6 +2434,52 @@ mod tests {
         .unwrap_or_else(|error| panic!("fixture review should succeed: {error}"));
         assert_eq!(output.artifact.status, ArtifactStatus::Fixture);
         assert!(output.payload_json.contains("fixture review"));
+    }
+
+    #[tokio::test]
+    async fn follow_up_artifact_uses_current_snapshot_privacy_profile() {
+        let mut snapshot = loaded_snapshot("today");
+        snapshot.bundle.metadata.privacy_profile = PrivacyProfile::Balanced;
+        snapshot.compact_json = serde_json::to_string(&snapshot.bundle)
+            .unwrap_or_else(|error| panic!("bundle should encode: {error}"));
+
+        let source_record = AiArtifactRecord {
+            artifact_id: "artifact-source".to_owned(),
+            artifact_kind: "review".to_owned(),
+            output_schema_version: FOLLOW_UP_OUTPUT_SCHEMA_VERSION.to_owned(),
+            prompt_version: FOLLOW_UP_PROMPT_VERSION.to_owned(),
+            provider: "openai".to_owned(),
+            model: "gpt-5-mini".to_owned(),
+            reasoning_effort: None,
+            request_mode: "stateless".to_owned(),
+            input_transport: "inline".to_owned(),
+            run_mode: "dry_run".to_owned(),
+            created_at: "2026-04-10T00:00:00Z".to_owned(),
+            snapshot_hash_a: snapshot.bundle.metadata.snapshot_hash.clone(),
+            snapshot_hash_b: None,
+            privacy_profile: "redacted".to_owned(),
+            artifact_status: "success".to_owned(),
+            overview: "source overview".to_owned(),
+            summary_cache: "summary".to_owned(),
+            request_fingerprint: Some("fingerprint".to_owned()),
+            payload_json: serde_json::to_string(&dry_run_review_artifact(&snapshot.bundle))
+                .unwrap_or_else(|error| panic!("artifact should encode: {error}")),
+            rendered_briefing: "briefing".to_owned(),
+        };
+
+        let output = follow_up_from_artifact_with_run_identity(
+            &test_config(),
+            &[snapshot],
+            &source_record,
+            GuidedFollowUpKind::ExpandEvidence,
+            true,
+            None,
+            Some("2026-04-10T00:00:01Z"),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("follow-up should render: {error}"));
+
+        assert_eq!(output.record.privacy_profile, "balanced");
     }
 
     #[test]

@@ -163,8 +163,20 @@ pub async fn run(config: &Config, app: &mut AppState) -> Result<()> {
             .join()
             .map_err(|_| RingmasterError::Ui("refresh worker panicked".to_owned()))?;
     }
-    for (_, handle) in ai_tasks {
+    let mut shutdown_error = None;
+    for (run_id, handle) in ai_tasks {
         handle.abort();
+        if let Err(error) = interrupt_ai_run(
+            config,
+            &run_id,
+            "Interrupted when a previous TUI session ended before the run completed.",
+        ) && shutdown_error.is_none()
+        {
+            shutdown_error = Some(error);
+        }
+    }
+    if let Some(error) = shutdown_error {
+        return Err(error);
     }
 
     Ok(())
@@ -534,10 +546,17 @@ fn handle_ai_side_effect(
             if let Some(handle) = ai_tasks.remove(&run.run_id) {
                 handle.abort();
             }
-            cancel_ai_run(config, &run)?;
+            let cancelled = cancel_ai_run(config, &run.run_id)?;
             let _ = ai_action_tx.send(reload_live_snapshot_action(
                 config,
-                &format!("Cancelled AI run {}.", abbreviate_id(&run.run_id, 12)),
+                &if cancelled {
+                    format!("Cancelled AI run {}.", abbreviate_id(&run.run_id, 12))
+                } else {
+                    format!(
+                        "AI run {} is no longer queued or running.",
+                        abbreviate_id(&run.run_id, 12)
+                    )
+                },
                 None,
             )?);
         }
@@ -857,8 +876,9 @@ fn spawn_report_export_task(
             Ok(Ok(_)) => {
                 let refresh_task = tokio::task::spawn_blocking({
                     let config = config.clone();
+                    let run_mode = run_mode;
                     let success_message = success_message.clone();
-                    move || reload_live_snapshot_action(&config, &success_message, None)
+                    move || report_export_success_action(&config, run_mode, &success_message)
                 });
 
                 match refresh_task.await {
@@ -898,6 +918,19 @@ fn spawn_report_export_task(
 #[derive(Debug, Clone)]
 struct ReportExportContext {
     args: ReportExportArgs,
+}
+
+fn report_export_success_action(
+    config: &Config,
+    run_mode: RunMode,
+    success_message: &str,
+) -> Result<Action> {
+    if run_mode == RunMode::Demo {
+        return Ok(Action::StatusMessage {
+            message: success_message.to_owned(),
+        });
+    }
+    reload_live_snapshot_action(config, success_message, None)
 }
 
 fn build_report_export_context(
@@ -1794,18 +1827,35 @@ fn failed_ai_run_record(
     Ok(failed)
 }
 
-fn cancel_ai_run(config: &Config, run: &AiRunRecord) -> Result<()> {
-    if !matches!(run.run_status.as_str(), "queued" | "running") {
-        return Ok(());
-    }
+fn transition_ai_run_if_active(
+    config: &Config,
+    run_id: &str,
+    status: AiRunStatus,
+    message: &str,
+) -> Result<bool> {
     let store = Store::open(config)?;
-    let cancelled = failed_ai_run_record(
-        run,
+    let Some(current_record) = store.analysis().ai_run(run_id)? else {
+        return Ok(false);
+    };
+    if !matches!(current_record.run_status.as_str(), "queued" | "running") {
+        return Ok(false);
+    }
+    let transitioned = failed_ai_run_record(&current_record, status, message.to_owned())?;
+    store.analysis().upsert_ai_run(&transitioned)?;
+    Ok(true)
+}
+
+fn cancel_ai_run(config: &Config, run_id: &str) -> Result<bool> {
+    transition_ai_run_if_active(
+        config,
+        run_id,
         AiRunStatus::Cancelled,
-        "Cancelled from the AI workbench.".to_owned(),
-    )?;
-    store.analysis().upsert_ai_run(&cancelled)?;
-    Ok(())
+        "Cancelled from the AI workbench.",
+    )
+}
+
+fn interrupt_ai_run(config: &Config, run_id: &str, message: &str) -> Result<bool> {
+    transition_ai_run_if_active(config, run_id, AiRunStatus::Interrupted, message)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2375,14 +2425,16 @@ mod tests {
         build_live_state,
     };
     use crate::build_scenario_fixture_snapshot_apps_for_tests;
-    use crate::config::{Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig};
+    use crate::config::{
+        AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
+    };
     use crate::error::OuraProblem;
     use crate::oura::models::{AuthStatus, CapabilityReport};
     use crate::snapshot::PrivacyProfile;
     use crate::store::Store;
     use crate::store::queries::{
         AiRunRecord, AuthSessionRecord, DailyActivityRecord, DailyReadinessRecord,
-        DailySleepRecord, PersonalInfoRecord, SyncRunStatus, SyncStateRecord,
+        DailySleepRecord, PersonalInfoRecord, SnapshotExportRecord, SyncRunStatus, SyncStateRecord,
     };
     use crate::tui::render_snapshot;
     use crate::webhook::default_desired_subscriptions;
@@ -2552,6 +2604,52 @@ mod tests {
             account_email: Some("fixture-user@example.com".to_owned()),
             last_error: None,
         }
+    }
+
+    fn isolated_test_config() -> (tempfile::TempDir, Config) {
+        let temp_dir =
+            tempfile::tempdir().unwrap_or_else(|error| panic!("temp dir should exist: {error}"));
+        let root = temp_dir.path();
+        let config = Config {
+            paths: AppPaths::from_roots(
+                root.join("home"),
+                root.join("config"),
+                root.join("state"),
+                root.join("cache"),
+            )
+            .unwrap_or_else(|error| panic!("paths should resolve: {error}")),
+            ..test_config()
+        };
+        (temp_dir, config)
+    }
+
+    fn persist_snapshot_for_run(store: &Store, snapshot_hash: &str) {
+        let snapshot = SnapshotExportRecord {
+            snapshot_hash: snapshot_hash.to_owned(),
+            schema_version: "ringmaster.snapshot.v1".to_owned(),
+            app_version: "0.1.0".to_owned(),
+            generated_at: "2026-04-10T00:00:00Z".to_owned(),
+            scope: "day:2026-04-08".to_owned(),
+            start_day: "2026-04-08".to_owned(),
+            end_day: "2026-04-08".to_owned(),
+            anchor_day: "2026-04-08".to_owned(),
+            day_count: 1,
+            privacy_profile: "redacted".to_owned(),
+            source_mode: "real".to_owned(),
+            fixture_dir: None,
+            latest_source_day: Some("2026-04-08".to_owned()),
+            latest_review_day: Some("2026-04-08".to_owned()),
+            freshness_summary: "fresh".to_owned(),
+            trust_summary: "trust".to_owned(),
+            capability_summary: "capabilities".to_owned(),
+            provenance_summary: "provenance".to_owned(),
+            snapshot_json: "{}".to_owned(),
+            created_at: "2026-04-10T00:00:00Z".to_owned(),
+        };
+        store
+            .analysis()
+            .upsert_snapshot_export(&snapshot, &[])
+            .unwrap_or_else(|error| panic!("snapshot should persist: {error}"));
     }
 
     fn seed_sync_state(
@@ -3425,6 +3523,23 @@ mod tests {
     }
 
     #[test]
+    fn report_export_success_action_skips_live_reload_in_demo_mode() {
+        let action = super::report_export_success_action(
+            &test_config(),
+            RunMode::Demo,
+            "Exported report to /tmp/demo-report.md.",
+        )
+        .unwrap_or_else(|error| panic!("demo report export action should build: {error}"));
+
+        assert_eq!(
+            action,
+            Action::StatusMessage {
+                message: "Exported report to /tmp/demo-report.md.".to_owned(),
+            }
+        );
+    }
+
+    #[test]
     fn run_controls_require_runs_tab_and_fail_closed_on_other_tabs() {
         assert!(super::ai_run_controls_require_runs_tab(
             &Action::RequestCancelAiRun
@@ -3471,6 +3586,72 @@ mod tests {
             }
             other => panic!("expected non-runs-tab guard message, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cancel_ai_run_reloads_current_store_state_before_transitioning() {
+        let (_temp_dir, config) = isolated_test_config();
+        let store =
+            Store::open(&config).unwrap_or_else(|error| panic!("store should open: {error}"));
+        let mut completed_run = sample_ai_run_record();
+        completed_run.source_ai_artifact_id = None;
+        completed_run.artifact_id = None;
+        persist_snapshot_for_run(&store, &completed_run.snapshot_hash_a);
+        store
+            .analysis()
+            .upsert_ai_run(&completed_run)
+            .unwrap_or_else(|error| panic!("run should persist: {error}"));
+
+        let cancelled = super::cancel_ai_run(&config, &completed_run.run_id)
+            .unwrap_or_else(|error| panic!("cancellation should not fail: {error}"));
+        assert!(!cancelled);
+
+        let persisted = store
+            .analysis()
+            .ai_run(&completed_run.run_id)
+            .unwrap_or_else(|error| panic!("run should reload: {error}"))
+            .unwrap_or_else(|| panic!("run should still exist"));
+        assert_eq!(persisted.run_status, "succeeded");
+        assert_eq!(persisted.ended_at, completed_run.ended_at);
+    }
+
+    #[test]
+    fn interrupt_ai_run_marks_inflight_runs_with_terminal_status() {
+        let (_temp_dir, config) = isolated_test_config();
+        let store =
+            Store::open(&config).unwrap_or_else(|error| panic!("store should open: {error}"));
+        let mut running_run = sample_ai_run_record();
+        running_run.run_id = "run-review-interrupt".to_owned();
+        running_run.run_status = "running".to_owned();
+        running_run.ended_at = None;
+        running_run.error_message = None;
+        running_run.source_ai_artifact_id = None;
+        running_run.artifact_id = None;
+        persist_snapshot_for_run(&store, &running_run.snapshot_hash_a);
+        store
+            .analysis()
+            .upsert_ai_run(&running_run)
+            .unwrap_or_else(|error| panic!("run should persist: {error}"));
+
+        let interrupted = super::interrupt_ai_run(
+            &config,
+            &running_run.run_id,
+            "Interrupted when a previous TUI session ended before the run completed.",
+        )
+        .unwrap_or_else(|error| panic!("interruption should not fail: {error}"));
+        assert!(interrupted);
+
+        let persisted = store
+            .analysis()
+            .ai_run(&running_run.run_id)
+            .unwrap_or_else(|error| panic!("run should reload: {error}"))
+            .unwrap_or_else(|| panic!("run should still exist"));
+        assert_eq!(persisted.run_status, "interrupted");
+        assert_eq!(
+            persisted.error_message.as_deref(),
+            Some("Interrupted when a previous TUI session ended before the run completed.")
+        );
+        assert!(persisted.ended_at.is_some());
     }
 
     #[tokio::test]

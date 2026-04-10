@@ -43,6 +43,22 @@ export RINGMASTER_OURA_SECRET_FILE="$HOME/.local/state/ringmaster/secrets/oura-t
 
 The file backend is opt-in only. Ringmaster will not silently fall back from secure storage to plaintext local files.
 
+The default auth request now tracks Oura's broader current scope surface:
+
+- `email`
+- `personal`
+- `daily`
+- `heartrate`
+- `tag`
+- `workout`
+- `session`
+- `spo2`
+- `ring_configuration`
+- `stress`
+- `heart_health`
+
+Today the local product fully uses the baseline sync scopes plus the currently wired stress and heart-health reads. `spo2`, `ring_configuration`, and `email` are surfaced in auth/doctor/status as future-ready capability slots rather than hidden or silently ignored.
+
 ## Common workflows
 
 ### Explore locally

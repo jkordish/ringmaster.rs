@@ -42,6 +42,8 @@ cargo run -- webhook subscriptions list --fixture-dir tests/fixtures/webhooks
 cargo run -- webhook subscriptions sync --dry-run --fixture-dir tests/fixtures/webhooks
 ```
 
+`auth login` now requests the broader current Oura scope set by default and the product surfaces the result explicitly in `doctor`, auth status, and the TUI ops/auth readouts. Scopes that are granted but not yet wired into local sync, such as `spo2` and `ring_configuration`, are shown as future-ready instead of being silently ignored.
+
 ## Snapshot library runtime
 
 `ringmaster snapshot export` remains the canonical boundary between local product state and any optional external AI analysis.

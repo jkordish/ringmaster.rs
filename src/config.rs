@@ -1090,12 +1090,17 @@ fn parse_webhook_event_types(value: &str) -> Result<Vec<WebhookEventType>> {
 
 fn default_requested_scopes() -> Vec<String> {
     [
+        "email",
         "personal",
         "daily",
         "heartrate",
+        "tag",
         "workout",
         "session",
-        "tag",
+        "spo2",
+        "ring_configuration",
+        "stress",
+        "heart_health",
     ]
     .into_iter()
     .map(ToOwned::to_owned)
@@ -1240,12 +1245,17 @@ mod tests {
         assert_eq!(
             default_requested_scopes(),
             vec![
+                "email".to_owned(),
                 "personal".to_owned(),
                 "daily".to_owned(),
                 "heartrate".to_owned(),
+                "tag".to_owned(),
                 "workout".to_owned(),
                 "session".to_owned(),
-                "tag".to_owned(),
+                "spo2".to_owned(),
+                "ring_configuration".to_owned(),
+                "stress".to_owned(),
+                "heart_health".to_owned(),
             ]
         );
     }
