@@ -540,6 +540,14 @@ fn handle_ai_side_effect(
             ai_tasks.insert(run_id, handle);
         }
         Action::RequestCancelAiRun => {
+            if run_mode == RunMode::Demo {
+                let _ = ai_action_tx.send(Action::RefreshFailed {
+                    message:
+                        "Saved demo AI runs are read-only; cancellation is only available in live mode."
+                            .to_owned(),
+                });
+                return Ok(());
+            }
             let Some(run) = selected_run else {
                 return Ok(());
             };
@@ -1633,11 +1641,15 @@ async fn run_ai_job(
         running_record.updated_at = started_at.clone();
         store.analysis().upsert_ai_run(&running_record)?;
         failed_base_record = running_record.clone();
-        let _ = action_tx.send(reload_live_snapshot_action(
+        let _ = action_tx.send(nonfatal_reload_live_snapshot_action(
             &config,
             &format!("Running {}.", running_record.run_kind),
             Some(&store),
-        )?);
+            &format!(
+                "AI run {} started, but refreshing the workbench failed",
+                abbreviate_id(&running_record.run_id, 12)
+            ),
+        ));
 
         let run_config = config_with_model_override(&config, preflight.model_override.as_deref());
 
@@ -1676,7 +1688,7 @@ async fn run_ai_job(
                 now_rfc3339()?,
             )?;
             store.analysis().upsert_ai_run(&completed)?;
-            let _ = action_tx.send(reload_live_snapshot_action(
+            let _ = action_tx.send(nonfatal_reload_live_snapshot_action(
                 &config,
                 &format!(
                     "Completed AI {} {}.",
@@ -1684,7 +1696,11 @@ async fn run_ai_job(
                     abbreviate_id(&completed.run_id, 12)
                 ),
                 Some(&store),
-            )?);
+                &format!(
+                    "AI run {} completed, but refreshing the workbench failed",
+                    abbreviate_id(&completed.run_id, 12)
+                ),
+            ));
         } else {
             match preflight.intent {
                 AiLaunchIntent::ReviewSelectedDay | AiLaunchIntent::ChallengeSelectedDay => {
@@ -1700,14 +1716,18 @@ async fn run_ai_job(
                         now_rfc3339()?,
                     )?;
                     store.analysis().upsert_ai_run(&completed)?;
-                    let _ = action_tx.send(reload_live_snapshot_action(
+                    let _ = action_tx.send(nonfatal_reload_live_snapshot_action(
                         &config,
                         &format!(
                             "Completed AI review {}.",
                             abbreviate_id(&completed.run_id, 12)
                         ),
                         Some(&store),
-                    )?);
+                        &format!(
+                            "AI review {} completed, but refreshing the workbench failed",
+                            abbreviate_id(&completed.run_id, 12)
+                        ),
+                    ));
                 }
                 AiLaunchIntent::CompareSelectedWeek => {
                     let snapshot_a = load_snapshot_from_preflight(&preflight, 0)?;
@@ -1725,14 +1745,18 @@ async fn run_ai_job(
                         now_rfc3339()?,
                     )?;
                     store.analysis().upsert_ai_run(&completed)?;
-                    let _ = action_tx.send(reload_live_snapshot_action(
+                    let _ = action_tx.send(nonfatal_reload_live_snapshot_action(
                         &config,
                         &format!(
                             "Completed AI compare {}.",
                             abbreviate_id(&completed.run_id, 12)
                         ),
                         Some(&store),
-                    )?);
+                        &format!(
+                            "AI compare {} completed, but refreshing the workbench failed",
+                            abbreviate_id(&completed.run_id, 12)
+                        ),
+                    ));
                 }
             }
         }
@@ -2358,6 +2382,19 @@ fn reload_live_snapshot_action(
     Ok(Action::LiveSnapshotLoaded {
         snapshot: Box::new(snapshot),
         summary: summary.to_owned(),
+    })
+}
+
+fn nonfatal_reload_live_snapshot_action(
+    config: &Config,
+    summary: &str,
+    store_override: Option<&Store>,
+    failure_context: &str,
+) -> Action {
+    reload_live_snapshot_action(config, summary, store_override).unwrap_or_else(|error| {
+        Action::RefreshFailed {
+            message: format!("{failure_context}: {error}"),
+        }
     })
 }
 
@@ -3540,6 +3577,39 @@ mod tests {
     }
 
     #[test]
+    fn demo_mode_cancellation_stays_local_and_reports_read_only_state() {
+        let (ai_action_tx, mut ai_action_rx) = unbounded_channel();
+        let mut ai_tasks = HashMap::new();
+        super::handle_ai_side_effect(
+            &test_config(),
+            RunMode::Demo,
+            Action::RequestCancelAiRun,
+            Screen::Ai,
+            Some("2026-04-08".to_owned()),
+            None,
+            AiBrowserTab::Runs,
+            Some(sample_ai_run_record()),
+            None,
+            None,
+            None,
+            &ai_action_tx,
+            &mut ai_tasks,
+        )
+        .unwrap_or_else(|error| panic!("demo-mode cancellation should not fail: {error}"));
+
+        assert!(ai_tasks.is_empty());
+        match ai_action_rx.try_recv() {
+            Ok(Action::RefreshFailed { message }) => {
+                assert_eq!(
+                    message,
+                    "Saved demo AI runs are read-only; cancellation is only available in live mode."
+                );
+            }
+            other => panic!("expected demo-mode cancellation warning, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn run_controls_require_runs_tab_and_fail_closed_on_other_tabs() {
         assert!(super::ai_run_controls_require_runs_tab(
             &Action::RequestCancelAiRun
@@ -3585,6 +3655,29 @@ mod tests {
                 );
             }
             other => panic!("expected non-runs-tab guard message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nonfatal_reload_live_snapshot_action_reports_refresh_failures_without_panicking() {
+        let (_temp_dir, mut config) = isolated_test_config();
+        config.paths.state_dir = PathBuf::from("/proc/ringmaster-state");
+        config.paths.database_file = PathBuf::from("/proc/ringmaster-state/ringmaster.db");
+
+        let action = super::nonfatal_reload_live_snapshot_action(
+            &config,
+            "Completed AI review run-review-1.",
+            None,
+            "AI review run-review-1 completed, but refreshing the workbench failed",
+        );
+
+        match action {
+            Action::RefreshFailed { message } => {
+                assert!(message.contains(
+                    "AI review run-review-1 completed, but refreshing the workbench failed:"
+                ));
+            }
+            other => panic!("expected nonfatal refresh failure action, got {other:?}"),
         }
     }
 
