@@ -188,6 +188,16 @@ pub const fn search_scope(screen: Screen, region: FocusRegion) -> Option<SearchS
 }
 
 #[must_use]
+pub const fn default_search_scope(screen: Screen) -> Option<SearchScope> {
+    match screen {
+        Screen::Timeline => Some(SearchScope::TimelineEvents),
+        Screen::Review => Some(SearchScope::ReviewCards),
+        Screen::Ai => Some(SearchScope::AiBrowserItems),
+        _ => None,
+    }
+}
+
+#[must_use]
 pub fn next_region(screen: Screen, current: FocusRegion) -> FocusRegion {
     let regions = screen_regions(screen);
     let index = regions
@@ -209,7 +219,7 @@ pub fn previous_region(screen: Screen, current: FocusRegion) -> FocusRegion {
 
 #[cfg(test)]
 mod tests {
-    use super::{FocusRegion, default_region, screen_regions};
+    use super::{FocusRegion, SearchScope, default_region, default_search_scope, screen_regions};
     use crate::app::Screen;
 
     #[test]
@@ -228,5 +238,22 @@ mod tests {
         );
         assert_eq!(default_region(Screen::Explain), FocusRegion::ContextPrimary);
         assert_eq!(default_region(Screen::Ops), FocusRegion::Primary);
+    }
+
+    #[test]
+    fn default_search_scope_points_at_each_screen_primary_list() {
+        assert_eq!(
+            default_search_scope(Screen::Timeline),
+            Some(SearchScope::TimelineEvents)
+        );
+        assert_eq!(
+            default_search_scope(Screen::Review),
+            Some(SearchScope::ReviewCards)
+        );
+        assert_eq!(
+            default_search_scope(Screen::Ai),
+            Some(SearchScope::AiBrowserItems)
+        );
+        assert_eq!(default_search_scope(Screen::Patterns), None);
     }
 }

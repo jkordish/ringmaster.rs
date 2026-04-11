@@ -1829,7 +1829,9 @@ impl AppState {
     }
 
     fn open_search(&mut self) {
-        let Some(scope) = navigation::search_scope(self.active_screen, self.focused_region) else {
+        let Some(scope) = navigation::search_scope(self.active_screen, self.focused_region)
+            .or_else(|| navigation::default_search_scope(self.active_screen))
+        else {
             self.status_line = format!(
                 "Search is not available in {}.",
                 navigation::region_label(self.active_screen, self.focused_region)
@@ -8795,7 +8797,7 @@ mod tests {
         ArtifactStatus, ConfidenceLevel, GuidedFollowUpKind, ReviewArtifactV1, SufficiencyLevel,
     };
     use crate::insights::MetricPoint;
-    use crate::navigation::{self, FocusRegion, PreflightControl};
+    use crate::navigation::{self, FocusRegion, PreflightControl, SearchScope};
     use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
     use crate::review::{
         InvestigationReport, ReviewCard, ReviewConfidence, ReviewDeck, ReviewFocus, ReviewMode,
@@ -10220,6 +10222,54 @@ mod tests {
         app.handle(Action::CloseSearch);
         assert!(app.search_state().is_none());
         assert_eq!(app.focused_region(), FocusRegion::Primary);
+    }
+
+    #[test]
+    fn open_search_falls_back_to_the_screen_primary_list() {
+        let mut timeline = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        timeline.active_screen = Screen::Timeline;
+        timeline.set_focused_region(FocusRegion::ContextPrimary);
+
+        timeline.handle(Action::OpenSearch);
+        assert_eq!(
+            timeline.search_state().map(|search| search.scope),
+            Some(SearchScope::TimelineEvents)
+        );
+        assert_eq!(timeline.focused_region(), FocusRegion::ContextPrimary);
+
+        let mut review = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        review.active_screen = Screen::Review;
+        review.set_focused_region(FocusRegion::ContextPrimary);
+
+        review.handle(Action::OpenSearch);
+        assert_eq!(
+            review.search_state().map(|search| search.scope),
+            Some(SearchScope::ReviewCards)
+        );
+        assert_eq!(review.focused_region(), FocusRegion::ContextPrimary);
+
+        let mut ai = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        ai.active_screen = Screen::Ai;
+        ai.set_focused_region(FocusRegion::ContextPrimary);
+
+        ai.handle(Action::OpenSearch);
+        assert_eq!(
+            ai.search_state().map(|search| search.scope),
+            Some(SearchScope::AiBrowserItems)
+        );
+        assert_eq!(ai.focused_region(), FocusRegion::ContextPrimary);
     }
 
     #[test]

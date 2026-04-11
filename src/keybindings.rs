@@ -142,13 +142,22 @@ pub fn bindings() -> &'static [Keybinding] {
 
 fn resolve_scopes(context: BindingContext) -> Vec<BindingScope> {
     if context.ai_preflight_open {
-        return vec![BindingScope::Transient(TransientLayer::AiPreflight)];
+        return vec![
+            BindingScope::Transient(TransientLayer::AiPreflight),
+            BindingScope::Global,
+        ];
     }
     if context.search_open {
-        return vec![BindingScope::Transient(TransientLayer::Search)];
+        return vec![
+            BindingScope::Transient(TransientLayer::Search),
+            BindingScope::Global,
+        ];
     }
     if context.help_open {
-        return vec![BindingScope::Transient(TransientLayer::Help)];
+        return vec![
+            BindingScope::Transient(TransientLayer::Help),
+            BindingScope::Global,
+        ];
     }
 
     vec![
@@ -1337,6 +1346,22 @@ mod tests {
         );
 
         assert_eq!(action, None);
+    }
+
+    #[test]
+    fn transient_scopes_still_allow_global_quit() {
+        let action = super::resolve(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            BindingContext {
+                active_screen: Screen::Ai,
+                focused_region: FocusRegion::Secondary,
+                search_open: true,
+                help_open: false,
+                ai_preflight_open: false,
+            },
+        );
+
+        assert_eq!(action, Some(Action::Quit));
     }
 
     #[test]
