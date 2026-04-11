@@ -157,8 +157,9 @@ pub fn list_subscriptions<'a>(
     store: &'a Store,
     fixture_dir: Option<PathBuf>,
 ) -> impl std::future::Future<Output = Result<SubscriptionListReport>> + Send + 'a {
-    let prepared = prepare_subscription_list(config, store, fixture_dir);
+    let store_plan = store.plan().clone();
     async move {
+        let prepared = prepare_subscription_list(config, &store_plan, fixture_dir);
         let PreparedSubscriptionList {
             store_plan,
             fixture_dir,
@@ -201,8 +202,9 @@ pub fn sync_subscriptions<'a>(
     store: &'a Store,
     options: SubscriptionSyncOptions,
 ) -> impl std::future::Future<Output = Result<SubscriptionSyncReport>> + Send + 'a {
-    let prepared = prepare_subscription_sync(config, store, options);
+    let store_plan = store.plan().clone();
     async move {
+        let prepared = prepare_subscription_sync(config, &store_plan, options);
         let PreparedSubscriptionSync {
             store_plan,
             options,
@@ -626,13 +628,14 @@ fn reopen_store(config: &Config, store_plan: &StorePlan) -> Result<Store> {
 
 fn prepare_subscription_list(
     config: &Config,
-    store: &Store,
+    store_plan: &StorePlan,
     fixture_dir: Option<PathBuf>,
 ) -> Result<PreparedSubscriptionList> {
     let desired = desired_targets(config, fixture_dir.as_deref())?;
-    persist_desired_snapshot(config, store, &desired)?;
+    let persist_store = reopen_store(config, store_plan)?;
+    persist_desired_snapshot(config, &persist_store, &desired)?;
     Ok(PreparedSubscriptionList {
-        store_plan: store.plan().clone(),
+        store_plan: store_plan.clone(),
         callback_url: desired.first().map(|entry| entry.callback_url.clone()),
         verification_token_configured: config.webhook.verification_token.is_some(),
         fixture_dir,
@@ -642,13 +645,14 @@ fn prepare_subscription_list(
 
 fn prepare_subscription_sync(
     config: &Config,
-    store: &Store,
+    store_plan: &StorePlan,
     options: SubscriptionSyncOptions,
 ) -> Result<PreparedSubscriptionSync> {
     let desired = desired_targets(config, options.fixture_dir.as_deref())?;
-    persist_desired_snapshot(config, store, &desired)?;
+    let persist_store = reopen_store(config, store_plan)?;
+    persist_desired_snapshot(config, &persist_store, &desired)?;
     Ok(PreparedSubscriptionSync {
-        store_plan: store.plan().clone(),
+        store_plan: store_plan.clone(),
         options,
         desired,
     })
@@ -1112,5 +1116,79 @@ mod tests {
         );
         assert!(report.remote.is_empty());
         assert!(!report.desired.is_empty());
+    }
+
+    #[test]
+    fn list_subscriptions_future_is_lazy_until_polled() {
+        let fixture_dir =
+            tempdir().unwrap_or_else(|error| unreachable!("tempdir should succeed: {error}"));
+        std::fs::write(
+            fixture_dir.path().join("subscriptions.context.json"),
+            r#"{"callback_url":"https://fixture.test/webhooks/oura","verification_token":"fixture-token"}"#,
+        )
+        .unwrap_or_else(|error| unreachable!("context fixture write should succeed: {error}"));
+        std::fs::write(fixture_dir.path().join("subscriptions.remote.json"), r"[]")
+            .unwrap_or_else(|error| unreachable!("remote fixture write should succeed: {error}"));
+
+        let config =
+            Config::load().unwrap_or_else(|error| unreachable!("config should load: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
+
+        let future = list_subscriptions(&config, &store, Some(fixture_dir.path().to_path_buf()));
+        drop(future);
+
+        let desired = store
+            .webhook()
+            .list_desired_subscriptions()
+            .unwrap_or_else(|error| unreachable!("desired snapshot should load: {error}"));
+        let remote = store
+            .webhook()
+            .list_remote_subscriptions()
+            .unwrap_or_else(|error| unreachable!("remote snapshot should load: {error}"));
+
+        assert!(desired.is_empty());
+        assert!(remote.is_empty());
+    }
+
+    #[test]
+    fn sync_subscriptions_future_is_lazy_until_polled() {
+        let fixture_dir =
+            tempdir().unwrap_or_else(|error| unreachable!("tempdir should succeed: {error}"));
+        std::fs::write(
+            fixture_dir.path().join("subscriptions.context.json"),
+            r#"{"callback_url":"https://fixture.test/webhooks/oura","verification_token":"fixture-token"}"#,
+        )
+        .unwrap_or_else(|error| unreachable!("context fixture write should succeed: {error}"));
+        std::fs::write(fixture_dir.path().join("subscriptions.remote.json"), r"[]")
+            .unwrap_or_else(|error| unreachable!("remote fixture write should succeed: {error}"));
+
+        let config =
+            Config::load().unwrap_or_else(|error| unreachable!("config should load: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
+
+        let future = sync_subscriptions(
+            &config,
+            &store,
+            SubscriptionSyncOptions {
+                dry_run: true,
+                prune: false,
+                fixture_dir: Some(fixture_dir.path().to_path_buf()),
+            },
+        );
+        drop(future);
+
+        let desired = store
+            .webhook()
+            .list_desired_subscriptions()
+            .unwrap_or_else(|error| unreachable!("desired snapshot should load: {error}"));
+        let remote = store
+            .webhook()
+            .list_remote_subscriptions()
+            .unwrap_or_else(|error| unreachable!("remote snapshot should load: {error}"));
+
+        assert!(desired.is_empty());
+        assert!(remote.is_empty());
     }
 }
