@@ -1964,7 +1964,9 @@ fn build_ai_run_record(
         reasoning_effort: None,
         request_mode: preflight.request_preview.request_mode.clone(),
         input_transport: preflight.request_preview.input_transport.clone(),
-        run_mode: "real".to_owned(),
+        run_mode: ai_run_mode_from_preview(&preflight.request_preview)
+            .as_str()
+            .to_owned(),
         prompt_version: preflight.request_preview.prompt_version.clone(),
         output_schema_version: preflight.request_preview.output_schema_version.clone(),
         privacy_profile: preflight.privacy_profile.as_str().to_owned(),
@@ -1984,6 +1986,14 @@ fn build_ai_run_record(
         ended_at,
         updated_at: created_at.to_owned(),
     })
+}
+
+fn ai_run_mode_from_preview(preview: &ai::AiRequestPreview) -> ai::AiRunMode {
+    match preview.provider.as_str() {
+        "dry_run" => ai::AiRunMode::DryRun,
+        "fixture" => ai::AiRunMode::Fixture,
+        _ => ai::AiRunMode::Real,
+    }
 }
 
 fn ai_run_kind(preflight: &AiPreflightState) -> &'static str {
@@ -2528,9 +2538,16 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     fn sample_request_preview(snapshot_hash: &str) -> AiRequestPreview {
+        sample_request_preview_with_provider(snapshot_hash, "openai")
+    }
+
+    fn sample_request_preview_with_provider(
+        snapshot_hash: &str,
+        provider: &str,
+    ) -> AiRequestPreview {
         AiRequestPreview {
             task_family: "review".to_owned(),
-            provider: "openai".to_owned(),
+            provider: provider.to_owned(),
             model: "gpt-5-mini".to_owned(),
             request_mode: "stateless".to_owned(),
             input_transport: "inline".to_owned(),
@@ -3645,6 +3662,41 @@ mod tests {
         assert_eq!(failed.error_message.as_deref(), Some("boom"));
         assert_eq!(failed.run_status, "failed");
         assert!(failed.ended_at.is_some());
+    }
+
+    #[test]
+    fn build_ai_run_record_preserves_non_real_mode_from_preview() {
+        let preflight = AiPreflightState {
+            intent: AiLaunchIntent::ReviewSelectedDay,
+            source_screen: Screen::Review,
+            snapshot_scope: "day:2026-04-08".to_owned(),
+            snapshot_paths: vec!["/tmp/review-20260408-fixture.json".to_owned()],
+            request_preview: sample_request_preview_with_provider(
+                "demo-snapshot-20260408",
+                "fixture",
+            ),
+            privacy_profile: PrivacyProfile::Redacted,
+            model_override: None,
+            source_ai_artifact_id: None,
+            follow_up_kind: None,
+            warning_lines: Vec::new(),
+            confirm_enabled: true,
+        };
+
+        let record = super::build_ai_run_record(
+            "run-review-fixture-1",
+            &preflight,
+            super::AiRunStatus::Queued,
+            "2026-04-10T00:00:00Z",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_or_else(|error| panic!("fixture run record should build: {error}"));
+
+        assert_eq!(record.provider, "fixture");
+        assert_eq!(record.run_mode, "fixture");
     }
 
     #[test]

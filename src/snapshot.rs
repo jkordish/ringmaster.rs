@@ -830,16 +830,14 @@ pub fn export_snapshot(
         capabilities: SnapshotCapabilities {
             requested_scopes: auth_status.requested_scopes.clone(),
             granted_scopes: capability_report
-                .entries
-                .iter()
-                .filter(|entry| entry.granted)
-                .map(|entry| entry.kind.scope_name().to_owned())
+                .granted_scope_names()
+                .into_iter()
+                .map(str::to_owned)
                 .collect(),
             missing_scopes: capability_report
-                .entries
-                .iter()
-                .filter(|entry| entry.requested && !entry.granted)
-                .map(|entry| entry.kind.scope_name().to_owned())
+                .missing_scope_names()
+                .into_iter()
+                .map(str::to_owned)
                 .collect(),
             entries: capability_report
                 .entries

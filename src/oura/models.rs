@@ -382,9 +382,17 @@ impl CapabilityReport {
     }
 
     pub fn missing_scope_names(&self) -> Vec<&'static str> {
+        self.scope_names_for(|entry| entry.requested && !entry.granted)
+    }
+
+    pub fn granted_scope_names(&self) -> Vec<&'static str> {
+        self.scope_names_for(|entry| entry.granted)
+    }
+
+    fn scope_names_for(&self, predicate: impl Fn(&CapabilityEntry) -> bool) -> Vec<&'static str> {
         self.entries
             .iter()
-            .filter(|entry| entry.requested && !entry.granted)
+            .filter(|entry| predicate(entry))
             .map(|entry| entry.kind.scope_name())
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -665,6 +673,16 @@ mod tests {
             CapabilityReport::from_scopes(&["tag".to_owned(), "enhanced_tag".to_owned()], &[]);
 
         assert_eq!(report.missing_scope_names(), vec!["tag"]);
+    }
+
+    #[test]
+    fn granted_scope_names_dedupe_shared_tag_scope() {
+        let report = CapabilityReport::from_scopes(
+            &["tag".to_owned(), "enhanced_tag".to_owned()],
+            &["tag".to_owned()],
+        );
+
+        assert_eq!(report.granted_scope_names(), vec!["tag"]);
     }
 
     #[test]

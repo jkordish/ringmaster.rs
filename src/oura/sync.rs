@@ -1209,10 +1209,9 @@ fn error_problem(error: &RingmasterError) -> OuraProblem {
 
 fn granted_scopes_from_report(report: &CapabilityReport) -> Vec<String> {
     report
-        .entries
-        .iter()
-        .filter(|entry| entry.granted)
-        .map(|entry| entry.kind.scope_name().to_owned())
+        .granted_scope_names()
+        .into_iter()
+        .map(str::to_owned)
         .collect()
 }
 

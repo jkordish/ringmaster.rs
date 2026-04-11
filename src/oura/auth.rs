@@ -1,4 +1,4 @@
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -317,34 +317,84 @@ impl SecretStore for FileSecretStore {
         })?;
         set_owner_only_permissions(parent, 0o700)?;
 
+        let temp_path = temp_file_path(&self.path)?;
         let mut options = OpenOptions::new();
-        options.create(true).truncate(true).write(true);
+        options.create_new(true).write(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(&self.path).map_err(|source| {
+        let mut file = options.open(&temp_path).map_err(|source| {
             SecretStoreError::BackendUnavailable(format!(
-                "failed to open token file `{}` for writing: {source}",
-                self.path.display()
+                "failed to open temporary token file `{}` for writing: {source}",
+                temp_path.display()
             ))
         })?;
         file.write_all(payload.as_bytes()).map_err(|source| {
             SecretStoreError::BackendUnavailable(format!(
-                "failed to write token file `{}`: {source}",
-                self.path.display()
+                "failed to write temporary token file `{}`: {source}",
+                temp_path.display()
             ))
         })?;
-        file.flush().map_err(|source| {
+        file.sync_all().map_err(|source| {
             SecretStoreError::BackendUnavailable(format!(
-                "failed to flush token file `{}`: {source}",
-                self.path.display()
+                "failed to sync temporary token file `{}`: {source}",
+                temp_path.display()
             ))
         })?;
+        set_owner_only_permissions(&temp_path, 0o600)?;
+        replace_file_atomically(&temp_path, &self.path)?;
+        sync_directory(parent)?;
         set_owner_only_permissions(&self.path, 0o600)?;
         Ok(())
     }
+}
+
+fn temp_file_path(path: &Path) -> std::result::Result<PathBuf, SecretStoreError> {
+    let file_name = path.file_name().ok_or_else(|| {
+        SecretStoreError::BackendUnavailable(format!(
+            "token file path `{}` does not have a file name",
+            path.display()
+        ))
+    })?;
+    let mut temp_name = file_name.to_os_string();
+    temp_name.push(format!(
+        ".tmp-{}",
+        OffsetDateTime::now_utc().unix_timestamp_nanos()
+    ));
+    Ok(path.with_file_name(temp_name))
+}
+
+fn replace_file_atomically(
+    temp_path: &Path,
+    target_path: &Path,
+) -> std::result::Result<(), SecretStoreError> {
+    fs::rename(temp_path, target_path).map_err(|source| {
+        SecretStoreError::BackendUnavailable(format!(
+            "failed to replace token file `{}` with `{}`: {source}",
+            target_path.display(),
+            temp_path.display()
+        ))
+    })?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> std::result::Result<(), SecretStoreError> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| {
+            SecretStoreError::BackendUnavailable(format!(
+                "failed to sync token directory `{}`: {source}",
+                path.display()
+            ))
+        })
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> std::result::Result<(), SecretStoreError> {
+    Ok(())
 }
 
 pub fn inspect_auth(config: &Config, store: &Store) -> Result<AuthStatus> {
@@ -1363,5 +1413,50 @@ mod tests {
                 & 0o777;
             assert_eq!(parent_mode, 0o700);
         }
+    }
+
+    #[test]
+    fn file_secret_store_replaces_existing_payload_without_leaking_temp_files() {
+        let tempdir = tempdir()
+            .unwrap_or_else(|error| panic!("tempdir should succeed for file backend: {error}"));
+        let path = tempdir.path().join("secrets").join("oura-tokens.json");
+        let store = FileSecretStore::new(path.clone());
+
+        store
+            .write_tokens(&StoredTokens {
+                access_token: "first-access-token".to_owned(),
+                refresh_token: Some("first-refresh-token".to_owned()),
+            })
+            .unwrap_or_else(|error| panic!("first token write should succeed: {error}"));
+        store
+            .write_tokens(&StoredTokens {
+                access_token: "second-access-token".to_owned(),
+                refresh_token: Some("second-refresh-token".to_owned()),
+            })
+            .unwrap_or_else(|error| panic!("second token write should succeed: {error}"));
+
+        let loaded = store
+            .read_tokens()
+            .unwrap_or_else(|error| panic!("reading token file should succeed: {error}"))
+            .unwrap_or_else(|| panic!("token file should contain a payload"));
+        assert_eq!(loaded.access_token, "second-access-token");
+        assert_eq!(
+            loaded.refresh_token.as_deref(),
+            Some("second-refresh-token")
+        );
+
+        let leaked_temp = path
+            .parent()
+            .unwrap_or_else(|| panic!("token file should have a parent directory"))
+            .read_dir()
+            .unwrap_or_else(|error| panic!("token directory should be readable: {error}"))
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp-"))
+            .collect::<Vec<_>>();
+        assert!(
+            leaked_temp.is_empty(),
+            "temporary files leaked: {leaked_temp:?}"
+        );
     }
 }

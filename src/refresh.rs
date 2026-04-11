@@ -954,10 +954,9 @@ fn advance_dry_run_sync_states(
 ) {
     let granted_scopes = report
         .capability_report
-        .entries
-        .iter()
-        .filter(|entry| entry.granted)
-        .map(|entry| entry.kind.scope_name().to_owned())
+        .granted_scope_names()
+        .into_iter()
+        .map(str::to_owned)
         .collect::<Vec<_>>();
 
     for slice in &report.slice_reports {
