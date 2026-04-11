@@ -49,7 +49,7 @@ The branch has one functional keybinding bug report plus several API/docs cohere
 
 - [x] Capture the comment set and translate it into concrete code changes.
 - [x] Implement the fixes and update targeted tests/docs.
-- [ ] Run verification, update the plan, and resolve the review threads.
+- [x] Run verification, update the plan, and resolve the review threads.
 
 ## Verification
 
