@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -386,6 +386,8 @@ impl CapabilityReport {
             .iter()
             .filter(|entry| entry.requested && !entry.granted)
             .map(|entry| entry.kind.scope_name())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect()
     }
 
@@ -644,6 +646,25 @@ mod tests {
 
         assert!(report.is_granted(CapabilityKind::Tag));
         assert!(report.is_granted(CapabilityKind::EnhancedTag));
+    }
+
+    #[test]
+    fn legacy_enhanced_tag_scope_alias_grants_tag_and_enhanced_tag() {
+        let report = CapabilityReport::from_scopes(
+            &["enhanced_tag".to_owned()],
+            &["enhanced_tag".to_owned()],
+        );
+
+        assert!(report.is_granted(CapabilityKind::Tag));
+        assert!(report.is_granted(CapabilityKind::EnhancedTag));
+    }
+
+    #[test]
+    fn missing_scope_names_dedupe_shared_tag_scope() {
+        let report =
+            CapabilityReport::from_scopes(&["tag".to_owned(), "enhanced_tag".to_owned()], &[]);
+
+        assert_eq!(report.missing_scope_names(), vec!["tag"]);
     }
 
     #[test]

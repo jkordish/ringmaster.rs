@@ -523,14 +523,7 @@ fn handle_ai_side_effect(
                 return Ok(());
             }
             let queued_record = persist_queued_ai_run(config, &preflight)?;
-            let _ = ai_action_tx.send(reload_live_snapshot_action(
-                config,
-                &format!(
-                    "Queued {} with {} privacy.",
-                    queued_record.run_kind, queued_record.privacy_profile
-                ),
-                None,
-            )?);
+            let _ = ai_action_tx.send(queued_ai_run_refresh_action(config, &queued_record));
             let run_id = queued_record.run_id.clone();
             let config = config.clone();
             let ai_action_tx = ai_action_tx.clone();
@@ -1621,6 +1614,22 @@ fn persist_queued_ai_run(config: &Config, preflight: &AiPreflightState) -> Resul
     let store = Store::open(config)?;
     store.analysis().upsert_ai_run(&record)?;
     Ok(record)
+}
+
+fn queued_ai_run_refresh_action(config: &Config, queued_record: &AiRunRecord) -> Action {
+    let summary = format!(
+        "Queued {} with {} privacy.",
+        queued_record.run_kind, queued_record.privacy_profile
+    );
+    nonfatal_reload_live_snapshot_action(
+        config,
+        &summary,
+        None,
+        &format!(
+            "AI run {} was queued, but refreshing the workbench failed",
+            abbreviate_id(&queued_record.run_id, 12)
+        ),
+    )
 }
 
 async fn run_ai_job(
@@ -3764,6 +3773,23 @@ mod tests {
                 ));
             }
             other => panic!("expected nonfatal refresh failure action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn queued_ai_run_refresh_action_reports_refresh_failures_without_blocking_launch() {
+        let (_temp_dir, mut config) = isolated_test_config();
+        config.paths.state_dir = PathBuf::from("/proc/ringmaster-state");
+        config.paths.database_file = PathBuf::from("/proc/ringmaster-state/ringmaster.db");
+
+        let action = super::queued_ai_run_refresh_action(&config, &sample_ai_run_record());
+
+        match action {
+            Action::RefreshFailed { message } => {
+                assert!(message.starts_with("AI run "));
+                assert!(message.contains("was queued, but refreshing the workbench failed:"));
+            }
+            other => panic!("expected queued-run refresh failure action, got {other:?}"),
         }
     }
 
