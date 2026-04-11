@@ -542,9 +542,6 @@ fn map_event_with_preflight(
 fn map_event_with_context(context: keybindings::BindingContext, event: &Event) -> Option<Action> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
-            if let Some(action) = keybindings::resolve(*key, context) {
-                return Some(action);
-            }
             if context.search_open {
                 match key.code {
                     KeyCode::Char(character)
@@ -554,8 +551,14 @@ fn map_event_with_context(context: keybindings::BindingContext, event: &Event) -
                     {
                         return Some(Action::SearchAppend(character));
                     }
-                    _ => return None,
+                    _ => {}
                 }
+            }
+            if let Some(action) = keybindings::resolve(*key, context) {
+                return Some(action);
+            }
+            if context.search_open {
+                return None;
             }
             None
         }
@@ -4053,6 +4056,58 @@ mod tests {
                 Some(Action::Quit)
             );
         }
+    }
+
+    #[test]
+    fn search_overlay_prefers_query_input_over_printable_global_shortcuts() {
+        let context = keybindings::BindingContext {
+            active_screen: Screen::Review,
+            focused_region: FocusRegion::Primary,
+            search_open: true,
+            help_open: false,
+            ai_preflight_open: false,
+        };
+
+        assert_eq!(
+            super::map_event_with_context(
+                context,
+                &Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+            ),
+            Some(Action::SearchAppend('r'))
+        );
+        assert_eq!(
+            super::map_event_with_context(
+                context,
+                &Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            ),
+            Some(Action::SearchAppend('q'))
+        );
+        assert_eq!(
+            super::map_event_with_context(
+                context,
+                &Event::Key(KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE)),
+            ),
+            Some(Action::SearchAppend('7'))
+        );
+    }
+
+    #[test]
+    fn search_overlay_keeps_ctrl_c_quit_available() {
+        let context = keybindings::BindingContext {
+            active_screen: Screen::Review,
+            focused_region: FocusRegion::Primary,
+            search_open: true,
+            help_open: false,
+            ai_preflight_open: false,
+        };
+
+        assert_eq!(
+            super::map_event_with_context(
+                context,
+                &Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            ),
+            Some(Action::Quit)
+        );
     }
 
     #[test]
