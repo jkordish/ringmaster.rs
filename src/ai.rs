@@ -526,6 +526,7 @@ pub(crate) async fn follow_up_from_artifact_with_run_identity(
     fixture: Option<&Path>,
     run_identity_override: Option<&str>,
 ) -> Result<FollowUpRunOutput> {
+    let (snapshot_hash_a, snapshot_hash_b) = follow_up_snapshot_hashes(snapshots)?;
     let snapshot_views = snapshots
         .iter()
         .map(|snapshot| (&snapshot.bundle, snapshot.compact_json.as_str()))
@@ -558,8 +559,8 @@ pub(crate) async fn follow_up_from_artifact_with_run_identity(
     let record = artifact_record(ArtifactRecordInput {
         artifact_id: artifact_id(
             "follow_up",
-            &source_record.snapshot_hash_a,
-            source_record.snapshot_hash_b.as_deref(),
+            snapshot_hash_a,
+            snapshot_hash_b,
             metadata.run_mode,
             &created_at,
             &payload_json,
@@ -574,8 +575,8 @@ pub(crate) async fn follow_up_from_artifact_with_run_identity(
         input_transport: &metadata.input_transport,
         run_mode: metadata.run_mode.as_str(),
         created_at,
-        snapshot_hash_a: &source_record.snapshot_hash_a,
-        snapshot_hash_b: source_record.snapshot_hash_b.as_deref(),
+        snapshot_hash_a,
+        snapshot_hash_b,
         privacy_profile,
         artifact_status: artifact.status.as_str(),
         overview: &artifact.overview,
@@ -2122,6 +2123,21 @@ fn merged_snapshot_privacy_profile(snapshots: &[LoadedSnapshotArtifact]) -> Opti
         .reduce(merged_privacy_profile)
 }
 
+fn follow_up_snapshot_hashes(snapshots: &[LoadedSnapshotArtifact]) -> Result<(&str, Option<&str>)> {
+    let snapshot_hash_a = snapshots
+        .first()
+        .map(|snapshot| snapshot.bundle.metadata.snapshot_hash.as_str())
+        .ok_or_else(|| {
+            RingmasterError::Ui(
+                "follow-up AI runs require at least one preflight snapshot input".to_owned(),
+            )
+        })?;
+    let snapshot_hash_b = snapshots
+        .get(1)
+        .map(|snapshot| snapshot.bundle.metadata.snapshot_hash.as_str());
+    Ok((snapshot_hash_a, snapshot_hash_b))
+}
+
 fn parse_privacy_profile(value: &str) -> Result<PrivacyProfile> {
     match value {
         "redacted" => Ok(PrivacyProfile::Redacted),
@@ -2749,6 +2765,67 @@ mod tests {
         .unwrap_or_else(|error| panic!("follow-up should render: {error}"));
 
         assert_eq!(output.record.privacy_profile, "balanced");
+    }
+
+    #[tokio::test]
+    async fn follow_up_artifact_uses_snapshot_hashes_from_current_inputs() {
+        let mut snapshot_a = loaded_snapshot("week");
+        snapshot_a.bundle.metadata.privacy_profile = PrivacyProfile::Balanced;
+        snapshot_a.compact_json = serde_json::to_string(&snapshot_a.bundle)
+            .unwrap_or_else(|error| panic!("bundle should encode: {error}"));
+        let mut snapshot_b = loaded_snapshot("range:2026-04-08..2026-04-10");
+        snapshot_b.bundle.metadata.privacy_profile = PrivacyProfile::Full;
+        snapshot_b.compact_json = serde_json::to_string(&snapshot_b.bundle)
+            .unwrap_or_else(|error| panic!("bundle should encode: {error}"));
+
+        let source_record = AiArtifactRecord {
+            artifact_id: "artifact-source".to_owned(),
+            artifact_kind: "compare".to_owned(),
+            output_schema_version: FOLLOW_UP_OUTPUT_SCHEMA_VERSION.to_owned(),
+            prompt_version: FOLLOW_UP_PROMPT_VERSION.to_owned(),
+            provider: "openai".to_owned(),
+            model: "gpt-5-mini".to_owned(),
+            reasoning_effort: None,
+            request_mode: "stateless".to_owned(),
+            input_transport: "inline".to_owned(),
+            run_mode: "dry_run".to_owned(),
+            created_at: "2026-04-10T00:00:00Z".to_owned(),
+            snapshot_hash_a: "stale-snapshot-a".to_owned(),
+            snapshot_hash_b: Some("stale-snapshot-b".to_owned()),
+            privacy_profile: "redacted".to_owned(),
+            artifact_status: "success".to_owned(),
+            overview: "source overview".to_owned(),
+            summary_cache: "summary".to_owned(),
+            request_fingerprint: Some("fingerprint".to_owned()),
+            payload_json: serde_json::to_string(&dry_run_compare_artifact(
+                &snapshot_a.bundle,
+                &snapshot_b.bundle,
+            ))
+            .unwrap_or_else(|error| panic!("artifact should encode: {error}")),
+            rendered_briefing: "briefing".to_owned(),
+        };
+
+        let output = follow_up_from_artifact_with_run_identity(
+            &test_config(),
+            &[snapshot_a.clone(), snapshot_b.clone()],
+            &source_record,
+            GuidedFollowUpKind::ExpandEvidence,
+            true,
+            None,
+            Some("2026-04-10T00:00:01Z"),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("follow-up should render: {error}"));
+
+        assert_eq!(
+            output.record.snapshot_hash_a,
+            snapshot_a.bundle.metadata.snapshot_hash
+        );
+        assert_eq!(
+            output.record.snapshot_hash_b.as_deref(),
+            Some(snapshot_b.bundle.metadata.snapshot_hash.as_str())
+        );
+        assert_eq!(output.record.privacy_profile, "full");
     }
 
     #[test]

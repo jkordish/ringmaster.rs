@@ -121,7 +121,11 @@ pub async fn run(config: &Config, app: &mut AppState) -> Result<()> {
         {
             let event = event::read()
                 .map_err(|error| RingmasterError::io("reading terminal event", error))?;
-            if let Some(action) = map_event(app.active_screen, event) {
+            if let Some(action) = map_event_with_preflight(
+                app.active_screen,
+                app.ai_preflight_state().is_some(),
+                event,
+            ) {
                 let source_screen = app.active_screen;
                 let selected_day = app.selected_day_label();
                 let current_preflight = app.ai_preflight_state().cloned();
@@ -282,143 +286,179 @@ fn draw_active_screen(
     }
 }
 
+#[cfg(test)]
 fn map_event(active_screen: Screen, event: Event) -> Option<Action> {
+    map_event_with_preflight(active_screen, false, event)
+}
+
+fn map_event_with_preflight(
+    active_screen: Screen,
+    preflight_open: bool,
+    event: Event,
+) -> Option<Action> {
     match event {
-        Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
-            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => Some(Action::NextScreen),
-            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => Some(Action::PreviousScreen),
-            KeyCode::Char('r') => Some(Action::RefreshRequested),
-            KeyCode::Char('1') => Some(Action::ShowScreen(Screen::Dashboard)),
-            KeyCode::Char('2') => Some(Action::ShowScreen(Screen::Timeline)),
-            KeyCode::Char('3') => Some(Action::ShowScreen(Screen::Trends)),
-            KeyCode::Char('4') => Some(Action::ShowScreen(Screen::Explain)),
-            KeyCode::Char('5') => Some(Action::ShowScreen(Screen::Patterns)),
-            KeyCode::Char('6') => Some(Action::ShowScreen(Screen::Review)),
-            KeyCode::Char('7') => Some(Action::ShowScreen(Screen::Ai)),
-            KeyCode::Char('8') => Some(Action::ShowScreen(Screen::Ops)),
-            KeyCode::Char('[') => match active_screen {
-                Screen::Dashboard | Screen::Timeline | Screen::Explain | Screen::Review => {
-                    Some(Action::PreviousDay)
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            if active_screen == Screen::Ai && preflight_open {
+                match key.code {
+                    KeyCode::Char('n') => return Some(Action::DismissAiPreflight),
+                    KeyCode::Char('p') => {
+                        return Some(Action::CycleAiPreflightPrivacyProfile);
+                    }
+                    KeyCode::Enter => return Some(Action::ConfirmAiPreflight),
+                    KeyCode::Char('x' | 'e' | 'y' | 'i' | 'd' | 'g' | 'u' | 'm' | 'b' | 'o') => {
+                        return None;
+                    }
+                    _ => {}
                 }
-                Screen::Trends => Some(Action::PreviousTrendWindow),
-                Screen::Ai => Some(Action::PreviousAiBrowserTab),
-                _ => None,
-            },
-            KeyCode::Char(']') => match active_screen {
-                Screen::Dashboard | Screen::Timeline | Screen::Explain | Screen::Review => {
-                    Some(Action::NextDay)
+            }
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
+                KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => Some(Action::NextScreen),
+                KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+                    Some(Action::PreviousScreen)
                 }
-                Screen::Trends => Some(Action::NextTrendWindow),
-                Screen::Ai => Some(Action::NextAiBrowserTab),
-                _ => None,
-            },
-            KeyCode::Char(',') if active_screen == Screen::Timeline => {
-                Some(Action::PreviousTimelinePoint)
-            }
-            KeyCode::Char('.') if active_screen == Screen::Timeline => {
-                Some(Action::NextTimelinePoint)
-            }
-            KeyCode::Char('-') if active_screen == Screen::Timeline => {
-                Some(Action::TimelineZoomOut)
-            }
-            KeyCode::Char('=') if active_screen == Screen::Timeline => Some(Action::TimelineZoomIn),
-            KeyCode::Char('j') => match active_screen {
-                Screen::Timeline | Screen::Explain => Some(Action::NextEvent),
-                Screen::Review => Some(Action::NextReviewCard),
-                Screen::Ai => Some(Action::NextAiBrowserItem),
-                _ => None,
-            },
-            KeyCode::Char('k') => match active_screen {
-                Screen::Timeline | Screen::Explain => Some(Action::PreviousEvent),
-                Screen::Review => Some(Action::PreviousReviewCard),
-                Screen::Ai => Some(Action::PreviousAiBrowserItem),
-                _ => None,
-            },
-            KeyCode::Char('w')
-                if matches!(
-                    active_screen,
-                    Screen::Timeline | Screen::Explain | Screen::Patterns
-                ) =>
-            {
-                Some(Action::ToggleWorkoutFilter)
-            }
-            KeyCode::Char('t')
-                if matches!(
-                    active_screen,
-                    Screen::Timeline | Screen::Explain | Screen::Patterns
-                ) =>
-            {
-                Some(Action::ToggleTagFilter)
-            }
-            KeyCode::Char('s')
-                if matches!(
-                    active_screen,
-                    Screen::Timeline | Screen::Explain | Screen::Patterns
-                ) =>
-            {
-                Some(Action::ToggleSessionFilter)
-            }
-            KeyCode::Char('m') if active_screen == Screen::Patterns => {
-                Some(Action::CyclePatternMetric)
-            }
-            KeyCode::Char('a')
-                if matches!(
-                    active_screen,
-                    Screen::Dashboard | Screen::Explain | Screen::Review | Screen::Ai
-                ) =>
-            {
-                Some(Action::RequestAiLaunch(AiLaunchIntent::ReviewSelectedDay))
-            }
-            KeyCode::Char('c')
-                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                    && matches!(
+                KeyCode::Char('r') => Some(Action::RefreshRequested),
+                KeyCode::Char('1') => Some(Action::ShowScreen(Screen::Dashboard)),
+                KeyCode::Char('2') => Some(Action::ShowScreen(Screen::Timeline)),
+                KeyCode::Char('3') => Some(Action::ShowScreen(Screen::Trends)),
+                KeyCode::Char('4') => Some(Action::ShowScreen(Screen::Explain)),
+                KeyCode::Char('5') => Some(Action::ShowScreen(Screen::Patterns)),
+                KeyCode::Char('6') => Some(Action::ShowScreen(Screen::Review)),
+                KeyCode::Char('7') => Some(Action::ShowScreen(Screen::Ai)),
+                KeyCode::Char('8') => Some(Action::ShowScreen(Screen::Ops)),
+                KeyCode::Char('[') => match active_screen {
+                    Screen::Dashboard | Screen::Timeline | Screen::Explain | Screen::Review => {
+                        Some(Action::PreviousDay)
+                    }
+                    Screen::Trends => Some(Action::PreviousTrendWindow),
+                    Screen::Ai => Some(Action::PreviousAiBrowserTab),
+                    _ => None,
+                },
+                KeyCode::Char(']') => match active_screen {
+                    Screen::Dashboard | Screen::Timeline | Screen::Explain | Screen::Review => {
+                        Some(Action::NextDay)
+                    }
+                    Screen::Trends => Some(Action::NextTrendWindow),
+                    Screen::Ai => Some(Action::NextAiBrowserTab),
+                    _ => None,
+                },
+                KeyCode::Char(',') if active_screen == Screen::Timeline => {
+                    Some(Action::PreviousTimelinePoint)
+                }
+                KeyCode::Char('.') if active_screen == Screen::Timeline => {
+                    Some(Action::NextTimelinePoint)
+                }
+                KeyCode::Char('-') if active_screen == Screen::Timeline => {
+                    Some(Action::TimelineZoomOut)
+                }
+                KeyCode::Char('=') if active_screen == Screen::Timeline => {
+                    Some(Action::TimelineZoomIn)
+                }
+                KeyCode::Char('j') => match active_screen {
+                    Screen::Timeline | Screen::Explain => Some(Action::NextEvent),
+                    Screen::Review => Some(Action::NextReviewCard),
+                    Screen::Ai => Some(Action::NextAiBrowserItem),
+                    _ => None,
+                },
+                KeyCode::Char('k') => match active_screen {
+                    Screen::Timeline | Screen::Explain => Some(Action::PreviousEvent),
+                    Screen::Review => Some(Action::PreviousReviewCard),
+                    Screen::Ai => Some(Action::PreviousAiBrowserItem),
+                    _ => None,
+                },
+                KeyCode::Char('w')
+                    if matches!(
                         active_screen,
-                        Screen::Dashboard | Screen::Patterns | Screen::Review | Screen::Ai
+                        Screen::Timeline | Screen::Explain | Screen::Patterns
                     ) =>
-            {
-                Some(Action::RequestAiLaunch(AiLaunchIntent::CompareSelectedWeek))
+                {
+                    Some(Action::ToggleWorkoutFilter)
+                }
+                KeyCode::Char('t')
+                    if matches!(
+                        active_screen,
+                        Screen::Timeline | Screen::Explain | Screen::Patterns
+                    ) =>
+                {
+                    Some(Action::ToggleTagFilter)
+                }
+                KeyCode::Char('s')
+                    if matches!(
+                        active_screen,
+                        Screen::Timeline | Screen::Explain | Screen::Patterns
+                    ) =>
+                {
+                    Some(Action::ToggleSessionFilter)
+                }
+                KeyCode::Char('m') if active_screen == Screen::Patterns => {
+                    Some(Action::CyclePatternMetric)
+                }
+                KeyCode::Char('a')
+                    if matches!(
+                        active_screen,
+                        Screen::Dashboard | Screen::Explain | Screen::Review | Screen::Ai
+                    ) =>
+                {
+                    Some(Action::RequestAiLaunch(AiLaunchIntent::ReviewSelectedDay))
+                }
+                KeyCode::Char('c')
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(
+                            active_screen,
+                            Screen::Dashboard | Screen::Patterns | Screen::Review | Screen::Ai
+                        ) =>
+                {
+                    Some(Action::RequestAiLaunch(AiLaunchIntent::CompareSelectedWeek))
+                }
+                KeyCode::Char('n') if active_screen == Screen::Ai => {
+                    Some(Action::DismissAiPreflight)
+                }
+                KeyCode::Char('p') if active_screen == Screen::Ai => {
+                    Some(Action::CycleAiPreflightPrivacyProfile)
+                }
+                KeyCode::Char('x') if active_screen == Screen::Ai => {
+                    Some(Action::RequestCancelAiRun)
+                }
+                KeyCode::Char('e') if active_screen == Screen::Ai => Some(
+                    Action::RequestAiGuidedFollowUp(GuidedFollowUpKind::ExpandEvidence),
+                ),
+                KeyCode::Char('y') if active_screen == Screen::Ai => Some(
+                    Action::RequestAiGuidedFollowUp(GuidedFollowUpKind::ShowCounterevidence),
+                ),
+                KeyCode::Char('i') if active_screen == Screen::Ai => Some(
+                    Action::RequestAiGuidedFollowUp(GuidedFollowUpKind::ExplainRanking),
+                ),
+                KeyCode::Char('d') if active_screen == Screen::Ai => Some(
+                    Action::RequestAiGuidedFollowUp(GuidedFollowUpKind::SuggestLocalDrilldown),
+                ),
+                KeyCode::Char('g') if active_screen == Screen::Ai => {
+                    Some(Action::RequestAiGenerateReport)
+                }
+                KeyCode::Char('u') if active_screen == Screen::Ai => {
+                    Some(Action::RequestAiRerunNextPrivacy)
+                }
+                KeyCode::Char('m') if active_screen == Screen::Ai => {
+                    Some(Action::RequestAiRerunNextModel)
+                }
+                KeyCode::Char('b') if active_screen == Screen::Ai => {
+                    Some(Action::RequestAiComparePreviousSnapshot)
+                }
+                KeyCode::Char('o') if active_screen == Screen::Ai => {
+                    Some(Action::RequestJumpToAiEvidence)
+                }
+                KeyCode::Enter if active_screen == Screen::Ai => Some(Action::ConfirmAiPreflight),
+                KeyCode::Char('v') if active_screen == Screen::Review => {
+                    Some(Action::CycleReviewMode)
+                }
+                KeyCode::Char('f') if active_screen == Screen::Review => {
+                    Some(Action::CycleReviewFocus)
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(Action::Quit)
+                }
+                _ => None,
             }
-            KeyCode::Char('n') if active_screen == Screen::Ai => Some(Action::DismissAiPreflight),
-            KeyCode::Char('p') if active_screen == Screen::Ai => {
-                Some(Action::CycleAiPreflightPrivacyProfile)
-            }
-            KeyCode::Char('x') if active_screen == Screen::Ai => Some(Action::RequestCancelAiRun),
-            KeyCode::Char('e') if active_screen == Screen::Ai => Some(
-                Action::RequestAiGuidedFollowUp(GuidedFollowUpKind::ExpandEvidence),
-            ),
-            KeyCode::Char('y') if active_screen == Screen::Ai => Some(
-                Action::RequestAiGuidedFollowUp(GuidedFollowUpKind::ShowCounterevidence),
-            ),
-            KeyCode::Char('i') if active_screen == Screen::Ai => Some(
-                Action::RequestAiGuidedFollowUp(GuidedFollowUpKind::ExplainRanking),
-            ),
-            KeyCode::Char('d') if active_screen == Screen::Ai => Some(
-                Action::RequestAiGuidedFollowUp(GuidedFollowUpKind::SuggestLocalDrilldown),
-            ),
-            KeyCode::Char('g') if active_screen == Screen::Ai => {
-                Some(Action::RequestAiGenerateReport)
-            }
-            KeyCode::Char('u') if active_screen == Screen::Ai => {
-                Some(Action::RequestAiRerunNextPrivacy)
-            }
-            KeyCode::Char('m') if active_screen == Screen::Ai => {
-                Some(Action::RequestAiRerunNextModel)
-            }
-            KeyCode::Char('b') if active_screen == Screen::Ai => {
-                Some(Action::RequestAiComparePreviousSnapshot)
-            }
-            KeyCode::Char('o') if active_screen == Screen::Ai => {
-                Some(Action::RequestJumpToAiEvidence)
-            }
-            KeyCode::Enter if active_screen == Screen::Ai => Some(Action::ConfirmAiPreflight),
-            KeyCode::Char('v') if active_screen == Screen::Review => Some(Action::CycleReviewMode),
-            KeyCode::Char('f') if active_screen == Screen::Review => Some(Action::CycleReviewFocus),
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Some(Action::Quit)
-            }
-            _ => None,
-        },
+        }
         _ => None,
     }
 }
@@ -3529,6 +3569,32 @@ mod tests {
         ] {
             assert_eq!(super::map_event(screen, ctrl_c.clone()), Some(Action::Quit));
         }
+    }
+
+    #[test]
+    fn ai_preflight_blocks_destructive_ai_shortcuts() {
+        let press = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+
+        for key in ['x', 'e', 'y', 'i', 'd', 'g', 'u', 'm', 'b', 'o'] {
+            assert_eq!(
+                super::map_event_with_preflight(Screen::Ai, true, press(KeyCode::Char(key))),
+                None,
+                "preflight should block `{key}`",
+            );
+        }
+
+        assert_eq!(
+            super::map_event_with_preflight(Screen::Ai, true, press(KeyCode::Char('n'))),
+            Some(Action::DismissAiPreflight)
+        );
+        assert_eq!(
+            super::map_event_with_preflight(Screen::Ai, true, press(KeyCode::Char('p'))),
+            Some(Action::CycleAiPreflightPrivacyProfile)
+        );
+        assert_eq!(
+            super::map_event_with_preflight(Screen::Ai, true, press(KeyCode::Enter)),
+            Some(Action::ConfirmAiPreflight)
+        );
     }
 
     #[test]
