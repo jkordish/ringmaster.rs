@@ -6821,11 +6821,14 @@ fn demo_eval_run_details() -> PersistedEvalRunDetails {
                 expectations: EvalExpectations {
                     min_primary_findings: Some(1),
                     expected_primary_title: Some("Sleep score remained elevated".to_owned()),
+                    required_substrings: Vec::new(),
                     forbidden_substrings: vec![
                         "user@example.com".to_owned(),
                         "refresh_token".to_owned(),
                         "client_secret".to_owned(),
                     ],
+                    expected_follow_up_commands: Vec::new(),
+                    require_distinct_finding_titles: false,
                     honesty_required: true,
                 },
                 overall_pass: true,
@@ -6883,11 +6886,14 @@ fn demo_eval_run_details() -> PersistedEvalRunDetails {
                 expectations: EvalExpectations {
                     min_primary_findings: Some(1),
                     expected_primary_title: Some("Average daily score increased".to_owned()),
+                    required_substrings: Vec::new(),
                     forbidden_substrings: vec![
                         "user@example.com".to_owned(),
                         "refresh_token".to_owned(),
                         "client_secret".to_owned(),
                     ],
+                    expected_follow_up_commands: Vec::new(),
+                    require_distinct_finding_titles: false,
                     honesty_required: false,
                 },
                 overall_pass: false,

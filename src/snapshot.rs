@@ -744,7 +744,8 @@ pub fn export_snapshot(
     let baselines = build_baselines(&daily_history_all, scope)?;
     let trend_summaries =
         build_trend_summaries(&daily_history_all, &heartrate_daily_averages, scope)?;
-    let follow_up_targets = build_follow_up_targets(scope, &review_signals);
+    let follow_up_targets =
+        build_follow_up_targets(scope, &baselines, &trend_summaries, &review_signals);
     let warnings = build_freshness_warnings(
         &sync_states,
         latest_source_day.as_deref(),
@@ -952,6 +953,23 @@ pub fn load_snapshot_artifact(path: &Path) -> Result<LoadedSnapshotArtifact> {
         bundle,
         compact_json,
     })
+}
+
+pub fn rebuild_follow_up_targets(bundle: &SnapshotBundleV1) -> Vec<SnapshotFollowUpTarget> {
+    let scope = ResolvedSnapshotScope {
+        raw_spec: bundle.metadata.scope.clone(),
+        normalized_spec: bundle.metadata.scope.clone(),
+        start_day: bundle.metadata.start_day.clone(),
+        end_day: bundle.metadata.end_day.clone(),
+        anchor_day: bundle.metadata.anchor_day.clone(),
+        day_count: 0,
+    };
+    build_follow_up_targets(
+        &scope,
+        &bundle.baselines,
+        &bundle.trend_summaries,
+        &bundle.review_signals,
+    )
 }
 
 pub fn catalog_record_from_loaded_artifact(
@@ -1540,6 +1558,8 @@ fn build_freshness_warnings(
 
 fn build_follow_up_targets(
     scope: &ResolvedSnapshotScope,
+    baselines: &[SnapshotBaseline],
+    trend_summaries: &[SnapshotTrendSummary],
     review_signals: &[SnapshotReviewSignal],
 ) -> Vec<SnapshotFollowUpTarget> {
     let mut targets = vec![
@@ -1554,32 +1574,233 @@ fn build_follow_up_targets(
             reason: "Inspect the local weekly brief around the same period.".to_owned(),
         },
     ];
-    for signal in review_signals.iter().take(3) {
-        targets.push(SnapshotFollowUpTarget {
-            label: format!("Investigate {}", signal.signal_key),
-            command: format!(
-                "review investigate --focus {} --anchor-day {}",
-                signal_focus(&signal.signal_key),
-                signal.day
-            ),
-            reason: "Follow the strongest structured signal back into local review tooling."
-                .to_owned(),
-        });
-    }
+    targets.extend(
+        ranked_signal_targets(review_signals)
+            .or_else(|| ranked_baseline_targets(scope, baselines, trend_summaries))
+            .unwrap_or_else(|| ranked_missing_signal_targets(review_signals)),
+    );
     targets
 }
 
-fn signal_focus(signal_key: &str) -> &str {
+fn signal_focus(signal_key: &str) -> Option<&'static str> {
     if signal_key.contains("stress") {
-        "stress"
+        Some("stress")
     } else if signal_key.contains("recovery") {
-        "recovery"
+        Some("recovery")
     } else if signal_key.contains("sleep") {
-        "sleep"
-    } else if signal_key.contains("activity") {
-        "activity"
+        Some("sleep")
+    } else if signal_key.contains("activity")
+        || signal_key.contains("calorie")
+        || signal_key.contains("step")
+        || signal_key.contains("workout")
+    {
+        Some("activity")
+    } else if signal_key.contains("readiness")
+        || signal_key.contains("temperature")
+        || signal_key.contains("cardio")
+        || signal_key.contains("vascular")
+        || signal_key.contains("vo2")
+        || signal_key.contains("resilience")
+    {
+        Some("readiness")
     } else {
-        "readiness"
+        None
+    }
+}
+
+fn metric_focus(metric_key: &str) -> Option<&'static str> {
+    match metric_key {
+        "sleep_score" => Some("sleep"),
+        "readiness_score" => Some("readiness"),
+        "activity_score" => Some("activity"),
+        _ => None,
+    }
+}
+
+fn sufficiency_rank(sufficiency: &str) -> u8 {
+    match sufficiency {
+        "strong" => 3,
+        "medium" => 2,
+        "thin" => 1,
+        _ => 0,
+    }
+}
+
+fn ranked_signal_targets(
+    review_signals: &[SnapshotReviewSignal],
+) -> Option<Vec<SnapshotFollowUpTarget>> {
+    let mut ranked = review_signals
+        .iter()
+        .filter_map(|signal| {
+            let focus = signal_focus(&signal.signal_key)?;
+            let sufficiency = sufficiency_rank(&signal.sufficiency);
+            (sufficiency > 0).then_some((
+                focus,
+                sufficiency,
+                signal.z_score.map(f64::abs).unwrap_or(0.0),
+                signal.delta.map(f64::abs).unwrap_or(0.0),
+                signal.persistence_days,
+                signal.stale_days,
+                signal,
+            ))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| right.2.total_cmp(&left.2))
+            .then_with(|| right.3.total_cmp(&left.3))
+            .then_with(|| right.4.cmp(&left.4))
+            .then_with(|| left.5.cmp(&right.5))
+            .then_with(|| left.6.signal_key.cmp(&right.6.signal_key))
+    });
+
+    let mut seen_focuses = BTreeSet::new();
+    let targets = ranked
+        .into_iter()
+        .filter_map(|(focus, _, _, _, _, _, signal)| {
+            seen_focuses
+                .insert(focus)
+                .then_some(SnapshotFollowUpTarget {
+                    label: format!("Investigate {}", signal.signal_key),
+                    command: format!(
+                        "review investigate --focus {focus} --anchor-day {}",
+                        signal.day
+                    ),
+                    reason:
+                        "Follow the strongest structured signal back into local review tooling."
+                            .to_owned(),
+                })
+        })
+        .take(3)
+        .collect::<Vec<_>>();
+
+    (!targets.is_empty()).then_some(targets)
+}
+
+fn ranked_missing_signal_targets(
+    review_signals: &[SnapshotReviewSignal],
+) -> Vec<SnapshotFollowUpTarget> {
+    let mut ranked = review_signals
+        .iter()
+        .filter_map(|signal| {
+            let focus = signal_focus(&signal.signal_key)?;
+            Some((
+                focus,
+                signal.z_score.map(f64::abs).unwrap_or(0.0),
+                signal.delta.map(f64::abs).unwrap_or(0.0),
+                signal.persistence_days,
+                signal.stale_days,
+                signal,
+            ))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| right.2.total_cmp(&left.2))
+            .then_with(|| right.3.cmp(&left.3))
+            .then_with(|| left.4.cmp(&right.4))
+            .then_with(|| left.5.signal_key.cmp(&right.5.signal_key))
+    });
+
+    let mut seen_focuses = BTreeSet::new();
+    ranked
+        .into_iter()
+        .filter_map(|(focus, _, _, _, _, signal)| {
+            seen_focuses.insert(focus).then_some(SnapshotFollowUpTarget {
+                label: format!("Investigate {}", signal.signal_key),
+                command: format!(
+                    "review investigate --focus {focus} --anchor-day {}",
+                    signal.day
+                ),
+                reason: "Fall back to the best available sparse review signal when stronger local comparisons are unavailable."
+                    .to_owned(),
+            })
+        })
+        .take(3)
+        .collect()
+}
+
+fn ranked_baseline_targets(
+    scope: &ResolvedSnapshotScope,
+    baselines: &[SnapshotBaseline],
+    trend_summaries: &[SnapshotTrendSummary],
+) -> Option<Vec<SnapshotFollowUpTarget>> {
+    let mut candidates = BTreeMap::<&'static str, (f64, String)>::new();
+
+    for baseline in baselines {
+        let Some(focus) = metric_focus(&baseline.metric_key) else {
+            continue;
+        };
+        let Some(delta) = baseline.delta else {
+            continue;
+        };
+        let delta_abs = delta.abs();
+        let reason = format!(
+            "Follow the largest local {} delta back into review tooling.",
+            baseline.label.to_ascii_lowercase()
+        );
+        upsert_baseline_candidate(&mut candidates, focus, delta_abs, reason);
+    }
+
+    for trend in trend_summaries {
+        let Some(focus) = metric_focus(&trend.metric_key) else {
+            continue;
+        };
+        let Some(delta_abs) = trend
+            .current_average
+            .zip(trend.previous_average)
+            .map(|(current, previous)| (current - previous).abs())
+        else {
+            continue;
+        };
+        let reason = format!(
+            "Follow the clearest local {} trend back into review tooling.",
+            trend.label.to_ascii_lowercase()
+        );
+        upsert_baseline_candidate(&mut candidates, focus, delta_abs, reason);
+    }
+
+    let mut ranked = candidates
+        .into_iter()
+        .map(|(focus, (delta_abs, reason))| (focus, delta_abs, reason))
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then_with(|| left.0.cmp(right.0)));
+
+    let targets = ranked
+        .into_iter()
+        .take(3)
+        .map(|(focus, _, reason)| SnapshotFollowUpTarget {
+            label: format!("Investigate {focus}"),
+            command: format!(
+                "review investigate --focus {focus} --anchor-day {}",
+                scope.anchor_day
+            ),
+            reason,
+        })
+        .collect::<Vec<_>>();
+
+    (!targets.is_empty()).then_some(targets)
+}
+
+fn upsert_baseline_candidate(
+    candidates: &mut BTreeMap<&'static str, (f64, String)>,
+    focus: &'static str,
+    delta_abs: f64,
+    reason: String,
+) {
+    match candidates.get_mut(focus) {
+        Some((current_delta, current_reason)) if delta_abs > *current_delta => {
+            *current_delta = delta_abs;
+            *current_reason = reason;
+        }
+        None => {
+            candidates.insert(focus, (delta_abs, reason));
+        }
+        Some(_) => {}
     }
 }
 
@@ -1746,8 +1967,9 @@ impl From<PatternMetric> for String {
 #[allow(clippy::panic)]
 mod tests {
     use super::{
-        PrivacyProfile, ResolvedSnapshotScope, SNAPSHOT_SCHEMA_VERSION, SnapshotFollowUpTarget,
-        SnapshotReviewSignal, build_follow_up_targets, resolve_scope,
+        PrivacyProfile, ResolvedSnapshotScope, SNAPSHOT_SCHEMA_VERSION, SnapshotBaseline,
+        SnapshotFollowUpTarget, SnapshotReviewSignal, SnapshotTrendSummary,
+        build_follow_up_targets, resolve_scope,
     };
     use crate::config::Config;
     use crate::oura::models::{AuthStatus, CapabilityReport};
@@ -2063,7 +2285,7 @@ mod tests {
             },
         ];
 
-        let targets = build_follow_up_targets(&scope, &signals);
+        let targets = build_follow_up_targets(&scope, &[], &[], &signals);
         let investigate = targets
             .into_iter()
             .skip(2)
@@ -2075,7 +2297,88 @@ mod tests {
             vec![
                 "review investigate --focus stress --anchor-day 2026-04-10".to_owned(),
                 "review investigate --focus recovery --anchor-day 2026-04-10".to_owned(),
-                "review investigate --focus recovery --anchor-day 2026-04-10".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn follow_up_targets_backfill_from_score_deltas_when_review_signals_are_sparse() {
+        let scope = ResolvedSnapshotScope {
+            raw_spec: "today".to_owned(),
+            normalized_spec: "day:2026-04-10".to_owned(),
+            start_day: "2026-04-10".to_owned(),
+            end_day: "2026-04-10".to_owned(),
+            anchor_day: "2026-04-10".to_owned(),
+            day_count: 1,
+        };
+        let signals = vec![
+            SnapshotReviewSignal {
+                export_ref: "signal:active-calories".to_owned(),
+                day: "2026-04-10".to_owned(),
+                signal_key: "active_calories".to_owned(),
+                numeric_value: Some(251.0),
+                text_value: None,
+                delta: Some(-5.0),
+                z_score: Some(-0.3),
+                persistence_days: 1,
+                sufficiency: "missing".to_owned(),
+                stale_days: 0,
+            },
+            SnapshotReviewSignal {
+                export_ref: "signal:cardio".to_owned(),
+                day: "2026-04-10".to_owned(),
+                signal_key: "cardiovascular_age".to_owned(),
+                numeric_value: Some(43.0),
+                text_value: None,
+                delta: Some(1.0),
+                z_score: Some(0.2),
+                persistence_days: 1,
+                sufficiency: "missing".to_owned(),
+                stale_days: 0,
+            },
+        ];
+        let baselines = vec![
+            SnapshotBaseline {
+                metric_key: "sleep_score".to_owned(),
+                label: "Sleep score".to_owned(),
+                scope_average: Some(86.0),
+                baseline_average: Some(63.0),
+                delta: Some(23.0),
+                scope_samples: 1,
+                baseline_samples: 14,
+            },
+            SnapshotBaseline {
+                metric_key: "readiness_score".to_owned(),
+                label: "Readiness score".to_owned(),
+                scope_average: Some(70.0),
+                baseline_average: Some(76.0),
+                delta: Some(-6.0),
+                scope_samples: 1,
+                baseline_samples: 14,
+            },
+        ];
+        let trends = vec![SnapshotTrendSummary {
+            metric_key: "activity_score".to_owned(),
+            label: "Activity score".to_owned(),
+            direction: "lower".to_owned(),
+            summary: "Activity score dipped slightly.".to_owned(),
+            current_average: Some(75.0),
+            previous_average: Some(77.0),
+        }];
+
+        let targets = build_follow_up_targets(&scope, &baselines, &trends, &signals);
+        let investigate = targets
+            .into_iter()
+            .skip(2)
+            .map(|target: SnapshotFollowUpTarget| target.command)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            investigate,
+            vec![
+                "review investigate --focus sleep --anchor-day 2026-04-10".to_owned(),
+                "review investigate --focus readiness --anchor-day 2026-04-10".to_owned(),
+                "review investigate --focus activity --anchor-day 2026-04-10".to_owned(),
             ]
         );
     }

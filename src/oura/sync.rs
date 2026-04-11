@@ -811,7 +811,7 @@ async fn sync_enhanced_tags(
             for document in &page.documents {
                 store.imports().upsert_enhanced_tag(&EnhancedTagRecord {
                     enhanced_tag_id: document.id.clone(),
-                    day: document.day.clone(),
+                    day: document.anchor_day().to_owned(),
                     label: document.title(),
                     started_at: document.start_time.clone(),
                     ended_at: document.end_time.clone(),
@@ -1457,6 +1457,65 @@ mod tests {
         assert_eq!(counts.vo2_max, 7);
         assert_eq!(counts.rest_mode_periods, 2);
         assert_eq!(latest_source_day.as_deref(), Some("2026-04-08"));
+    }
+
+    #[tokio::test]
+    async fn fixture_sync_accepts_official_enhanced_tag_start_day_payloads() {
+        let store = Store::open_in_memory().expect("store should open");
+        let config = fixture_config();
+        let tempdir = tempfile::tempdir().expect("tempdir should build");
+        let fixture_dir = tempdir.path().join("review-official-enhanced-tags");
+        copy_fixture_dir(&review_fixture_dir(), &fixture_dir);
+        fs::write(
+            fixture_dir.join("enhanced_tags.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "data": [
+                    {
+                        "id": "etag_2026-04-04_caffeine",
+                        "start_day": "2026-04-04",
+                        "end_day": "2026-04-04",
+                        "start_time": "2026-04-04T20:15:00Z",
+                        "end_time": "2026-04-04T20:15:00Z",
+                        "tag_type_code": "caffeine",
+                        "tags": ["Late coffee"],
+                        "comment": "Espresso after dinner.",
+                        "intensity": "medium"
+                    },
+                    {
+                        "id": "etag_2026-04-05_stress",
+                        "start_day": "2026-04-05",
+                        "end_day": "2026-04-05",
+                        "start_time": "2026-04-05T09:00:00Z",
+                        "end_time": "2026-04-05T11:30:00Z",
+                        "tag_type_code": "stress",
+                        "tags": ["Travel day"],
+                        "comment": "Packed morning with back-to-back errands.",
+                        "intensity": "high"
+                    }
+                ],
+                "next_token": null
+            }))
+            .unwrap_or_else(|error| panic!("official enhanced tag fixture should encode: {error}")),
+        )
+        .expect("official enhanced tag fixture should write");
+
+        let report = sync_once(
+            &config,
+            &store,
+            SyncOptions {
+                dry_run: false,
+                fixture_dir: Some(fixture_dir),
+                families: SyncFamily::ALL.to_vec(),
+                trigger_source: Some("periodic_reconcile".to_owned()),
+                trigger_detail: Some("test official enhanced tag fixture sync".to_owned()),
+            },
+        )
+        .await
+        .expect("review fixture sync should succeed with official enhanced tag shape");
+        let counts = store.views().record_counts().expect("record counts");
+
+        assert_eq!(report.status, SyncRunStatus::Success);
+        assert!(counts.enhanced_tags > 0);
     }
 
     #[tokio::test]

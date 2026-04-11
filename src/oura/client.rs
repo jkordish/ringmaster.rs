@@ -1016,7 +1016,7 @@ impl SerializeableDocument for WorkoutDocument {
 impl SerializeableDocument for EnhancedTagDocument {
     fn field_value(&self, field_name: &str) -> Option<&str> {
         match field_name {
-            "day" => Some(self.day.as_str()),
+            "day" => Some(self.anchor_day()),
             "timestamp" => self.start_time.as_deref(),
             _ => None,
         }

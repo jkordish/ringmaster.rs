@@ -596,7 +596,7 @@ impl Config {
                 timeout_secs: env_string("RINGMASTER_AI_TIMEOUT_SECS")
                     .and_then(|value| value.parse::<u64>().ok())
                     .or_else(|| file_config.ai.as_ref().and_then(|ai| ai.timeout_secs))
-                    .unwrap_or(30),
+                    .unwrap_or(120),
                 max_retries: env_string("RINGMASTER_AI_MAX_RETRIES")
                     .and_then(|value| value.parse::<u32>().ok())
                     .or_else(|| file_config.ai.as_ref().and_then(|ai| ai.max_retries))
@@ -986,7 +986,7 @@ impl Default for AiConfig {
             api_key_env: "OPENAI_API_KEY".to_owned(),
             model: "gpt-5-mini".to_owned(),
             reasoning_effort: None,
-            timeout_secs: 30,
+            timeout_secs: 120,
             max_retries: 1,
             request_mode: AiRequestMode::Stateless,
             input_transport: AiInputTransport::Inline,
@@ -1382,7 +1382,7 @@ mod tests {
             api_key_env: "OPENAI_API_KEY".to_owned(),
             model: "gpt-5-mini".to_owned(),
             reasoning_effort: Some("minimal".to_owned()),
-            timeout_secs: 30,
+            timeout_secs: 120,
             max_retries: 1,
             request_mode: AiRequestMode::Stateless,
             input_transport: AiInputTransport::Inline,

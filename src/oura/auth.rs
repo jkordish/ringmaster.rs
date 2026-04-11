@@ -24,7 +24,7 @@ use tokio::sync::oneshot;
 
 use crate::config::{Config, OuraSecretBackend};
 use crate::error::{AuthError, OuraProblem, Result, SecretStoreError};
-use crate::oura::models::{AuthStatus, CapabilityReport};
+use crate::oura::models::{AuthStatus, CapabilityReport, normalize_scopes};
 use crate::store::Store;
 use crate::store::queries::{AuthSessionRecord, OURA_PROVIDER};
 
@@ -385,7 +385,7 @@ fn inspect_auth_with_secret_store(
     };
     let granted_scopes = session
         .as_ref()
-        .map(|record| record.granted_scopes.clone())
+        .map(|record| normalize_scopes(&record.granted_scopes))
         .unwrap_or_default();
 
     Ok(AuthStatus {
@@ -588,7 +588,7 @@ async fn ensure_authorized_session_with_secret_store(
 
     Ok(AuthorizedSession {
         access_token: tokens.access_token,
-        granted_scopes: session.granted_scopes,
+        granted_scopes: normalize_scopes(&session.granted_scopes),
         access_token_expires_at: session.access_token_expires_at,
         account_id: session.account_id,
         account_email: session.account_email,
@@ -782,6 +782,7 @@ fn exchanged_token_set(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_else(|| requested_scopes.to_vec());
+    let granted_scopes = normalize_scopes(&granted_scopes);
 
     Ok(ExchangedTokenSet {
         access_token: token_response.access_token().secret().to_owned(),
@@ -1123,7 +1124,7 @@ mod tests {
                         "refresh_token": "refresh-1",
                         "token_type": "Bearer",
                         "expires_in": 3600,
-                        "scope": "personal daily heartrate"
+                        "scope": "extapi:personal extapi:daily extapi:heartrate"
                     }))
                 }),
             );
@@ -1163,6 +1164,59 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[test]
+    fn inspect_auth_normalizes_prefixed_session_scopes() {
+        let config = test_config("http://127.0.0.1:9999/token".to_owned());
+        let store = Store::open_in_memory().expect("store should open");
+        let secrets = MemorySecretStore::default();
+        store
+            .auth()
+            .upsert(&AuthSessionRecord {
+                provider: OURA_PROVIDER.to_owned(),
+                account_id: None,
+                account_email: None,
+                token_type: "Bearer".to_owned(),
+                granted_scopes: vec![
+                    "extapi:personal".to_owned(),
+                    "extapi:daily".to_owned(),
+                    "extapi:heartrate".to_owned(),
+                ],
+                access_token_expires_at: Some("2026-05-11T00:26:49Z".to_owned()),
+                last_authenticated_at: Some("2026-04-11T00:26:50Z".to_owned()),
+                last_refresh_at: None,
+                last_error: None,
+                updated_at: "2026-04-11T00:26:50Z".to_owned(),
+            })
+            .expect("seed auth session");
+
+        let auth_status =
+            inspect_auth_with_secret_store(&config, &store, &secrets).expect("inspect auth");
+
+        assert_eq!(
+            auth_status.granted_scopes,
+            vec![
+                "personal".to_owned(),
+                "daily".to_owned(),
+                "heartrate".to_owned()
+            ]
+        );
+        assert!(
+            auth_status
+                .capability_report
+                .is_granted(crate::oura::models::CapabilityKind::Personal)
+        );
+        assert!(
+            auth_status
+                .capability_report
+                .is_granted(crate::oura::models::CapabilityKind::Daily)
+        );
+        assert!(
+            auth_status
+                .capability_report
+                .is_granted(crate::oura::models::CapabilityKind::Heartrate)
+        );
     }
 
     #[tokio::test]

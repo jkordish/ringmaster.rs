@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     prelude::Rect,
     text::Line,
-    widgets::{List, ListItem, Paragraph, Tabs, Wrap},
+    widgets::{Clear, List, ListItem, Paragraph, Tabs, Wrap},
 };
 
 use crate::app::{AiLaunchPointView, AiPreflightView, AiWorkbenchModel};
@@ -20,14 +20,14 @@ pub fn draw(
     ui: &UiContext,
     theme: &Theme,
 ) {
-    if ui.viewport.is_compact() {
-        draw_compact(frame, area, model, theme);
-    } else {
+    if ui.viewport.is_wide() {
         draw_wide(frame, area, model, theme);
+    } else {
+        draw_narrow(frame, area, model, theme, ui.viewport.is_compact());
     }
 
     if let Some(preflight) = &model.preflight {
-        draw_preflight_overlay(frame, area, preflight, theme, ui.viewport.is_compact());
+        draw_preflight_overlay(frame, area, preflight, theme, !ui.viewport.is_wide());
     }
 }
 
@@ -59,39 +59,58 @@ fn draw_wide(frame: &mut Frame<'_>, area: Rect, model: &AiWorkbenchModel, theme:
         .split(body[1]);
 
     draw_launch_points(frame, left[0], &model.launch_points, theme, true);
-    draw_browser_list(frame, left[1], model, theme);
+    draw_browser_list(frame, left[1], model, theme, false);
     draw_trust(frame, right[0], model, theme);
     draw_detail(frame, right[1], model, theme);
     draw_warnings(frame, layout[3], model, theme);
 }
 
-fn draw_compact(frame: &mut Frame<'_>, area: Rect, model: &AiWorkbenchModel, theme: &Theme) {
+fn draw_narrow(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &AiWorkbenchModel,
+    theme: &Theme,
+    compact: bool,
+) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
+            Constraint::Length(if compact { 4 } else { 5 }),
             Constraint::Length(3),
-            Constraint::Length(8),
-            Constraint::Min(8),
-            Constraint::Length(5),
+            Constraint::Min(if compact { 9 } else { 12 }),
+            Constraint::Length(if compact { 5 } else { 6 }),
         ])
         .split(area);
 
-    draw_intro(frame, layout[0], model, theme, true);
+    draw_intro(frame, layout[0], model, theme, compact);
     draw_browser_tabs(frame, layout[1], model, theme);
-    draw_launch_points(frame, layout[2], &model.launch_points, theme, false);
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-        .split(layout[3]);
-    draw_browser_list(frame, body[0], model, theme);
+        .constraints(if compact {
+            [Constraint::Percentage(44), Constraint::Percentage(56)]
+        } else {
+            [Constraint::Percentage(40), Constraint::Percentage(60)]
+        })
+        .split(layout[2]);
+    let left = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(if compact { 5 } else { 6 }),
+            Constraint::Min(4),
+        ])
+        .split(body[0]);
     let right = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(6), Constraint::Min(6)])
+        .constraints([
+            Constraint::Length(if compact { 5 } else { 6 }),
+            Constraint::Min(4),
+        ])
         .split(body[1]);
+    draw_launch_points(frame, left[0], &model.launch_points, theme, true);
+    draw_browser_list(frame, left[1], model, theme, true);
     draw_trust(frame, right[0], model, theme);
     draw_detail(frame, right[1], model, theme);
-    draw_warnings(frame, layout[4], model, theme);
+    draw_warnings(frame, layout[3], model, theme);
 }
 
 fn draw_intro(
@@ -169,7 +188,13 @@ fn draw_launch_points(
     );
 }
 
-fn draw_browser_list(frame: &mut Frame<'_>, area: Rect, model: &AiWorkbenchModel, theme: &Theme) {
+fn draw_browser_list(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &AiWorkbenchModel,
+    theme: &Theme,
+    condensed: bool,
+) {
     let items = if model.browser_items.is_empty() {
         vec![ListItem::new(
             "[empty] Nothing is saved in this browser slice yet.",
@@ -179,13 +204,14 @@ fn draw_browser_list(frame: &mut Frame<'_>, area: Rect, model: &AiWorkbenchModel
             .browser_items
             .iter()
             .map(|item| {
-                ListItem::new(format!(
-                    "{} {} | {}\n{}",
-                    chrome::focus_prefix(item.selected),
-                    item.headline,
-                    item.status_badge,
-                    item.detail
-                ))
+                let focus = chrome::focus_prefix(item.selected);
+                let headline = if condensed {
+                    truncate_text(&item.headline, area.width.saturating_sub(8) as usize)
+                } else {
+                    format!("{} | {}", item.headline, item.status_badge)
+                };
+                let detail = truncate_text(&item.detail, area.width.saturating_sub(4) as usize);
+                ListItem::new(format!("{focus} {headline}\n{detail}"))
             })
             .collect::<Vec<_>>()
     };
@@ -193,6 +219,21 @@ fn draw_browser_list(frame: &mut Frame<'_>, area: Rect, model: &AiWorkbenchModel
         List::new(items).block(chrome::panel(theme, Line::from("List"), PanelKind::Section)),
         area,
     );
+}
+
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
+        return text.to_owned();
+    }
+    if max_chars <= 3 {
+        return text.chars().take(max_chars).collect();
+    }
+    let prefix = text.chars().take(max_chars - 3).collect::<String>();
+    format!("{prefix}...")
 }
 
 fn draw_trust(frame: &mut Frame<'_>, area: Rect, model: &AiWorkbenchModel, theme: &Theme) {
@@ -260,6 +301,7 @@ fn draw_preflight_overlay(
         if compact { 92 } else { 74 },
         if compact { 72 } else { 68 },
     );
+    frame.render_widget(Clear, popup);
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

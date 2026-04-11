@@ -1,6 +1,6 @@
 {
   "schema_version": "ringmaster.ai.review.v1",
-  "prompt_version": "review_prompt_v1",
+  "prompt_version": "review_prompt_v2",
   "status": "fixture",
   "overview": "Candidate fixture review for regression testing.",
   "headline_findings": [

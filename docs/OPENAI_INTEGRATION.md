@@ -206,6 +206,13 @@ Current default behavior:
 - `store: false`
 - no chat history retained by the API on behalf of the app
 - no stateful conversation thread in this pass
+- request timeout defaults to 120 seconds for snapshot review/compare workloads
+
+If a real provider call needs more time in a specific environment, override it with:
+
+```bash
+export RINGMASTER_AI_TIMEOUT_SECS=180
+```
 
 If stateful mode is enabled later through config, that will be a deliberate opt-in change and must not become the silent default.
 
@@ -221,12 +228,18 @@ Current versions:
 - review output schema: `ringmaster.ai.review.v1`
 - compare output schema: `ringmaster.ai.compare.v1`
 - follow-up output schema: `ringmaster.ai.follow_up.v1`
-- review prompt: `review_prompt_v1`
+- review prompt: `review_prompt_v2`
 - compare prompt: `compare_prompt_v1`
 - follow-up prompt: `follow_up_prompt_v1`
-- review task frame: `review_task_frame_v1`
+- review task frame: `review_task_frame_v2`
 - compare task frame: `compare_task_frame_v1`
 - follow-up task frame: `follow_up_task_frame_v1`
+
+The review pipeline also now applies a local post-provider sanitation pass before persistence and rendering:
+
+- invalid or duplicate evidence references are removed
+- duplicate review themes across headline/positive/negative sections are collapsed
+- review follow-up targets are replaced with the deterministic locally generated snapshot targets
 
 Each persisted AI artifact also records:
 

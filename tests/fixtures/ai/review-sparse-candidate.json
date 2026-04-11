@@ -1,0 +1,108 @@
+{
+  "schema_version": "ringmaster.ai.review.v1",
+  "prompt_version": "review_prompt_v2",
+  "status": "insufficient",
+  "overview": "Single-day review for 2026-04-10: sleep score is above baseline, readiness is below baseline, and the rest of the snapshot stays sparse enough that conclusions remain limited.",
+  "headline_findings": [
+    {
+      "finding_id": "sleep-score-elevated",
+      "title": "Sleep score is higher than baseline",
+      "summary": "Sleep score on 2026-04-10 is 86 versus a baseline average of 63, but this is still a single-day comparison.",
+      "confidence": "medium",
+      "sufficiency": "thin",
+      "evidence_refs": [
+        {
+          "export_ref": "daily:2026-04-10",
+          "note": "Single-day daily score row"
+        }
+      ],
+      "counterevidence_refs": []
+    },
+    {
+      "finding_id": "readiness-score-lower",
+      "title": "Readiness score is below baseline",
+      "summary": "Readiness score on 2026-04-10 is 70 versus a baseline average of 76, and the single-day scope limits confidence in whether that is a pattern.",
+      "confidence": "medium",
+      "sufficiency": "thin",
+      "evidence_refs": [
+        {
+          "export_ref": "daily:2026-04-10",
+          "note": "Single-day daily score row"
+        }
+      ],
+      "counterevidence_refs": []
+    }
+  ],
+  "positive_findings": [
+    {
+      "finding_id": "moderate-workout",
+      "title": "A moderate workout was logged on the anchor day",
+      "summary": "The context snapshot includes one moderate-intensity workout on 2026-04-10.",
+      "confidence": "high",
+      "sufficiency": "medium",
+      "evidence_refs": [
+        {
+          "export_ref": "context:workout:fixture",
+          "note": "Workout context event"
+        }
+      ],
+      "counterevidence_refs": []
+    }
+  ],
+  "negative_findings": [
+    {
+      "finding_id": "heartrate-context-limited",
+      "title": "Heartrate context is too sparse for a strong conclusion",
+      "summary": "The daily heartrate average is 101.8, but the snapshot only includes one day and does not distinguish resting from active periods.",
+      "confidence": "low",
+      "sufficiency": "missing",
+      "evidence_refs": [
+        {
+          "export_ref": "heartrate:2026-04-10",
+          "note": "Single-day heartrate average"
+        }
+      ],
+      "counterevidence_refs": []
+    }
+  ],
+  "unresolved_questions": [
+    "Is the 101.8 heartrate average mostly capturing active periods rather than resting periods?"
+  ],
+  "limitations": [
+    {
+      "code": "single_day_scope",
+      "message": "This is a single-day snapshot, so several comparisons remain thin even when the score deltas look large."
+    },
+    {
+      "code": "enhanced_tags_sync_failed",
+      "message": "The enhanced tags sync failed, so local context is incomplete for this day."
+    }
+  ],
+  "follow_up_targets": [
+    {
+      "label": "Review day brief",
+      "command": "review today --day 2026-04-10",
+      "reason": "Open the bounded local daily brief for this anchor day."
+    },
+    {
+      "label": "Review week brief",
+      "command": "review week --end-day 2026-04-10",
+      "reason": "Inspect the local weekly brief around the same period."
+    },
+    {
+      "label": "Investigate sleep",
+      "command": "review investigate --focus sleep --anchor-day 2026-04-10",
+      "reason": "Follow the largest local sleep score delta back into review tooling."
+    },
+    {
+      "label": "Investigate readiness",
+      "command": "review investigate --focus readiness --anchor-day 2026-04-10",
+      "reason": "Follow the largest local readiness score delta back into review tooling."
+    },
+    {
+      "label": "Investigate activity",
+      "command": "review investigate --focus activity --anchor-day 2026-04-10",
+      "reason": "Follow the clearest local activity score trend back into review tooling."
+    }
+  ]
+}

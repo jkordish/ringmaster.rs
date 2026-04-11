@@ -2450,6 +2450,7 @@ impl Drop for TerminalSession {
 #[allow(clippy::panic)]
 mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::{Constraint, Direction, Layout, Rect};
     use std::collections::HashMap;
     use std::future::pending;
     use std::time::Duration;
@@ -3139,12 +3140,18 @@ mod tests {
 
         let compact = render_snapshot(&app, 90, 28)
             .unwrap_or_else(|error| panic!("compact ai snapshot should render: {error}"));
+        let medium = render_snapshot(&app, 120, 44)
+            .unwrap_or_else(|error| panic!("medium ai snapshot should render: {error}"));
         let wide = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| panic!("wide ai snapshot should render: {error}"));
 
         assert!(compact.contains("AI workbench"));
         assert!(compact.contains("Launch points"));
         assert!(compact.contains("Preflight defaults"));
+        assert!(medium.contains("Saved AI run"));
+        assert!(medium.contains("API key ready: yes"));
+        assert!(medium.contains("Generate a report [g on saved item]"));
+        assert!(!medium.contains("Prepare a snapshot-scoped review"));
         assert!(wide.contains("AI workbench"));
         assert!(wide.contains("saved artifacts"));
         assert!(wide.contains("trust surface"));
@@ -3203,6 +3210,65 @@ mod tests {
     }
 
     #[test]
+    fn ai_preflight_overlay_clears_underlying_screen_content() {
+        let config = test_config();
+        let mut background_app = build_demo_state(&config);
+        background_app.active_screen = Screen::Ai;
+        let background = super::render_buffer(&background_app, 160, 44)
+            .unwrap_or_else(|error| panic!("background ai buffer should render: {error}"));
+
+        let mut preflight_app = build_demo_state(&config);
+        preflight_app.active_screen = Screen::Ai;
+        preflight_app.handle(Action::AiPreflightPrepared {
+            preflight: Box::new(AiPreflightState {
+                intent: AiLaunchIntent::ReviewSelectedDay,
+                source_screen: Screen::Review,
+                snapshot_scope: "day:2026-04-08".to_owned(),
+                snapshot_paths: vec![
+                    "/tmp/cache/ringmaster/ai-workbench/snapshots/review-20260408-redacted.json"
+                        .to_owned(),
+                ],
+                request_preview: sample_request_preview("demo-snapshot-20260408"),
+                privacy_profile: PrivacyProfile::Redacted,
+                model_override: Some("gpt-5-mini".to_owned()),
+                source_ai_artifact_id: Some("run-demo-review-20260408".to_owned()),
+                follow_up_kind: Some(crate::ai::GuidedFollowUpKind::ExpandEvidence),
+                warning_lines: Vec::new(),
+                confirm_enabled: true,
+            }),
+            status_line: "Prepared review preflight.".to_owned(),
+        });
+        let overlay = super::render_buffer(&preflight_app, 160, 44)
+            .unwrap_or_else(|error| panic!("preflight ai buffer should render: {error}"));
+
+        let screen = Rect::new(0, 0, 160, 44);
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(5),
+                Constraint::Length(3),
+                Constraint::Min(10),
+                Constraint::Length(3),
+            ])
+            .split(screen);
+        let popup = centered_test_rect(layout[2], 74, 68);
+
+        let cleared_cell_exists =
+            ((popup.y + 1)..(popup.y + popup.height.saturating_sub(1))).any(|y| {
+                ((popup.x + 1)..(popup.x + popup.width.saturating_sub(1))).any(|x| {
+                    let before = background[(x, y)].symbol();
+                    let after = overlay[(x, y)].symbol();
+                    !before.trim().is_empty() && after == " "
+                })
+            });
+
+        assert!(
+            cleared_cell_exists,
+            "expected at least one popup cell to clear underlying content"
+        );
+    }
+
+    #[test]
     fn ai_workbench_browser_tabs_render_snapshot_report_and_eval_details() {
         let config = test_config();
         let mut app = build_demo_state(&config);
@@ -3239,6 +3305,26 @@ mod tests {
         assert!(output.contains("Latest eval"));
         assert!(output.contains("Eval health"));
         assert!(output.contains("failed_cases=1 regressions=1 improvements=1"));
+    }
+
+    fn centered_test_rect(area: Rect, width_pct: u16, height_pct: u16) -> Rect {
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage((100 - height_pct) / 2),
+                Constraint::Percentage(height_pct),
+                Constraint::Percentage((100 - height_pct) / 2),
+            ])
+            .split(area);
+        let horizontal = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage((100 - width_pct) / 2),
+                Constraint::Percentage(width_pct),
+                Constraint::Percentage((100 - width_pct) / 2),
+            ])
+            .split(vertical[1]);
+        horizontal[1]
     }
 
     #[tokio::test]

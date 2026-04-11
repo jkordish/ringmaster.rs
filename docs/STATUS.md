@@ -199,10 +199,10 @@ The repository now has explicit version discipline for:
 - compare output schema version: `ringmaster.ai.compare.v1`
 - follow-up output schema version: `ringmaster.ai.follow_up.v1`
 - prompt templates:
-  - `review_prompt_v1`
+  - `review_prompt_v2`
   - `compare_prompt_v1`
   - `follow_up_prompt_v1`
-  - `review_task_frame_v1`
+  - `review_task_frame_v2`
   - `compare_task_frame_v1`
   - `follow_up_task_frame_v1`
 - report templates:

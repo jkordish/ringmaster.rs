@@ -20,7 +20,7 @@ use crate::config::{AiConfig, AiInputTransport, AiRequestMode, Config, PromptCac
 use crate::error::{Result, RingmasterError};
 use crate::snapshot::{
     ArtifactRecordInput, LoadedSnapshotArtifact, PrivacyProfile, SnapshotBundleV1,
-    SnapshotFollowUpTarget, SnapshotReviewSignal, artifact_record,
+    SnapshotFollowUpTarget, SnapshotReviewSignal, artifact_record, rebuild_follow_up_targets,
 };
 use crate::store::queries::AiArtifactRecord;
 
@@ -333,6 +333,7 @@ pub(crate) async fn review_snapshot_with_run_identity(
             snapshot_json: &snapshot.compact_json,
         })
         .await?;
+    let artifact = sanitize_review_artifact(&snapshot.bundle, artifact)?;
     let created_at = resolve_run_created_at(run_identity_override)?;
     let payload_json = serde_json::to_string_pretty(&artifact)?;
     let rendered_briefing = render_review_briefing(&artifact);
@@ -751,6 +752,142 @@ pub fn parse_stored_artifact(record: &AiArtifactRecord) -> Result<StoredArtifact
     }
 }
 
+fn sanitize_review_artifact(
+    snapshot: &SnapshotBundleV1,
+    mut artifact: ReviewArtifactV1,
+) -> Result<ReviewArtifactV1> {
+    let valid_export_refs = collect_export_refs_from_snapshot(snapshot)?;
+    let mut seen_finding_ids = BTreeSet::new();
+    let mut seen_finding_themes = BTreeSet::new();
+
+    artifact.headline_findings = sanitize_review_findings(
+        artifact.headline_findings,
+        &valid_export_refs,
+        &mut seen_finding_ids,
+        &mut seen_finding_themes,
+    );
+    artifact.positive_findings = sanitize_review_findings(
+        artifact.positive_findings,
+        &valid_export_refs,
+        &mut seen_finding_ids,
+        &mut seen_finding_themes,
+    );
+    artifact.negative_findings = sanitize_review_findings(
+        artifact.negative_findings,
+        &valid_export_refs,
+        &mut seen_finding_ids,
+        &mut seen_finding_themes,
+    );
+    artifact.follow_up_targets = rebuild_follow_up_targets(snapshot)
+        .iter()
+        .map(follow_up_target)
+        .collect();
+
+    Ok(artifact)
+}
+
+fn sanitize_review_findings(
+    findings: Vec<ArtifactFinding>,
+    valid_export_refs: &BTreeSet<String>,
+    seen_finding_ids: &mut BTreeSet<String>,
+    seen_finding_themes: &mut BTreeSet<String>,
+) -> Vec<ArtifactFinding> {
+    findings
+        .into_iter()
+        .filter_map(|finding| sanitize_review_finding(finding, valid_export_refs))
+        .filter(|finding| {
+            let finding_id_key = normalize_dedupe_key(&finding.finding_id);
+            if !finding_id_key.is_empty() && !seen_finding_ids.insert(finding_id_key) {
+                return false;
+            }
+
+            let theme_key = format!(
+                "{}|{}",
+                normalize_dedupe_key(&finding.title),
+                normalize_dedupe_key(&finding.summary)
+            );
+            if theme_key == "|" {
+                return true;
+            }
+            seen_finding_themes.insert(theme_key)
+        })
+        .collect()
+}
+
+fn sanitize_review_finding(
+    mut finding: ArtifactFinding,
+    valid_export_refs: &BTreeSet<String>,
+) -> Option<ArtifactFinding> {
+    let evidence_refs = sanitize_evidence_refs(&finding.evidence_refs, valid_export_refs, None);
+    let evidence_export_refs = evidence_refs
+        .iter()
+        .map(|evidence| evidence.export_ref.as_str())
+        .collect::<BTreeSet<_>>();
+    let counterevidence_refs = sanitize_evidence_refs(
+        &finding.counterevidence_refs,
+        valid_export_refs,
+        Some(&evidence_export_refs),
+    );
+
+    finding.evidence_refs = evidence_refs;
+    finding.counterevidence_refs = counterevidence_refs;
+
+    (!finding.title.trim().is_empty() || !finding.summary.trim().is_empty()).then_some(finding)
+}
+
+fn sanitize_evidence_refs(
+    refs: &[ArtifactEvidenceRef],
+    valid_export_refs: &BTreeSet<String>,
+    excluded_refs: Option<&BTreeSet<&str>>,
+) -> Vec<ArtifactEvidenceRef> {
+    let mut seen_export_refs = BTreeSet::new();
+
+    refs.iter()
+        .filter(|evidence| valid_export_refs.contains(&evidence.export_ref))
+        .filter(|evidence| {
+            excluded_refs
+                .map(|excluded| !excluded.contains(evidence.export_ref.as_str()))
+                .unwrap_or(true)
+        })
+        .filter(|evidence| seen_export_refs.insert(evidence.export_ref.clone()))
+        .cloned()
+        .collect()
+}
+
+fn collect_export_refs_from_snapshot(snapshot: &SnapshotBundleV1) -> Result<BTreeSet<String>> {
+    fn visit(value: &Value, refs: &mut BTreeSet<String>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(export_ref) = map.get("export_ref").and_then(Value::as_str) {
+                    refs.insert(export_ref.to_owned());
+                }
+                for value in map.values() {
+                    visit(value, refs);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    visit(value, refs);
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+
+    let value = serde_json::to_value(snapshot)?;
+    let mut refs = BTreeSet::new();
+    visit(&value, &mut refs);
+    Ok(refs)
+}
+
+fn normalize_dedupe_key(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
 fn render_findings(findings: &[ArtifactFinding]) -> Vec<String> {
     findings
         .iter()
@@ -999,7 +1136,8 @@ impl OpenAiProvider {
             .bearer_auth(api_key)
             .json(body)
             .send()
-            .await?;
+            .await
+            .map_err(|error| ai_transport_error(error, self.config.timeout_secs))?;
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
@@ -1012,6 +1150,29 @@ impl OpenAiProvider {
         let response_text = extract_output_text(&value)?;
         serde_json::from_str::<T>(&response_text).map_err(Into::into)
     }
+}
+
+fn ai_transport_error(error: reqwest::Error, timeout_secs: u64) -> RingmasterError {
+    if error.is_timeout() {
+        return RingmasterError::Ui(ai_timeout_message(timeout_secs));
+    }
+
+    let mut detail = error.to_string();
+    let mut source = std::error::Error::source(&error);
+    while let Some(next) = source {
+        if !detail.contains(&next.to_string()) {
+            detail.push_str(": ");
+            detail.push_str(&next.to_string());
+        }
+        source = next.source();
+    }
+    RingmasterError::Ui(format!("OpenAI transport error: {detail}"))
+}
+
+fn ai_timeout_message(timeout_secs: u64) -> String {
+    format!(
+        "OpenAI Responses API request timed out after {timeout_secs}s. Increase `ai.timeout_secs` or set `RINGMASTER_AI_TIMEOUT_SECS` to allow longer snapshot reviews."
+    )
 }
 
 fn build_review_request_plan(
@@ -2116,12 +2277,14 @@ mod tests {
     use sha2::Digest;
 
     use super::{
-        ArtifactStatus, COMPARE_OUTPUT_SCHEMA_VERSION, COMPARE_PROMPT_VERSION, CompareArtifactV1,
-        FOLLOW_UP_OUTPUT_SCHEMA_VERSION, FOLLOW_UP_PROMPT_VERSION, GuidedFollowUpKind,
-        REVIEW_OUTPUT_SCHEMA_VERSION, REVIEW_PROMPT_VERSION, ReviewArtifactV1, SufficiencyLevel,
-        artifact_id, build_review_request_plan, dry_run_compare_artifact, dry_run_review_artifact,
+        ArtifactEvidenceRef, ArtifactFinding, ArtifactStatus, COMPARE_OUTPUT_SCHEMA_VERSION,
+        COMPARE_PROMPT_VERSION, CompareArtifactV1, FOLLOW_UP_OUTPUT_SCHEMA_VERSION,
+        FOLLOW_UP_PROMPT_VERSION, GuidedFollowUpKind, REVIEW_OUTPUT_SCHEMA_VERSION,
+        REVIEW_PROMPT_VERSION, ReviewArtifactV1, SufficiencyLevel, artifact_id,
+        build_review_request_plan, dry_run_compare_artifact, dry_run_review_artifact,
         follow_up_from_artifact_with_run_identity, render_compare_briefing, render_request_preview,
-        render_review_briefing, retryable_error, review_snapshot, schema_value,
+        render_review_briefing, retryable_error, review_snapshot, sanitize_review_artifact,
+        schema_value,
     };
     use crate::config::{
         AiConfig, AiInputTransport, AiProviderKind, AiRequestMode, AppPaths, Config, LoggingConfig,
@@ -2132,7 +2295,7 @@ mod tests {
         PrivacyProfile, SnapshotBundleV1, SnapshotCapabilities, SnapshotCapabilityEntry,
         SnapshotContextEvent, SnapshotFreshness, SnapshotMetadata, SnapshotMetrics,
         SnapshotRecordCounts, SnapshotReviewSignal, SnapshotSourceMode, SnapshotSyncState,
-        deserialize_snapshot_bundle,
+        deserialize_snapshot_bundle, rebuild_follow_up_targets,
     };
     use crate::store::queries::AiArtifactRecord;
 
@@ -2333,7 +2496,7 @@ mod tests {
                 api_key_env: "OPENAI_API_KEY".to_owned(),
                 model: "gpt-5-mini".to_owned(),
                 reasoning_effort: None,
-                timeout_secs: 30,
+                timeout_secs: 120,
                 max_retries: 1,
                 request_mode: AiRequestMode::Stateless,
                 input_transport: AiInputTransport::Inline,
@@ -2406,6 +2569,8 @@ mod tests {
         let temp_dir =
             tempfile::tempdir().unwrap_or_else(|error| panic!("temp dir should exist: {error}"));
         let fixture_path = temp_dir.path().join("review.json");
+        let loaded = loaded_snapshot("today");
+        let expected_follow_ups = rebuild_follow_up_targets(&loaded.bundle);
         fs::write(
             &fixture_path,
             serde_json::to_string_pretty(&ReviewArtifactV1 {
@@ -2426,7 +2591,7 @@ mod tests {
 
         let output = review_snapshot(
             &Config::load().unwrap_or_else(|error| panic!("config should load: {error}")),
-            &loaded_snapshot("today"),
+            &loaded,
             false,
             Some(&fixture_path),
         )
@@ -2434,6 +2599,110 @@ mod tests {
         .unwrap_or_else(|error| panic!("fixture review should succeed: {error}"));
         assert_eq!(output.artifact.status, ArtifactStatus::Fixture);
         assert!(output.payload_json.contains("fixture review"));
+        assert_eq!(
+            output
+                .artifact
+                .follow_up_targets
+                .iter()
+                .map(|target| target.command.as_str())
+                .collect::<Vec<_>>(),
+            expected_follow_ups
+                .iter()
+                .map(|target| target.command.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn sanitize_review_artifact_dedupes_findings_and_overwrites_follow_ups() {
+        let snapshot = snapshot_bundle("today");
+        let expected_follow_ups = rebuild_follow_up_targets(&snapshot);
+        let artifact = ReviewArtifactV1 {
+            schema_version: REVIEW_OUTPUT_SCHEMA_VERSION.to_owned(),
+            prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
+            status: ArtifactStatus::Success,
+            overview: "fixture review".to_owned(),
+            headline_findings: vec![ArtifactFinding {
+                finding_id: "sleep-dup".to_owned(),
+                title: "Elevated sleep score".to_owned(),
+                summary: "Sleep score is above baseline.".to_owned(),
+                confidence: super::ConfidenceLevel::Medium,
+                sufficiency: SufficiencyLevel::Medium,
+                evidence_refs: vec![
+                    ArtifactEvidenceRef {
+                        export_ref: "daily:2026-04-10".to_owned(),
+                        note: "Daily row".to_owned(),
+                    },
+                    ArtifactEvidenceRef {
+                        export_ref: "daily:2026-04-10".to_owned(),
+                        note: "Duplicate daily row".to_owned(),
+                    },
+                    ArtifactEvidenceRef {
+                        export_ref: "bogus:missing".to_owned(),
+                        note: "Invalid".to_owned(),
+                    },
+                ],
+                counterevidence_refs: vec![ArtifactEvidenceRef {
+                    export_ref: "daily:2026-04-10".to_owned(),
+                    note: "Should be removed because it duplicates evidence".to_owned(),
+                }],
+            }],
+            positive_findings: vec![ArtifactFinding {
+                finding_id: "sleep-dup".to_owned(),
+                title: "Elevated sleep score".to_owned(),
+                summary: "Sleep score is above baseline.".to_owned(),
+                confidence: super::ConfidenceLevel::Medium,
+                sufficiency: SufficiencyLevel::Medium,
+                evidence_refs: vec![ArtifactEvidenceRef {
+                    export_ref: "context:1".to_owned(),
+                    note: "Duplicate theme should be removed before this matters".to_owned(),
+                }],
+                counterevidence_refs: Vec::new(),
+            }],
+            negative_findings: vec![ArtifactFinding {
+                finding_id: "workout-context".to_owned(),
+                title: "Workout context present".to_owned(),
+                summary: "A workout context event exists on the anchor day.".to_owned(),
+                confidence: super::ConfidenceLevel::High,
+                sufficiency: SufficiencyLevel::Medium,
+                evidence_refs: vec![ArtifactEvidenceRef {
+                    export_ref: "context:1".to_owned(),
+                    note: "Context event".to_owned(),
+                }],
+                counterevidence_refs: Vec::new(),
+            }],
+            unresolved_questions: Vec::new(),
+            limitations: Vec::new(),
+            follow_up_targets: vec![super::ArtifactFollowUpTarget {
+                label: "Bad target".to_owned(),
+                command: "review investigate --focus bogus --anchor-day 2026-04-10".to_owned(),
+                reason: "Should be replaced".to_owned(),
+            }],
+        };
+
+        let sanitized = sanitize_review_artifact(&snapshot, artifact)
+            .unwrap_or_else(|error| panic!("review artifact should sanitize: {error}"));
+
+        assert_eq!(sanitized.headline_findings.len(), 1);
+        assert!(sanitized.positive_findings.is_empty());
+        assert_eq!(sanitized.negative_findings.len(), 1);
+        assert_eq!(sanitized.headline_findings[0].evidence_refs.len(), 1);
+        assert!(
+            sanitized.headline_findings[0]
+                .counterevidence_refs
+                .is_empty()
+        );
+        assert_eq!(
+            sanitized
+                .follow_up_targets
+                .iter()
+                .map(|target| target.command.as_str())
+                .collect::<Vec<_>>(),
+            expected_follow_ups
+                .iter()
+                .map(|target| target.command.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
@@ -2599,5 +2868,12 @@ mod tests {
             !retryable_error(&error),
             "permanent client errors should not be retried"
         );
+    }
+
+    #[test]
+    fn ai_transport_timeout_error_points_to_config_override() {
+        let rendered = super::ai_timeout_message(120);
+        assert!(rendered.contains("timed out after 120s"));
+        assert!(rendered.contains("RINGMASTER_AI_TIMEOUT_SECS"));
     }
 }

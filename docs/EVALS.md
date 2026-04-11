@@ -42,6 +42,9 @@ tests/fixtures/ai/
   review-snapshot.json
   review-candidate.json
   review-baseline.json
+  review-sparse-snapshot.json
+  review-sparse-candidate.json
+  review-sparse-baseline.json
   compare-snapshot-a.json
   compare-snapshot-b.json
   compare-candidate.json
@@ -67,10 +70,13 @@ The current harness runs these graders:
 
 - `schema_validity`
 - `completeness`
+- `required_content`
+- `distinct_finding_titles`
 - `overclaiming`
 - `medical_safety`
 - `privacy`
 - `evidence`
+- `follow_up_targets`
 - `honesty`
 
 ### Schema validity
@@ -80,6 +86,14 @@ Checks that the structured artifact parses into the expected typed artifact shap
 ### Completeness
 
 Checks that the artifact produces at least the expected number of primary findings and, where declared, the expected primary title.
+
+### Required content
+
+Checks for explicit required caveat text, such as single-day or sync-failure acknowledgements, when a fixture expects those limits to be called out directly.
+
+### Distinct finding titles
+
+Checks that review artifacts do not repeat the same finding title across headline, positive, and negative sections when the fixture requires de-duplication.
 
 ### Overclaiming
 
@@ -96,6 +110,10 @@ Checks for forbidden substrings such as account identifiers, tokens, or secrets 
 ### Evidence integrity
 
 Checks that evidence references point to export refs that actually exist in the fixture snapshots.
+
+### Follow-up targets
+
+Checks that artifact drill-down commands match the deterministic local expectations encoded in the fixture manifest.
 
 ### Stale-data honesty
 

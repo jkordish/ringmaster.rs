@@ -1,0 +1,274 @@
+{
+  "schema_version": "ringmaster.snapshot.v1",
+  "metadata": {
+    "app_version": "0.1.0",
+    "generated_at": "2026-04-11T01:15:34Z",
+    "snapshot_hash": "28327d8811300028843c5f7dbf1084304332d41e908db5f61352589ad6b5b779",
+    "scope": "day:2026-04-10",
+    "start_day": "2026-04-10",
+    "end_day": "2026-04-10",
+    "anchor_day": "2026-04-10",
+    "privacy_profile": "redacted",
+    "source_mode": "demo",
+    "schema_version": 14
+  },
+  "freshness": {
+    "latest_source_day": "2026-04-10",
+    "latest_review_day": "2026-04-10",
+    "warnings": [
+      "oura.enhanced_tags last failed at 2026-04-11T01:00:00Z.",
+      "single-day scope limits trend reliability for several signals."
+    ],
+    "sync_states": [
+      {
+        "sync_key": "oura.daily",
+        "status": "success",
+        "last_attempted_at": "2026-04-11T01:15:34Z",
+        "last_completed_at": "2026-04-11T01:15:34Z",
+        "failure_count": 0,
+        "next_attempt_after": null,
+        "message": "Fixture sync completed."
+      },
+      {
+        "sync_key": "oura.enhanced_tags",
+        "status": "failed",
+        "last_attempted_at": "2026-04-11T01:00:00Z",
+        "last_completed_at": null,
+        "failure_count": 1,
+        "next_attempt_after": null,
+        "message": "failed to decode Oura API payload for `enhanced_tag`: missing field `day`"
+      }
+    ]
+  },
+  "capabilities": {
+    "requested_scopes": [
+      "daily",
+      "tag"
+    ],
+    "granted_scopes": [
+      "daily",
+      "tag"
+    ],
+    "missing_scopes": [],
+    "entries": [
+      {
+        "key": "daily",
+        "label": "Daily",
+        "requested": true,
+        "granted": true,
+        "note": "granted"
+      },
+      {
+        "key": "tag",
+        "label": "Tags",
+        "requested": true,
+        "granted": true,
+        "note": "granted"
+      }
+    ]
+  },
+  "record_counts": {
+    "daily_history_days": 1,
+    "heartrate_days": 1,
+    "context_events": 1,
+    "pattern_summaries": 0,
+    "review_signals": 4,
+    "raw_tables": {
+      "daily_activity": 1,
+      "daily_readiness": 1,
+      "daily_sleep": 1,
+      "enhanced_tags": 0
+    }
+  },
+  "metrics": {
+    "daily_scores": [
+      {
+        "export_ref": "daily:2026-04-10",
+        "day": "2026-04-10",
+        "sleep_score": 86,
+        "readiness_score": 70,
+        "activity_score": 75
+      }
+    ],
+    "activity": [
+      {
+        "export_ref": "activity:2026-04-10",
+        "day": "2026-04-10",
+        "active_calories": 251,
+        "steps": 3274,
+        "total_calories": 2148
+      }
+    ],
+    "heartrate_daily_averages": [
+      {
+        "export_ref": "heartrate:2026-04-10",
+        "day": "2026-04-10",
+        "value": 101.8
+      }
+    ],
+    "sleep_windows": [],
+    "stress": [
+      {
+        "export_ref": "signal:stress_high:2026-04-10",
+        "day": "2026-04-10",
+        "stress_high": 2700,
+        "recovery_high": 0,
+        "summary": null
+      }
+    ],
+    "resilience": [],
+    "cardiovascular_age": [
+      {
+        "export_ref": "cardio_age:2026-04-10",
+        "day": "2026-04-10",
+        "value": 43.0
+      }
+    ],
+    "vo2_max": [],
+    "rest_mode_periods": []
+  },
+  "baselines": [
+    {
+      "metric_key": "sleep_score",
+      "label": "Sleep score",
+      "scope_average": 86.0,
+      "baseline_average": 63.0,
+      "delta": 23.0,
+      "scope_samples": 1,
+      "baseline_samples": 14
+    },
+    {
+      "metric_key": "readiness_score",
+      "label": "Readiness score",
+      "scope_average": 70.0,
+      "baseline_average": 76.0,
+      "delta": -6.0,
+      "scope_samples": 1,
+      "baseline_samples": 14
+    },
+    {
+      "metric_key": "activity_score",
+      "label": "Activity score",
+      "scope_average": 75.0,
+      "baseline_average": 77.0,
+      "delta": -2.0,
+      "scope_samples": 1,
+      "baseline_samples": 14
+    }
+  ],
+  "trend_summaries": [
+    {
+      "metric_key": "sleep_score",
+      "label": "Sleep score",
+      "direction": "higher",
+      "summary": "Sleep score is higher than the recent comparison window.",
+      "current_average": 86.0,
+      "previous_average": 63.0
+    },
+    {
+      "metric_key": "readiness_score",
+      "label": "Readiness score",
+      "direction": "lower",
+      "summary": "Readiness score is below the recent comparison window.",
+      "current_average": 70.0,
+      "previous_average": 76.0
+    },
+    {
+      "metric_key": "activity_score",
+      "label": "Activity score",
+      "direction": "lower",
+      "summary": "Activity score is slightly below the recent comparison window.",
+      "current_average": 75.0,
+      "previous_average": 77.0
+    }
+  ],
+  "context_events": [
+    {
+      "export_ref": "context:workout:fixture",
+      "anchor_day": "2026-04-10",
+      "family": "Workout",
+      "label": "Workout",
+      "subtype": "coreExercise",
+      "intensity": "moderate",
+      "summary": null
+    }
+  ],
+  "pattern_summaries": [],
+  "review_signals": [
+    {
+      "export_ref": "signal:active_calories:2026-04-10",
+      "day": "2026-04-10",
+      "signal_key": "active_calories",
+      "numeric_value": 251.0,
+      "text_value": null,
+      "delta": -5.0,
+      "z_score": -0.4,
+      "persistence_days": 1,
+      "sufficiency": "missing",
+      "stale_days": 0
+    },
+    {
+      "export_ref": "signal:activity_score:2026-04-10",
+      "day": "2026-04-10",
+      "signal_key": "activity_score",
+      "numeric_value": 75.0,
+      "text_value": null,
+      "delta": -2.0,
+      "z_score": -0.3,
+      "persistence_days": 1,
+      "sufficiency": "missing",
+      "stale_days": 0
+    },
+    {
+      "export_ref": "signal:cardiovascular_age:2026-04-10",
+      "day": "2026-04-10",
+      "signal_key": "cardiovascular_age",
+      "numeric_value": 43.0,
+      "text_value": null,
+      "delta": 1.0,
+      "z_score": 0.2,
+      "persistence_days": 1,
+      "sufficiency": "missing",
+      "stale_days": 0
+    },
+    {
+      "export_ref": "signal:stress_high:2026-04-10",
+      "day": "2026-04-10",
+      "signal_key": "stress_high",
+      "numeric_value": 2700.0,
+      "text_value": null,
+      "delta": 50.0,
+      "z_score": 0.4,
+      "persistence_days": 1,
+      "sufficiency": "missing",
+      "stale_days": 0
+    }
+  ],
+  "follow_up_targets": [
+    {
+      "label": "Review day brief",
+      "command": "review today --day 2026-04-10",
+      "reason": "Open the bounded local daily brief for this anchor day."
+    },
+    {
+      "label": "Review week brief",
+      "command": "review week --end-day 2026-04-10",
+      "reason": "Inspect the local weekly brief around the same period."
+    },
+    {
+      "label": "Investigate sleep",
+      "command": "review investigate --focus sleep --anchor-day 2026-04-10",
+      "reason": "Follow the largest local sleep score delta back into review tooling."
+    },
+    {
+      "label": "Investigate readiness",
+      "command": "review investigate --focus readiness --anchor-day 2026-04-10",
+      "reason": "Follow the largest local readiness score delta back into review tooling."
+    },
+    {
+      "label": "Investigate activity",
+      "command": "review investigate --focus activity --anchor-day 2026-04-10",
+      "reason": "Follow the clearest local activity score trend back into review tooling."
+    }
+  ]
+}

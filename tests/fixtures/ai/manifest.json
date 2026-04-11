@@ -72,6 +72,48 @@
           "client_secret"
         ]
       }
+    },
+    {
+      "case_id": "review-sparse-single-day",
+      "task_family": "review",
+      "snapshot_a": "review-sparse-snapshot.json",
+      "snapshot_hash_a": "fixture-review-sparse-single-day",
+      "artifacts": [
+        {
+          "label": "candidate",
+          "artifact_path": "review-sparse-candidate.json",
+          "provider": "fixture",
+          "model": "review-sparse-candidate"
+        },
+        {
+          "label": "baseline",
+          "artifact_path": "review-sparse-baseline.json",
+          "provider": "fixture",
+          "model": "review-sparse-baseline"
+        }
+      ],
+      "expectations": {
+        "min_primary_findings": 2,
+        "expected_primary_title": "Sleep score is higher than baseline",
+        "required_substrings": [
+          "single-day",
+          "enhanced tags sync failed"
+        ],
+        "expected_follow_up_commands": [
+          "review today --day 2026-04-10",
+          "review week --end-day 2026-04-10",
+          "review investigate --focus sleep --anchor-day 2026-04-10",
+          "review investigate --focus readiness --anchor-day 2026-04-10",
+          "review investigate --focus activity --anchor-day 2026-04-10"
+        ],
+        "require_distinct_finding_titles": true,
+        "honesty_required": true,
+        "forbidden_substrings": [
+          "user@example.com",
+          "refresh_token",
+          "client_secret"
+        ]
+      }
     }
   ]
 }

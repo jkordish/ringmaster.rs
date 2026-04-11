@@ -303,9 +303,9 @@ Important rules:
 
 Prompt and rendering assets now live in explicit versioned files:
 
-- `src/ai_prompts/review_prompt_v1.md`
+- `src/ai_prompts/review_prompt_v2.md`
 - `src/ai_prompts/compare_prompt_v1.md`
-- `src/ai_prompts/review_task_frame_v1.md`
+- `src/ai_prompts/review_task_frame_v2.md`
 - `src/ai_prompts/compare_task_frame_v1.md`
 - `src/report_templates/markdown_v1.md`
 - `src/report_templates/html_v1.html`
