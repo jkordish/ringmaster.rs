@@ -1016,7 +1016,7 @@ impl SerializeableDocument for WorkoutDocument {
 impl SerializeableDocument for EnhancedTagDocument {
     fn field_value(&self, field_name: &str) -> Option<&str> {
         match field_name {
-            "day" => Some(self.day.as_str()),
+            "day" => Some(self.anchor_day()),
             "timestamp" => self.start_time.as_deref(),
             _ => None,
         }
@@ -1051,6 +1051,22 @@ fn available_fixture_scopes(fixture_dir: &Path) -> Vec<String> {
     ];
     if daily_files.iter().any(|path| path.is_file()) {
         scopes.push(CapabilityKind::Daily.scope_name().to_owned());
+    }
+    let stress_files = [
+        fixture_dir.join("sleep_time.json"),
+        fixture_dir.join("rest_mode_periods.json"),
+        fixture_dir.join("daily_stress.json"),
+    ];
+    if stress_files.iter().any(|path| path.is_file()) {
+        scopes.push(CapabilityKind::Stress.scope_name().to_owned());
+    }
+    let heart_health_files = [
+        fixture_dir.join("daily_resilience.json"),
+        fixture_dir.join("daily_cardiovascular_age.json"),
+        fixture_dir.join("vo2_max.json"),
+    ];
+    if heart_health_files.iter().any(|path| path.is_file()) {
+        scopes.push(CapabilityKind::HeartHealth.scope_name().to_owned());
     }
     if fixture_dir.join("heartrate.json").is_file() {
         scopes.push(CapabilityKind::Heartrate.scope_name().to_owned());
@@ -1112,4 +1128,29 @@ fn now_rfc3339() -> Result<String> {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .map_err(|error| RingmasterError::Config(format!("formatting timestamp failed: {error}")))
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    #[test]
+    fn fixture_scope_detection_includes_stress_and_heart_health_families() {
+        let tempdir = tempdir().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        fs::write(tempdir.path().join("daily_sleep.json"), "[]")
+            .unwrap_or_else(|error| panic!("daily fixture should write: {error}"));
+        fs::write(tempdir.path().join("sleep_time.json"), "[]")
+            .unwrap_or_else(|error| panic!("stress fixture should write: {error}"));
+        fs::write(tempdir.path().join("daily_resilience.json"), "[]")
+            .unwrap_or_else(|error| panic!("heart health fixture should write: {error}"));
+
+        let scopes = super::available_fixture_scopes(tempdir.path());
+
+        assert!(scopes.contains(&"daily".to_owned()));
+        assert!(scopes.contains(&"stress".to_owned()));
+        assert!(scopes.contains(&"heart_health".to_owned()));
+    }
 }

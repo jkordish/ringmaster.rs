@@ -7,12 +7,18 @@
       "case_id": "review-stale-snapshot",
       "task_family": "review",
       "snapshot_a": "review-snapshot.json",
+      "snapshot_hash_a": "fixture-review-snapshot",
       "artifacts": [
         {
           "label": "candidate",
           "artifact_path": "review-candidate.json",
           "provider": "fixture",
-          "model": "review-candidate"
+          "model": "review-candidate",
+          "lineage": {
+            "ai_run_id": "fixture-run-review-candidate",
+            "ai_artifact_id": "fixture-artifact-review-candidate",
+            "report_id": "fixture-report-review-candidate"
+          }
         },
         {
           "label": "baseline",
@@ -37,12 +43,17 @@
       "task_family": "compare",
       "snapshot_a": "compare-snapshot-a.json",
       "snapshot_b": "compare-snapshot-b.json",
+      "snapshot_hash_a": "fixture-compare-snapshot-a",
+      "snapshot_hash_b": "fixture-compare-snapshot-b",
       "artifacts": [
         {
           "label": "candidate",
           "artifact_path": "compare-candidate.json",
           "provider": "fixture",
-          "model": "compare-candidate"
+          "model": "compare-candidate",
+          "lineage": {
+            "ai_run_id": "fixture-run-compare-candidate"
+          }
         },
         {
           "label": "baseline",
@@ -55,6 +66,48 @@
         "min_primary_findings": 1,
         "expected_primary_title": "Average daily score increased",
         "honesty_required": false,
+        "forbidden_substrings": [
+          "user@example.com",
+          "refresh_token",
+          "client_secret"
+        ]
+      }
+    },
+    {
+      "case_id": "review-sparse-single-day",
+      "task_family": "review",
+      "snapshot_a": "review-sparse-snapshot.json",
+      "snapshot_hash_a": "fixture-review-sparse-single-day",
+      "artifacts": [
+        {
+          "label": "candidate",
+          "artifact_path": "review-sparse-candidate.json",
+          "provider": "fixture",
+          "model": "review-sparse-candidate"
+        },
+        {
+          "label": "baseline",
+          "artifact_path": "review-sparse-baseline.json",
+          "provider": "fixture",
+          "model": "review-sparse-baseline"
+        }
+      ],
+      "expectations": {
+        "min_primary_findings": 2,
+        "expected_primary_title": "Sleep score is higher than baseline",
+        "required_substrings": [
+          "single-day",
+          "enhanced tags sync failed"
+        ],
+        "expected_follow_up_commands": [
+          "review today --day 2026-04-10",
+          "review week --end-day 2026-04-10",
+          "review investigate --focus sleep --anchor-day 2026-04-10",
+          "review investigate --focus readiness --anchor-day 2026-04-10",
+          "review investigate --focus activity --anchor-day 2026-04-10"
+        ],
+        "require_distinct_finding_titles": true,
+        "honesty_required": true,
         "forbidden_substrings": [
           "user@example.com",
           "refresh_token",

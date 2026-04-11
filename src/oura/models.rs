@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,6 +8,7 @@ use crate::error::OuraProblem;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CapabilityKind {
+    Email,
     Personal,
     Daily,
     Heartrate,
@@ -15,6 +16,10 @@ pub enum CapabilityKind {
     Session,
     Tag,
     EnhancedTag,
+    Spo2,
+    RingConfiguration,
+    Stress,
+    HeartHealth,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,7 +276,10 @@ pub struct WorkoutDocument {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnhancedTagDocument {
     pub id: String,
-    pub day: String,
+    #[serde(alias = "day")]
+    pub start_day: String,
+    #[serde(default)]
+    pub end_day: Option<String>,
     #[serde(default, alias = "start_datetime", alias = "start_date")]
     pub start_time: Option<String>,
     #[serde(default, alias = "end_datetime", alias = "end_date")]
@@ -322,19 +330,21 @@ pub struct TimeSeriesCollection<T> {
 
 impl CapabilityReport {
     pub fn from_scopes(requested_scopes: &[String], granted_scopes: &[String]) -> Self {
+        let requested_scopes = normalize_scopes(requested_scopes);
+        let granted_scopes = normalize_scopes(granted_scopes);
         let entries = CapabilityKind::all()
             .into_iter()
             .map(|kind| {
                 let requested = requested_scopes
                     .iter()
-                    .any(|scope| scope == kind.scope_name());
-                let granted = granted_scopes
-                    .iter()
-                    .any(|scope| scope == kind.scope_name());
-                let note = match (requested, granted) {
-                    (true, true) => "granted".to_owned(),
-                    (true, false) => "missing scope".to_owned(),
-                    (false, _) => "not requested".to_owned(),
+                    .any(|scope| kind.matches_scope(scope));
+                let granted = granted_scopes.iter().any(|scope| kind.matches_scope(scope));
+                let note = match (requested, granted, kind.is_local_sync_ready()) {
+                    (true, true, true) => "granted".to_owned(),
+                    (true, true, false) => "granted for future support".to_owned(),
+                    (true, false, true) => "missing scope".to_owned(),
+                    (true, false, false) => "missing scope; future support only".to_owned(),
+                    (false, _, _) => "not requested".to_owned(),
                 };
 
                 CapabilityEntry {
@@ -372,10 +382,20 @@ impl CapabilityReport {
     }
 
     pub fn missing_scope_names(&self) -> Vec<&'static str> {
+        self.scope_names_for(|entry| entry.requested && !entry.granted)
+    }
+
+    pub fn granted_scope_names(&self) -> Vec<&'static str> {
+        self.scope_names_for(|entry| entry.granted)
+    }
+
+    fn scope_names_for(&self, predicate: impl Fn(&CapabilityEntry) -> bool) -> Vec<&'static str> {
         self.entries
             .iter()
-            .filter(|entry| entry.requested && !entry.granted)
+            .filter(|entry| predicate(entry))
             .map(|entry| entry.kind.scope_name())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect()
     }
 
@@ -392,8 +412,9 @@ impl CapabilityReport {
 }
 
 impl CapabilityKind {
-    pub fn all() -> [Self; 7] {
+    pub fn all() -> [Self; 12] {
         [
+            Self::Email,
             Self::Personal,
             Self::Daily,
             Self::Heartrate,
@@ -401,11 +422,16 @@ impl CapabilityKind {
             Self::Session,
             Self::Tag,
             Self::EnhancedTag,
+            Self::Spo2,
+            Self::RingConfiguration,
+            Self::Stress,
+            Self::HeartHealth,
         ]
     }
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Email => "Email",
             Self::Personal => "Personal",
             Self::Daily => "Daily",
             Self::Heartrate => "Heartrate",
@@ -413,20 +439,67 @@ impl CapabilityKind {
             Self::Session => "Sessions",
             Self::Tag => "Tags",
             Self::EnhancedTag => "Enhanced Tags",
+            Self::Spo2 => "SpO2",
+            Self::RingConfiguration => "Ring Configuration",
+            Self::Stress => "Stress",
+            Self::HeartHealth => "Heart Health",
         }
     }
 
     pub fn scope_name(self) -> &'static str {
         match self {
+            Self::Email => "email",
             Self::Personal => "personal",
             Self::Daily => "daily",
             Self::Heartrate => "heartrate",
             Self::Workout => "workout",
             Self::Session => "session",
-            Self::Tag => "tag",
-            Self::EnhancedTag => "enhanced_tag",
+            Self::Tag | Self::EnhancedTag => "tag",
+            Self::Spo2 => "spo2",
+            Self::RingConfiguration => "ring_configuration",
+            Self::Stress => "stress",
+            Self::HeartHealth => "heart_health",
         }
     }
+
+    pub fn matches_scope(self, scope: &str) -> bool {
+        normalize_scope_name(scope)
+            .as_deref()
+            .is_some_and(|scope| scope == self.scope_name())
+    }
+
+    pub fn is_local_sync_ready(self) -> bool {
+        !matches!(self, Self::Email | Self::Spo2 | Self::RingConfiguration)
+    }
+}
+
+pub fn normalize_scopes(scopes: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for scope in scopes {
+        let Some(scope) = normalize_scope_name(scope) else {
+            continue;
+        };
+        if !normalized.contains(&scope) {
+            normalized.push(scope);
+        }
+    }
+    normalized
+}
+
+pub fn normalize_scope_name(scope: &str) -> Option<String> {
+    let trimmed = scope.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let raw = trimmed.rsplit(':').next().unwrap_or(trimmed).trim();
+    let canonical = raw.to_ascii_lowercase().replace([' ', '-'], "_");
+    let canonical = match canonical.as_str() {
+        "enhanced_tag" => "tag",
+        _ => canonical.as_str(),
+    };
+
+    Some(canonical.to_owned())
 }
 
 impl WorkoutDocument {
@@ -453,6 +526,10 @@ impl WorkoutDocument {
 }
 
 impl EnhancedTagDocument {
+    pub fn anchor_day(&self) -> &str {
+        self.start_day.as_str()
+    }
+
     pub fn title(&self) -> String {
         if self.tags.is_empty() {
             self.tag_type_code
@@ -548,7 +625,10 @@ fn current_local_day_string() -> String {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::{RestModeEpisodeDocument, RestModePeriodDocument, current_local_day_string};
+    use super::{
+        CapabilityKind, CapabilityReport, EnhancedTagDocument, RestModeEpisodeDocument,
+        RestModePeriodDocument, current_local_day_string, normalize_scopes,
+    };
 
     #[test]
     fn open_rest_mode_period_overlaps_windows_after_start_day() {
@@ -566,5 +646,137 @@ mod tests {
         };
 
         assert!(period.overlaps_day_window("2026-04-03", &current_day));
+    }
+
+    #[test]
+    fn enhanced_tag_capability_accepts_tag_scope_alias() {
+        let report = CapabilityReport::from_scopes(&["tag".to_owned()], &["tag".to_owned()]);
+
+        assert!(report.is_granted(CapabilityKind::Tag));
+        assert!(report.is_granted(CapabilityKind::EnhancedTag));
+    }
+
+    #[test]
+    fn legacy_enhanced_tag_scope_alias_grants_tag_and_enhanced_tag() {
+        let report = CapabilityReport::from_scopes(
+            &["enhanced_tag".to_owned()],
+            &["enhanced_tag".to_owned()],
+        );
+
+        assert!(report.is_granted(CapabilityKind::Tag));
+        assert!(report.is_granted(CapabilityKind::EnhancedTag));
+    }
+
+    #[test]
+    fn missing_scope_names_dedupe_shared_tag_scope() {
+        let report =
+            CapabilityReport::from_scopes(&["tag".to_owned(), "enhanced_tag".to_owned()], &[]);
+
+        assert_eq!(report.missing_scope_names(), vec!["tag"]);
+    }
+
+    #[test]
+    fn granted_scope_names_dedupe_shared_tag_scope() {
+        let report = CapabilityReport::from_scopes(
+            &["tag".to_owned(), "enhanced_tag".to_owned()],
+            &["tag".to_owned()],
+        );
+
+        assert_eq!(report.granted_scope_names(), vec!["tag"]);
+    }
+
+    #[test]
+    fn future_ready_capabilities_have_descriptive_notes() {
+        let report = CapabilityReport::from_scopes(
+            &["email".to_owned(), "spo2".to_owned()],
+            &["email".to_owned()],
+        );
+
+        assert_eq!(
+            report
+                .status_for(CapabilityKind::Email)
+                .unwrap_or_else(|| panic!("email capability should exist"))
+                .note,
+            "granted for future support"
+        );
+        assert_eq!(
+            report
+                .status_for(CapabilityKind::Spo2)
+                .unwrap_or_else(|| panic!("spo2 capability should exist"))
+                .note,
+            "missing scope; future support only"
+        );
+    }
+
+    #[test]
+    fn stress_and_heart_health_capabilities_map_to_new_scope_names() {
+        let report = CapabilityReport::from_scopes(
+            &["stress".to_owned(), "heart_health".to_owned()],
+            &["stress".to_owned(), "heart_health".to_owned()],
+        );
+
+        assert!(report.is_granted(CapabilityKind::Stress));
+        assert!(report.is_granted(CapabilityKind::HeartHealth));
+    }
+
+    #[test]
+    fn extapi_prefixed_and_display_scopes_normalize_cleanly() {
+        let granted = normalize_scopes(&[
+            "extapi:daily".to_owned(),
+            "SpO2".to_owned(),
+            "Ring Configuration".to_owned(),
+            "Heart Health".to_owned(),
+            "enhanced_tag".to_owned(),
+        ]);
+
+        assert_eq!(
+            granted,
+            vec![
+                "daily".to_owned(),
+                "spo2".to_owned(),
+                "ring_configuration".to_owned(),
+                "heart_health".to_owned(),
+                "tag".to_owned(),
+            ]
+        );
+
+        let report = CapabilityReport::from_scopes(&granted, &granted);
+        assert!(report.is_granted(CapabilityKind::Daily));
+        assert!(report.is_granted(CapabilityKind::Spo2));
+        assert!(report.is_granted(CapabilityKind::RingConfiguration));
+        assert!(report.is_granted(CapabilityKind::HeartHealth));
+        assert!(report.is_granted(CapabilityKind::EnhancedTag));
+    }
+
+    #[test]
+    fn enhanced_tag_document_accepts_official_start_day_payloads() {
+        let document: EnhancedTagDocument = serde_json::from_value(serde_json::json!({
+            "id": "etag-1",
+            "start_day": "2026-04-10",
+            "end_day": "2026-04-10",
+            "start_time": "2026-04-10T08:00:00Z",
+            "end_time": "2026-04-10T09:00:00Z",
+            "tag_type_code": "focus",
+            "tags": ["Deep work"]
+        }))
+        .unwrap_or_else(|error| panic!("official enhanced tag payload should decode: {error}"));
+
+        assert_eq!(document.anchor_day(), "2026-04-10");
+        assert_eq!(document.end_day.as_deref(), Some("2026-04-10"));
+    }
+
+    #[test]
+    fn enhanced_tag_document_accepts_legacy_day_payloads() {
+        let document: EnhancedTagDocument = serde_json::from_value(serde_json::json!({
+            "id": "etag-legacy",
+            "day": "2026-04-11",
+            "start_time": "2026-04-11T08:00:00Z",
+            "tag_type_code": "caffeine",
+            "tags": ["Coffee"]
+        }))
+        .unwrap_or_else(|error| panic!("legacy enhanced tag payload should decode: {error}"));
+
+        assert_eq!(document.anchor_day(), "2026-04-11");
+        assert_eq!(document.end_day, None);
     }
 }

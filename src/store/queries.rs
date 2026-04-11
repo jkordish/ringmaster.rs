@@ -465,6 +465,58 @@ pub struct AiArtifactDaySummaryRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiRunRecord {
+    pub run_id: String,
+    pub run_kind: String,
+    pub run_status: String,
+    pub provider: String,
+    pub model: String,
+    pub reasoning_effort: Option<String>,
+    pub request_mode: String,
+    pub input_transport: String,
+    pub run_mode: String,
+    pub prompt_version: String,
+    pub output_schema_version: String,
+    pub privacy_profile: String,
+    pub snapshot_scope: String,
+    pub snapshot_hash_a: String,
+    pub snapshot_hash_b: Option<String>,
+    pub source_ai_artifact_id: Option<String>,
+    pub follow_up_kind: Option<String>,
+    pub request_fingerprint: Option<String>,
+    pub request_preview_json: String,
+    pub artifact_id: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiRunRegistryEntry {
+    pub run_id: String,
+    pub run_kind: String,
+    pub run_status: String,
+    pub provider: String,
+    pub model: String,
+    pub prompt_version: String,
+    pub output_schema_version: String,
+    pub run_mode: String,
+    pub privacy_profile: String,
+    pub snapshot_scope: String,
+    pub snapshot_hash_a: String,
+    pub snapshot_hash_b: Option<String>,
+    pub source_ai_artifact_id: Option<String>,
+    pub follow_up_kind: Option<String>,
+    pub artifact_id: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotCatalogEntry {
     pub snapshot_hash: String,
     pub schema_version: String,
@@ -549,6 +601,7 @@ pub struct AiEvalRunRecord {
     pub evidence_score: f64,
     pub honesty_score: f64,
     pub regression_summary: String,
+    pub details_json: String,
 }
 
 impl Display for SyncRunStatus {
@@ -2359,6 +2412,469 @@ impl<'connection> AnalysisStore<'connection> {
         Ok(records)
     }
 
+    pub fn upsert_ai_run(&self, record: &AiRunRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO ai_runs (
+                run_id,
+                run_kind,
+                run_status,
+                provider,
+                model,
+                reasoning_effort,
+                request_mode,
+                input_transport,
+                run_mode,
+                prompt_version,
+                output_schema_version,
+                privacy_profile,
+                snapshot_scope,
+                snapshot_hash_a,
+                snapshot_hash_b,
+                source_ai_artifact_id,
+                follow_up_kind,
+                request_fingerprint,
+                request_preview_json,
+                artifact_id,
+                error_message,
+                created_at,
+                started_at,
+                ended_at,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
+            ON CONFLICT(run_id) DO UPDATE SET
+                run_kind = excluded.run_kind,
+                run_status = excluded.run_status,
+                provider = excluded.provider,
+                model = excluded.model,
+                reasoning_effort = excluded.reasoning_effort,
+                request_mode = excluded.request_mode,
+                input_transport = excluded.input_transport,
+                run_mode = excluded.run_mode,
+                prompt_version = excluded.prompt_version,
+                output_schema_version = excluded.output_schema_version,
+                privacy_profile = excluded.privacy_profile,
+                snapshot_scope = excluded.snapshot_scope,
+                snapshot_hash_a = excluded.snapshot_hash_a,
+                snapshot_hash_b = excluded.snapshot_hash_b,
+                source_ai_artifact_id = excluded.source_ai_artifact_id,
+                follow_up_kind = excluded.follow_up_kind,
+                request_fingerprint = excluded.request_fingerprint,
+                request_preview_json = excluded.request_preview_json,
+                artifact_id = excluded.artifact_id,
+                error_message = excluded.error_message,
+                created_at = excluded.created_at,
+                started_at = excluded.started_at,
+                ended_at = excluded.ended_at,
+                updated_at = excluded.updated_at",
+            params![
+                record.run_id,
+                record.run_kind,
+                record.run_status,
+                record.provider,
+                record.model,
+                record.reasoning_effort,
+                record.request_mode,
+                record.input_transport,
+                record.run_mode,
+                record.prompt_version,
+                record.output_schema_version,
+                record.privacy_profile,
+                record.snapshot_scope,
+                record.snapshot_hash_a,
+                record.snapshot_hash_b,
+                record.source_ai_artifact_id,
+                record.follow_up_kind,
+                record.request_fingerprint,
+                record.request_preview_json,
+                record.artifact_id,
+                record.error_message,
+                record.created_at,
+                record.started_at,
+                record.ended_at,
+                record.updated_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn update_ai_run_if_active(&self, record: &AiRunRecord) -> Result<bool> {
+        let updated = self.connection.execute(
+            "UPDATE ai_runs
+             SET
+                run_kind = ?2,
+                run_status = ?3,
+                provider = ?4,
+                model = ?5,
+                reasoning_effort = ?6,
+                request_mode = ?7,
+                input_transport = ?8,
+                run_mode = ?9,
+                prompt_version = ?10,
+                output_schema_version = ?11,
+                privacy_profile = ?12,
+                snapshot_scope = ?13,
+                snapshot_hash_a = ?14,
+                snapshot_hash_b = ?15,
+                source_ai_artifact_id = ?16,
+                follow_up_kind = ?17,
+                request_fingerprint = ?18,
+                request_preview_json = ?19,
+                artifact_id = ?20,
+                error_message = ?21,
+                created_at = ?22,
+                started_at = ?23,
+                ended_at = ?24,
+                updated_at = ?25
+             WHERE run_id = ?1
+               AND run_status IN ('queued', 'running')",
+            params![
+                record.run_id,
+                record.run_kind,
+                record.run_status,
+                record.provider,
+                record.model,
+                record.reasoning_effort,
+                record.request_mode,
+                record.input_transport,
+                record.run_mode,
+                record.prompt_version,
+                record.output_schema_version,
+                record.privacy_profile,
+                record.snapshot_scope,
+                record.snapshot_hash_a,
+                record.snapshot_hash_b,
+                record.source_ai_artifact_id,
+                record.follow_up_kind,
+                record.request_fingerprint,
+                record.request_preview_json,
+                record.artifact_id,
+                record.error_message,
+                record.created_at,
+                record.started_at,
+                record.ended_at,
+                record.updated_at,
+            ],
+        )?;
+
+        Ok(updated > 0)
+    }
+
+    pub fn ai_run(&self, run_id: &str) -> Result<Option<AiRunRecord>> {
+        self.connection
+            .query_row(
+                "SELECT
+                    run_id,
+                    run_kind,
+                    run_status,
+                    provider,
+                    model,
+                    reasoning_effort,
+                    request_mode,
+                    input_transport,
+                    run_mode,
+                    prompt_version,
+                    output_schema_version,
+                    privacy_profile,
+                    snapshot_scope,
+                    snapshot_hash_a,
+                    snapshot_hash_b,
+                    source_ai_artifact_id,
+                    follow_up_kind,
+                    request_fingerprint,
+                    request_preview_json,
+                    artifact_id,
+                    error_message,
+                    created_at,
+                    started_at,
+                    ended_at,
+                    updated_at
+                 FROM ai_runs
+                 WHERE run_id = ?1",
+                params![run_id],
+                |row| {
+                    Ok(AiRunRecord {
+                        run_id: row.get(0)?,
+                        run_kind: row.get(1)?,
+                        run_status: row.get(2)?,
+                        provider: row.get(3)?,
+                        model: row.get(4)?,
+                        reasoning_effort: row.get(5)?,
+                        request_mode: row.get(6)?,
+                        input_transport: row.get(7)?,
+                        run_mode: row.get(8)?,
+                        prompt_version: row.get(9)?,
+                        output_schema_version: row.get(10)?,
+                        privacy_profile: row.get(11)?,
+                        snapshot_scope: row.get(12)?,
+                        snapshot_hash_a: row.get(13)?,
+                        snapshot_hash_b: row.get(14)?,
+                        source_ai_artifact_id: row.get(15)?,
+                        follow_up_kind: row.get(16)?,
+                        request_fingerprint: row.get(17)?,
+                        request_preview_json: row.get(18)?,
+                        artifact_id: row.get(19)?,
+                        error_message: row.get(20)?,
+                        created_at: row.get(21)?,
+                        started_at: row.get(22)?,
+                        ended_at: row.get(23)?,
+                        updated_at: row.get(24)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn ai_runs_with_prefix(&self, run_prefix: &str) -> Result<Vec<AiRunRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                run_id,
+                run_kind,
+                run_status,
+                provider,
+                model,
+                reasoning_effort,
+                request_mode,
+                input_transport,
+                run_mode,
+                prompt_version,
+                output_schema_version,
+                privacy_profile,
+                snapshot_scope,
+                snapshot_hash_a,
+                snapshot_hash_b,
+                source_ai_artifact_id,
+                follow_up_kind,
+                request_fingerprint,
+                request_preview_json,
+                artifact_id,
+                error_message,
+                created_at,
+                started_at,
+                ended_at,
+                updated_at
+             FROM ai_runs
+             WHERE run_id LIKE ?1
+             ORDER BY created_at DESC, run_id DESC",
+        )?;
+        let rows = statement.query_map(params![format!("{run_prefix}%")], |row| {
+            Ok(AiRunRecord {
+                run_id: row.get(0)?,
+                run_kind: row.get(1)?,
+                run_status: row.get(2)?,
+                provider: row.get(3)?,
+                model: row.get(4)?,
+                reasoning_effort: row.get(5)?,
+                request_mode: row.get(6)?,
+                input_transport: row.get(7)?,
+                run_mode: row.get(8)?,
+                prompt_version: row.get(9)?,
+                output_schema_version: row.get(10)?,
+                privacy_profile: row.get(11)?,
+                snapshot_scope: row.get(12)?,
+                snapshot_hash_a: row.get(13)?,
+                snapshot_hash_b: row.get(14)?,
+                source_ai_artifact_id: row.get(15)?,
+                follow_up_kind: row.get(16)?,
+                request_fingerprint: row.get(17)?,
+                request_preview_json: row.get(18)?,
+                artifact_id: row.get(19)?,
+                error_message: row.get(20)?,
+                created_at: row.get(21)?,
+                started_at: row.get(22)?,
+                ended_at: row.get(23)?,
+                updated_at: row.get(24)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
+    }
+
+    pub fn list_ai_runs(&self) -> Result<Vec<AiRunRegistryEntry>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                run_id,
+                run_kind,
+                run_status,
+                provider,
+                model,
+                prompt_version,
+                output_schema_version,
+                run_mode,
+                privacy_profile,
+                snapshot_scope,
+                snapshot_hash_a,
+                snapshot_hash_b,
+                source_ai_artifact_id,
+                follow_up_kind,
+                artifact_id,
+                error_message,
+                created_at,
+                started_at,
+                ended_at
+             FROM ai_runs
+             ORDER BY created_at DESC, run_id DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(AiRunRegistryEntry {
+                run_id: row.get(0)?,
+                run_kind: row.get(1)?,
+                run_status: row.get(2)?,
+                provider: row.get(3)?,
+                model: row.get(4)?,
+                prompt_version: row.get(5)?,
+                output_schema_version: row.get(6)?,
+                run_mode: row.get(7)?,
+                privacy_profile: row.get(8)?,
+                snapshot_scope: row.get(9)?,
+                snapshot_hash_a: row.get(10)?,
+                snapshot_hash_b: row.get(11)?,
+                source_ai_artifact_id: row.get(12)?,
+                follow_up_kind: row.get(13)?,
+                artifact_id: row.get(14)?,
+                error_message: row.get(15)?,
+                created_at: row.get(16)?,
+                started_at: row.get(17)?,
+                ended_at: row.get(18)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
+    }
+
+    pub fn list_ai_run_records(&self) -> Result<Vec<AiRunRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                run_id,
+                run_kind,
+                run_status,
+                provider,
+                model,
+                reasoning_effort,
+                request_mode,
+                input_transport,
+                run_mode,
+                prompt_version,
+                output_schema_version,
+                privacy_profile,
+                snapshot_scope,
+                snapshot_hash_a,
+                snapshot_hash_b,
+                source_ai_artifact_id,
+                follow_up_kind,
+                request_fingerprint,
+                request_preview_json,
+                artifact_id,
+                error_message,
+                created_at,
+                started_at,
+                ended_at,
+                updated_at
+             FROM ai_runs
+             ORDER BY created_at DESC, run_id DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(AiRunRecord {
+                run_id: row.get(0)?,
+                run_kind: row.get(1)?,
+                run_status: row.get(2)?,
+                provider: row.get(3)?,
+                model: row.get(4)?,
+                reasoning_effort: row.get(5)?,
+                request_mode: row.get(6)?,
+                input_transport: row.get(7)?,
+                run_mode: row.get(8)?,
+                prompt_version: row.get(9)?,
+                output_schema_version: row.get(10)?,
+                privacy_profile: row.get(11)?,
+                snapshot_scope: row.get(12)?,
+                snapshot_hash_a: row.get(13)?,
+                snapshot_hash_b: row.get(14)?,
+                source_ai_artifact_id: row.get(15)?,
+                follow_up_kind: row.get(16)?,
+                request_fingerprint: row.get(17)?,
+                request_preview_json: row.get(18)?,
+                artifact_id: row.get(19)?,
+                error_message: row.get(20)?,
+                created_at: row.get(21)?,
+                started_at: row.get(22)?,
+                ended_at: row.get(23)?,
+                updated_at: row.get(24)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
+    }
+
+    pub fn list_ai_runs_for_snapshot(
+        &self,
+        snapshot_hash: &str,
+    ) -> Result<Vec<AiRunRegistryEntry>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                run_id,
+                run_kind,
+                run_status,
+                provider,
+                model,
+                prompt_version,
+                output_schema_version,
+                run_mode,
+                privacy_profile,
+                snapshot_scope,
+                snapshot_hash_a,
+                snapshot_hash_b,
+                source_ai_artifact_id,
+                follow_up_kind,
+                artifact_id,
+                error_message,
+                created_at,
+                started_at,
+                ended_at
+             FROM ai_runs
+             WHERE snapshot_hash_a = ?1 OR snapshot_hash_b = ?1
+             ORDER BY created_at DESC, run_id DESC",
+        )?;
+        let rows = statement.query_map(params![snapshot_hash], |row| {
+            Ok(AiRunRegistryEntry {
+                run_id: row.get(0)?,
+                run_kind: row.get(1)?,
+                run_status: row.get(2)?,
+                provider: row.get(3)?,
+                model: row.get(4)?,
+                prompt_version: row.get(5)?,
+                output_schema_version: row.get(6)?,
+                run_mode: row.get(7)?,
+                privacy_profile: row.get(8)?,
+                snapshot_scope: row.get(9)?,
+                snapshot_hash_a: row.get(10)?,
+                snapshot_hash_b: row.get(11)?,
+                source_ai_artifact_id: row.get(12)?,
+                follow_up_kind: row.get(13)?,
+                artifact_id: row.get(14)?,
+                error_message: row.get(15)?,
+                created_at: row.get(16)?,
+                started_at: row.get(17)?,
+                ended_at: row.get(18)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
+    }
+
     pub fn list_ai_artifacts(&self) -> Result<Vec<AiRunListEntry>> {
         let mut statement = self.connection.prepare(
             "SELECT
@@ -2395,6 +2911,63 @@ impl<'connection> AnalysisStore<'connection> {
                 privacy_profile: row.get(11)?,
                 overview: row.get(12)?,
                 summary_cache: row.get(13)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
+    }
+
+    pub fn list_ai_artifact_records(&self) -> Result<Vec<AiArtifactRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                artifact_id,
+                artifact_kind,
+                artifact_status,
+                provider,
+                model,
+                reasoning_effort,
+                request_mode,
+                input_transport,
+                run_mode,
+                prompt_version,
+                output_schema_version,
+                created_at,
+                snapshot_hash_a,
+                snapshot_hash_b,
+                privacy_profile,
+                overview,
+                summary_cache,
+                request_fingerprint,
+                payload_json,
+                rendered_briefing
+             FROM ai_artifacts
+             ORDER BY created_at DESC, artifact_id DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(AiArtifactRecord {
+                artifact_id: row.get(0)?,
+                artifact_kind: row.get(1)?,
+                artifact_status: row.get(2)?,
+                provider: row.get(3)?,
+                model: row.get(4)?,
+                reasoning_effort: row.get(5)?,
+                request_mode: row.get(6)?,
+                input_transport: row.get(7)?,
+                run_mode: row.get(8)?,
+                prompt_version: row.get(9)?,
+                output_schema_version: row.get(10)?,
+                created_at: row.get(11)?,
+                snapshot_hash_a: row.get(12)?,
+                snapshot_hash_b: row.get(13)?,
+                privacy_profile: row.get(14)?,
+                overview: row.get(15)?,
+                summary_cache: row.get(16)?,
+                request_fingerprint: row.get(17)?,
+                payload_json: row.get(18)?,
+                rendered_briefing: row.get(19)?,
             })
         })?;
         let mut records = Vec::new();
@@ -2574,6 +3147,59 @@ impl<'connection> AnalysisStore<'connection> {
         Ok(records)
     }
 
+    pub fn list_report_exports(&self) -> Result<Vec<ReportExportRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                report_id,
+                report_kind,
+                title,
+                format,
+                output_path,
+                content_hash,
+                privacy_profile,
+                created_at,
+                source_snapshot_hash_a,
+                source_snapshot_hash_b,
+                source_ai_artifact_id,
+                provider,
+                model,
+                prompt_version,
+                output_schema_version,
+                export_status,
+                last_verified_exists,
+                last_verified_at
+             FROM report_exports
+             ORDER BY created_at DESC, report_id DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(ReportExportRecord {
+                report_id: row.get(0)?,
+                report_kind: row.get(1)?,
+                title: row.get(2)?,
+                format: row.get(3)?,
+                output_path: row.get(4)?,
+                content_hash: row.get(5)?,
+                privacy_profile: row.get(6)?,
+                created_at: row.get(7)?,
+                source_snapshot_hash_a: row.get(8)?,
+                source_snapshot_hash_b: row.get(9)?,
+                source_ai_artifact_id: row.get(10)?,
+                provider: row.get(11)?,
+                model: row.get(12)?,
+                prompt_version: row.get(13)?,
+                output_schema_version: row.get(14)?,
+                export_status: row.get(15)?,
+                last_verified_exists: row.get::<_, i64>(16)? != 0,
+                last_verified_at: row.get(17)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
+    }
+
     pub fn report_exports_for_ai_artifact(
         &self,
         artifact_id: &str,
@@ -2654,8 +3280,9 @@ impl<'connection> AnalysisStore<'connection> {
                 privacy_score,
                 evidence_score,
                 honesty_score,
-                regression_summary
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+                regression_summary,
+                details_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
             ON CONFLICT(eval_run_id) DO UPDATE SET
                 task_family = excluded.task_family,
                 fixture_dir = excluded.fixture_dir,
@@ -2676,7 +3303,8 @@ impl<'connection> AnalysisStore<'connection> {
                 privacy_score = excluded.privacy_score,
                 evidence_score = excluded.evidence_score,
                 honesty_score = excluded.honesty_score,
-                regression_summary = excluded.regression_summary",
+                regression_summary = excluded.regression_summary,
+                details_json = excluded.details_json",
             params![
                 record.eval_run_id,
                 record.task_family,
@@ -2699,9 +3327,71 @@ impl<'connection> AnalysisStore<'connection> {
                 record.evidence_score,
                 record.honesty_score,
                 record.regression_summary,
+                record.details_json,
             ],
         )?;
         Ok(())
+    }
+
+    pub fn list_ai_eval_runs(&self) -> Result<Vec<AiEvalRunRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                eval_run_id,
+                task_family,
+                fixture_dir,
+                candidate_label,
+                baseline_label,
+                provider,
+                model,
+                prompt_version,
+                output_schema_version,
+                created_at,
+                total_cases,
+                passed_cases,
+                failed_cases,
+                schema_validity_score,
+                completeness_score,
+                overclaiming_score,
+                medical_safety_score,
+                privacy_score,
+                evidence_score,
+                honesty_score,
+                regression_summary,
+                details_json
+             FROM ai_eval_runs
+             ORDER BY created_at DESC, eval_run_id DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(AiEvalRunRecord {
+                eval_run_id: row.get(0)?,
+                task_family: row.get(1)?,
+                fixture_dir: row.get(2)?,
+                candidate_label: row.get(3)?,
+                baseline_label: row.get(4)?,
+                provider: row.get(5)?,
+                model: row.get(6)?,
+                prompt_version: row.get(7)?,
+                output_schema_version: row.get(8)?,
+                created_at: row.get(9)?,
+                total_cases: row.get(10)?,
+                passed_cases: row.get(11)?,
+                failed_cases: row.get(12)?,
+                schema_validity_score: row.get(13)?,
+                completeness_score: row.get(14)?,
+                overclaiming_score: row.get(15)?,
+                medical_safety_score: row.get(16)?,
+                privacy_score: row.get(17)?,
+                evidence_score: row.get(18)?,
+                honesty_score: row.get(19)?,
+                regression_summary: row.get(20)?,
+                details_json: row.get(21)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
     }
 }
 
@@ -3945,9 +4635,9 @@ mod tests {
     use crate::review::features::ReviewSufficiency;
     use crate::store::Store;
     use crate::store::queries::{
-        AiArtifactDaySummaryRecord, AiArtifactRecord, ContextEventFamily, ContextEventRecord,
-        DailyActivityRecord, DailyReadinessRecord, DailySleepRecord, HeartrateSampleRecord,
-        RestModePeriodRecord, ReviewSignalDayRecord, SnapshotExportRecord,
+        AiArtifactDaySummaryRecord, AiArtifactRecord, AiRunRecord, ContextEventFamily,
+        ContextEventRecord, DailyActivityRecord, DailyReadinessRecord, DailySleepRecord,
+        HeartrateSampleRecord, RestModePeriodRecord, ReviewSignalDayRecord, SnapshotExportRecord,
         SnapshotProvenanceRefRecord, SyncRunStatus, SyncStateRecord, TimeSemantics, Vo2MaxRecord,
     };
 
@@ -4050,6 +4740,42 @@ mod tests {
             request_fingerprint: Some(format!("fingerprint-{artifact_id}")),
             payload_json: format!("{{\"artifact_id\":\"{artifact_id}\"}}"),
             rendered_briefing: format!("{artifact_kind} rendered briefing"),
+        }
+    }
+
+    fn make_ai_run(
+        run_id: &str,
+        run_kind: &str,
+        run_status: &str,
+        snapshot_hash_a: &str,
+        snapshot_hash_b: Option<&str>,
+    ) -> AiRunRecord {
+        AiRunRecord {
+            run_id: run_id.to_owned(),
+            run_kind: run_kind.to_owned(),
+            run_status: run_status.to_owned(),
+            provider: "openai".to_owned(),
+            model: "gpt-5.1".to_owned(),
+            reasoning_effort: Some("medium".to_owned()),
+            request_mode: "stateless".to_owned(),
+            input_transport: "inline".to_owned(),
+            run_mode: "real".to_owned(),
+            prompt_version: format!("{run_kind}_prompt_v1"),
+            output_schema_version: format!("ringmaster.ai.{run_kind}.v1"),
+            privacy_profile: "redacted".to_owned(),
+            snapshot_scope: "today".to_owned(),
+            snapshot_hash_a: snapshot_hash_a.to_owned(),
+            snapshot_hash_b: snapshot_hash_b.map(str::to_owned),
+            source_ai_artifact_id: None,
+            follow_up_kind: None,
+            request_fingerprint: Some(format!("fingerprint-{run_id}")),
+            request_preview_json: "{\"task_family\":\"review\"}".to_owned(),
+            artifact_id: None,
+            error_message: None,
+            created_at: "2026-04-10T00:01:00Z".to_owned(),
+            started_at: Some("2026-04-10T00:01:01Z".to_owned()),
+            ended_at: Some("2026-04-10T00:01:02Z".to_owned()),
+            updated_at: "2026-04-10T00:01:02Z".to_owned(),
         }
     }
 
@@ -4519,6 +5245,129 @@ mod tests {
     }
 
     #[test]
+    fn analysis_store_round_trips_ai_runs() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        store
+            .analysis()
+            .upsert_snapshot_export(&make_snapshot_export("hash-123", "2026-04-10"), &[])
+            .unwrap_or_else(|error| panic!("snapshot export should persist: {error}"));
+        let run = make_ai_run("run-123", "review", "queued", "hash-123", None);
+
+        store
+            .analysis()
+            .upsert_ai_run(&run)
+            .unwrap_or_else(|error| panic!("ai run should persist: {error}"));
+
+        let loaded = store
+            .analysis()
+            .ai_run("run-123")
+            .unwrap_or_else(|error| panic!("ai run should load: {error}"))
+            .unwrap_or_else(|| panic!("ai run should exist"));
+
+        assert_eq!(loaded.run_status, "queued");
+        assert_eq!(loaded.provider, "openai");
+        assert_eq!(loaded.snapshot_hash_a, "hash-123");
+    }
+
+    #[test]
+    fn analysis_store_updates_ai_runs_only_while_active() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        store
+            .analysis()
+            .upsert_snapshot_export(&make_snapshot_export("hash-123", "2026-04-10"), &[])
+            .unwrap_or_else(|error| panic!("snapshot export should persist: {error}"));
+
+        let queued = make_ai_run("run-conditional", "review", "queued", "hash-123", None);
+        store
+            .analysis()
+            .upsert_ai_run(&queued)
+            .unwrap_or_else(|error| panic!("queued run should persist: {error}"));
+
+        let mut cancelled = queued;
+        cancelled.run_status = "cancelled".to_owned();
+        cancelled.error_message = Some("Cancelled from test.".to_owned());
+        cancelled.ended_at = Some("2026-04-10T00:02:00Z".to_owned());
+        cancelled.updated_at = "2026-04-10T00:02:00Z".to_owned();
+
+        let updated = store
+            .analysis()
+            .update_ai_run_if_active(&cancelled)
+            .unwrap_or_else(|error| panic!("active run transition should succeed: {error}"));
+        assert!(updated);
+
+        let persisted = store
+            .analysis()
+            .ai_run("run-conditional")
+            .unwrap_or_else(|error| panic!("ai run should load: {error}"))
+            .unwrap_or_else(|| panic!("ai run should exist"));
+        assert_eq!(persisted.run_status, "cancelled");
+
+        let mut succeeded = persisted;
+        succeeded.run_status = "succeeded".to_owned();
+        succeeded.error_message = None;
+        succeeded.updated_at = "2026-04-10T00:03:00Z".to_owned();
+        store
+            .analysis()
+            .upsert_ai_run(&succeeded)
+            .unwrap_or_else(|error| panic!("succeeded run should persist: {error}"));
+
+        let mut interrupted = succeeded;
+        interrupted.run_status = "interrupted".to_owned();
+        interrupted.error_message = Some("Interrupted after completion.".to_owned());
+        interrupted.updated_at = "2026-04-10T00:04:00Z".to_owned();
+
+        let updated = store
+            .analysis()
+            .update_ai_run_if_active(&interrupted)
+            .unwrap_or_else(|error| panic!("inactive run transition should not error: {error}"));
+        assert!(!updated);
+
+        let persisted = store
+            .analysis()
+            .ai_run("run-conditional")
+            .unwrap_or_else(|error| panic!("ai run should reload: {error}"))
+            .unwrap_or_else(|| panic!("ai run should still exist"));
+        assert_eq!(persisted.run_status, "succeeded");
+        assert!(persisted.error_message.is_none());
+    }
+
+    #[test]
+    fn list_ai_runs_for_snapshot_includes_compare_runs_on_either_side() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        store
+            .analysis()
+            .upsert_snapshot_export(&make_snapshot_export("hash-left", "2026-04-09"), &[])
+            .unwrap_or_else(|error| panic!("left snapshot should persist: {error}"));
+        store
+            .analysis()
+            .upsert_snapshot_export(&make_snapshot_export("hash-right", "2026-04-10"), &[])
+            .unwrap_or_else(|error| panic!("right snapshot should persist: {error}"));
+
+        store
+            .analysis()
+            .upsert_ai_run(&make_ai_run(
+                "run-compare",
+                "compare",
+                "running",
+                "hash-left",
+                Some("hash-right"),
+            ))
+            .unwrap_or_else(|error| panic!("compare run should persist: {error}"));
+
+        let right_runs = store
+            .analysis()
+            .list_ai_runs_for_snapshot("hash-right")
+            .unwrap_or_else(|error| panic!("ai runs should load: {error}"));
+
+        assert_eq!(right_runs.len(), 1);
+        assert_eq!(right_runs[0].run_id, "run-compare");
+        assert_eq!(right_runs[0].snapshot_hash_b.as_deref(), Some("hash-right"));
+    }
+
+    #[test]
     fn latest_ai_artifact_for_anchor_day_returns_none_when_day_has_no_snapshot_artifact() {
         let store =
             Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
@@ -4743,6 +5592,7 @@ mod tests {
             evidence_score: 1.0,
             honesty_score: 1.0,
             regression_summary: "Improvements: compare:evidence; regressions: none.".to_owned(),
+            details_json: r#"{"fixture_dir":"tests/fixtures/ai","fixture_schema_version":"ringmaster.ai.eval.fixtures.v1","candidate_label":"candidate","baseline_label":"baseline","total_cases":2,"passed_cases":2,"failed_cases":0,"scores":{"schema_validity":1.0,"completeness":1.0,"overclaiming":1.0,"medical_safety":1.0,"privacy":1.0,"evidence":1.0,"honesty":1.0},"regression_summary":"Improvements: compare:evidence; regressions: none.","improvements":["compare:evidence"],"regressions":[],"cases":[]}"#.to_owned(),
         };
         store
             .analysis()

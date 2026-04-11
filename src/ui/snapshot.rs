@@ -181,6 +181,8 @@ mod tests {
                 authorize_url: "https://example.invalid/auth".to_owned(),
                 token_url: "https://example.invalid/token".to_owned(),
                 api_base_url: "https://example.invalid/api".to_owned(),
+                secret_backend: crate::config::OuraSecretBackend::Keyring,
+                secret_file: PathBuf::from("/tmp/state/ringmaster/secrets/oura-tokens.json"),
                 callback_bind: "127.0.0.1:8788"
                     .parse()
                     .unwrap_or_else(|error| panic!("socket address should parse: {error}")),
@@ -190,7 +192,7 @@ mod tests {
                     "daily".to_owned(),
                     "heartrate".to_owned(),
                     "workout".to_owned(),
-                    "enhanced_tag".to_owned(),
+                    "tag".to_owned(),
                     "session".to_owned(),
                 ],
                 auth_timeout_secs: 120,

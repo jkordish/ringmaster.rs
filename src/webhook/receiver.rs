@@ -11,7 +11,7 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -971,7 +971,7 @@ mod tests {
     use crate::webhook::default_desired_subscriptions;
     use crate::webhook::receiver::{WebhookReplayOptions, delivery_fingerprint};
     use axum::http::StatusCode;
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use rusqlite::Connection;
     use serde_json::json;
     use sha2::Sha256;
@@ -1002,6 +1002,10 @@ mod tests {
         let root = tempdir.path();
         let config_root = root.join("config");
         let state_root = root.join("state");
+        let secret_file = state_root
+            .join("ringmaster")
+            .join("secrets")
+            .join("oura-tokens.json");
         let cache_root = root.join("cache");
         let paths = AppPaths::from_roots(root.to_path_buf(), config_root, state_root, cache_root)
             .unwrap_or_else(|error| panic!("paths should resolve: {error}"));
@@ -1020,6 +1024,8 @@ mod tests {
                     authorize_url: "https://example.invalid/auth".to_owned(),
                     token_url: "https://example.invalid/token".to_owned(),
                     api_base_url: "https://example.invalid/api".to_owned(),
+                    secret_backend: crate::config::OuraSecretBackend::Keyring,
+                    secret_file,
                     callback_bind: "127.0.0.1:8788"
                         .parse()
                         .unwrap_or_else(|error| panic!("callback bind should parse: {error}")),

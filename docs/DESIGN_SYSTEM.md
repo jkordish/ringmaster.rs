@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document defines the visual system used by the phase-6 terminal redesign. It is the source of truth for how the app communicates hierarchy, state, and rhythm.
+This document defines the visual system used by the current terminal redesign. It is the source of truth for how the app communicates hierarchy, state, rhythm, trust, and guided AI behavior.
 
 ## Design goals
 
@@ -30,6 +30,12 @@ The palette is semantic rather than screen-specific. Code should reference roles
 - `danger`: errors, rejected operations, hard failures
 - `info`: neutral-but-important operator or context information
 - `focus`: keyboard focus/selection emphasis, paired with glyph and wording
+
+AI-specific interpretation:
+
+- `accent` and `focus` call out the active AI workbench slice or selected saved artifact
+- `warning` communicates privacy or provider concerns before launch
+- `info` communicates trust metadata such as stateless mode, disabled tools, and payload scope
 
 ## Text hierarchy
 
@@ -75,6 +81,8 @@ Badges combine text, state prefix, and style.
 - selected/focused badges use a focus marker plus accent styling
 - warnings/errors always include explicit text, not color-only signaling
 - review confidence and sufficiency labels remain compact and repeatable
+- AI lifecycle badges must combine text and semantics, never color alone
+- preflight trust chips should surface privacy and request posture before confirmation
 
 ## Chart grammar
 
@@ -99,6 +107,12 @@ Every state should be legible in monochrome and in low-color terminals.
 - `error`: concise hard-failure block with danger tone
 - `selected`: focus marker, ordering emphasis, and accent/focus tone
 - `disabled`: muted text plus explicit unavailable wording
+- `queued`: explicit queued wording plus info/focus tone
+- `running`: active wording plus focus tone
+- `succeeded`: explicit success wording plus positive tone
+- `failed`: explicit failure wording plus danger tone
+- `cancelled`: explicit cancelled wording plus warning tone
+- `interrupted`: explicit interrupted wording plus warning tone and recovery context
 
 ## Screen roles
 
@@ -108,7 +122,30 @@ Every state should be legible in monochrome and in low-color terminals.
 - `Explain`: narrow evidence view with claim, support, and uncertainty
 - `Patterns`: grouped cross-day association browser
 - `Review`: ranked editorial digest and bounded investigation surface
+- `AI`: workbench for launch, preflight, saved-run inspection, artifact browsing, and guided follow-up actions
 - `Status`: utilitarian diagnostic console with disciplined hierarchy
+
+AI workbench composition rules:
+
+- the top region should explain the product boundary, not mimic chat chrome
+- launch points belong in a compact, clearly guided list
+- browser tabs should keep snapshots, runs, and reports visually related
+- detail panes should foreground provenance and actionability over raw JSON
+- preflight overlays must read as trust and confirmation surfaces, not as generic modal clutter
+
+## Trust surfaces
+
+AI-related trust state must be obvious without opening external docs.
+
+Required cues:
+
+- snapshot-first wording near the AI workbench header
+- explicit stateless and tools-disabled wording in preflight and detail views
+- visible privacy profile on preflight, saved runs, and report details
+- artifact path or source linkage when local files are involved
+- warnings rendered with words and layout, not just hue
+
+The visual system should make AI feel inspectable and bounded rather than magical.
 
 ## Terminal size adaptation
 
@@ -124,6 +161,12 @@ Rules:
 - medium keeps the main structure but limits tertiary columns
 - wide uses sidecars, comparison rails, and larger temporal layouts without adding decorative filler
 
+AI-specific adaptation:
+
+- compact keeps launch points, browser list, trust panel, and detail in a vertical-first composition
+- wide adds a clearer left rail for launch and browsing, plus a right-side trust and detail inspector
+- preflight overlays should stay legible at compact widths and avoid hiding the fact that confirmation is required
+
 ## Snapshot QA
 
 `ringmaster ui snapshot` is the canonical visual QA path.
@@ -134,6 +177,14 @@ It should:
 - support multiple screens and multiple terminal sizes
 - write stable text artifacts to an output directory
 - be usable for human review and regression tests
+
+Phase-9 AI QA extends this to cover:
+
+- provider-disabled AI workbench state
+- preflight confirmation state
+- running and saved-run inspection states
+- browser detail for snapshots, runs, and reports
+- failure and cancellation rendering
 
 ## Intentionally deferred
 

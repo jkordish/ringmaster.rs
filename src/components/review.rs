@@ -47,7 +47,13 @@ fn draw_wide(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, theme: &The
         .split(body[1]);
 
     draw_cards(frame, body[0], model, theme);
-    draw_ai_artifact(frame, detail[0], &model.ai_artifact, theme);
+    draw_ai_artifact(
+        frame,
+        detail[0],
+        &model.ai_artifact,
+        &model.ai_actions,
+        theme,
+    );
     draw_details(frame, detail[1], model, theme);
     draw_warnings(frame, layout[4], model, theme);
 }
@@ -82,7 +88,13 @@ fn draw_compact(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, theme: &
         .split(body[1]);
     draw_cards(frame, body[0], model, theme);
     draw_details(frame, detail[0], model, theme);
-    draw_ai_artifact(frame, detail[1], &model.ai_artifact, theme);
+    draw_ai_artifact(
+        frame,
+        detail[1],
+        &model.ai_artifact,
+        &model.ai_actions,
+        theme,
+    );
     draw_warnings(frame, layout[3], model, theme);
 }
 
@@ -226,6 +238,7 @@ fn draw_ai_artifact(
     frame: &mut Frame<'_>,
     area: Rect,
     artifact: &AiArtifactSummaryView,
+    ai_actions: &[String],
     theme: &Theme,
 ) {
     let badge_tone = if artifact.status_label == "available" {
@@ -245,6 +258,11 @@ fn draw_ai_artifact(
     if !artifact.lineage_lines.is_empty() {
         lines.push(String::new());
         lines.extend(artifact.lineage_lines.iter().cloned());
+    }
+
+    if !ai_actions.is_empty() {
+        lines.push(String::new());
+        lines.extend(ai_actions.iter().cloned());
     }
 
     frame.render_widget(

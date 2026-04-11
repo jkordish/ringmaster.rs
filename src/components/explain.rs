@@ -111,6 +111,19 @@ pub fn draw(
         middle[1],
     );
 
+    let footer = Layout::default()
+        .direction(if ui.viewport.is_compact() {
+            Direction::Horizontal
+        } else {
+            Direction::Vertical
+        })
+        .constraints(if ui.viewport.is_compact() {
+            vec![Constraint::Percentage(60), Constraint::Percentage(40)]
+        } else {
+            vec![Constraint::Percentage(58), Constraint::Percentage(42)]
+        })
+        .split(layout[3]);
+
     frame.render_widget(
         List::new(
             model
@@ -123,6 +136,15 @@ pub fn draw(
             chrome::title_with_badge(theme, "Uncertainty", "read before acting", Tone::Warning),
             PanelKind::Section,
         )),
-        layout[3],
+        footer[0],
+    );
+
+    frame.render_widget(
+        List::new(model.ai_actions.iter().cloned().map(ListItem::new)).block(chrome::panel(
+            theme,
+            chrome::title_with_badge(theme, "AI launch", "guided only", Tone::Info),
+            PanelKind::Subtle,
+        )),
+        footer[1],
     );
 }

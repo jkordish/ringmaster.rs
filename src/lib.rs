@@ -85,7 +85,7 @@ struct TempRootGuard {
 const FIXTURE_SNAPSHOT_WEBHOOK_BIND_ADDRESS: &str = "127.0.0.1:8799";
 const FIXTURE_SNAPSHOT_WEBHOOK_PATH: &str = "/webhooks/oura";
 const FIXTURE_SNAPSHOT_WEBHOOK_CALLBACK_URL: &str = "https://fixture.example.test/webhooks/oura";
-const FIXTURE_SNAPSHOT_AUTH_CALLBACK_URL: &str = "http://127.0.0.1:8788/callback";
+const FIXTURE_SNAPSHOT_AUTH_CALLBACK_URL: &str = "http://localhost:8788/callback";
 const FIXTURE_SNAPSHOT_AUTH_TIMEOUT_SECS: u64 = 120;
 const FIXTURE_SNAPSHOT_SECRET_BACKEND: &str = "fixture-memory";
 const FIXTURE_SNAPSHOT_ACCESS_TOKEN_EXPIRES_AT: &str = "2026-04-09T12:45:00Z";
@@ -361,6 +361,20 @@ webhook_receiver_heartbeat: {}
 webhook_watch_heartbeat: {}
 webhook_runtime_mode: {}
 webhook_missing_public_prereq: {}
+ai_provider_enabled: {}
+ai_provider: {}
+ai_api_key_env: {}
+ai_api_key_ready: {}
+ai_default_model: {}
+ai_request_mode: {}
+ai_input_transport: {}
+ai_prompt_cache: {}
+ai_stateless_default: {}
+ai_tools_disabled_by_default: {}
+ai_prompt_versions: review={} compare={}
+ai_last_successful_run: {}
+ai_last_failed_run: {}
+ai_artifact_registry: snapshots={} runs={} artifacts={} reports={} evals={}
 webhook_desired_subscriptions: {}
 webhook_remote_subscriptions: {}
 webhook_remote_healthy: {}
@@ -457,6 +471,33 @@ record_counts:
         doctor_heartbeat_status(&snapshot, "sync.watch"),
         doctor_runtime_mode(&snapshot),
         snapshot.webhook.callback_url.is_none(),
+        snapshot.ai_ops.enabled,
+        snapshot.ai_ops.provider,
+        snapshot.ai_ops.api_key_env,
+        snapshot.ai_ops.api_key_ready,
+        snapshot.ai_ops.default_model,
+        snapshot.ai_ops.request_mode,
+        snapshot.ai_ops.input_transport,
+        snapshot.ai_ops.prompt_cache,
+        snapshot.ai_ops.stateless_default,
+        snapshot.ai_ops.tools_disabled,
+        snapshot.ai_ops.review_prompt_version,
+        snapshot.ai_ops.compare_prompt_version,
+        snapshot
+            .ai_ops
+            .last_successful_run
+            .clone()
+            .unwrap_or_else(|| "none".to_owned()),
+        snapshot
+            .ai_ops
+            .last_failed_run
+            .clone()
+            .unwrap_or_else(|| "none".to_owned()),
+        snapshot.ai_ops.snapshot_catalog_count,
+        snapshot.ai_ops.ai_run_count,
+        snapshot.ai_ops.ai_artifact_count,
+        snapshot.ai_ops.report_export_count,
+        snapshot.ai_ops.ai_eval_run_count,
         webhook_desired_enabled,
         snapshot.webhook.remote_subscriptions.len(),
         webhook_remote_healthy,
@@ -718,6 +759,7 @@ fn snapshot_screens(args: &UiSnapshotArgs) -> Vec<app::Screen> {
                 SnapshotScreenArg::Explain => app::Screen::Explain,
                 SnapshotScreenArg::Patterns => app::Screen::Patterns,
                 SnapshotScreenArg::Review => app::Screen::Review,
+                SnapshotScreenArg::Ai => app::Screen::Ai,
                 SnapshotScreenArg::Status => app::Screen::Ops,
             })
             .collect()
@@ -1024,6 +1066,22 @@ fn fixture_snapshot_granted_scopes(fixture_dir: &std::path::Path) -> Vec<String>
     if daily_files.iter().any(|path| path.is_file()) {
         scopes.push("daily".to_owned());
     }
+    let stress_files = [
+        fixture_dir.join("sleep_time.json"),
+        fixture_dir.join("rest_mode_periods.json"),
+        fixture_dir.join("daily_stress.json"),
+    ];
+    if stress_files.iter().any(|path| path.is_file()) {
+        scopes.push("stress".to_owned());
+    }
+    let heart_health_files = [
+        fixture_dir.join("daily_resilience.json"),
+        fixture_dir.join("daily_cardiovascular_age.json"),
+        fixture_dir.join("vo2_max.json"),
+    ];
+    if heart_health_files.iter().any(|path| path.is_file()) {
+        scopes.push("heart_health".to_owned());
+    }
     if fixture_dir.join("heartrate.json").is_file() {
         scopes.push("heartrate".to_owned());
     }
@@ -1031,7 +1089,7 @@ fn fixture_snapshot_granted_scopes(fixture_dir: &std::path::Path) -> Vec<String>
         scopes.push("workout".to_owned());
     }
     if fixture_dir.join("enhanced_tags.json").is_file() {
-        scopes.push("enhanced_tag".to_owned());
+        scopes.push("tag".to_owned());
     }
     if fixture_dir.join("sessions.json").is_file() {
         scopes.push("session".to_owned());
@@ -1306,10 +1364,8 @@ fn apply_scenario_fixture_snapshot_overlay(
                     }
                     "oura.enhanced_tags" => {
                         state.status = crate::store::queries::SyncRunStatus::Blocked;
-                        state.message = Some(
-                            "Missing `enhanced_tag` scope; tag context stays unavailable."
-                                .to_owned(),
-                        );
+                        state.message =
+                            Some("Missing `tag` scope; tag context stays unavailable.".to_owned());
                         state.last_error = None;
                     }
                     "oura.sessions" => {
@@ -2115,6 +2171,17 @@ async fn run_ai_review(config: &Config, args: AiReviewArgs) -> Result<Option<Str
         args.fixture.as_deref().and_then(|path| path.parent()),
     )?;
     store.analysis().upsert_ai_artifact(&output.record)?;
+    store.analysis().upsert_ai_run(&completed_ai_run_record(
+        "review",
+        &snapshot_artifact.bundle.metadata.scope,
+        &snapshot_artifact.bundle.metadata.snapshot_hash,
+        None,
+        &output.request_preview,
+        &output.request_fingerprint,
+        &output.record,
+        None,
+        None,
+    )?)?;
     let artifact_output = if let Some(out_path) = args.out {
         write_text_file(
             &out_path,
@@ -2131,7 +2198,11 @@ async fn run_ai_review(config: &Config, args: AiReviewArgs) -> Result<Option<Str
         format!("{}\n\n{}", output.rendered_briefing, output.payload_json)
     };
     let rendered = if show_request_preview {
-        format!("{}\n{}", output.request_preview.trim_end(), artifact_output)
+        format!(
+            "{}\n{}",
+            ai::render_request_preview(&output.request_preview).trim_end(),
+            artifact_output
+        )
     } else {
         artifact_output
     };
@@ -2163,6 +2234,17 @@ async fn run_ai_compare(config: &Config, args: AiCompareArgs) -> Result<Option<S
         args.fixture.as_deref().and_then(|path| path.parent()),
     )?;
     store.analysis().upsert_ai_artifact(&output.record)?;
+    store.analysis().upsert_ai_run(&completed_ai_run_record(
+        "compare",
+        &snapshot_b.bundle.metadata.scope,
+        &snapshot_a.bundle.metadata.snapshot_hash,
+        Some(&snapshot_b.bundle.metadata.snapshot_hash),
+        &output.request_preview,
+        &output.request_fingerprint,
+        &output.record,
+        None,
+        None,
+    )?)?;
     let artifact_output = if let Some(out_path) = args.out {
         write_text_file(
             &out_path,
@@ -2179,12 +2261,57 @@ async fn run_ai_compare(config: &Config, args: AiCompareArgs) -> Result<Option<S
         format!("{}\n\n{}", output.rendered_briefing, output.payload_json)
     };
     let rendered = if show_request_preview {
-        format!("{}\n{}", output.request_preview.trim_end(), artifact_output)
+        format!(
+            "{}\n{}",
+            ai::render_request_preview(&output.request_preview).trim_end(),
+            artifact_output
+        )
     } else {
         artifact_output
     };
 
     Ok(Some(rendered))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn completed_ai_run_record(
+    run_kind: &str,
+    snapshot_scope: &str,
+    snapshot_hash_a: &str,
+    snapshot_hash_b: Option<&str>,
+    request_preview: &ai::AiRequestPreview,
+    request_fingerprint: &str,
+    artifact_record: &store::queries::AiArtifactRecord,
+    source_ai_artifact_id: Option<&str>,
+    follow_up_kind: Option<&str>,
+) -> Result<store::queries::AiRunRecord> {
+    Ok(store::queries::AiRunRecord {
+        run_id: format!("run-{}", artifact_record.artifact_id),
+        run_kind: run_kind.to_owned(),
+        run_status: ai::AiRunStatus::Succeeded.as_str().to_owned(),
+        provider: artifact_record.provider.clone(),
+        model: artifact_record.model.clone(),
+        reasoning_effort: artifact_record.reasoning_effort.clone(),
+        request_mode: artifact_record.request_mode.clone(),
+        input_transport: artifact_record.input_transport.clone(),
+        run_mode: artifact_record.run_mode.clone(),
+        prompt_version: artifact_record.prompt_version.clone(),
+        output_schema_version: artifact_record.output_schema_version.clone(),
+        privacy_profile: artifact_record.privacy_profile.clone(),
+        snapshot_scope: snapshot_scope.to_owned(),
+        snapshot_hash_a: snapshot_hash_a.to_owned(),
+        snapshot_hash_b: snapshot_hash_b.map(ToOwned::to_owned),
+        source_ai_artifact_id: source_ai_artifact_id.map(ToOwned::to_owned),
+        follow_up_kind: follow_up_kind.map(ToOwned::to_owned),
+        request_fingerprint: Some(request_fingerprint.to_owned()),
+        request_preview_json: serde_json::to_string(request_preview)?,
+        artifact_id: Some(artifact_record.artifact_id.clone()),
+        error_message: None,
+        created_at: artifact_record.created_at.clone(),
+        started_at: Some(artifact_record.created_at.clone()),
+        ended_at: Some(artifact_record.created_at.clone()),
+        updated_at: artifact_record.created_at.clone(),
+    })
 }
 
 async fn run_ai_runs_list(config: &Config, args: AiRunsListArgs) -> Result<Option<String>> {
@@ -2552,6 +2679,18 @@ pub(crate) async fn seed_demo_library_artifacts(
         .await?;
         DEMO_REVIEW_RUN_ID.clone_into(&mut review.record.artifact_id);
         store.analysis().upsert_ai_artifact(&review.record)?;
+        let review_run = completed_ai_run_record(
+            "review",
+            &today_artifact.bundle.metadata.scope,
+            &today_artifact.bundle.metadata.snapshot_hash,
+            None,
+            &review.request_preview,
+            &review.request_fingerprint,
+            &review.record,
+            None,
+            None,
+        )?;
+        store.analysis().upsert_ai_run(&review_run)?;
         let mut compare = ai::compare_snapshots_with_run_identity(
             config,
             &today_artifact,
@@ -2563,6 +2702,18 @@ pub(crate) async fn seed_demo_library_artifacts(
         .await?;
         DEMO_COMPARE_RUN_ID.clone_into(&mut compare.record.artifact_id);
         store.analysis().upsert_ai_artifact(&compare.record)?;
+        let compare_run = completed_ai_run_record(
+            "compare",
+            &week_artifact.bundle.metadata.scope,
+            &today_artifact.bundle.metadata.snapshot_hash,
+            Some(&week_artifact.bundle.metadata.snapshot_hash),
+            &compare.request_preview,
+            &compare.request_fingerprint,
+            &compare.record,
+            None,
+            None,
+        )?;
+        store.analysis().upsert_ai_run(&compare_run)?;
     }
 
     Ok(())
@@ -3180,6 +3331,10 @@ mod tests {
         let root = tempdir.path();
         let config_root = root.join("config");
         let state_root = root.join("state");
+        let secret_file = state_root
+            .join("ringmaster")
+            .join("secrets")
+            .join("oura-tokens.json");
         let cache_root = root.join("cache");
         let paths = AppPaths::from_roots(root.to_path_buf(), config_root, state_root, cache_root)
             .unwrap_or_else(|error| panic!("paths should resolve: {error}"));
@@ -3198,6 +3353,8 @@ mod tests {
                     authorize_url: "https://example.invalid/auth".to_owned(),
                     token_url: "https://example.invalid/token".to_owned(),
                     api_base_url: "https://example.invalid/api".to_owned(),
+                    secret_backend: crate::config::OuraSecretBackend::Keyring,
+                    secret_file,
                     callback_bind: "127.0.0.1:8788".parse().unwrap_or_else(|error| {
                         panic!("socket address should parse in doctor test: {error}")
                     }),
@@ -3207,7 +3364,7 @@ mod tests {
                         "daily".to_owned(),
                         "heartrate".to_owned(),
                         "workout".to_owned(),
-                        "enhanced_tag".to_owned(),
+                        "tag".to_owned(),
                         "session".to_owned(),
                     ],
                     auth_timeout_secs: 120,
@@ -4471,7 +4628,7 @@ mod tests {
             "daily".to_owned(),
             "heartrate".to_owned(),
             "workout".to_owned(),
-            "enhanced_tag".to_owned(),
+            "tag".to_owned(),
             "session".to_owned(),
         ];
         second_config.refresh.daily_interval_secs = 1;
@@ -4510,9 +4667,10 @@ mod tests {
         assert!(first_snapshot.contains(super::FIXTURE_SNAPSHOT_WEBHOOK_CALLBACK_URL));
         assert!(first_snapshot.contains(super::FIXTURE_SNAPSHOT_BASE_SYNC_COMPLETED_AT));
         assert!(first_snapshot.contains("Auth state: authenticated"));
-        assert!(first_snapshot.contains(
-            "Granted scopes: personal, daily, heartrate, workout, enhanced_tag, session"
-        ));
+        assert!(
+            first_snapshot
+                .contains("Granted scopes: personal, daily, heartrate, workout, tag, session")
+        );
         assert!(first_snapshot.contains("Secret backend: fixture-memory"));
         assert!(first_snapshot.contains("tests/fixtures/phase3/ringmaster.db"));
     }
@@ -4544,7 +4702,7 @@ mod tests {
                 "daily".to_owned(),
                 "heartrate".to_owned(),
                 "workout".to_owned(),
-                "enhanced_tag".to_owned(),
+                "tag".to_owned(),
                 "session".to_owned(),
             ]
         );
@@ -4616,7 +4774,7 @@ mod tests {
             "daily".to_owned(),
             "heartrate".to_owned(),
             "workout".to_owned(),
-            "enhanced_tag".to_owned(),
+            "tag".to_owned(),
             "session".to_owned(),
         ];
         second_config.refresh.daily_interval_secs = 1;
@@ -4653,9 +4811,10 @@ mod tests {
             "demo status snapshots should not vary with host auth or refresh config"
         );
         assert!(first_snapshot.contains("Auth state: authenticated"));
-        assert!(first_snapshot.contains(
-            "Granted scopes: personal, daily, heartrate, workout, enhanced_tag, session"
-        ));
+        assert!(
+            first_snapshot.contains("Granted scopes: email, personal, daily, heartrate, tag"),
+            "status snapshot should surface the expanded Oura scope line"
+        );
         assert!(first_snapshot.contains("Secret backend: demo-memory"));
         assert_eq!(
             first_refresh_policy,

@@ -105,6 +105,41 @@ async fn ui_snapshot_demo_writes_artifacts() {
 }
 
 #[tokio::test]
+async fn ui_snapshot_ai_demo_writes_ai_workbench_artifacts() {
+    let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
+    let out_path = out_dir.path().join("ai-snapshots");
+    let out_arg = out_path.to_string_lossy().into_owned();
+
+    let result = ringmaster::run_from([
+        "ringmaster",
+        "ui",
+        "snapshot",
+        "--demo",
+        "--screen",
+        "ai",
+        "--size",
+        "compact",
+        "--size",
+        "wide",
+        "--out-dir",
+        &out_arg,
+    ])
+    .await;
+    assert!(result.is_ok(), "ai ui snapshot should run");
+
+    let output = match result {
+        Ok(Some(output)) => output,
+        Ok(None) => panic!("ai ui snapshot should render command output"),
+        Err(error) => panic!("unexpected ai ui snapshot failure: {error}"),
+    };
+
+    assert!(output.contains("ringmaster ui snapshot"));
+    assert!(output.contains("ai"));
+    assert!(out_path.join("ai-compact.txt").exists());
+    assert!(out_path.join("ai-wide.txt").exists());
+}
+
+#[tokio::test]
 async fn ui_snapshot_scenario_fixture_root_writes_scenario_tagged_artifacts() {
     let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
     let out_path = out_dir.path().join("phase7");

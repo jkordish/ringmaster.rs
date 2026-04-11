@@ -1,12 +1,12 @@
-# Phase 8: Snapshot Library, Report Export, and Eval Flywheel
+# Snapshot Library, Report Export, and Eval Flywheel
 
 ## Goal
 
-Turn the Phase 7 snapshot/OpenAI integration into a durable local workflow with a snapshot catalog, AI run registry, report export, and a local eval flywheel.
+Turn the earlier snapshot/OpenAI integration into a durable local workflow with a snapshot catalog, AI run registry, report export, and a local eval flywheel.
 
 ## Why
 
-Phase 7 proved the snapshot boundary and OpenAI provider seam. This pass makes those artifacts useful over time by making them browsable, exportable, comparable, and safer to evolve.
+The earlier snapshot/OpenAI work proved the snapshot boundary and provider seam. This pass makes those artifacts useful over time by making them browsable, exportable, comparable, and safer to evolve.
 
 ## Current state
 
@@ -46,7 +46,7 @@ Phase 7 proved the snapshot boundary and OpenAI provider seam. This pass makes t
 
 ## File plan
 
-- `docs/execplans/20260410-phase8-snapshot-library-reports-and-eval-flywheel.md`
+- `docs/execplans/20260410-snapshot-library-reports-and-eval-flywheel.md`
 - `src/cli.rs`
 - `src/lib.rs`
 - `src/ai.rs`
@@ -69,7 +69,7 @@ Phase 7 proved the snapshot boundary and OpenAI provider seam. This pass makes t
 
 ## Milestones
 
-- [x] Milestone 1: add the Phase 8 exec plan, storage schema changes, typed registry models, and CLI routing for the new command families.
+- [x] Milestone 1: add the exec plan, storage schema changes, typed registry models, and CLI routing for the new command families.
 - [x] Milestone 2: implement the snapshot catalog and AI run registry with deterministic list/show behavior and lineage-safe metadata.
 - [x] Milestone 3: implement `report export` with shared report view models, Markdown/HTML rendering, and persisted report manifests.
 - [x] Milestone 4: centralize prompt/schema/template versioning and refactor canonical request builders with better dry-run inspection.

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document explains the optional OpenAI integration that now powers the snapshot library, AI run registry, report export, and eval flywheel. The integration remains intentionally narrow, privacy-aware, and bounded.
+This document explains the optional OpenAI integration that now powers the AI workbench, snapshot library, AI run registry, report export, and eval flywheel. The integration remains intentionally narrow, privacy-aware, and bounded.
 
 ## Core rules
 
@@ -16,6 +16,8 @@ The current design is built around these invariants:
 - no OpenAI tools are enabled by default
 - no web search, file search, or remote retrieval are enabled in this pass
 - there is no freeform chat surface and no prompt textbox in the TUI
+- every in-app launch must show a preflight confirmation before any provider call
+- guided follow-up actions remain schema-driven and snapshot-bounded
 
 ## Canonical commands
 
@@ -25,9 +27,24 @@ cargo run -- snapshot list --demo
 cargo run -- ai review /tmp/ringmaster-snapshot.json --dry-run
 cargo run -- ai compare /tmp/ringmaster-snapshot.json /tmp/ringmaster-snapshot.json --dry-run
 cargo run -- ai runs list --demo
+cargo run -- ui snapshot --screen ai --demo --out-dir /tmp/ringmaster-ai-ui
 cargo run -- report export --from-snapshot /tmp/ringmaster-snapshot.json --format markdown --out /tmp/ringmaster-report.md
 cargo run -- ai eval --fixture-dir tests/fixtures/ai
 ```
+
+## In-app launch model
+
+The TUI now surfaces AI through a dedicated `AI` workbench plus inline entry points from screens such as `Dashboard`, `Review`, `Explain`, and `Patterns`.
+
+Important product behavior:
+
+- users launch AI work from the TUI, but widgets do not call OpenAI directly
+- the app builds or resolves the exact local snapshot artifact first
+- preflight shows exactly what will be sent
+- confirmation is always explicit
+- saved runs, reports, and provenance stay browsable in-app after the request completes
+
+This makes AI visible and native to the product without turning the app into a general chat shell.
 
 ## Snapshot-first design
 
@@ -42,6 +59,7 @@ This keeps the privacy boundary inspectable and testable. It also means:
 - snapshot exports remain useful even when AI is disabled
 - the user can see exactly which file would leave the machine
 - reports and evals can be regenerated without hidden database access
+- guided follow-up actions can reuse the saved artifact boundary without widening data access
 
 ## What is sent
 
@@ -53,6 +71,12 @@ When a real OpenAI call is enabled and the user runs `ai review` or `ai compare`
 - stable task framing
 - strict JSON Schema output framing
 - optional provider metadata such as reasoning effort or `safety_identifier`
+
+For guided follow-ups, the provider also receives:
+
+- the saved source artifact JSON
+- the bounded follow-up kind selector
+- the same explicit schema framing used by review and compare
 
 ## What is not sent
 
@@ -67,6 +91,7 @@ The current pass does not send:
 - OpenAI tool definitions
 - browsing or remote retrieval instructions
 - hidden file uploads outside the snapshot boundary object
+- live store queries derived on the fly during a model request
 
 ## Privacy profiles
 
@@ -119,6 +144,7 @@ Current artifact contracts:
 
 - `ReviewArtifactV1`
 - `CompareArtifactV1`
+- `FollowUpArtifactV1`
 
 Important consequences:
 
@@ -152,6 +178,25 @@ Dry-run and fixture execution expose a request preview that records:
 - payload fingerprint
 - request fingerprint
 
+The same typed preview is what powers the TUI preflight panel. The UI does not scrape rendered prose to infer trust or privacy state.
+
+## Preflight confirmation
+
+Before any in-app OpenAI request leaves the machine, the user sees a preflight summary that includes:
+
+- snapshot scope
+- privacy profile
+- provider and model
+- request mode
+- stateless status
+- tools-disabled status
+- artifact path(s)
+- content classes
+- notes/free-text inclusion
+- approximate byte and token size
+
+Warnings are also surfaced when relevant, including disabled provider state or recent run failures. Confirming preflight is the explicit opt-in step for outbound model traffic.
+
 ## Stateless mode
 
 The default provider mode is stateless.
@@ -161,8 +206,17 @@ Current default behavior:
 - `store: false`
 - no chat history retained by the API on behalf of the app
 - no stateful conversation thread in this pass
+- request timeout defaults to 120 seconds for snapshot review/compare workloads
+
+If a real provider call needs more time in a specific environment, override it with:
+
+```bash
+export RINGMASTER_AI_TIMEOUT_SECS=180
+```
 
 If stateful mode is enabled later through config, that will be a deliberate opt-in change and must not become the silent default.
+
+The workbench and CLI both present this mode explicitly so the privacy posture is visible rather than implied.
 
 ## Prompt and schema versioning
 
@@ -173,10 +227,19 @@ Current versions:
 - snapshot schema: `ringmaster.snapshot.v1`
 - review output schema: `ringmaster.ai.review.v1`
 - compare output schema: `ringmaster.ai.compare.v1`
-- review prompt: `review_prompt_v1`
+- follow-up output schema: `ringmaster.ai.follow_up.v1`
+- review prompt: `review_prompt_v2`
 - compare prompt: `compare_prompt_v1`
-- review task frame: `review_task_frame_v1`
+- follow-up prompt: `follow_up_prompt_v1`
+- review task frame: `review_task_frame_v2`
 - compare task frame: `compare_task_frame_v1`
+- follow-up task frame: `follow_up_task_frame_v1`
+
+The review pipeline also now applies a local post-provider sanitation pass before persistence and rendering:
+
+- invalid or duplicate evidence references are removed
+- duplicate review themes across headline/positive/negative sections are collapsed
+- review follow-up targets are replaced with the deterministic locally generated snapshot targets
 
 Each persisted AI artifact also records:
 
@@ -201,6 +264,36 @@ Browse commands:
 - `ai runs show <run-id>`
 
 The registry exists so prompt/model/version drift can be inspected over time instead of disappearing into stdout.
+
+The TUI workbench browser and Ops/doctor surfaces also expose this registry. Runs keep lifecycle state, request previews, snapshot linkage, prompt/schema versions, provider/model metadata, and any error or cancellation details.
+
+Run lifecycle states:
+
+- `queued`
+- `running`
+- `succeeded`
+- `failed`
+- `cancelled`
+- `interrupted`
+
+Interrupted runs are marked locally during startup to avoid stale in-flight UX.
+
+## Guided follow-up actions
+
+The workbench exposes bounded follow-up actions instead of a chat box.
+
+Current guided actions:
+
+- expand evidence
+- show strongest counterevidence
+- explain ranking
+- suggest next local drill-down
+- compare against a previous similar snapshot
+- rerun with a different privacy profile
+- rerun with a different model
+- generate a report
+
+Only the model-backed actions create new OpenAI requests, and those requests remain tied to known schemas and saved artifact lineage.
 
 ## Report export and eval interplay
 
@@ -233,7 +326,9 @@ This pass does not include:
 - direct database-to-OpenAI access
 - browsing-enabled or tool-enabled OpenAI runs
 - hosted eval services as a runtime requirement
-- a dedicated AI chat screen in the TUI
+- a freeform AI chat screen in the TUI
 - batch archive processing as the main user-facing workflow
+
+The dedicated `AI` screen that now exists is a structured workbench, not a chat interface.
 
 Those behaviors would expand the privacy and product surface significantly and require a separate design pass.

@@ -95,6 +95,7 @@ pub fn draw(
         .chain(std::iter::once(ListItem::new(
             "[keys] m metric | w/t/s families | 4 Explain for selected day context",
         )))
+        .chain(model.ai_actions.iter().cloned().map(ListItem::new))
         .collect::<Vec<_>>();
     frame.render_widget(
         List::new(notes).block(chrome::panel(

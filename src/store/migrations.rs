@@ -747,6 +747,61 @@ pub const MIGRATIONS: &[Migration] = &[
             ON ai_eval_runs(created_at DESC);
         ",
     },
+    Migration {
+        version: 15,
+        name: "phase9_ai_run_registry",
+        sql: r"
+        CREATE TABLE IF NOT EXISTS ai_runs (
+            run_id TEXT PRIMARY KEY,
+            run_kind TEXT NOT NULL,
+            run_status TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            reasoning_effort TEXT,
+            request_mode TEXT NOT NULL,
+            input_transport TEXT NOT NULL,
+            run_mode TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            output_schema_version TEXT NOT NULL,
+            privacy_profile TEXT NOT NULL,
+            snapshot_scope TEXT NOT NULL,
+            snapshot_hash_a TEXT NOT NULL,
+            snapshot_hash_b TEXT,
+            source_ai_artifact_id TEXT,
+            follow_up_kind TEXT,
+            request_fingerprint TEXT,
+            request_preview_json TEXT NOT NULL,
+            artifact_id TEXT,
+            error_message TEXT,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            ended_at TEXT,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (snapshot_hash_a) REFERENCES snapshot_exports(snapshot_hash) ON DELETE CASCADE,
+            FOREIGN KEY (snapshot_hash_b) REFERENCES snapshot_exports(snapshot_hash) ON DELETE SET NULL,
+            FOREIGN KEY (source_ai_artifact_id) REFERENCES ai_artifacts(artifact_id) ON DELETE SET NULL,
+            FOREIGN KEY (artifact_id) REFERENCES ai_artifacts(artifact_id) ON DELETE SET NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ai_runs_created_at
+            ON ai_runs(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_ai_runs_status_created_at
+            ON ai_runs(run_status, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_ai_runs_snapshot_a
+            ON ai_runs(snapshot_hash_a, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_ai_runs_snapshot_b
+            ON ai_runs(snapshot_hash_b, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_ai_runs_artifact_id
+            ON ai_runs(artifact_id, created_at DESC);
+        ",
+    },
+    Migration {
+        version: 16,
+        name: "phase10_ai_eval_details",
+        sql: r"
+        ALTER TABLE ai_eval_runs ADD COLUMN details_json TEXT NOT NULL DEFAULT '';
+        ",
+    },
 ];
 
 pub fn run_migrations(connection: &mut rusqlite::Connection) -> Result<MigrationReport> {
@@ -828,7 +883,7 @@ mod tests {
         assert_eq!(report.current_version, current_version());
         assert_eq!(
             report.applied_versions,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         );
     }
 
@@ -903,7 +958,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("phase-3 migrations should succeed: {error}"));
         assert_eq!(
             report.applied_versions,
-            vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+            vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         );
 
         let (workout_day, workout_title): (String, String) = connection
@@ -976,7 +1031,10 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("phase4 migrations should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![7, 8, 9, 10, 11, 12, 13, 14]);
+        assert_eq!(
+            report.applied_versions,
+            vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        );
 
         let row: (String, String, String) = connection
             .query_row(
@@ -1020,7 +1078,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("phase4 migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![9, 10, 11, 12, 13, 14]);
+        assert_eq!(report.applied_versions, vec![9, 10, 11, 12, 13, 14, 15, 16]);
 
         let daily_sleep_columns: Vec<String> = {
             let mut statement = connection
@@ -1063,7 +1121,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("phase5 migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![10, 11, 12, 13, 14]);
+        assert_eq!(report.applied_versions, vec![10, 11, 12, 13, 14, 15, 16]);
 
         let table_names: Vec<String> = {
             let mut statement = connection
@@ -1132,7 +1190,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("review signal migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![11, 12, 13, 14]);
+        assert_eq!(report.applied_versions, vec![11, 12, 13, 14, 15, 16]);
 
         let table_names: Vec<String> = {
             let mut statement = connection
@@ -1202,7 +1260,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| panic!("vo2 history migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![12, 13, 14]);
+        assert_eq!(report.applied_versions, vec![12, 13, 14, 15, 16]);
 
         let primary_key_columns: Vec<String> = {
             let mut statement = connection

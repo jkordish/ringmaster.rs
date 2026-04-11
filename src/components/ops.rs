@@ -160,17 +160,18 @@ fn draw_diagnostics_list(
 }
 
 fn compact_diagnostic_items(model: &OpsModel) -> Vec<OpsItem> {
-    const PRIORITY_LABELS: [&str; 10] = [
+    const PRIORITY_LABELS: [&str; 11] = [
         "Auth state",
         "Granted scopes",
-        "Access token expiry",
+        "Invalidation queue",
         "Receiver heartbeat",
+        "Latest eval",
+        "Eval health",
+        "Access token expiry",
         "Watch heartbeat",
         "Subscriptions",
         "Last accepted delivery",
         "Last rejected delivery",
-        "Invalidation queue",
-        "Last periodic sync",
     ];
 
     let mut diagnostics = PRIORITY_LABELS

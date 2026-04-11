@@ -7,7 +7,8 @@ It gives you:
 - a Ratatui interface for browsing recent signals, trends, context, patterns, reviews, and system status
 - a SQLite-backed local cache with deterministic demo and fixture flows
 - real Oura login and sync for supported families
-- an optional snapshot-based OpenAI layer for bounded review, compare, report, and eval workflows
+- an optional snapshot-based OpenAI layer for bounded review, compare, follow-up, report, and eval workflows
+- a first-class in-app AI workbench with explicit preflight, saved-run and eval browsing, and local evidence jump-backs
 
 The design goal is simple: useful local insight first, optional external analysis second, and no surprise data sharing.
 
@@ -33,6 +34,31 @@ cargo run -- sync once
 cargo run -- tui
 ```
 
+On Linux, `auth login` stores tokens through the desktop Secret Service keyring by default. If token persistence fails, make sure a provider such as `gnome-keyring` or `KeePassXC` is running and unlocked. For headless boxes, you can explicitly opt into local file storage instead:
+
+```bash
+export RINGMASTER_OURA_SECRET_BACKEND=file
+export RINGMASTER_OURA_SECRET_FILE="$HOME/.local/state/ringmaster/secrets/oura-tokens.json"
+```
+
+The file backend is opt-in only. Ringmaster will not silently fall back from secure storage to plaintext local files.
+
+The default auth request now tracks Oura's broader current scope surface:
+
+- `email`
+- `personal`
+- `daily`
+- `heartrate`
+- `tag`
+- `workout`
+- `session`
+- `spo2`
+- `ring_configuration`
+- `stress`
+- `heart_health`
+
+Today the local product fully uses the baseline sync scopes plus the currently wired stress and heart-health reads. `spo2`, `ring_configuration`, and `email` are surfaced in auth/doctor/status as future-ready capability slots rather than hidden or silently ignored.
+
 ## Common workflows
 
 ### Explore locally
@@ -48,6 +74,8 @@ cargo run -- review week --demo
 
 ```bash
 cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots
+cargo run -- ui snapshot --screen ai --demo --out-dir /tmp/ringmaster-ai-ui
+cargo run -- ui snapshot --screen status --demo --out-dir /tmp/ringmaster-status-ui
 ```
 
 ### Run the snapshot library and report workflow
@@ -59,9 +87,25 @@ cargo run -- snapshot show /tmp/ringmaster-snapshot.json
 cargo run -- ai review /tmp/ringmaster-snapshot.json --dry-run
 cargo run -- ai compare /tmp/ringmaster-snapshot.json /tmp/ringmaster-snapshot.json --dry-run
 cargo run -- ai runs list --demo
+cargo run -- ui snapshot --screen ai --demo --out-dir /tmp/ringmaster-ai-ui
 cargo run -- report export --from-snapshot /tmp/ringmaster-snapshot.json --format markdown --out /tmp/ringmaster-report.md
 cargo run -- ai eval --fixture-dir tests/fixtures/ai
 ```
+
+## AI in the TUI
+
+AI is now a top-level product workflow, not a CLI-only add-on.
+
+- `7` opens the dedicated `AI` workbench screen.
+- `a` and `c` launch snapshot-bounded review or compare work from `Dashboard`, `Explain`, `Patterns`, `Review`, and the workbench itself.
+- every launch routes through an explicit preflight that shows snapshot scope, privacy profile, provider/model, stateless mode, tools-disabled status, content classes, payload size estimate, and the exact local artifact path that will be sent
+- the workbench browses saved snapshots, AI runs, reports, and persisted eval runs in one place
+- saved AI runs render structured findings, evidence, counterevidence, uncertainty, and provenance directly in the TUI
+- saved eval runs render fixture manifest summaries, baseline-vs-candidate rollups, failing graders first, and lineage back to saved snapshots, AI runs, and reports when those local handles are available
+- bounded follow-up actions such as expanding evidence, surfacing counterevidence, rerunning with another privacy profile/model, and generating a report are available without adding a freeform chat box
+- the `Status` screen now surfaces latest eval health so regressions show up in the same operator surface as provider and sync readiness
+
+The workbench is intentionally guided and snapshot-first. There is still no arbitrary chat prompt, no direct database-to-model path, and no hidden uploads.
 
 ## Privacy defaults
 
@@ -79,14 +123,15 @@ If you want the full contract, read [docs/OPENAI_INTEGRATION.md](docs/OPENAI_INT
 
 - loopback OAuth login and local token/session persistence
 - local sync and derived review/pattern/context layers
-- a seven-screen TUI: Dashboard, Timeline, Trends, Explain, Patterns, Review, Status
+- an eight-screen TUI: Dashboard, Timeline, Trends, Explain, Patterns, Review, AI, Status
 - webhook-aware freshness and ops surfaces where Oura supports it
 - deterministic demo, fixture, and smoke-test paths
 - snapshot export plus a local snapshot catalog
-- structured AI review/compare artifact persistence plus AI run browsing
-- a Review-screen read-only AI artifact panel with local summary and provenance context
+- a dedicated AI workbench with inline launch points, explicit preflight, async run tracking, and in-app artifact browsing
+- structured AI review/compare/follow-up artifact persistence plus AI run browsing
+- local jump-backs from AI findings to Review / Explain / Patterns / Timeline evidence when the saved export refs are resolvable
 - Markdown and HTML report export from snapshots and AI runs
-- a fixture-backed local eval flywheel for prompt/schema/model regressions
+- a fixture-backed local eval flywheel for prompt/schema/model regressions, including an in-app eval browser and Status eval health
 
 ## Minimal config
 
@@ -115,10 +160,12 @@ For the complete config and runtime behavior, use the docs below instead of the 
 - Visual system references:
   - [docs/DESIGN_AUDIT.md](docs/DESIGN_AUDIT.md)
   - [docs/DESIGN_SYSTEM.md](docs/DESIGN_SYSTEM.md)
-- Current execution plan for the snapshot library/report/eval pass:
-  - [docs/execplans/20260410-phase8-snapshot-library-reports-and-eval-flywheel.md](docs/execplans/20260410-phase8-snapshot-library-reports-and-eval-flywheel.md)
-- Current execution plan for the Review AI artifact panel follow-up:
-  - [docs/execplans/20260410-phase9-review-ai-artifact-panel.md](docs/execplans/20260410-phase9-review-ai-artifact-panel.md)
+- Snapshot library, reports, and eval workflow plan:
+  - [Snapshot library, report export, and eval flywheel](docs/execplans/20260410-snapshot-library-reports-and-eval-flywheel.md)
+- AI workbench plan:
+  - [AI workbench and first-class TUI](docs/execplans/20260410-ai-workbench-and-first-class-tui.md)
+- Eval lab and regression console plan:
+  - [AI eval lab and regression console](docs/execplans/20260410-ai-eval-lab-and-regression-console.md)
 
 ## Development notes
 
@@ -134,6 +181,8 @@ cargo run -- snapshot export --demo --profile redacted --out /tmp/ringmaster-sna
 cargo run -- snapshot list --demo
 cargo run -- ai review /tmp/ringmaster-snapshot.json --dry-run
 cargo run -- ai runs list --demo
+cargo run -- ui snapshot --screen ai --demo --out-dir /tmp/ringmaster-ai-ui
+cargo run -- ui snapshot --screen status --demo --out-dir /tmp/ringmaster-status-ui
 cargo run -- report export --from-snapshot /tmp/ringmaster-snapshot.json --format markdown --out /tmp/ringmaster-report.md
 cargo run -- ai eval --fixture-dir tests/fixtures/ai
 ```
