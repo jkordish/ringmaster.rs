@@ -86,12 +86,13 @@ impl Store {
     }
 
     #[cfg(test)]
-    /// Opens an isolated in-memory store for tests.
+    /// Opens an isolated temporary on-disk store for tests.
     ///
     /// # Errors
     ///
-    /// Returns an error when the in-memory database cannot be opened, configured, or migrated.
-    pub fn open_in_memory() -> Result<Self> {
+    /// Returns an error when the temporary database cannot be opened,
+    /// configured, or migrated.
+    pub fn open_test_store() -> Result<Self> {
         let temp_dir = tempfile::tempdir()
             .map_err(|error| RingmasterError::io("creating isolated test store", error))?;
         let plan = StorePlan {
@@ -182,8 +183,8 @@ mod tests {
     use crate::test_support::ok;
 
     #[test]
-    fn opens_in_memory_store() {
-        let store = ok(Store::open_in_memory(), "store should open");
+    fn opens_isolated_test_store() {
+        let store = ok(Store::open_test_store(), "store should open");
 
         assert_eq!(store.migration_report().current_version, 16);
     }

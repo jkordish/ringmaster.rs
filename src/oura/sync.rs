@@ -1832,7 +1832,7 @@ mod tests {
 
     #[tokio::test]
     async fn fixture_sync_populates_baseline_tables_idempotently() {
-        let store = ok(Store::open_in_memory(), "store should open");
+        let store = ok(Store::open_test_store(), "store should open");
         let config = fixture_config();
         let options = SyncOptions {
             dry_run: false,
@@ -1867,7 +1867,7 @@ mod tests {
 
     #[tokio::test]
     async fn dry_run_does_not_write_any_rows() {
-        let store = ok(Store::open_in_memory(), "store should open");
+        let store = ok(Store::open_test_store(), "store should open");
         let config = fixture_config();
         let report = sync_once(
             &config,
@@ -1895,7 +1895,7 @@ mod tests {
 
     #[tokio::test]
     async fn fixture_sync_populates_review_family_tables() {
-        let store = ok(Store::open_in_memory(), "store should open");
+        let store = ok(Store::open_test_store(), "store should open");
         let config = fixture_config();
         let report = sync_once(
             &config,
@@ -1928,7 +1928,7 @@ mod tests {
 
     #[tokio::test]
     async fn fixture_sync_accepts_official_enhanced_tag_start_day_payloads() {
-        let store = ok(Store::open_in_memory(), "store should open");
+        let store = ok(Store::open_test_store(), "store should open");
         let config = fixture_config();
         let tempdir = ok(tempfile::tempdir(), "tempdir should build");
         let fixture_dir = tempdir.path().join("review-official-enhanced-tags");
@@ -1994,7 +1994,7 @@ mod tests {
 
     #[tokio::test]
     async fn daily_sync_degrades_when_optional_review_endpoint_fixture_is_malformed() {
-        let store = ok(Store::open_in_memory(), "store should open");
+        let store = ok(Store::open_test_store(), "store should open");
         let config = fixture_config();
         let tempdir = ok(tempfile::tempdir(), "tempdir should build");
         let fixture_dir = tempdir.path().join("review-malformed-sleep-time");
@@ -2051,7 +2051,7 @@ mod tests {
 
     #[test]
     fn overlap_day_window_reuses_partial_daily_cursor() {
-        let store = ok(Store::open_in_memory(), "store should open");
+        let store = ok(Store::open_test_store(), "store should open");
         ok(
             store.sync_state().upsert(&SyncStateRecord {
                 sync_key: "oura.daily".to_owned(),

@@ -995,7 +995,7 @@ mod tests {
 
         let config =
             Config::load().unwrap_or_else(|error| unreachable!("config should load: {error}"));
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let report = sync_subscriptions(
             &config,
@@ -1051,7 +1051,7 @@ mod tests {
                 enabled: true,
             });
 
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let report = sync_subscriptions(
             &config,
@@ -1100,7 +1100,7 @@ mod tests {
 
         let config =
             Config::load().unwrap_or_else(|error| unreachable!("config should load: {error}"));
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let report = list_subscriptions(&config, &store, Some(fixture_dir.path().to_path_buf()))
             .await

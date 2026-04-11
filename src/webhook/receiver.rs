@@ -1107,7 +1107,7 @@ mod tests {
 
     #[test]
     fn accepts_valid_signed_delivery_and_enqueues_invalidation() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let timestamp = OffsetDateTime::now_utc()
             .format(&Rfc3339)
@@ -1216,7 +1216,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_verification_challenge_token() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let response = process_inbound_request(
             &security_config(),
@@ -1250,7 +1250,7 @@ mod tests {
 
     #[test]
     fn rejects_malformed_timestamp_instead_of_returning_internal_error() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let body = r#"{"data_type":"daily_sleep","event_type":"create","object_id":"sleep_123"}"#;
         let response = process_inbound_request(
@@ -1290,7 +1290,7 @@ mod tests {
 
     #[test]
     fn dedupes_duplicate_signed_delivery() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let timestamp = OffsetDateTime::now_utc()
             .format(&Rfc3339)
@@ -1361,7 +1361,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_json_after_signature_verification() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let timestamp = OffsetDateTime::now_utc()
             .format(&Rfc3339)
@@ -1403,7 +1403,7 @@ mod tests {
 
     #[test]
     fn duplicate_signed_delivery_does_not_requeue_completed_invalidation() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let timestamp = OffsetDateTime::now_utc()
             .format(&Rfc3339)
@@ -1621,7 +1621,7 @@ mod tests {
 
         let config =
             Config::load().unwrap_or_else(|error| unreachable!("config should load: {error}"));
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let report = replay(
             &config,
@@ -1658,7 +1658,7 @@ mod tests {
         let mut config =
             Config::load().unwrap_or_else(|error| unreachable!("config should load: {error}"));
         config.oura.client_secret = Some("fixture-secret".to_owned());
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let report = replay(
             &config,

@@ -1052,7 +1052,7 @@ mod tests {
 
     #[test]
     fn replaces_desired_subscriptions() {
-        let store = ok(Store::open_in_memory(), "store should open");
+        let store = ok(Store::open_test_store(), "store should open");
         let updated_at = ok(now_rfc3339(), "timestamp");
 
         ok(
@@ -1079,7 +1079,7 @@ mod tests {
 
     #[test]
     fn dedupes_accepted_deliveries_by_fingerprint() {
-        let store = ok(Store::open_in_memory(), "store should open");
+        let store = ok(Store::open_test_store(), "store should open");
         let first = ok(
             store
                 .webhook()
@@ -1131,7 +1131,7 @@ mod tests {
 
     #[test]
     fn coalesces_invalidations_by_queue_key() {
-        let store = ok(Store::open_in_memory(), "store should open");
+        let store = ok(Store::open_test_store(), "store should open");
         let webhook = store.webhook();
         let delivery_id = match ok(
             webhook.insert_accepted_delivery(&AcceptedWebhookDeliveryInput {
@@ -1185,7 +1185,7 @@ mod tests {
 
     #[test]
     fn reactivating_completed_invalidation_resets_retry_state() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let webhook = store.webhook();
         let delivery_id = match webhook
@@ -1262,7 +1262,7 @@ mod tests {
 
     #[test]
     fn requeue_during_active_lease_stays_pending_for_follow_up_processing() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let webhook = store.webhook();
         let first_delivery_id = match webhook
@@ -1364,7 +1364,7 @@ mod tests {
 
     #[test]
     fn persists_runtime_heartbeat() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         store
             .webhook()
@@ -1400,7 +1400,7 @@ mod tests {
 
     #[test]
     fn claim_available_invalidations_handles_mixed_timestamp_precision() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let webhook = store.webhook();
         let delivery_id = match webhook

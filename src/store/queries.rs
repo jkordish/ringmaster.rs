@@ -4839,7 +4839,7 @@ mod tests {
 
     #[test]
     fn sync_state_round_trips_backoff_metadata() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
 
         store
@@ -4880,7 +4880,7 @@ mod tests {
 
     #[test]
     fn daily_history_returns_oldest_to_newest_rows() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         seed_daily_history(&store);
 
@@ -4903,7 +4903,7 @@ mod tests {
 
     #[test]
     fn heartrate_queries_return_per_day_points_and_day_list() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
 
         for (timestamp, bpm, day) in [
@@ -4940,7 +4940,7 @@ mod tests {
 
     #[test]
     fn latest_source_day_tracks_newest_persisted_family_day() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         seed_daily_history(&store);
         store
@@ -4970,7 +4970,7 @@ mod tests {
 
     #[test]
     fn latest_source_day_treats_open_rest_mode_as_current() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let current_day = super::current_local_day_string();
         store
@@ -5000,7 +5000,7 @@ mod tests {
 
     #[test]
     fn latest_review_day_prefers_reviewable_sources() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
 
         store
@@ -5048,7 +5048,7 @@ mod tests {
 
     #[test]
     fn latest_review_day_treats_open_rest_mode_as_current() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let current_day = super::current_local_day_string();
         store
@@ -5078,7 +5078,7 @@ mod tests {
 
     #[test]
     fn analysis_store_round_trips_snapshot_exports_and_provenance() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let record = SnapshotExportRecord {
             snapshot_hash: "hash-123".to_owned(),
@@ -5134,7 +5134,7 @@ mod tests {
 
     #[test]
     fn analysis_store_preserves_provenance_on_metadata_only_snapshot_upsert() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let record = SnapshotExportRecord {
             snapshot_hash: "hash-keep".to_owned(),
@@ -5207,7 +5207,7 @@ mod tests {
 
     #[test]
     fn analysis_store_preserves_snapshot_created_at_on_upsert() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let original = SnapshotExportRecord {
             snapshot_hash: "hash-created-at".to_owned(),
@@ -5262,7 +5262,7 @@ mod tests {
 
     #[test]
     fn analysis_store_round_trips_ai_artifacts() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let artifact = AiArtifactRecord {
             artifact_id: "artifact-123".to_owned(),
@@ -5304,7 +5304,7 @@ mod tests {
 
     #[test]
     fn analysis_store_round_trips_ai_runs() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         store
             .analysis()
@@ -5330,7 +5330,7 @@ mod tests {
 
     #[test]
     fn analysis_store_updates_ai_runs_only_while_active() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         store
             .analysis()
@@ -5395,7 +5395,7 @@ mod tests {
 
     #[test]
     fn list_ai_runs_for_snapshot_includes_compare_runs_on_either_side() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         store
             .analysis()
@@ -5429,7 +5429,7 @@ mod tests {
 
     #[test]
     fn latest_ai_artifact_for_anchor_day_returns_none_when_day_has_no_snapshot_artifact() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
 
         assert_eq!(
@@ -5445,7 +5445,7 @@ mod tests {
 
     #[test]
     fn latest_ai_artifact_for_anchor_day_prefers_newest_review_for_matching_day() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
 
         store
@@ -5504,7 +5504,7 @@ mod tests {
 
     #[test]
     fn latest_ai_artifact_for_anchor_day_matches_compare_runs_on_either_snapshot_side() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
 
         store
@@ -5551,7 +5551,7 @@ mod tests {
 
     #[test]
     fn analysis_store_round_trips_report_exports_and_eval_runs() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let snapshot = make_snapshot_export("hash-123", "2026-04-10");
         let ai_artifact = make_ai_artifact(
@@ -5592,7 +5592,7 @@ mod tests {
 
     #[test]
     fn rest_mode_periods_between_days_include_open_periods_started_before_window() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         store
             .imports()
@@ -5620,7 +5620,7 @@ mod tests {
 
     #[test]
     fn vo2_max_queries_preserve_multiple_measurements_per_day() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
 
         for (oura_id, recorded_at, vo2_max) in [
@@ -5652,7 +5652,7 @@ mod tests {
 
     #[test]
     fn context_events_for_day_respects_offset_timestamps() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         store
             .derived()
@@ -5684,7 +5684,7 @@ mod tests {
 
     #[test]
     fn daily_delete_accepts_object_id_suffix_for_legacy_rows() {
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         store
             .imports()

@@ -1282,7 +1282,7 @@ mod tests {
             "code exchange should succeed",
         );
 
-        let store = ok(Store::open_in_memory(), "store should open");
+        let store = ok(Store::open_test_store(), "store should open");
         let secrets = MemorySecretStore::default();
         ok(
             persist_authorized_session(&store, &secrets, &exchanged, None, false),
@@ -1310,7 +1310,7 @@ mod tests {
     #[test]
     fn inspect_auth_normalizes_prefixed_session_scopes() {
         let config = test_config("http://127.0.0.1:9999/token".to_owned());
-        let store = ok(Store::open_in_memory(), "store should open");
+        let store = ok(Store::open_test_store(), "store should open");
         let secrets = MemorySecretStore::default();
         store
             .auth()
@@ -1401,7 +1401,7 @@ mod tests {
         });
 
         let config = test_config(format!("http://{address}/token"));
-        let store = ok(Store::open_in_memory(), "store should open");
+        let store = ok(Store::open_test_store(), "store should open");
         let secrets = MemorySecretStore::default();
         secrets
             .write_tokens(&StoredTokens {

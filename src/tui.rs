@@ -3349,7 +3349,7 @@ mod tests {
     #[test]
     fn renders_dashboard_missing_capability_state() {
         let config = test_config();
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         seed_sync_state(
             &store,
@@ -3374,7 +3374,7 @@ mod tests {
     #[test]
     fn renders_timeline_missing_heartrate_state() {
         let config = test_config();
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         seed_sync_state(
             &store,
@@ -3398,7 +3398,7 @@ mod tests {
     #[test]
     fn renders_trends_empty_data_state() {
         let config = test_config();
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         seed_sync_state(
             &store,
@@ -3445,7 +3445,7 @@ mod tests {
     #[test]
     fn renders_patterns_insufficient_data_state() {
         let config = test_config();
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let auth_status = test_auth_status(
             &config,
@@ -3489,7 +3489,7 @@ mod tests {
     #[test]
     fn renders_review_screen_without_ai_artifact_when_none_is_saved() {
         let config = test_config();
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let auth_status = test_auth_status(
             &config,
@@ -3517,7 +3517,7 @@ mod tests {
     #[test]
     fn renders_ops_auth_and_sync_metadata() {
         let config = test_config();
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         seed_live_rows(&store);
         seed_sync_state(
@@ -3573,7 +3573,7 @@ mod tests {
     #[test]
     fn compact_status_snapshot_keeps_auth_and_queue_diagnostics_visible() {
         let config = test_config();
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         seed_live_rows(&store);
         seed_sync_state(

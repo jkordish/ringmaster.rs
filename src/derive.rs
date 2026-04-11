@@ -1202,7 +1202,7 @@ mod tests {
 
     #[test]
     fn pattern_summaries_require_enough_samples_and_report_confidence() {
-        let store = ok(Store::open_in_memory(), "store should open in memory");
+        let store = ok(Store::open_test_store(), "store should open test store");
         populate_history(&store);
 
         let workouts = ok(
@@ -1248,7 +1248,7 @@ mod tests {
 
     #[test]
     fn rebuild_store_persists_derived_tables() {
-        let store = ok(Store::open_in_memory(), "store should open in memory");
+        let store = ok(Store::open_test_store(), "store should open test store");
         populate_history(&store);
 
         let report = ok(rebuild_store(&store), "rebuild should succeed");
@@ -1296,7 +1296,7 @@ mod tests {
 
     #[test]
     fn bounded_refresh_uses_anchor_day_for_review_freshness() {
-        let store = ok(Store::open_in_memory(), "store should open in memory");
+        let store = ok(Store::open_test_store(), "store should open test store");
         populate_history(&store);
 
         let artifacts = ok(

@@ -26,12 +26,14 @@ pub mod refresh;
 pub mod report;
 pub mod review;
 pub mod snapshot;
-pub mod store;
+mod store;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod tui;
-pub mod ui;
+mod ui;
 pub mod webhook;
+
+pub use store::{Store, StorePlan};
 
 use std::collections::HashMap;
 use std::fs;
@@ -56,7 +58,6 @@ use review::{
     InvestigationReport, ReviewCard, ReviewDeck, ReviewFocus, ReviewInputs, ReviewMode,
     build_investigation_report, build_review_deck,
 };
-use store::Store;
 use time::{Date, Duration, OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;

@@ -2468,7 +2468,7 @@ mod tests {
 
     #[test]
     fn resolves_today_scope_from_latest_source_day() {
-        let store = ok(Store::open_in_memory(), "store should open");
+        let store = ok(Store::open_test_store(), "store should open");
         seed_history(&store);
 
         let scope = ok(resolve_scope(&store, "today"), "scope should resolve");
@@ -2479,7 +2479,7 @@ mod tests {
 
     #[test]
     fn redacted_export_omits_personal_identifiers() {
-        let store = ok(Store::open_in_memory(), "store should open");
+        let store = ok(Store::open_test_store(), "store should open");
         seed_history(&store);
         let config = ok(Config::load(), "config should load");
         let scope = ok(
@@ -2507,7 +2507,7 @@ mod tests {
 
     #[test]
     fn redacted_catalog_metadata_stays_compact_and_safe() {
-        let store = ok(Store::open_in_memory(), "store should open");
+        let store = ok(Store::open_test_store(), "store should open");
         seed_history(&store);
         let config = ok(Config::load(), "config should load");
         let scope = ok(
@@ -2551,7 +2551,7 @@ mod tests {
 
     #[test]
     fn snapshot_export_derives_artifacts_across_requested_range() {
-        let store = ok(Store::open_in_memory(), "store should open");
+        let store = ok(Store::open_test_store(), "store should open");
         seed_wide_history(&store);
         let config = ok(Config::load(), "config should load");
         let scope = ok(

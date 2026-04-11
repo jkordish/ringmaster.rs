@@ -20,7 +20,7 @@ Clippy is currently failing with a large mix of mechanical, structural, async, a
   - `cargo check --all-targets --all-features` is green after each batch
   - the current clippy inventory is now concentrated in structural and dependency issues: `too_many_lines`, `future_not_send`, `multiple_crate_versions`, and a small number of remaining mechanical lints such as helper annotations
   - auth and sync now use store-plan reopen flows instead of carrying a live SQLite handle across the core OAuth and Oura fetch awaits, which cut the `future_not_send` inventory from 46 occurrences to 20 on the latest full clippy pass
-  - `Store::open_in_memory()` now uses an isolated temporary SQLite database so tests remain reopen-safe while the async refactors reacquire short-lived stores after await boundaries
+  - `Store::open_test_store()` now uses an isolated temporary SQLite database so tests remain reopen-safe while the async refactors reacquire short-lived stores after await boundaries
   - the remaining `future_not_send` diagnostics in refresh, report export, webhook subscription management, and library/demo-artifact command helpers have now been eliminated as well; clippy is no longer failing on async `Send` boundaries
   - follow-up mechanical cleanup also removed the lingering auth/test-support pedantic lints that were entangled with the async refactor, leaving the remaining clippy failures concentrated in `too_many_lines`, dependency duplication, and a still-large batch of repetitive test-helper assertions
   - the current full-clippy inventory is down to 55 failures: 32 `too_many_lines` and 23 `multiple_crate_versions`

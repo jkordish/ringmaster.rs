@@ -1129,7 +1129,7 @@ const fn key(
     Keybinding {
         scope,
         kind,
-        chord,
+        chord: chord.normalized(),
         action,
         label,
         show_in_footer,
@@ -1137,6 +1137,32 @@ const fn key(
 }
 
 impl KeyChord {
+    #[must_use]
+    const fn normalized(self) -> Self {
+        match self.code {
+            ChordKey::Char(mut character) => {
+                let mut modifiers = self.modifiers;
+                if modifiers.control {
+                    if character.is_ascii_uppercase() {
+                        character = character.to_ascii_lowercase();
+                    }
+                    modifiers.shift = false;
+                } else if modifiers.shift {
+                    if character.is_ascii_lowercase() {
+                        character = character.to_ascii_uppercase();
+                    }
+                    modifiers.shift = false;
+                }
+
+                Self {
+                    code: ChordKey::Char(character),
+                    modifiers,
+                }
+            }
+            _ => self,
+        }
+    }
+
     #[must_use]
     pub const fn plain(code: ChordKey) -> Self {
         Self {
@@ -1146,6 +1172,7 @@ impl KeyChord {
                 shift: false,
             },
         }
+        .normalized()
     }
 
     #[must_use]
@@ -1157,6 +1184,7 @@ impl KeyChord {
                 shift: false,
             },
         }
+        .normalized()
     }
 
     #[must_use]
@@ -1168,6 +1196,7 @@ impl KeyChord {
                 shift: true,
             },
         }
+        .normalized()
     }
 
     const fn from_key_event(event: KeyEvent) -> Option<Self> {
@@ -1188,13 +1217,16 @@ impl KeyChord {
             KeyCode::Backspace => ChordKey::Backspace,
             _ => return None,
         };
-        Some(Self {
-            code,
-            modifiers: ChordModifiers {
-                control: event.modifiers.contains(KeyModifiers::CONTROL),
-                shift: event.modifiers.contains(KeyModifiers::SHIFT),
-            },
-        })
+        Some(
+            Self {
+                code,
+                modifiers: ChordModifiers {
+                    control: event.modifiers.contains(KeyModifiers::CONTROL),
+                    shift: event.modifiers.contains(KeyModifiers::SHIFT),
+                },
+            }
+            .normalized(),
+        )
     }
 }
 
@@ -1292,5 +1324,40 @@ mod tests {
         );
 
         assert_eq!(action, None);
+    }
+
+    #[test]
+    fn shifted_character_bindings_match_uppercase_terminal_events() {
+        let action = super::resolve(
+            KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE),
+            BindingContext {
+                active_screen: Screen::Review,
+                focused_region: FocusRegion::Primary,
+                search_open: false,
+                help_open: false,
+                ai_preflight_open: false,
+            },
+        );
+
+        assert_eq!(
+            action,
+            Some(Action::MoveFocusedRegion(crate::navigation::NavMove::Last))
+        );
+    }
+
+    #[test]
+    fn shifted_symbol_bindings_match_terminals_that_keep_shift_modifier() {
+        let action = super::resolve(
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT),
+            BindingContext {
+                active_screen: Screen::Dashboard,
+                focused_region: FocusRegion::TopNav,
+                search_open: false,
+                help_open: false,
+                ai_preflight_open: false,
+            },
+        );
+
+        assert_eq!(action, Some(Action::ToggleHelp));
     }
 }

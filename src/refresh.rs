@@ -1634,7 +1634,7 @@ mod tests {
     #[tokio::test]
     async fn invalidation_processing_updates_trigger_provenance_and_clears_queue() {
         let config = test_config();
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let queued_at = crate::store::webhook_store::now_rfc3339()
             .unwrap_or_else(|error| unreachable!("timestamp should render: {error}"));
@@ -1695,7 +1695,7 @@ mod tests {
     #[tokio::test]
     async fn invalidation_delete_side_effect_removes_deleted_workout() {
         let config = test_config();
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let seed_report = crate::oura::sync::sync_selected(
             &config,
@@ -1774,7 +1774,7 @@ mod tests {
     #[tokio::test]
     async fn invalidation_delete_side_effect_removes_deleted_daily_sleep() {
         let config = test_config();
-        let store = Store::open_in_memory()
+        let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         store
             .imports()
