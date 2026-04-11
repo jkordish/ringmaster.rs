@@ -1914,8 +1914,7 @@ fn transition_ai_run_if_active(
         return Ok(false);
     }
     let transitioned = failed_ai_run_record(&current_record, status, message.to_owned())?;
-    store.analysis().upsert_ai_run(&transitioned)?;
-    Ok(true)
+    store.analysis().update_ai_run_if_active(&transitioned)
 }
 
 fn cancel_ai_run(config: &Config, run_id: &str) -> Result<bool> {

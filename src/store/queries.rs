@@ -2498,6 +2498,68 @@ impl<'connection> AnalysisStore<'connection> {
         Ok(())
     }
 
+    pub fn update_ai_run_if_active(&self, record: &AiRunRecord) -> Result<bool> {
+        let updated = self.connection.execute(
+            "UPDATE ai_runs
+             SET
+                run_kind = ?2,
+                run_status = ?3,
+                provider = ?4,
+                model = ?5,
+                reasoning_effort = ?6,
+                request_mode = ?7,
+                input_transport = ?8,
+                run_mode = ?9,
+                prompt_version = ?10,
+                output_schema_version = ?11,
+                privacy_profile = ?12,
+                snapshot_scope = ?13,
+                snapshot_hash_a = ?14,
+                snapshot_hash_b = ?15,
+                source_ai_artifact_id = ?16,
+                follow_up_kind = ?17,
+                request_fingerprint = ?18,
+                request_preview_json = ?19,
+                artifact_id = ?20,
+                error_message = ?21,
+                created_at = ?22,
+                started_at = ?23,
+                ended_at = ?24,
+                updated_at = ?25
+             WHERE run_id = ?1
+               AND run_status IN ('queued', 'running')",
+            params![
+                record.run_id,
+                record.run_kind,
+                record.run_status,
+                record.provider,
+                record.model,
+                record.reasoning_effort,
+                record.request_mode,
+                record.input_transport,
+                record.run_mode,
+                record.prompt_version,
+                record.output_schema_version,
+                record.privacy_profile,
+                record.snapshot_scope,
+                record.snapshot_hash_a,
+                record.snapshot_hash_b,
+                record.source_ai_artifact_id,
+                record.follow_up_kind,
+                record.request_fingerprint,
+                record.request_preview_json,
+                record.artifact_id,
+                record.error_message,
+                record.created_at,
+                record.started_at,
+                record.ended_at,
+                record.updated_at,
+            ],
+        )?;
+
+        Ok(updated > 0)
+    }
+
     pub fn ai_run(&self, run_id: &str) -> Result<Option<AiRunRecord>> {
         self.connection
             .query_row(
@@ -5206,6 +5268,69 @@ mod tests {
         assert_eq!(loaded.run_status, "queued");
         assert_eq!(loaded.provider, "openai");
         assert_eq!(loaded.snapshot_hash_a, "hash-123");
+    }
+
+    #[test]
+    fn analysis_store_updates_ai_runs_only_while_active() {
+        let store =
+            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        store
+            .analysis()
+            .upsert_snapshot_export(&make_snapshot_export("hash-123", "2026-04-10"), &[])
+            .unwrap_or_else(|error| panic!("snapshot export should persist: {error}"));
+
+        let queued = make_ai_run("run-conditional", "review", "queued", "hash-123", None);
+        store
+            .analysis()
+            .upsert_ai_run(&queued)
+            .unwrap_or_else(|error| panic!("queued run should persist: {error}"));
+
+        let mut cancelled = queued;
+        cancelled.run_status = "cancelled".to_owned();
+        cancelled.error_message = Some("Cancelled from test.".to_owned());
+        cancelled.ended_at = Some("2026-04-10T00:02:00Z".to_owned());
+        cancelled.updated_at = "2026-04-10T00:02:00Z".to_owned();
+
+        let updated = store
+            .analysis()
+            .update_ai_run_if_active(&cancelled)
+            .unwrap_or_else(|error| panic!("active run transition should succeed: {error}"));
+        assert!(updated);
+
+        let persisted = store
+            .analysis()
+            .ai_run("run-conditional")
+            .unwrap_or_else(|error| panic!("ai run should load: {error}"))
+            .unwrap_or_else(|| panic!("ai run should exist"));
+        assert_eq!(persisted.run_status, "cancelled");
+
+        let mut succeeded = persisted;
+        succeeded.run_status = "succeeded".to_owned();
+        succeeded.error_message = None;
+        succeeded.updated_at = "2026-04-10T00:03:00Z".to_owned();
+        store
+            .analysis()
+            .upsert_ai_run(&succeeded)
+            .unwrap_or_else(|error| panic!("succeeded run should persist: {error}"));
+
+        let mut interrupted = succeeded;
+        interrupted.run_status = "interrupted".to_owned();
+        interrupted.error_message = Some("Interrupted after completion.".to_owned());
+        interrupted.updated_at = "2026-04-10T00:04:00Z".to_owned();
+
+        let updated = store
+            .analysis()
+            .update_ai_run_if_active(&interrupted)
+            .unwrap_or_else(|error| panic!("inactive run transition should not error: {error}"));
+        assert!(!updated);
+
+        let persisted = store
+            .analysis()
+            .ai_run("run-conditional")
+            .unwrap_or_else(|error| panic!("ai run should reload: {error}"))
+            .unwrap_or_else(|| panic!("ai run should still exist"));
+        assert_eq!(persisted.run_status, "succeeded");
+        assert!(persisted.error_message.is_none());
     }
 
     #[test]
