@@ -138,6 +138,13 @@ struct ReceiverState {
     store: Arc<Mutex<Store>>,
 }
 
+/// Serves the local webhook receiver until the process is interrupted.
+///
+/// # Errors
+///
+/// Returns an error when receiver security cannot be built, the store or
+/// listener cannot be initialized, heartbeat updates fail, or Axum exits with an
+/// unrecoverable server error.
 pub async fn serve(config: &Config) -> Result<WebhookServeReport> {
     let security = security_from_config(config)?;
     let bind_address = config.webhook.bind;
@@ -199,6 +206,12 @@ pub async fn serve(config: &Config) -> Result<WebhookServeReport> {
     })
 }
 
+/// Processes a verification or delivery request against the local webhook store.
+///
+/// # Errors
+///
+/// Returns an error when timestamps or signatures cannot be validated, payloads
+/// cannot be decoded, or accepted/rejected delivery records cannot be persisted.
 pub fn process_inbound_request(
     security: &ReceiverSecurityConfig,
     store: &Store,
@@ -222,7 +235,7 @@ pub fn process_inbound_request(
     }
 }
 
-pub async fn replay(
+pub fn replay(
     config: &Config,
     store: &Store,
     options: WebhookReplayOptions,
@@ -1601,7 +1614,6 @@ mod tests {
                 recent: None,
             },
         )
-        .await
         .unwrap_or_else(|error| panic!("fixture replay should succeed: {error}"));
 
         assert_eq!(report.entries.len(), 1);
@@ -1639,7 +1651,6 @@ mod tests {
                 recent: None,
             },
         )
-        .await
         .unwrap_or_else(|error| panic!("fixture replay should succeed: {error}"));
 
         assert_eq!(report.entries.len(), 1);

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This file is the execution runbook for the current product. It only describes flows that work today, including the AI workbench, inline AI launch points, preflight confirmation, the snapshot library, AI run registry, report export workflow, the in-app eval browser, and the local eval harness.
+This file is the execution runbook for the current product. It only describes flows that work today, including the standardized TUI navigation model, the AI workbench, inline AI launch points, preflight confirmation, the snapshot library, AI run registry, report export workflow, the in-app eval browser, and the local eval harness.
 
 ## Commands
 
@@ -43,6 +43,45 @@ cargo run -- webhook subscriptions sync --dry-run --fixture-dir tests/fixtures/w
 ```
 
 `auth login` now requests the broader current Oura scope set by default and the product surfaces the result explicitly in `doctor`, auth status, and the TUI ops/auth readouts. Scopes that are granted but not yet wired into local sync, such as `spo2` and `ring_configuration`, are shown as future-ready instead of being silently ignored.
+
+## TUI navigation runtime
+
+The interactive TUI now uses one shared navigation model across every primary screen.
+
+Region model:
+
+1. `Views` top navigation
+2. screen-local controls such as trend windows, review mode/focus tabs, or AI browser tabs
+3. primary working region such as a list, launch-point group, or main content pane
+4. secondary or detail regions when the screen has them
+
+Keyboard rules:
+
+- `Tab` / `Shift+Tab`: move between major regions
+- arrows, `Home`, `End`, `PageUp`, `PageDown`: move within the focused composite according to pane type
+- `Enter` / `Space`: activate or commit
+- `Esc`: close help, close search, dismiss a transient panel, or back out one interaction layer
+- `Ctrl+F`: open search in the current searchable context
+- `?`: open the scoped keyboard-help overlay
+
+Pane-type rules:
+
+- selector panes such as `Views`, trend windows, review mode/focus, and AI browser tabs use `Left` / `Right` for one-step moves and `Home` / `End` or `PageUp` / `PageDown` for edge jumps
+- list panes such as Timeline events, Review cards, AI launch points, and saved artifacts use `Up` / `Down`, `Home` / `End`, and `PageUp` / `PageDown`
+- chart/pager panes such as the Timeline chart use `Left` / `Right` within the active day and `PageUp` / `PageDown` for larger day shifts
+- detail panes are explicit drill-down surfaces; `Enter` / `Space` and `Esc` return to the invoking region instead of inventing screen-specific navigation keys
+
+Back-out is now consistent with screen region order. `Esc` walks to the previous major region on the current screen before it returns to `Views`.
+
+Search works today on the current list-heavy surfaces:
+
+- Timeline event list
+- Review ranked observations
+- AI saved-artifact browser list
+
+The footer is registry-driven and intentionally concise. The help overlay is the place for the full scoped command list, including optional expert aliases.
+
+Navigation regression coverage now lives in the app, keybinding, and TUI test suites plus the deterministic `ui snapshot --demo` artifact pass.
 
 ## Snapshot library runtime
 
@@ -113,7 +152,7 @@ The in-app flow is:
 1. open the AI workbench directly or route there from an inline launch point
 2. select a bounded launch such as review, compare, rerun, or follow-up
 3. inspect the preflight panel before any provider call
-4. confirm explicitly with `Enter` or cancel with `n`
+4. move between preflight controls with `Tab` / `Shift+Tab` or `Left` / `Right`, then confirm with `Enter` / `Space` or cancel with `Esc`
 5. monitor the persisted run lifecycle in-app
 6. inspect the saved structured result, linked reports, and source snapshot lineage
 7. jump back to local evidence screens or export a report
@@ -380,14 +419,7 @@ cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
 cargo run -- doctor
-cargo run -- snapshot export --demo --profile redacted --out /tmp/ringmaster-snapshot.json
-cargo run -- snapshot list --demo
-cargo run -- ai review /tmp/ringmaster-snapshot.json --dry-run
-cargo run -- ai runs list --demo
-cargo run -- ui snapshot --screen ai --demo --out-dir /tmp/ringmaster-ai-ui
-cargo run -- ui snapshot --screen status --demo --out-dir /tmp/ringmaster-status-ui
-cargo run -- report export --from-snapshot /tmp/ringmaster-snapshot.json --format markdown --out /tmp/ringmaster-report.md
-cargo run -- ai eval --fixture-dir tests/fixtures/ai
+cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-nav-ui
 ```
 
 ## Notes for future passes

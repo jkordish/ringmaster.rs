@@ -39,7 +39,8 @@ fn draw_wide(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &Theme)
         .split(layout[1]);
 
     draw_family_table(frame, body[0], model, theme);
-    draw_diagnostics_list(frame, body[1], &model.items, theme, None);
+    let diagnostics = prioritized_diagnostic_items(model);
+    draw_diagnostics_list(frame, body[1], &diagnostics, theme, None);
     draw_warnings(frame, layout[2], model, theme);
 }
 
@@ -74,7 +75,7 @@ fn draw_compact(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &The
         body[0],
     );
 
-    let diagnostics = compact_diagnostic_items(model);
+    let diagnostics = prioritized_diagnostic_items(model);
     draw_diagnostics_list(frame, body[1], &diagnostics, theme, None);
     draw_warnings(frame, layout[2], model, theme);
 }
@@ -159,7 +160,7 @@ fn draw_diagnostics_list(
     );
 }
 
-fn compact_diagnostic_items(model: &OpsModel) -> Vec<OpsItem> {
+fn prioritized_diagnostic_items(model: &OpsModel) -> Vec<OpsItem> {
     const PRIORITY_LABELS: [&str; 11] = [
         "Auth state",
         "Granted scopes",

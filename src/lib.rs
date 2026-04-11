@@ -6,25 +6,6 @@
     clippy::cargo,
     clippy::perf
 )]
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::future_not_send,
-    clippy::map_unwrap_or,
-    clippy::missing_const_for_fn,
-    clippy::missing_errors_doc,
-    clippy::module_name_repetitions,
-    clippy::multiple_crate_versions,
-    clippy::must_use_candidate,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::ref_option,
-    clippy::too_many_lines,
-    clippy::uninlined_format_args,
-    clippy::unused_async
-)]
 
 pub mod action;
 pub mod ai;
@@ -37,6 +18,8 @@ pub mod derive;
 pub mod error;
 pub mod eval;
 pub mod insights;
+pub mod keybindings;
+pub mod navigation;
 pub mod oura;
 pub mod refresh;
 pub mod report;
@@ -112,6 +95,12 @@ const FIXTURE_SNAPSHOT_STALE_SYNC_COMPLETED_AT: &str = "2026-04-09T05:01:00Z";
 const FIXTURE_SNAPSHOT_ERROR_SYNC_ATTEMPTED_AT: &str = "2026-04-09T11:45:00Z";
 const FIXTURE_SNAPSHOT_ERROR_SYNC_COMPLETED_AT: &str = "2026-04-09T11:46:00Z";
 
+/// Parses CLI arguments and runs the requested command.
+///
+/// # Errors
+///
+/// Returns an error when argument parsing fails, configuration or runtime
+/// dependencies cannot be initialized, or the selected command fails.
 pub async fn run_from<I, T>(args: I) -> Result<Option<String>>
 where
     I: IntoIterator<Item = T>,
@@ -125,6 +114,12 @@ where
     run_cli(cli).await
 }
 
+/// Executes a parsed CLI command.
+///
+/// # Errors
+///
+/// Returns an error when configuration cannot be loaded, logging or runtime
+/// directories cannot be initialized, or the chosen command fails.
 pub async fn run_cli(cli: Cli) -> Result<Option<String>> {
     let config = Config::load()?;
     init_logging(&config.logging.filter)?;
@@ -137,8 +132,8 @@ pub async fn run_cli(cli: Cli) -> Result<Option<String>> {
 
     match command {
         Command::Doctor => run_doctor(&config),
-        Command::Demo => run_demo(&config).await,
-        Command::Tui(args) => run_tui(&config, args).await,
+        Command::Demo => run_demo(&config),
+        Command::Tui(args) => run_tui(&config, &args),
         Command::Snapshot { command } => match command {
             SnapshotCommand::Export(args) => run_snapshot_export(&config, args).await,
             SnapshotCommand::List(args) => run_snapshot_list(&config, args).await,
@@ -181,7 +176,7 @@ pub async fn run_cli(cli: Cli) -> Result<Option<String>> {
                 AiRunsCommand::List(args) => run_ai_runs_list(&config, args).await,
                 AiRunsCommand::Show(args) => run_ai_runs_show(&config, args).await,
             },
-            AiCommand::Eval(args) => run_ai_eval(&config, args).await,
+            AiCommand::Eval(args) => run_ai_eval(&config, args),
         },
         Command::Report { command } => match command {
             ReportCommand::Export(args) => run_report_export(&config, args).await,
@@ -652,11 +647,12 @@ fn doctor_parse_timestamp(value: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(value, &Rfc3339).ok()
 }
 
-async fn run_demo(config: &Config) -> Result<Option<String>> {
-    run_tui(config, TuiArgs { demo: true }).await
+fn run_demo(config: &Config) -> Result<Option<String>> {
+    let args = TuiArgs { demo: true };
+    run_tui(config, &args)
 }
 
-async fn run_tui(config: &Config, args: TuiArgs) -> Result<Option<String>> {
+fn run_tui(config: &Config, args: &TuiArgs) -> Result<Option<String>> {
     let mut app = if args.demo {
         build_demo_state(config)
     } else {
@@ -671,7 +667,7 @@ async fn run_tui(config: &Config, args: TuiArgs) -> Result<Option<String>> {
         } else {
             info!("running live TUI");
         }
-        tui::run(config, &mut app).await?;
+        tui::run(config, &mut app)?;
         Ok(None)
     } else {
         if args.demo {
@@ -708,7 +704,7 @@ async fn run_ui_snapshot(config: &Config, args: UiSnapshotArgs) -> Result<Option
         .collect::<Vec<_>>()
         .join("\n");
     let scenarios = if scenario_list.is_empty() {
-        "legacy single source".to_owned()
+        "single source".to_owned()
     } else {
         scenario_list
             .iter()
@@ -1671,8 +1667,7 @@ async fn run_webhook_replay(config: &Config, args: WebhookReplayArgs) -> Result<
             delivery_id: args.delivery_id,
             recent: args.recent,
         },
-    )
-    .await?;
+    )?;
     let replay_processing_fixture_dir = replay_processing_fixture_dir(config);
     if report
         .entries
@@ -2375,8 +2370,8 @@ async fn run_report_export(config: &Config, args: ReportExportArgs) -> Result<Op
     report::export_report(config, args).await
 }
 
-async fn run_ai_eval(config: &Config, args: AiEvalArgs) -> Result<Option<String>> {
-    eval::run_eval(config, args).await
+fn run_ai_eval(config: &Config, args: AiEvalArgs) -> Result<Option<String>> {
+    eval::run_eval(config, &args)
 }
 
 #[derive(Debug, Clone)]
@@ -4442,7 +4437,6 @@ mod tests {
                 export: Some(eval_export_path.clone()),
             },
         )
-        .await
         .unwrap_or_else(|error| panic!("ai eval should succeed: {error}"))
         .unwrap_or_else(|| panic!("ai eval should render output"));
 
@@ -4671,7 +4665,6 @@ mod tests {
             first_snapshot
                 .contains("Granted scopes: personal, daily, heartrate, workout, tag, session")
         );
-        assert!(first_snapshot.contains("Secret backend: fixture-memory"));
         assert!(first_snapshot.contains("tests/fixtures/phase3/ringmaster.db"));
     }
 
@@ -4815,7 +4808,6 @@ mod tests {
             first_snapshot.contains("Granted scopes: email, personal, daily, heartrate, tag"),
             "status snapshot should surface the expanded Oura scope line"
         );
-        assert!(first_snapshot.contains("Secret backend: demo-memory"));
         assert_eq!(
             first_refresh_policy,
             "personal=3600s daily=300s heartrate=60s workouts=600s tags=300s sessions=300s"

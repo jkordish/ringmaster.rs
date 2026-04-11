@@ -838,7 +838,7 @@ impl<'connection> SyncStateStore<'connection> {
                 record.last_completed_at,
                 record.message,
                 join_scopes(&record.granted_scopes),
-                encode_problem(&record.last_error)?,
+                encode_problem(record.last_error.as_ref())?,
                 i64::from(record.failure_count),
                 record.next_attempt_after,
                 record.last_trigger_source,
@@ -1002,7 +1002,7 @@ impl<'connection> AuthStore<'connection> {
                 record.access_token_expires_at,
                 record.last_authenticated_at,
                 record.last_refresh_at,
-                encode_problem(&record.last_error)?,
+                encode_problem(record.last_error.as_ref())?,
                 record.updated_at,
             ],
         )?;
@@ -4599,9 +4599,8 @@ fn split_scopes(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn encode_problem(problem: &Option<OuraProblem>) -> Result<Option<String>> {
+fn encode_problem(problem: Option<&OuraProblem>) -> Result<Option<String>> {
     problem
-        .as_ref()
         .map(serde_json::to_string)
         .transpose()
         .map_err(Into::into)

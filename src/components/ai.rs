@@ -170,10 +170,11 @@ fn draw_launch_points(
     let rows = items
         .iter()
         .map(|item| {
+            let prefix = chrome::focus_prefix(item.selected);
             let detail = if trim_to_label {
-                format!("{} [{}]", item.label, item.key_hint)
+                format!("{prefix} {}", item.label)
             } else {
-                format!("{} [{}]\n{}", item.label, item.key_hint, item.detail)
+                format!("{prefix} {}\n{}", item.label, item.detail)
             };
             ListItem::new(detail)
         })

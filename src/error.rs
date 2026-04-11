@@ -96,12 +96,14 @@ pub struct OuraProblem {
 }
 
 impl RingmasterError {
+    #[must_use]
     pub fn io(context: &'static str, source: io::Error) -> Self {
         Self::Io { context, source }
     }
 }
 
 impl OuraProblem {
+    #[must_use]
     pub fn new(status: Option<u16>, title: impl Into<String>, detail: Option<String>) -> Self {
         Self {
             status,
@@ -112,6 +114,7 @@ impl OuraProblem {
         }
     }
 
+    #[must_use]
     pub fn oauth(
         status: Option<u16>,
         title: impl Into<String>,

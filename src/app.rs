@@ -13,6 +13,10 @@ use crate::eval::{
     parse_persisted_eval_details,
 };
 use crate::insights::{InsightConfidence, MetricInsight, MetricPoint, build_metric_insight};
+use crate::keybindings::BindingContext;
+use crate::navigation::{
+    self, FocusRegion, NavMove, PreflightControl, SearchScope, SearchState, TransientLayer,
+};
 use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
 use crate::refresh::SyncFamily;
 use crate::review::{
@@ -239,6 +243,12 @@ pub struct AppState {
     pub should_quit: bool,
     pub refresh_in_flight: bool,
     live_snapshot: Option<LiveSnapshot>,
+    focused_region: FocusRegion,
+    screen_focus_memory: [FocusRegion; 8],
+    focused_top_nav_screen: Screen,
+    help_open: bool,
+    focus_before_help: Option<FocusRegion>,
+    search: Option<SearchState>,
     selected_day_index: usize,
     selected_timeline_point: usize,
     timeline_window_hours: u16,
@@ -246,7 +256,9 @@ pub struct AppState {
     selected_event_id: Option<String>,
     selected_review_card_index: usize,
     ai_preflight: Option<AiPreflightState>,
+    ai_preflight_control: PreflightControl,
     ai_browser_tab: AiBrowserTab,
+    selected_ai_launch_index: usize,
     selected_ai_run_index: usize,
     selected_snapshot_catalog_index: usize,
     selected_report_export_index: usize,
@@ -381,6 +393,7 @@ pub struct AiLaunchPointView {
     pub label: String,
     pub detail: String,
     pub key_hint: String,
+    pub selected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -561,6 +574,7 @@ struct LiveModelOptions {
     selected_event_id: Option<String>,
     ai_preflight: Option<AiPreflightState>,
     ai_browser_tab: AiBrowserTab,
+    selected_ai_launch_index: usize,
     selected_ai_run_index: usize,
     selected_snapshot_catalog_index: usize,
     selected_report_export_index: usize,
@@ -604,6 +618,58 @@ struct ReviewViewContext<'a> {
 impl AppState {
     pub fn handle(&mut self, action: Action) {
         match action {
+            Action::FocusNextRegion => {
+                if self.current_transient().is_none() {
+                    let next = navigation::next_region(self.active_screen, self.focused_region);
+                    self.set_focused_region(next);
+                    self.status_line = format!(
+                        "Focused {}.",
+                        navigation::region_label(self.active_screen, next).unwrap_or("next region")
+                    );
+                }
+            }
+            Action::FocusPreviousRegion => {
+                if self.current_transient().is_none() {
+                    let previous =
+                        navigation::previous_region(self.active_screen, self.focused_region);
+                    self.set_focused_region(previous);
+                    self.status_line = format!(
+                        "Focused {}.",
+                        navigation::region_label(self.active_screen, previous)
+                            .unwrap_or("previous region")
+                    );
+                }
+            }
+            Action::MoveFocusedRegion(movement) => {
+                self.move_focused_region(movement);
+            }
+            Action::ActivateFocusedRegion => {
+                self.activate_focused_region();
+            }
+            Action::Back => {
+                self.back_out();
+            }
+            Action::ToggleHelp => {
+                self.toggle_help();
+            }
+            Action::OpenSearch => {
+                self.open_search();
+            }
+            Action::CloseSearch => {
+                self.close_search();
+            }
+            Action::SearchAppend(character) => {
+                self.append_search_character(character);
+            }
+            Action::SearchBackspace => {
+                self.backspace_search();
+            }
+            Action::SearchNextResult => {
+                self.advance_search(true);
+            }
+            Action::SearchPreviousResult => {
+                self.advance_search(false);
+            }
             Action::Tick => {
                 self.tick_count = self.tick_count.saturating_add(1);
             }
@@ -612,14 +678,20 @@ impl AppState {
             }
             Action::NextScreen => {
                 self.active_screen = self.active_screen.next();
+                self.focused_top_nav_screen = self.active_screen;
+                self.restore_screen_focus();
                 self.status_line = format!("Switched to {}", self.active_screen.title());
             }
             Action::PreviousScreen => {
                 self.active_screen = self.active_screen.previous();
+                self.focused_top_nav_screen = self.active_screen;
+                self.restore_screen_focus();
                 self.status_line = format!("Switched to {}", self.active_screen.title());
             }
             Action::ShowScreen(screen) => {
                 self.active_screen = screen;
+                self.focused_top_nav_screen = screen;
+                self.restore_screen_focus();
                 self.status_line = format!("Switched to {}", self.active_screen.title());
             }
             Action::RefreshRequested => {
@@ -822,6 +894,8 @@ impl AppState {
             }
             Action::RequestAiLaunch(intent) => {
                 self.active_screen = Screen::Ai;
+                self.focused_top_nav_screen = Screen::Ai;
+                self.restore_screen_focus();
                 self.status_line = format!("Preparing {} preflight.", intent.label());
                 self.ai_preflight = None;
                 self.rebuild_live_model();
@@ -832,17 +906,20 @@ impl AppState {
             } => {
                 self.active_screen = Screen::Ai;
                 self.ai_preflight = Some(*preflight);
+                self.ai_preflight_control = PreflightControl::Confirm;
                 self.status_line = status_line;
                 self.rebuild_live_model();
             }
             Action::AiPreflightFailed { message } => {
                 self.active_screen = Screen::Ai;
                 self.ai_preflight = None;
+                self.ai_preflight_control = PreflightControl::Confirm;
                 self.status_line = message;
                 self.rebuild_live_model();
             }
             Action::DismissAiPreflight => {
                 if self.ai_preflight.take().is_some() {
+                    self.ai_preflight_control = PreflightControl::Confirm;
                     "AI preflight dismissed.".clone_into(&mut self.status_line);
                     self.rebuild_live_model();
                 }
@@ -871,28 +948,40 @@ impl AppState {
             }
             Action::RequestAiGuidedFollowUp(kind) => {
                 self.active_screen = Screen::Ai;
+                self.focused_top_nav_screen = Screen::Ai;
+                self.restore_screen_focus();
                 self.status_line = format!("Preparing {} follow-up.", kind.label());
             }
             Action::RequestAiRerunNextPrivacy => {
                 self.active_screen = Screen::Ai;
+                self.focused_top_nav_screen = Screen::Ai;
+                self.restore_screen_focus();
                 "Preparing rerun with another privacy profile.".clone_into(&mut self.status_line);
             }
             Action::RequestAiRerunNextModel => {
                 self.active_screen = Screen::Ai;
+                self.focused_top_nav_screen = Screen::Ai;
+                self.restore_screen_focus();
                 "Preparing rerun with another model.".clone_into(&mut self.status_line);
             }
             Action::RequestAiComparePreviousSnapshot => {
                 self.active_screen = Screen::Ai;
+                self.focused_top_nav_screen = Screen::Ai;
+                self.restore_screen_focus();
                 "Preparing compare against the nearest previous similar snapshot."
                     .clone_into(&mut self.status_line);
             }
             Action::RequestAiGenerateReport => {
                 self.active_screen = Screen::Ai;
+                self.focused_top_nav_screen = Screen::Ai;
+                self.restore_screen_focus();
                 "Exporting a local report for the selected AI artifact."
                     .clone_into(&mut self.status_line);
             }
             Action::RequestJumpToAiEvidence => {
                 self.active_screen = Screen::Ai;
+                self.focused_top_nav_screen = Screen::Ai;
+                self.restore_screen_focus();
                 "Resolving saved evidence back into the local investigation views."
                     .clone_into(&mut self.status_line);
             }
@@ -903,6 +992,8 @@ impl AppState {
             } => {
                 if self.select_day_by_label(&day) {
                     self.active_screen = screen;
+                    self.focused_top_nav_screen = screen;
+                    self.restore_screen_focus();
                     self.status_line = status_line;
                     self.rebuild_live_model();
                 } else {
@@ -918,6 +1009,8 @@ impl AppState {
             } => {
                 if self.select_ai_browser_record(tab, &record_id) {
                     self.active_screen = Screen::Ai;
+                    self.focused_top_nav_screen = Screen::Ai;
+                    self.restore_screen_focus();
                     self.status_line = status_line;
                     self.rebuild_live_model();
                 } else {
@@ -959,36 +1052,83 @@ impl AppState {
     #[must_use]
     pub fn footer(&self) -> String {
         let spinner = ["·", "o", "O", "o"][(self.tick_count % 4) as usize];
-        let screen_hint = match self.active_screen {
-            Screen::Dashboard => "[ ] day | a review | c compare | 1-8 jump",
-            Screen::Timeline => "[ ] day | , . hr | j k event | -/= zoom | w/t/s filters",
-            Screen::Trends => "[ ] window",
-            Screen::Explain => "[ ] day | j k event | a review | w/t/s filters",
-            Screen::Patterns => "w/t/s family | m metric | c compare",
-            Screen::Review => "[ ] day | v mode | f focus | j k cards | a/c AI",
-            Screen::Ai if self.ai_preflight.is_some() => {
-                "enter confirm | n cancel | p privacy | 1-8 jump"
-            }
-            Screen::Ai => {
-                "[ ] tab | j k select | a/c launch | e/y/i/d follow-up | g report | u/m rerun | b baseline | o evidence | x cancel run"
-            }
-            Screen::Ops => "1-8 jump",
-        };
         let refresh_hint = if self.refresh_in_flight {
             "refreshing"
         } else {
             "r refresh"
         };
+        let region = navigation::region_label(self.active_screen, self.focused_region)
+            .unwrap_or_else(|| self.active_screen.title());
+        let hints = crate::keybindings::footer_hints(self.binding_context());
+        let hint_text = if hints.is_empty() {
+            "No contextual keys".to_owned()
+        } else {
+            hints.join(" | ")
+        };
 
         format!(
-            "{spinner} {} | {} | {} | q quit",
-            self.status_line, screen_hint, refresh_hint
+            "{spinner} {} | Focus: {} | {} | {}",
+            self.status_line, region, hint_text, refresh_hint
         )
     }
 
     #[must_use]
     pub fn active_tab_index(&self) -> usize {
         self.active_screen.index()
+    }
+
+    #[must_use]
+    pub fn focused_region(&self) -> FocusRegion {
+        self.focused_region
+    }
+
+    #[must_use]
+    pub fn focused_top_nav_screen(&self) -> Screen {
+        self.focused_top_nav_screen
+    }
+
+    #[must_use]
+    pub fn help_open(&self) -> bool {
+        self.help_open
+    }
+
+    #[must_use]
+    pub fn search_state(&self) -> Option<&SearchState> {
+        self.search.as_ref()
+    }
+
+    #[must_use]
+    pub fn ai_preflight_control(&self) -> PreflightControl {
+        self.ai_preflight_control
+    }
+
+    #[must_use]
+    pub fn binding_context(&self) -> BindingContext {
+        BindingContext {
+            active_screen: self.active_screen,
+            focused_region: self.focused_region,
+            search_open: self.search.is_some(),
+            help_open: self.help_open,
+            ai_preflight_open: self.ai_preflight.is_some(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_region_focused(&self, region: FocusRegion) -> bool {
+        self.focused_region == region && self.current_transient().is_none()
+    }
+
+    #[must_use]
+    pub fn current_transient(&self) -> Option<TransientLayer> {
+        if self.ai_preflight.is_some() {
+            Some(TransientLayer::AiPreflight)
+        } else if self.search.is_some() {
+            Some(TransientLayer::Search)
+        } else if self.help_open {
+            Some(TransientLayer::Help)
+        } else {
+            None
+        }
     }
 
     fn replace_live_snapshot(&mut self, snapshot: LiveSnapshot) {
@@ -1026,6 +1166,7 @@ impl AppState {
                     selected_event_id: self.selected_event_id.clone(),
                     ai_preflight: self.ai_preflight.clone(),
                     ai_browser_tab: self.ai_browser_tab,
+                    selected_ai_launch_index: self.selected_ai_launch_index,
                     selected_ai_run_index: self.selected_ai_run_index,
                     selected_snapshot_catalog_index: self.selected_snapshot_catalog_index,
                     selected_report_export_index: self.selected_report_export_index,
@@ -1337,6 +1478,660 @@ impl AppState {
         *selected = new_index;
         changed
     }
+
+    fn set_focused_region(&mut self, region: FocusRegion) {
+        self.focused_region = region;
+        if region != FocusRegion::TopNav {
+            self.screen_focus_memory[self.active_screen.index()] = region;
+        }
+        if region == FocusRegion::TopNav {
+            self.focused_top_nav_screen = self.active_screen;
+        }
+    }
+
+    fn restore_screen_focus(&mut self) {
+        let region = self.screen_focus_memory[self.active_screen.index()];
+        self.focused_region = region;
+    }
+
+    fn move_focused_region(&mut self, movement: NavMove) {
+        if self.ai_preflight.is_some() {
+            self.ai_preflight_control = match movement {
+                NavMove::Previous => self.ai_preflight_control.previous(),
+                NavMove::Next => self.ai_preflight_control.next(),
+                NavMove::First => PreflightControl::Confirm,
+                NavMove::Last => PreflightControl::Cancel,
+                NavMove::PageBackward => PreflightControl::Confirm,
+                NavMove::PageForward => PreflightControl::Cancel,
+            };
+            self.status_line = format!(
+                "Focused {}.",
+                self.ai_preflight_control.label().to_ascii_lowercase()
+            );
+            return;
+        }
+        if self.help_open {
+            return;
+        }
+
+        if self.search.is_some() {
+            match movement {
+                NavMove::Previous | NavMove::PageBackward => self.advance_search(false),
+                NavMove::Next | NavMove::PageForward => self.advance_search(true),
+                NavMove::First => self.advance_search_to_edge(true),
+                NavMove::Last => self.advance_search_to_edge(false),
+            }
+            return;
+        }
+
+        match (self.active_screen, self.focused_region) {
+            (_, FocusRegion::TopNav) => self.move_top_nav_focus(movement),
+            (Screen::Timeline, FocusRegion::ContextPrimary) => {
+                self.move_timeline_chart(movement);
+            }
+            (Screen::Timeline, FocusRegion::Primary) => {
+                self.move_timeline_events(movement);
+            }
+            (Screen::Timeline, FocusRegion::Secondary) => {}
+            (Screen::Trends, FocusRegion::ContextPrimary) => {
+                self.move_trend_window(movement);
+            }
+            (Screen::Review, FocusRegion::ContextPrimary) => {
+                self.move_review_mode(movement);
+            }
+            (Screen::Review, FocusRegion::ContextSecondary) => {
+                self.move_review_focus(movement);
+            }
+            (Screen::Review, FocusRegion::Primary) => {
+                self.move_review_cards(movement);
+            }
+            (Screen::Ai, FocusRegion::ContextPrimary) => {
+                self.move_ai_browser_tabs(movement);
+            }
+            (Screen::Ai, FocusRegion::Primary) => {
+                self.move_ai_launch_points(movement);
+            }
+            (Screen::Ai, FocusRegion::Secondary) => {
+                self.move_ai_browser_items(movement);
+            }
+            (screen, FocusRegion::Primary) => {
+                if matches!(movement, NavMove::PageBackward)
+                    && Self::screen_supports_day_paging(screen)
+                {
+                    self.handle(Action::PreviousDay);
+                } else if matches!(movement, NavMove::PageForward)
+                    && Self::screen_supports_day_paging(screen)
+                {
+                    self.handle(Action::NextDay);
+                }
+            }
+            (screen, _) if Self::screen_supports_day_paging(screen) => match movement {
+                NavMove::PageBackward => self.handle(Action::PreviousDay),
+                NavMove::PageForward => self.handle(Action::NextDay),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn activate_focused_region(&mut self) {
+        if self.ai_preflight.is_some() {
+            match self.ai_preflight_control {
+                PreflightControl::Confirm => self.handle(Action::ConfirmAiPreflight),
+                PreflightControl::Privacy => self.handle(Action::CycleAiPreflightPrivacyProfile),
+                PreflightControl::Cancel => self.handle(Action::DismissAiPreflight),
+            }
+            return;
+        }
+        if self.help_open {
+            self.toggle_help();
+            return;
+        }
+        if self.search.is_some() {
+            self.advance_search(true);
+            return;
+        }
+
+        match (self.active_screen, self.focused_region) {
+            (_, FocusRegion::TopNav) => {
+                self.active_screen = self.focused_top_nav_screen;
+                self.restore_screen_focus();
+                self.status_line = format!("Switched to {}.", self.active_screen.title());
+            }
+            (Screen::Timeline, FocusRegion::Primary) => {
+                self.set_focused_region(FocusRegion::Secondary);
+                "Inspecting selected event details.".clone_into(&mut self.status_line);
+            }
+            (Screen::Timeline, FocusRegion::Secondary) => {
+                self.set_focused_region(FocusRegion::Primary);
+                "Returned to day events.".clone_into(&mut self.status_line);
+            }
+            (Screen::Review, FocusRegion::Primary) => {
+                self.set_focused_region(FocusRegion::Secondary);
+                "Inspecting selected review brief.".clone_into(&mut self.status_line);
+            }
+            (Screen::Review, FocusRegion::Secondary) => {
+                self.set_focused_region(FocusRegion::Primary);
+                "Returned to ranked observations.".clone_into(&mut self.status_line);
+            }
+            (Screen::Ai, FocusRegion::Primary) => match self.selected_ai_launch_index() {
+                0 => self.handle(Action::RequestAiLaunch(AiLaunchIntent::ReviewSelectedDay)),
+                1 => self.handle(Action::RequestAiLaunch(AiLaunchIntent::CompareSelectedWeek)),
+                _ => self.handle(Action::RequestAiLaunch(
+                    AiLaunchIntent::ChallengeSelectedDay,
+                )),
+            },
+            (Screen::Ai, FocusRegion::Secondary) => {
+                self.set_focused_region(FocusRegion::Tertiary);
+                "Inspecting selected AI artifact.".clone_into(&mut self.status_line);
+            }
+            (Screen::Ai, FocusRegion::Tertiary) => {
+                self.set_focused_region(FocusRegion::Secondary);
+                "Returned to saved artifacts.".clone_into(&mut self.status_line);
+            }
+            _ => {}
+        }
+    }
+
+    fn back_out(&mut self) {
+        if self.ai_preflight.take().is_some() {
+            self.ai_preflight_control = PreflightControl::Confirm;
+            "AI preflight dismissed.".clone_into(&mut self.status_line);
+            self.rebuild_live_model();
+            return;
+        }
+        if self.search.is_some() {
+            self.close_search();
+            return;
+        }
+        if self.help_open {
+            self.toggle_help();
+            return;
+        }
+
+        if self.focused_region != FocusRegion::TopNav {
+            let region = navigation::previous_region(self.active_screen, self.focused_region);
+            self.set_focused_region(region);
+            self.status_line = format!(
+                "Focused {}.",
+                navigation::region_label(self.active_screen, region).unwrap_or("navigation")
+            );
+        }
+    }
+
+    fn toggle_help(&mut self) {
+        if self.help_open {
+            self.help_open = false;
+            if let Some(region) = self.focus_before_help.take() {
+                self.set_focused_region(region);
+            }
+            "Closed keyboard help.".clone_into(&mut self.status_line);
+        } else {
+            if let Some(search) = self.search.take() {
+                self.set_focused_region(search.previous_region);
+            }
+            self.focus_before_help = Some(self.focused_region);
+            self.help_open = true;
+            "Opened keyboard help.".clone_into(&mut self.status_line);
+        }
+    }
+
+    fn open_search(&mut self) {
+        let Some(scope) = navigation::search_scope(self.active_screen, self.focused_region) else {
+            self.status_line = format!(
+                "Search is not available in {}.",
+                navigation::region_label(self.active_screen, self.focused_region)
+                    .unwrap_or_else(|| self.active_screen.title())
+            );
+            return;
+        };
+        self.help_open = false;
+        self.focus_before_help = None;
+
+        let previous_region = self.focused_region;
+        self.search = Some(SearchState {
+            scope,
+            query: String::new(),
+            active_match_index: 0,
+            total_matches: 0,
+            previous_region,
+        });
+        "Find opened. Type to search the current list.".clone_into(&mut self.status_line);
+    }
+
+    fn close_search(&mut self) {
+        if let Some(search) = self.search.take() {
+            self.set_focused_region(search.previous_region);
+            "Closed search.".clone_into(&mut self.status_line);
+        }
+    }
+
+    fn append_search_character(&mut self, character: char) {
+        if let Some(search) = self.search.as_mut() {
+            search.query.push(character);
+            self.advance_search_to_edge(true);
+        }
+    }
+
+    fn backspace_search(&mut self) {
+        if let Some(search) = self.search.as_mut() {
+            search.query.pop();
+            self.advance_search_to_edge(true);
+        }
+    }
+
+    fn advance_search_to_edge(&mut self, first: bool) {
+        let Some((scope, query)) = self
+            .search
+            .as_ref()
+            .map(|search| (search.scope, search.query.clone()))
+        else {
+            return;
+        };
+        let matches = self.search_matches(scope, &query);
+        if matches.is_empty() {
+            if let Some(search) = self.search.as_mut() {
+                search.total_matches = 0;
+                search.active_match_index = 0;
+            }
+            self.status_line = format!("No matches for `{}`.", query);
+            return;
+        }
+        let match_index = if first {
+            0
+        } else {
+            matches.len().saturating_sub(1)
+        };
+        self.apply_search_match(scope, &matches, match_index);
+    }
+
+    fn advance_search(&mut self, forward: bool) {
+        let Some((scope, query, current)) = self.search.as_ref().map(|search| {
+            (
+                search.scope,
+                search.query.clone(),
+                search.active_match_index,
+            )
+        }) else {
+            return;
+        };
+        let matches = self.search_matches(scope, &query);
+        if matches.is_empty() {
+            self.status_line = format!("No matches for `{}`.", query);
+            return;
+        }
+        let next = if forward {
+            (current + 1) % matches.len()
+        } else if current == 0 {
+            matches.len().saturating_sub(1)
+        } else {
+            current - 1
+        };
+        self.apply_search_match(scope, &matches, next);
+    }
+
+    fn apply_search_match(&mut self, scope: SearchScope, matches: &[usize], match_index: usize) {
+        let Some(item_index) = matches.get(match_index).copied() else {
+            return;
+        };
+        match scope {
+            SearchScope::TimelineEvents => {
+                self.select_timeline_event_at(item_index);
+            }
+            SearchScope::ReviewCards => {
+                self.selected_review_card_index = item_index;
+                self.rebuild_live_model();
+            }
+            SearchScope::AiBrowserItems => {
+                self.set_ai_browser_index(item_index);
+                self.rebuild_live_model();
+            }
+        }
+        if let Some(search) = self.search.as_mut() {
+            search.total_matches = matches.len();
+            search.active_match_index = match_index;
+        }
+        let query = self
+            .search
+            .as_ref()
+            .map(|search| search.query.clone())
+            .unwrap_or_default();
+        self.status_line = format!(
+            "Match {} of {} for `{}`.",
+            match_index + 1,
+            matches.len(),
+            query
+        );
+    }
+
+    fn search_matches(&self, scope: SearchScope, query: &str) -> Vec<usize> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let needle = query.to_ascii_lowercase();
+        match scope {
+            SearchScope::TimelineEvents => self
+                .model
+                .timeline
+                .events
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| {
+                    format!("{} {}", item.headline, item.detail)
+                        .to_ascii_lowercase()
+                        .contains(&needle)
+                })
+                .map(|(index, _)| index)
+                .collect(),
+            SearchScope::ReviewCards => self
+                .model
+                .review
+                .cards
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| {
+                    format!(
+                        "{} {} {}",
+                        item.headline, item.confidence_label, item.section_label
+                    )
+                    .to_ascii_lowercase()
+                    .contains(&needle)
+                })
+                .map(|(index, _)| index)
+                .collect(),
+            SearchScope::AiBrowserItems => self
+                .model
+                .ai
+                .browser_items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| {
+                    format!("{} {}", item.headline, item.detail)
+                        .to_ascii_lowercase()
+                        .contains(&needle)
+                })
+                .map(|(index, _)| index)
+                .collect(),
+        }
+    }
+
+    fn move_top_nav_focus(&mut self, movement: NavMove) {
+        self.focused_top_nav_screen = match movement {
+            NavMove::Previous => self.focused_top_nav_screen.previous(),
+            NavMove::Next => self.focused_top_nav_screen.next(),
+            NavMove::First => Screen::Dashboard,
+            NavMove::Last => Screen::Ops,
+            NavMove::PageBackward => Screen::Dashboard,
+            NavMove::PageForward => Screen::Ops,
+        };
+        self.status_line = format!(
+            "Focused {} in primary navigation.",
+            self.focused_top_nav_screen.title()
+        );
+    }
+
+    fn move_timeline_chart(&mut self, movement: NavMove) {
+        match movement {
+            NavMove::Previous => self.handle(Action::PreviousTimelinePoint),
+            NavMove::Next => self.handle(Action::NextTimelinePoint),
+            NavMove::First => {
+                self.selected_timeline_point = 0;
+                self.select_nearest_event_for_current_point();
+                self.rebuild_live_model();
+                "Moved to the first heartrate point.".clone_into(&mut self.status_line);
+            }
+            NavMove::Last => {
+                self.selected_timeline_point =
+                    self.visible_timeline_point_count().saturating_sub(1);
+                self.select_nearest_event_for_current_point();
+                self.rebuild_live_model();
+                "Moved to the last heartrate point.".clone_into(&mut self.status_line);
+            }
+            NavMove::PageBackward => self.handle(Action::PreviousDay),
+            NavMove::PageForward => self.handle(Action::NextDay),
+        }
+    }
+
+    fn move_timeline_events(&mut self, movement: NavMove) {
+        match movement {
+            NavMove::Previous => {
+                self.handle(Action::PreviousEvent);
+            }
+            NavMove::Next => {
+                self.handle(Action::NextEvent);
+            }
+            NavMove::First => {
+                self.select_timeline_event_at(0);
+            }
+            NavMove::Last => {
+                let last = self.model.timeline.events.len().saturating_sub(1);
+                self.select_timeline_event_at(last);
+            }
+            NavMove::PageBackward => {
+                self.select_relative_event(-5);
+                self.align_point_to_selected_event();
+                self.rebuild_live_model();
+            }
+            NavMove::PageForward => {
+                self.select_relative_event(5);
+                self.align_point_to_selected_event();
+                self.rebuild_live_model();
+            }
+        }
+    }
+
+    fn move_trend_window(&mut self, movement: NavMove) {
+        self.trends_window = match movement {
+            NavMove::Previous => self.trends_window.previous(),
+            NavMove::Next => self.trends_window.next(),
+            NavMove::First => TrendWindowKind::Days7,
+            NavMove::Last => TrendWindowKind::Days90,
+            NavMove::PageBackward => TrendWindowKind::Days7,
+            NavMove::PageForward => TrendWindowKind::Days90,
+        };
+        self.status_line = format!("Trend window changed to {}.", self.trends_window.label());
+        self.rebuild_live_model();
+    }
+
+    fn move_review_mode(&mut self, movement: NavMove) {
+        self.review_mode = match movement {
+            NavMove::Previous => match self.review_mode {
+                ReviewScreenMode::Today => ReviewScreenMode::Investigate,
+                ReviewScreenMode::Week => ReviewScreenMode::Today,
+                ReviewScreenMode::Investigate => ReviewScreenMode::Week,
+            },
+            NavMove::Next => self.review_mode.next(),
+            NavMove::First => ReviewScreenMode::Today,
+            NavMove::Last => ReviewScreenMode::Investigate,
+            NavMove::PageBackward => ReviewScreenMode::Today,
+            NavMove::PageForward => ReviewScreenMode::Investigate,
+        };
+        self.selected_review_card_index = 0;
+        self.status_line = format!("Review mode changed to {}.", self.review_mode.label());
+        self.rebuild_live_model();
+    }
+
+    fn move_review_focus(&mut self, movement: NavMove) {
+        let all = ReviewFocus::ALL;
+        let current = all
+            .iter()
+            .position(|focus| *focus == self.review_focus)
+            .unwrap_or(0);
+        let next = match movement {
+            NavMove::Previous => {
+                if current == 0 {
+                    all.len().saturating_sub(1)
+                } else {
+                    current - 1
+                }
+            }
+            NavMove::Next => (current + 1) % all.len(),
+            NavMove::First => 0,
+            NavMove::Last => all.len().saturating_sub(1),
+            NavMove::PageBackward => 0,
+            NavMove::PageForward => all.len().saturating_sub(1),
+        };
+        self.review_focus = all[next];
+        self.selected_review_card_index = 0;
+        self.status_line = format!(
+            "Investigation focus changed to {}.",
+            self.review_focus.label()
+        );
+        self.rebuild_live_model();
+    }
+
+    fn move_review_cards(&mut self, movement: NavMove) {
+        match movement {
+            NavMove::Previous => {
+                self.handle(Action::PreviousReviewCard);
+            }
+            NavMove::Next => {
+                self.handle(Action::NextReviewCard);
+            }
+            NavMove::First => {
+                self.selected_review_card_index = 0;
+                self.rebuild_live_model();
+                "Moved to the first review card.".clone_into(&mut self.status_line);
+            }
+            NavMove::Last => {
+                self.selected_review_card_index =
+                    self.current_review_card_count().saturating_sub(1);
+                self.rebuild_live_model();
+                "Moved to the last review card.".clone_into(&mut self.status_line);
+            }
+            NavMove::PageBackward => {
+                self.selected_review_card_index = self.selected_review_card_index.saturating_sub(5);
+                self.rebuild_live_model();
+                "Jumped earlier in the review deck.".clone_into(&mut self.status_line);
+            }
+            NavMove::PageForward => {
+                let max_index = self.current_review_card_count().saturating_sub(1);
+                self.selected_review_card_index =
+                    usize::min(self.selected_review_card_index.saturating_add(5), max_index);
+                self.rebuild_live_model();
+                "Jumped later in the review deck.".clone_into(&mut self.status_line);
+            }
+        }
+    }
+
+    fn move_ai_browser_tabs(&mut self, movement: NavMove) {
+        self.ai_browser_tab = match movement {
+            NavMove::Previous => self.ai_browser_tab.previous(),
+            NavMove::Next => self.ai_browser_tab.next(),
+            NavMove::First => AiBrowserTab::Runs,
+            NavMove::Last => AiBrowserTab::Evals,
+            NavMove::PageBackward => AiBrowserTab::Runs,
+            NavMove::PageForward => AiBrowserTab::Evals,
+        };
+        self.status_line = format!("AI browser switched to {}.", self.ai_browser_tab.label());
+        self.rebuild_live_model();
+    }
+
+    fn move_ai_launch_points(&mut self, movement: NavMove) {
+        let count = self.model.ai.launch_points.len();
+        if count == 0 {
+            return;
+        }
+        let current = self.selected_ai_launch_index();
+        let next = match movement {
+            NavMove::Previous => current.saturating_sub(1),
+            NavMove::Next => usize::min(current + 1, count.saturating_sub(1)),
+            NavMove::First => 0,
+            NavMove::Last => count.saturating_sub(1),
+            NavMove::PageBackward => current.saturating_sub(5),
+            NavMove::PageForward => usize::min(current.saturating_add(5), count.saturating_sub(1)),
+        };
+        self.set_selected_ai_launch_index(next);
+        self.status_line = format!("Focused AI launch point {}.", next + 1);
+    }
+
+    fn move_ai_browser_items(&mut self, movement: NavMove) {
+        match movement {
+            NavMove::Previous => {
+                self.handle(Action::PreviousAiBrowserItem);
+            }
+            NavMove::Next => {
+                self.handle(Action::NextAiBrowserItem);
+            }
+            NavMove::First => {
+                self.set_ai_browser_index(0);
+                self.rebuild_live_model();
+                "Moved to the first saved artifact.".clone_into(&mut self.status_line);
+            }
+            NavMove::Last => {
+                let last = self.ai_browser_item_count().saturating_sub(1);
+                self.set_ai_browser_index(last);
+                self.rebuild_live_model();
+                "Moved to the last saved artifact.".clone_into(&mut self.status_line);
+            }
+            NavMove::PageBackward => {
+                self.adjust_ai_browser_index(-5);
+                self.rebuild_live_model();
+                "Jumped earlier in saved artifacts.".clone_into(&mut self.status_line);
+            }
+            NavMove::PageForward => {
+                self.adjust_ai_browser_index(5);
+                self.rebuild_live_model();
+                "Jumped later in saved artifacts.".clone_into(&mut self.status_line);
+            }
+        }
+    }
+
+    fn screen_supports_day_paging(screen: Screen) -> bool {
+        matches!(
+            screen,
+            Screen::Dashboard | Screen::Timeline | Screen::Explain | Screen::Review
+        )
+    }
+
+    fn selected_ai_launch_index(&self) -> usize {
+        let count = self.model.ai.launch_points.len();
+        if count == 0 {
+            0
+        } else {
+            usize::min(self.selected_ai_launch_index, count.saturating_sub(1))
+        }
+    }
+
+    fn set_selected_ai_launch_index(&mut self, index: usize) {
+        let count = self.model.ai.launch_points.len();
+        if count == 0 {
+            return;
+        }
+        self.selected_ai_launch_index = usize::min(index, count.saturating_sub(1));
+        self.rebuild_live_model();
+    }
+
+    fn ai_browser_item_count(&self) -> usize {
+        self.model.ai.browser_items.len()
+    }
+
+    fn set_ai_browser_index(&mut self, index: usize) {
+        match self.ai_browser_tab {
+            AiBrowserTab::Runs => self.selected_ai_run_index = index,
+            AiBrowserTab::Snapshots => self.selected_snapshot_catalog_index = index,
+            AiBrowserTab::Reports => self.selected_report_export_index = index,
+            AiBrowserTab::Evals => self.selected_ai_eval_run_index = index,
+        }
+    }
+
+    fn select_timeline_event_at(&mut self, index: usize) {
+        let Some(snapshot) = &self.live_snapshot else {
+            return;
+        };
+        let Some(day) = self.selected_day_label() else {
+            return;
+        };
+        let events = filtered_events_for_day(snapshot, &day, &self.overlay_filters);
+        if let Some(event) = events.get(index) {
+            let selected_id = event.context_event_id.clone();
+            let title = event.title.clone();
+            self.selected_event_id = Some(selected_id);
+            self.align_point_to_selected_event();
+            self.rebuild_live_model();
+            self.status_line = format!("Selected {}.", title);
+        }
+    }
 }
 
 impl Screen {
@@ -1592,6 +2387,8 @@ pub fn build_state_from_snapshot(
     snapshot: LiveSnapshot,
 ) -> AppState {
     let selected_day_index = newest_day_index(&snapshot);
+    let screen_focus_memory =
+        std::array::from_fn(|index| navigation::default_region(Screen::ALL[index]));
     let mut app = AppState {
         mode,
         active_screen: Screen::Dashboard,
@@ -1601,6 +2398,12 @@ pub fn build_state_from_snapshot(
         should_quit: false,
         refresh_in_flight: false,
         live_snapshot: Some(snapshot),
+        focused_region: navigation::default_region(Screen::Dashboard),
+        screen_focus_memory,
+        focused_top_nav_screen: Screen::Dashboard,
+        help_open: false,
+        focus_before_help: None,
+        search: None,
         selected_day_index,
         selected_timeline_point: 0,
         timeline_window_hours: 24,
@@ -1608,7 +2411,9 @@ pub fn build_state_from_snapshot(
         selected_event_id: None,
         selected_review_card_index: 0,
         ai_preflight: None,
+        ai_preflight_control: PreflightControl::Confirm,
         ai_browser_tab: AiBrowserTab::Runs,
+        selected_ai_launch_index: 0,
         selected_ai_run_index: 0,
         selected_snapshot_catalog_index: 0,
         selected_report_export_index: 0,
@@ -2027,9 +2832,9 @@ fn build_dashboard_model(
         change_summary,
         highlights,
         ai_actions: vec![
-            "[ai] a review this day".to_owned(),
-            "[ai] c compare this week to the previous week".to_owned(),
-            "[ai] 7 open the AI workbench".to_owned(),
+            "[ai] Review this day from the AI launch region.".to_owned(),
+            "[ai] Compare this week with the previous week from the AI launch region.".to_owned(),
+            "[ai] Open the AI workbench from Views for saved runs and reports.".to_owned(),
         ],
     }
 }
@@ -2345,12 +3150,15 @@ fn build_explain_model(
                     }
                 })
                 .collect::<Vec<_>>();
-            lines.push("Press 2 to open Timeline with the same selected event.".to_owned());
+            lines.push(
+                "Move to Views and activate Timeline to inspect the same selected event."
+                    .to_owned(),
+            );
             lines
         },
         ai_actions: vec![
-            "[ai] a review this day inside the AI workbench".to_owned(),
-            "[ai] 7 open the AI workbench for saved runs and reports".to_owned(),
+            "[ai] Review this day from the AI launch region.".to_owned(),
+            "[ai] Open the AI workbench from Views for saved runs and reports.".to_owned(),
         ],
     }
 }
@@ -2387,8 +3195,9 @@ fn build_patterns_model(
         empty_message:
             "Not enough data yet. Patterns appear after at least 3 comparable days.".to_owned(),
         ai_actions: vec![
-            "[ai] c compare this week to the previous week".to_owned(),
-            "[ai] 7 open the AI workbench".to_owned(),
+            "[ai] Compare this week with the previous week from the AI launch region."
+                .to_owned(),
+            "[ai] Open the AI workbench from Views for saved runs and reports.".to_owned(),
         ],
     }
 }
@@ -2808,9 +3617,9 @@ fn build_review_model(
         ),
         empty_message: review_empty_message(context.review_mode, context.review_focus),
         ai_actions: vec![
-            "[ai] a review this day in the AI workbench".to_owned(),
-            "[ai] c compare this week to the previous week".to_owned(),
-            "[ai] 7 open the dedicated AI workbench".to_owned(),
+            "[ai] Review this day from the AI launch region.".to_owned(),
+            "[ai] Compare this week with the previous week from the AI launch region.".to_owned(),
+            "[ai] Open the AI workbench from Views for saved runs and reports.".to_owned(),
         ],
     }
 }
@@ -2821,7 +3630,7 @@ fn build_ai_workbench_model(
 ) -> AiWorkbenchModel {
     let selected_day = selected_day_label(snapshot, options.selected_day_index)
         .unwrap_or_else(|| latest_review_anchor_day(snapshot));
-    let launch_points = build_ai_launch_points(&selected_day);
+    let launch_points = build_ai_launch_points(&selected_day, options.selected_ai_launch_index);
     let browser_tabs = [
         (
             AiBrowserTab::Runs,
@@ -2986,7 +3795,7 @@ fn build_ai_workbench_model(
     }
 }
 
-fn build_ai_launch_points(selected_day: &str) -> Vec<AiLaunchPointView> {
+fn build_ai_launch_points(selected_day: &str, selected_index: usize) -> Vec<AiLaunchPointView> {
     vec![
         AiLaunchPointView {
             intent: AiLaunchIntent::ReviewSelectedDay,
@@ -2995,6 +3804,7 @@ fn build_ai_launch_points(selected_day: &str) -> Vec<AiLaunchPointView> {
                 "Prepare a snapshot-scoped review for day:{selected_day}, then confirm the exact payload in preflight before any upload."
             ),
             key_hint: "a".to_owned(),
+            selected: selected_index == 0,
         },
         AiLaunchPointView {
             intent: AiLaunchIntent::CompareSelectedWeek,
@@ -3003,6 +3813,7 @@ fn build_ai_launch_points(selected_day: &str) -> Vec<AiLaunchPointView> {
                 "Prepare a week-to-week compare with explicit snapshot A/B provenance and model/privacy choices."
                     .to_owned(),
             key_hint: "c".to_owned(),
+            selected: selected_index == 1,
         },
         AiLaunchPointView {
             intent: AiLaunchIntent::ChallengeSelectedDay,
@@ -3011,6 +3822,7 @@ fn build_ai_launch_points(selected_day: &str) -> Vec<AiLaunchPointView> {
                 "Launch a bounded follow-up that expands evidence, surfaces counterevidence, or suggests the next local drill-down."
                     .to_owned(),
             key_hint: "e/y/i/d on saved run".to_owned(),
+            selected: selected_index == 2,
         },
         AiLaunchPointView {
             intent: AiLaunchIntent::ChallengeSelectedDay,
@@ -3019,6 +3831,7 @@ fn build_ai_launch_points(selected_day: &str) -> Vec<AiLaunchPointView> {
                 "Export a human-readable report from the selected snapshot or saved AI run without leaving the TUI flow."
                     .to_owned(),
             key_hint: "g on saved item".to_owned(),
+            selected: selected_index == 3,
         },
     ]
 }
@@ -3068,7 +3881,7 @@ fn build_ai_preflight_view(preflight: &AiPreflightState) -> AiPreflightView {
                 .map(|path| format!("  - {path}")),
         );
     }
-    body_lines.push("confirm with Enter | cancel with n | cycle privacy with p".to_owned());
+    body_lines.push("Tab or Left/Right move controls | Enter activates | Esc closes".to_owned());
 
     AiPreflightView {
         title: format!("Preflight | {}", preflight.intent.short_label()),
@@ -7003,7 +7816,8 @@ mod tests {
         DataFamily, HeartRateDay, LiveModelOptions, LiveSnapshot, OverlayFilterState,
         PatternMetricFilter, REVIEW_PROMPT_VERSION, RefreshPolicySnapshot, ReviewScreenMode,
         RunMode, Screen, TrendWindowKind, WebhookOpsSnapshot, build_ai_artifact_summary_view,
-        build_live_model, build_ops_model, demo_eval_run_details, newest_day_index, serialize_json,
+        build_live_model, build_ops_model, build_state_from_snapshot, demo_eval_run_details,
+        newest_day_index, serialize_json,
     };
     use crate::action::Action;
     use crate::ai::{
@@ -7011,6 +7825,7 @@ mod tests {
         ArtifactStatus, ConfidenceLevel, GuidedFollowUpKind, ReviewArtifactV1, SufficiencyLevel,
     };
     use crate::insights::MetricPoint;
+    use crate::navigation::{self, FocusRegion, PreflightControl};
     use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
     use crate::review::{
         InvestigationReport, ReviewCard, ReviewConfidence, ReviewDeck, ReviewFocus, ReviewMode,
@@ -7196,6 +8011,8 @@ mod tests {
 
     fn make_live_app(snapshot: LiveSnapshot) -> AppState {
         let selected_day_index = newest_day_index(&snapshot);
+        let screen_focus_memory =
+            std::array::from_fn(|index| navigation::default_region(Screen::ALL[index]));
         let mut app = AppState {
             mode: RunMode::Live,
             active_screen: Screen::Timeline,
@@ -7205,6 +8022,12 @@ mod tests {
             should_quit: false,
             refresh_in_flight: false,
             live_snapshot: Some(snapshot),
+            focused_region: navigation::default_region(Screen::Timeline),
+            screen_focus_memory,
+            focused_top_nav_screen: Screen::Timeline,
+            help_open: false,
+            focus_before_help: None,
+            search: None,
             selected_day_index,
             selected_timeline_point: 0,
             timeline_window_hours: 24,
@@ -7212,7 +8035,9 @@ mod tests {
             selected_event_id: None,
             selected_review_card_index: 0,
             ai_preflight: None,
+            ai_preflight_control: PreflightControl::Confirm,
             ai_browser_tab: AiBrowserTab::Runs,
+            selected_ai_launch_index: 0,
             selected_ai_run_index: 0,
             selected_snapshot_catalog_index: 0,
             selected_report_export_index: 0,
@@ -7429,6 +8254,7 @@ mod tests {
             selected_event_id: None,
             ai_preflight: None,
             ai_browser_tab: AiBrowserTab::Runs,
+            selected_ai_launch_index: 0,
             selected_ai_run_index: 0,
             selected_snapshot_catalog_index: 0,
             selected_report_export_index: 0,
@@ -8040,6 +8866,7 @@ mod tests {
                 selected_event_id: None,
                 ai_preflight: None,
                 ai_browser_tab: AiBrowserTab::Runs,
+                selected_ai_launch_index: 0,
                 selected_ai_run_index: 0,
                 selected_snapshot_catalog_index: 0,
                 selected_report_export_index: 0,
@@ -8099,6 +8926,7 @@ mod tests {
                 selected_event_id: None,
                 ai_preflight: None,
                 ai_browser_tab: AiBrowserTab::Runs,
+                selected_ai_launch_index: 0,
                 selected_ai_run_index: 0,
                 selected_snapshot_catalog_index: 0,
                 selected_report_export_index: 0,
@@ -8214,6 +9042,7 @@ mod tests {
                 selected_event_id: None,
                 ai_preflight: None,
                 ai_browser_tab: AiBrowserTab::Runs,
+                selected_ai_launch_index: 0,
                 selected_ai_run_index: 0,
                 selected_snapshot_catalog_index: 0,
                 selected_report_export_index: 0,
@@ -8358,5 +9187,189 @@ mod tests {
         assert_eq!(bounds.context_end, "2026-04-19");
         assert_eq!(bounds.rest_mode_start, "2025-10-10");
         assert_eq!(bounds.rest_mode_end, "2026-04-19");
+    }
+
+    #[test]
+    fn help_toggle_restores_the_previous_region() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Review;
+        app.handle(Action::FocusPreviousRegion);
+        app.handle(Action::FocusPreviousRegion);
+
+        assert_eq!(app.focused_region(), FocusRegion::ContextPrimary);
+
+        app.handle(Action::ToggleHelp);
+        assert!(app.help_open());
+
+        app.handle(Action::ToggleHelp);
+        assert!(!app.help_open());
+        assert_eq!(app.focused_region(), FocusRegion::ContextPrimary);
+    }
+
+    #[test]
+    fn closing_search_restores_the_previous_region() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Review;
+
+        assert_eq!(app.focused_region(), FocusRegion::Primary);
+
+        app.handle(Action::OpenSearch);
+        assert!(app.search_state().is_some());
+
+        app.handle(Action::CloseSearch);
+        assert!(app.search_state().is_none());
+        assert_eq!(app.focused_region(), FocusRegion::Primary);
+    }
+
+    #[test]
+    fn top_nav_activation_switches_screens_and_restores_screen_focus() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Review;
+        app.set_focused_region(FocusRegion::ContextPrimary);
+
+        app.handle(Action::Back);
+        app.handle(Action::Back);
+        app.handle(Action::Back);
+        assert_eq!(app.focused_region(), FocusRegion::TopNav);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::Next));
+        assert_eq!(app.focused_top_nav_screen(), Screen::Ai);
+
+        app.handle(Action::ActivateFocusedRegion);
+        assert_eq!(app.active_screen, Screen::Ai);
+        assert_eq!(app.focused_region(), FocusRegion::ContextPrimary);
+    }
+
+    #[test]
+    fn navigation_smoke_path_covers_screen_switching_search_help_and_back_out() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+
+        app.handle(Action::Back);
+        assert_eq!(app.focused_region(), FocusRegion::TopNav);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::Next));
+        assert_eq!(app.focused_top_nav_screen(), Screen::Timeline);
+
+        app.handle(Action::ActivateFocusedRegion);
+        assert_eq!(app.active_screen, Screen::Timeline);
+        assert_eq!(app.focused_region(), FocusRegion::ContextPrimary);
+
+        app.handle(Action::FocusNextRegion);
+        assert_eq!(app.focused_region(), FocusRegion::Primary);
+
+        app.handle(Action::OpenSearch);
+        assert!(app.search_state().is_some());
+        app.handle(Action::SearchAppend('c'));
+        assert_eq!(
+            app.search_state().map(|search| search.query.as_str()),
+            Some("c")
+        );
+
+        app.handle(Action::Back);
+        assert!(app.search_state().is_none());
+        assert_eq!(app.focused_region(), FocusRegion::Primary);
+
+        app.handle(Action::ToggleHelp);
+        assert!(app.help_open());
+
+        app.handle(Action::Back);
+        assert!(!app.help_open());
+        assert_eq!(app.focused_region(), FocusRegion::Primary);
+
+        app.handle(Action::ActivateFocusedRegion);
+        assert_eq!(app.focused_region(), FocusRegion::Secondary);
+
+        app.handle(Action::Back);
+        assert_eq!(app.focused_region(), FocusRegion::Primary);
+    }
+
+    #[test]
+    fn back_out_walks_back_through_screen_region_order() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Review;
+        app.set_focused_region(FocusRegion::ContextPrimary);
+
+        assert_eq!(app.focused_region(), FocusRegion::ContextPrimary);
+
+        app.handle(Action::FocusNextRegion);
+        app.handle(Action::FocusNextRegion);
+        assert_eq!(app.focused_region(), FocusRegion::Primary);
+
+        app.handle(Action::Back);
+        assert_eq!(app.focused_region(), FocusRegion::ContextSecondary);
+
+        app.handle(Action::Back);
+        assert_eq!(app.focused_region(), FocusRegion::ContextPrimary);
+
+        app.handle(Action::Back);
+        assert_eq!(app.focused_region(), FocusRegion::TopNav);
+    }
+
+    #[test]
+    fn selector_page_navigation_jumps_to_selector_edges() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Trends;
+        app.set_focused_region(FocusRegion::ContextPrimary);
+
+        assert_eq!(app.focused_region(), FocusRegion::ContextPrimary);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::PageForward));
+        assert_eq!(app.trends_window, TrendWindowKind::Days90);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::PageBackward));
+        assert_eq!(app.trends_window, TrendWindowKind::Days7);
+    }
+
+    #[test]
+    fn ai_launch_points_follow_list_style_navigation() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Ai;
+        app.set_focused_region(FocusRegion::ContextPrimary);
+
+        assert_eq!(app.focused_region(), FocusRegion::ContextPrimary);
+
+        app.handle(Action::FocusNextRegion);
+        assert_eq!(app.focused_region(), FocusRegion::Primary);
+        assert_eq!(app.selected_ai_launch_index(), 0);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::Next));
+        assert_eq!(app.selected_ai_launch_index(), 1);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::PageForward));
+        assert_eq!(
+            app.selected_ai_launch_index(),
+            app.model.ai.launch_points.len().saturating_sub(1)
+        );
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::First));
+        assert_eq!(app.selected_ai_launch_index(), 0);
     }
 }

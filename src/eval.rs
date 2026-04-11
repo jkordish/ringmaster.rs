@@ -205,7 +205,14 @@ struct RegressionDeltaSummary {
     regressions: Vec<String>,
 }
 
-pub async fn run_eval(config: &Config, args: AiEvalArgs) -> Result<Option<String>> {
+/// Runs the fixture-backed AI evaluation workflow and optionally exports the report.
+///
+/// # Errors
+///
+/// Returns an error when fixture inputs cannot be loaded, an artifact cannot be
+/// decoded or graded, the export cannot be written, or persisted eval details
+/// cannot be stored.
+pub fn run_eval(config: &Config, args: &AiEvalArgs) -> Result<Option<String>> {
     let manifest = load_manifest(&args.fixture_dir)?;
     let candidate_label = args
         .candidate
@@ -1261,14 +1268,13 @@ mod tests {
         let export_path = fixture_root.join("eval.json");
         let output = run_eval(
             &Config::load().unwrap_or_else(|error| panic!("config should load: {error}")),
-            AiEvalArgs {
+            &AiEvalArgs {
                 fixture_dir: fixture_root.to_path_buf(),
                 candidate: None,
                 baseline: None,
                 export: Some(export_path.clone()),
             },
         )
-        .await
         .unwrap_or_else(|error| panic!("eval should succeed: {error}"))
         .unwrap_or_else(|| panic!("eval should render output"));
 

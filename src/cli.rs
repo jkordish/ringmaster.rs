@@ -494,6 +494,11 @@ pub struct WebhookSubscriptionsSyncArgs {
 }
 
 impl Cli {
+    /// Parses command-line arguments into the typed CLI model.
+    ///
+    /// # Errors
+    ///
+    /// Returns a CLI error string when clap rejects the provided argument list.
     pub fn parse_from<I, T>(args: I) -> Result<Self>
     where
         I: IntoIterator<Item = T>,
@@ -502,6 +507,7 @@ impl Cli {
         Self::try_parse_from(args).map_err(|error| RingmasterError::Cli(error.to_string()))
     }
 
+    #[must_use]
     pub fn help_text() -> String {
         let mut command = Self::command();
         let mut buffer = Vec::new();

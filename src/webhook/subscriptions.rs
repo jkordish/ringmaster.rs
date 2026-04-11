@@ -130,6 +130,12 @@ struct UpdateWebhookSubscriptionRequest<'a> {
     data_type: Option<&'a str>,
 }
 
+/// Lists remote webhook subscriptions and records the desired and observed state.
+///
+/// # Errors
+///
+/// Returns an error when desired targets cannot be derived, snapshot persistence
+/// fails, or the fixture/live admin client cannot list subscriptions.
 pub async fn list_subscriptions(
     config: &Config,
     store: &Store,
@@ -159,6 +165,13 @@ pub async fn list_subscriptions(
     })
 }
 
+/// Reconciles remote webhook subscriptions with the locally configured targets.
+///
+/// # Errors
+///
+/// Returns an error when desired targets cannot be derived, the sync plan cannot
+/// be built, fixture/live admin operations fail, or state snapshots cannot be
+/// persisted.
 pub async fn sync_subscriptions(
     config: &Config,
     store: &Store,
@@ -220,6 +233,12 @@ pub async fn sync_subscriptions(
     })
 }
 
+/// Builds a reconciliation plan for desired versus remote webhook subscriptions.
+///
+/// # Errors
+///
+/// Returns an error when renewal lead seconds cannot be represented as a signed
+/// duration.
 pub fn build_sync_plan(
     desired: &[DesiredWebhookSubscriptionTarget],
     remote: &[RemoteWebhookSubscription],
@@ -332,14 +351,14 @@ impl WebhookAdminClient {
     async fn list(&mut self) -> Result<Vec<RemoteWebhookSubscription>> {
         match self {
             Self::Live(client) => client.list().await,
-            Self::Fixture(client) => client.list().await,
+            Self::Fixture(client) => Ok(client.list()),
         }
     }
 
     async fn apply(&mut self, plan: &SubscriptionSyncPlan) -> Result<()> {
         match self {
             Self::Live(client) => client.apply(plan).await,
-            Self::Fixture(client) => client.apply(plan).await,
+            Self::Fixture(client) => client.apply(plan),
         }
     }
 }
@@ -503,11 +522,11 @@ impl FixtureWebhookAdminClient {
         Ok(Self { subscriptions })
     }
 
-    async fn list(&self) -> Result<Vec<RemoteWebhookSubscription>> {
-        Ok(self.subscriptions.clone())
+    fn list(&self) -> Vec<RemoteWebhookSubscription> {
+        self.subscriptions.clone()
     }
 
-    async fn apply(&mut self, plan: &SubscriptionSyncPlan) -> Result<()> {
+    fn apply(&mut self, plan: &SubscriptionSyncPlan) -> Result<()> {
         for desired in &plan.create {
             self.subscriptions.push(RemoteWebhookSubscription {
                 id: format!(

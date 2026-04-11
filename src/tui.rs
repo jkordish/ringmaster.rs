@@ -16,8 +16,8 @@ use ratatui::{
     backend::{CrosstermBackend, TestBackend},
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
-    text::Line,
-    widgets::{Block, Paragraph, Tabs},
+    text::{Line, Span},
+    widgets::{Block, Clear, Paragraph, Tabs, Wrap},
 };
 use time::{
     Date, Duration as DateDuration, OffsetDateTime, format_description::well_known::Rfc3339,
@@ -37,6 +37,8 @@ use crate::components::{
 use crate::config::Config;
 use crate::error::{Result, RingmasterError};
 use crate::eval::parse_persisted_eval_details;
+use crate::keybindings;
+use crate::navigation;
 use crate::oura::{auth, sync::SyncOptions, sync::SyncReport, sync::sync_selected};
 use crate::refresh::{SyncFamily, due_families, next_wake_duration};
 use crate::report;
@@ -86,7 +88,14 @@ enum ReportSourceSelection {
 
 static REPORT_EXPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-pub async fn run(config: &Config, app: &mut AppState) -> Result<()> {
+/// Runs the interactive terminal session for the current app state.
+///
+/// # Errors
+///
+/// Returns an error when terminal capabilities are unavailable, terminal setup
+/// or event handling fails, or shutdown side effects such as AI interruption or
+/// worker teardown cannot complete cleanly.
+pub fn run(config: &Config, app: &mut AppState) -> Result<()> {
     if !(stdout().is_terminal() && io::stdin().is_terminal()) {
         return Err(RingmasterError::Ui(
             "interactive TUI mode requires a terminal".to_owned(),
@@ -121,11 +130,7 @@ pub async fn run(config: &Config, app: &mut AppState) -> Result<()> {
         {
             let event = event::read()
                 .map_err(|error| RingmasterError::io("reading terminal event", error))?;
-            if let Some(action) = map_event_with_preflight(
-                app.active_screen,
-                app.ai_preflight_state().is_some(),
-                event,
-            ) {
+            if let Some(action) = map_event_with_context(app.binding_context(), event) {
                 let source_screen = app.active_screen;
                 let selected_day = app.selected_day_label();
                 let current_preflight = app.ai_preflight_state().cloned();
@@ -186,11 +191,23 @@ pub async fn run(config: &Config, app: &mut AppState) -> Result<()> {
     Ok(())
 }
 
+/// Renders the current app state into a terminal snapshot string.
+///
+/// # Errors
+///
+/// Returns an error when the in-memory terminal backend cannot be constructed or
+/// the frame cannot be rendered.
 pub fn render_snapshot(app: &AppState, width: u16, height: u16) -> Result<String> {
     let buffer = render_buffer(app, width, height)?;
     Ok(buffer_to_string(&buffer))
 }
 
+/// Renders the current app state into a Ratatui buffer.
+///
+/// # Errors
+///
+/// Returns an error when the in-memory terminal backend cannot be constructed or
+/// the frame cannot be rendered.
 pub fn render_buffer(app: &AppState, width: u16, height: u16) -> Result<Buffer> {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend)
@@ -225,7 +242,8 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &AppState) {
         .constraints([
             Constraint::Length(if ui.viewport.is_compact() { 4 } else { 5 }),
             Constraint::Length(3),
-            Constraint::Min(10),
+            Constraint::Length(3),
+            Constraint::Min(8),
             Constraint::Length(3),
         ])
         .split(frame.area());
@@ -239,23 +257,53 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &AppState) {
         ));
     frame.render_widget(header, layout[0]);
 
+    let top_nav_focused = app.is_region_focused(navigation::FocusRegion::TopNav);
+    let top_nav_selected_index = if top_nav_focused {
+        Screen::ALL
+            .iter()
+            .position(|screen| *screen == app.focused_top_nav_screen())
+            .unwrap_or_else(|| app.active_tab_index())
+    } else {
+        app.active_tab_index()
+    };
     let tab_titles = Screen::ALL
         .into_iter()
-        .map(|screen| Line::from(screen.title()))
+        .map(|screen| {
+            let active_prefix = if screen == app.active_screen {
+                "* "
+            } else {
+                "  "
+            };
+            Line::from(format!("{active_prefix}{}", screen.title()))
+        })
         .collect::<Vec<_>>();
     let tabs = Tabs::new(tab_titles)
         .block(chrome::panel(
             &theme,
-            chrome::title_with_badge(&theme, "Views", app.active_screen.title(), Tone::Accent),
+            chrome::title_with_badge(
+                &theme,
+                "Views",
+                if top_nav_focused {
+                    "focus in tabs"
+                } else {
+                    app.active_screen.title()
+                },
+                if top_nav_focused {
+                    Tone::Focus
+                } else {
+                    Tone::Accent
+                },
+            ),
             PanelKind::Subtle,
         ))
         .style(theme.annotation())
         .highlight_style(theme.emphasis(Tone::Focus))
         .divider(" ")
-        .select(app.active_tab_index());
+        .select(top_nav_selected_index);
     frame.render_widget(tabs, layout[1]);
 
-    draw_active_screen(frame, layout[2], app, &ui, &theme);
+    draw_orientation_strip(frame, layout[2], app, &theme);
+    draw_active_screen(frame, layout[3], app, &ui, &theme);
 
     let footer = Paragraph::new(app.footer())
         .style(theme.annotation())
@@ -264,7 +312,9 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &AppState) {
             chrome::title_with_badge(&theme, "Keys", "keyboard-first", Tone::Muted),
             PanelKind::Subtle,
         ));
-    frame.render_widget(footer, layout[3]);
+    frame.render_widget(footer, layout[4]);
+
+    draw_transient_overlays(frame, app, &theme);
 }
 
 fn draw_active_screen(
@@ -286,178 +336,203 @@ fn draw_active_screen(
     }
 }
 
-#[cfg(test)]
-fn map_event(active_screen: Screen, event: Event) -> Option<Action> {
-    map_event_with_preflight(active_screen, false, event)
+fn draw_orientation_strip(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    app: &AppState,
+    theme: &Theme,
+) {
+    let region_summary = navigation::screen_regions(app.active_screen)
+        .iter()
+        .filter_map(|region| {
+            navigation::region_label(app.active_screen, *region).map(|label| {
+                if *region == app.focused_region() && app.current_transient().is_none() {
+                    format!("[{label}]")
+                } else {
+                    label.to_owned()
+                }
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+
+    let transient_label = match app.current_transient() {
+        Some(navigation::TransientLayer::Help) => "help open",
+        Some(navigation::TransientLayer::Search) => "find open",
+        Some(navigation::TransientLayer::AiPreflight) => "preflight open",
+        None => "body focus",
+    };
+    let body = format!("Focus: {transient_label} | {region_summary}");
+    frame.render_widget(
+        Paragraph::new(body)
+            .wrap(Wrap { trim: true })
+            .block(chrome::panel(
+                theme,
+                chrome::title_with_badge(
+                    theme,
+                    "Orientation",
+                    app.active_screen.title(),
+                    Tone::Info,
+                ),
+                PanelKind::Subtle,
+            )),
+        area,
+    );
 }
 
+fn draw_transient_overlays(frame: &mut ratatui::Frame<'_>, app: &AppState, theme: &Theme) {
+    if let Some(search) = app.search_state() {
+        draw_search_overlay(frame, frame.area(), search, theme);
+    }
+    if app.help_open() {
+        draw_help_overlay(frame, frame.area(), app.binding_context(), theme);
+    }
+}
+
+fn draw_search_overlay(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    search: &navigation::SearchState,
+    theme: &Theme,
+) {
+    let overlay = centered_rect(area, 60, 7);
+    let result_summary = if search.total_matches == 0 {
+        "No matches yet".to_owned()
+    } else {
+        format!(
+            "Result {} of {}",
+            search.active_match_index + 1,
+            search.total_matches
+        )
+    };
+    let body = vec![
+        Line::from(vec![
+            Span::styled("Query: ", theme.section_title(Tone::Focus)),
+            Span::raw(if search.query.is_empty() {
+                "<type to search>".to_owned()
+            } else {
+                search.query.clone()
+            }),
+        ]),
+        Line::from(result_summary),
+        Line::from("Enter next  Shift+Enter previous  Esc close"),
+    ];
+    frame.render_widget(Clear, overlay);
+    frame.render_widget(
+        Paragraph::new(body)
+            .wrap(Wrap { trim: true })
+            .block(chrome::panel(
+                theme,
+                chrome::title_with_badge(
+                    theme,
+                    "Find in Current Context",
+                    "search focus",
+                    Tone::Focus,
+                ),
+                PanelKind::Section,
+            )),
+        overlay,
+    );
+}
+
+fn draw_help_overlay(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    context: keybindings::BindingContext,
+    theme: &Theme,
+) {
+    let groups = keybindings::help_groups(context);
+    let mut lines = Vec::new();
+    for (index, (group, entries)) in groups.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(vec![Span::styled(
+            (*group).to_owned(),
+            theme.section_title(Tone::Focus),
+        )]));
+        if !entries.is_empty() {
+            lines.push(Line::from(format!("  {}", entries.join("  "))));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from("Esc closes this help."));
+
+    let overlay = centered_rect(area, 72, 18);
+    frame.render_widget(Clear, overlay);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(chrome::panel(
+                theme,
+                chrome::title_with_badge(theme, "Keyboard Help", "current scope", Tone::Focus),
+                PanelKind::Section,
+            )),
+        overlay,
+    );
+}
+
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let available_width = area.width.saturating_sub(2).max(1);
+    let available_height = area.height.saturating_sub(2).max(1);
+    let popup_width = width.min(available_width);
+    let popup_height = height.min(available_height);
+    let x = area.x + area.width.saturating_sub(popup_width) / 2;
+    let y = area.y + area.height.saturating_sub(popup_height) / 2;
+    Rect::new(x, y, popup_width, popup_height)
+}
+
+#[cfg(test)]
+fn map_event(active_screen: Screen, event: Event) -> Option<Action> {
+    map_event_with_context(
+        keybindings::BindingContext {
+            active_screen,
+            focused_region: navigation::default_region(active_screen),
+            search_open: false,
+            help_open: false,
+            ai_preflight_open: false,
+        },
+        event,
+    )
+}
+
+#[cfg(test)]
 fn map_event_with_preflight(
     active_screen: Screen,
     preflight_open: bool,
     event: Event,
 ) -> Option<Action> {
+    map_event_with_context(
+        keybindings::BindingContext {
+            active_screen,
+            focused_region: navigation::default_region(active_screen),
+            search_open: false,
+            help_open: false,
+            ai_preflight_open: preflight_open,
+        },
+        event,
+    )
+}
+
+fn map_event_with_context(context: keybindings::BindingContext, event: Event) -> Option<Action> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
-            if active_screen == Screen::Ai && preflight_open {
+            if let Some(action) = keybindings::resolve(key, context) {
+                return Some(action);
+            }
+            if context.search_open {
                 match key.code {
-                    KeyCode::Char('n') => return Some(Action::DismissAiPreflight),
-                    KeyCode::Char('p') => {
-                        return Some(Action::CycleAiPreflightPrivacyProfile);
+                    KeyCode::Char(character)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        return Some(Action::SearchAppend(character));
                     }
-                    KeyCode::Enter => return Some(Action::ConfirmAiPreflight),
-                    KeyCode::Char('x' | 'e' | 'y' | 'i' | 'd' | 'g' | 'u' | 'm' | 'b' | 'o') => {
-                        return None;
-                    }
-                    _ => {}
+                    _ => return None,
                 }
             }
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
-                KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => Some(Action::NextScreen),
-                KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
-                    Some(Action::PreviousScreen)
-                }
-                KeyCode::Char('r') => Some(Action::RefreshRequested),
-                KeyCode::Char('1') => Some(Action::ShowScreen(Screen::Dashboard)),
-                KeyCode::Char('2') => Some(Action::ShowScreen(Screen::Timeline)),
-                KeyCode::Char('3') => Some(Action::ShowScreen(Screen::Trends)),
-                KeyCode::Char('4') => Some(Action::ShowScreen(Screen::Explain)),
-                KeyCode::Char('5') => Some(Action::ShowScreen(Screen::Patterns)),
-                KeyCode::Char('6') => Some(Action::ShowScreen(Screen::Review)),
-                KeyCode::Char('7') => Some(Action::ShowScreen(Screen::Ai)),
-                KeyCode::Char('8') => Some(Action::ShowScreen(Screen::Ops)),
-                KeyCode::Char('[') => match active_screen {
-                    Screen::Dashboard | Screen::Timeline | Screen::Explain | Screen::Review => {
-                        Some(Action::PreviousDay)
-                    }
-                    Screen::Trends => Some(Action::PreviousTrendWindow),
-                    Screen::Ai => Some(Action::PreviousAiBrowserTab),
-                    _ => None,
-                },
-                KeyCode::Char(']') => match active_screen {
-                    Screen::Dashboard | Screen::Timeline | Screen::Explain | Screen::Review => {
-                        Some(Action::NextDay)
-                    }
-                    Screen::Trends => Some(Action::NextTrendWindow),
-                    Screen::Ai => Some(Action::NextAiBrowserTab),
-                    _ => None,
-                },
-                KeyCode::Char(',') if active_screen == Screen::Timeline => {
-                    Some(Action::PreviousTimelinePoint)
-                }
-                KeyCode::Char('.') if active_screen == Screen::Timeline => {
-                    Some(Action::NextTimelinePoint)
-                }
-                KeyCode::Char('-') if active_screen == Screen::Timeline => {
-                    Some(Action::TimelineZoomOut)
-                }
-                KeyCode::Char('=') if active_screen == Screen::Timeline => {
-                    Some(Action::TimelineZoomIn)
-                }
-                KeyCode::Char('j') => match active_screen {
-                    Screen::Timeline | Screen::Explain => Some(Action::NextEvent),
-                    Screen::Review => Some(Action::NextReviewCard),
-                    Screen::Ai => Some(Action::NextAiBrowserItem),
-                    _ => None,
-                },
-                KeyCode::Char('k') => match active_screen {
-                    Screen::Timeline | Screen::Explain => Some(Action::PreviousEvent),
-                    Screen::Review => Some(Action::PreviousReviewCard),
-                    Screen::Ai => Some(Action::PreviousAiBrowserItem),
-                    _ => None,
-                },
-                KeyCode::Char('w')
-                    if matches!(
-                        active_screen,
-                        Screen::Timeline | Screen::Explain | Screen::Patterns
-                    ) =>
-                {
-                    Some(Action::ToggleWorkoutFilter)
-                }
-                KeyCode::Char('t')
-                    if matches!(
-                        active_screen,
-                        Screen::Timeline | Screen::Explain | Screen::Patterns
-                    ) =>
-                {
-                    Some(Action::ToggleTagFilter)
-                }
-                KeyCode::Char('s')
-                    if matches!(
-                        active_screen,
-                        Screen::Timeline | Screen::Explain | Screen::Patterns
-                    ) =>
-                {
-                    Some(Action::ToggleSessionFilter)
-                }
-                KeyCode::Char('m') if active_screen == Screen::Patterns => {
-                    Some(Action::CyclePatternMetric)
-                }
-                KeyCode::Char('a')
-                    if matches!(
-                        active_screen,
-                        Screen::Dashboard | Screen::Explain | Screen::Review | Screen::Ai
-                    ) =>
-                {
-                    Some(Action::RequestAiLaunch(AiLaunchIntent::ReviewSelectedDay))
-                }
-                KeyCode::Char('c')
-                    if !key.modifiers.contains(KeyModifiers::CONTROL)
-                        && matches!(
-                            active_screen,
-                            Screen::Dashboard | Screen::Patterns | Screen::Review | Screen::Ai
-                        ) =>
-                {
-                    Some(Action::RequestAiLaunch(AiLaunchIntent::CompareSelectedWeek))
-                }
-                KeyCode::Char('n') if active_screen == Screen::Ai => {
-                    Some(Action::DismissAiPreflight)
-                }
-                KeyCode::Char('p') if active_screen == Screen::Ai => {
-                    Some(Action::CycleAiPreflightPrivacyProfile)
-                }
-                KeyCode::Char('x') if active_screen == Screen::Ai => {
-                    Some(Action::RequestCancelAiRun)
-                }
-                KeyCode::Char('e') if active_screen == Screen::Ai => Some(
-                    Action::RequestAiGuidedFollowUp(GuidedFollowUpKind::ExpandEvidence),
-                ),
-                KeyCode::Char('y') if active_screen == Screen::Ai => Some(
-                    Action::RequestAiGuidedFollowUp(GuidedFollowUpKind::ShowCounterevidence),
-                ),
-                KeyCode::Char('i') if active_screen == Screen::Ai => Some(
-                    Action::RequestAiGuidedFollowUp(GuidedFollowUpKind::ExplainRanking),
-                ),
-                KeyCode::Char('d') if active_screen == Screen::Ai => Some(
-                    Action::RequestAiGuidedFollowUp(GuidedFollowUpKind::SuggestLocalDrilldown),
-                ),
-                KeyCode::Char('g') if active_screen == Screen::Ai => {
-                    Some(Action::RequestAiGenerateReport)
-                }
-                KeyCode::Char('u') if active_screen == Screen::Ai => {
-                    Some(Action::RequestAiRerunNextPrivacy)
-                }
-                KeyCode::Char('m') if active_screen == Screen::Ai => {
-                    Some(Action::RequestAiRerunNextModel)
-                }
-                KeyCode::Char('b') if active_screen == Screen::Ai => {
-                    Some(Action::RequestAiComparePreviousSnapshot)
-                }
-                KeyCode::Char('o') if active_screen == Screen::Ai => {
-                    Some(Action::RequestJumpToAiEvidence)
-                }
-                KeyCode::Enter if active_screen == Screen::Ai => Some(Action::ConfirmAiPreflight),
-                KeyCode::Char('v') if active_screen == Screen::Review => {
-                    Some(Action::CycleReviewMode)
-                }
-                KeyCode::Char('f') if active_screen == Screen::Review => {
-                    Some(Action::CycleReviewFocus)
-                }
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    Some(Action::Quit)
-                }
-                _ => None,
-            }
+            None
         }
         _ => None,
     }
@@ -2525,6 +2600,8 @@ mod tests {
         AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
     };
     use crate::error::OuraProblem;
+    use crate::keybindings;
+    use crate::navigation::{FocusRegion, NavMove};
     use crate::oura::models::{AuthStatus, CapabilityReport};
     use crate::snapshot::PrivacyProfile;
     use crate::store::Store;
@@ -2947,7 +3024,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("live state should build: {error}"));
         app.active_screen = Screen::Trends;
 
-        let output = render_snapshot(&app, 100, 32)
+        let output = render_snapshot(&app, 120, 44)
             .unwrap_or_else(|error| panic!("trends snapshot should render: {error}"));
 
         assert!(output.contains("Analyst notes"));
@@ -2966,7 +3043,7 @@ mod tests {
         assert!(output.contains("Day story for 2026-04-08"));
         assert!(output.contains("Supporting evidence"));
         assert!(output.contains("Uncertainty"));
-        assert!(output.contains("Press 2 to open Timeline"));
+        assert!(output.contains("Move to Views and activate Timeline"));
     }
 
     #[test]
@@ -2989,7 +3066,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("live state should build: {error}"));
         app.active_screen = Screen::Patterns;
 
-        let output = render_snapshot(&app, 110, 32)
+        let output = render_snapshot(&app, 120, 44)
             .unwrap_or_else(|error| panic!("patterns snapshot should render: {error}"));
 
         assert!(output.contains("Not enough data yet"));
@@ -3091,7 +3168,6 @@ mod tests {
             .unwrap_or_else(|error| panic!("ops snapshot should render: {error}"));
 
         assert!(output.contains("Auth state: authenticated"));
-        assert!(output.contains("Secret backend: keyring"));
         assert!(output.contains("Granted scopes: personal, daily, heartrate"));
         assert!(output.contains("Database path: :memory:"));
         assert!(output.contains("Warnings [operator attention]"));
@@ -3190,8 +3266,8 @@ mod tests {
         let output = render_snapshot(&app, 90, 28)
             .unwrap_or_else(|error| panic!("compact review snapshot should render: {error}"));
 
-        assert!(output.contains("Today   Week   Investigate"));
-        assert!(output.contains("Readiness   Sleep   Recovery"));
+        assert!(output.contains("Mode [Today]"));
+        assert!(output.contains("Focus [Readiness]"));
         assert!(output.contains("> #1"));
         assert!(output.contains("#2"));
         assert!(output.contains("AI artifact: available"));
@@ -3215,7 +3291,7 @@ mod tests {
         assert!(compact.contains("Preflight defaults"));
         assert!(medium.contains("Saved AI run"));
         assert!(medium.contains("API key ready: yes"));
-        assert!(medium.contains("Generate a report [g on saved item]"));
+        assert!(medium.contains("Generate a report"));
         assert!(!medium.contains("Prepare a snapshot-scoped review"));
         assert!(wide.contains("AI workbench"));
         assert!(wide.contains("saved artifacts"));
@@ -3261,9 +3337,7 @@ mod tests {
         assert!(preflight_output.contains("Preflight | Review"));
         assert!(preflight_output.contains("model override: gpt-5-mini"));
         assert!(preflight_output.contains("follow_up_kind: expand_evidence"));
-        assert!(
-            preflight_output.contains("confirm with Enter | cancel with n | cycle privacy with p")
-        );
+        assert!(preflight_output.contains("artifact payload:"));
 
         let mut saved_run_app = build_demo_state(&config);
         saved_run_app.active_screen = Screen::Ai;
@@ -3407,11 +3481,7 @@ mod tests {
 
             for (screen, compact_marker, wide_marker) in [
                 (Screen::Dashboard, "Now |", "What matters now"),
-                (
-                    Screen::Timeline,
-                    "Timeline instrument",
-                    "Timeline instrument",
-                ),
+                (Screen::Timeline, "Day events", "Day events"),
                 (Screen::Trends, "Trend windows", "Trend windows"),
                 (
                     Screen::Explain,
@@ -3456,48 +3526,69 @@ mod tests {
     }
 
     #[test]
-    fn maps_contextual_keys_to_screen_actions() {
+    fn maps_navigation_actions_with_scope_and_context() {
         let press = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        let context = |active_screen, focused_region| keybindings::BindingContext {
+            active_screen,
+            focused_region,
+            search_open: false,
+            help_open: false,
+            ai_preflight_open: false,
+        };
 
         assert_eq!(
-            super::map_event(Screen::Timeline, press(KeyCode::Char('['))),
-            Some(Action::PreviousDay)
+            super::map_event(Screen::Timeline, press(KeyCode::Tab)),
+            Some(Action::FocusNextRegion)
         );
         assert_eq!(
-            super::map_event(Screen::Timeline, press(KeyCode::Char('.'))),
-            Some(Action::NextTimelinePoint)
+            super::map_event(
+                Screen::Review,
+                Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+            ),
+            Some(Action::OpenSearch)
         );
         assert_eq!(
-            super::map_event(Screen::Trends, press(KeyCode::Char(']'))),
-            Some(Action::NextTrendWindow)
+            super::map_event_with_context(
+                context(Screen::Timeline, FocusRegion::TopNav),
+                press(KeyCode::Right),
+            ),
+            Some(Action::MoveFocusedRegion(NavMove::Next))
         );
         assert_eq!(
-            super::map_event(Screen::Dashboard, press(KeyCode::Char('['))),
-            Some(Action::PreviousDay)
+            super::map_event_with_context(
+                context(Screen::Review, FocusRegion::Primary),
+                press(KeyCode::Char('j')),
+            ),
+            Some(Action::MoveFocusedRegion(NavMove::Next))
+        );
+        assert_eq!(
+            super::map_event_with_context(
+                context(Screen::Ai, FocusRegion::Secondary),
+                press(KeyCode::Char('k')),
+            ),
+            Some(Action::MoveFocusedRegion(NavMove::Previous))
+        );
+        assert_eq!(
+            super::map_event_with_context(
+                context(Screen::Ai, FocusRegion::Primary),
+                press(KeyCode::Up),
+            ),
+            Some(Action::MoveFocusedRegion(NavMove::Previous))
+        );
+        assert_eq!(
+            super::map_event_with_context(
+                context(Screen::Ai, FocusRegion::Secondary),
+                press(KeyCode::Enter),
+            ),
+            Some(Action::ActivateFocusedRegion)
         );
         assert_eq!(
             super::map_event(Screen::Dashboard, press(KeyCode::Char('a'))),
             Some(Action::RequestAiLaunch(AiLaunchIntent::ReviewSelectedDay))
         );
         assert_eq!(
-            super::map_event(Screen::Dashboard, press(KeyCode::Char('c'))),
-            Some(Action::RequestAiLaunch(AiLaunchIntent::CompareSelectedWeek))
-        );
-        assert_eq!(
             super::map_event(Screen::Patterns, press(KeyCode::Char('m'))),
             Some(Action::CyclePatternMetric)
-        );
-        assert_eq!(
-            super::map_event(Screen::Patterns, press(KeyCode::Char('c'))),
-            Some(Action::RequestAiLaunch(AiLaunchIntent::CompareSelectedWeek))
-        );
-        assert_eq!(
-            super::map_event(Screen::Explain, press(KeyCode::Char('j'))),
-            Some(Action::NextEvent)
-        );
-        assert_eq!(
-            super::map_event(Screen::Explain, press(KeyCode::Char('a'))),
-            Some(Action::RequestAiLaunch(AiLaunchIntent::ReviewSelectedDay))
         );
         assert_eq!(
             super::map_event(Screen::Review, press(KeyCode::Char('6'))),
@@ -3512,64 +3603,28 @@ mod tests {
             Some(Action::ShowScreen(Screen::Ops))
         );
         assert_eq!(
+            super::map_event(Screen::Timeline, press(KeyCode::Char('['))),
+            None
+        );
+        assert_eq!(
+            super::map_event(Screen::Timeline, press(KeyCode::Char('.'))),
+            None
+        );
+        assert_eq!(
             super::map_event(Screen::Review, press(KeyCode::Char('v'))),
-            Some(Action::CycleReviewMode)
+            None
         );
         assert_eq!(
             super::map_event(Screen::Review, press(KeyCode::Char('f'))),
-            Some(Action::CycleReviewFocus)
-        );
-        assert_eq!(
-            super::map_event(Screen::Review, press(KeyCode::Char('j'))),
-            Some(Action::NextReviewCard)
-        );
-        assert_eq!(
-            super::map_event(Screen::Review, press(KeyCode::Char('a'))),
-            Some(Action::RequestAiLaunch(AiLaunchIntent::ReviewSelectedDay))
-        );
-        assert_eq!(
-            super::map_event(Screen::Review, press(KeyCode::Char('c'))),
-            Some(Action::RequestAiLaunch(AiLaunchIntent::CompareSelectedWeek))
+            None
         );
         assert_eq!(
             super::map_event(Screen::Ai, press(KeyCode::Char('['))),
-            Some(Action::PreviousAiBrowserTab)
-        );
-        assert_eq!(
-            super::map_event(Screen::Ai, press(KeyCode::Char(']'))),
-            Some(Action::NextAiBrowserTab)
-        );
-        assert_eq!(
-            super::map_event(Screen::Ai, press(KeyCode::Char('j'))),
-            Some(Action::NextAiBrowserItem)
-        );
-        assert_eq!(
-            super::map_event(Screen::Ai, press(KeyCode::Char('k'))),
-            Some(Action::PreviousAiBrowserItem)
-        );
-        assert_eq!(
-            super::map_event(Screen::Ai, press(KeyCode::Char('a'))),
-            Some(Action::RequestAiLaunch(AiLaunchIntent::ReviewSelectedDay))
-        );
-        assert_eq!(
-            super::map_event(Screen::Ai, press(KeyCode::Char('c'))),
-            Some(Action::RequestAiLaunch(AiLaunchIntent::CompareSelectedWeek))
-        );
-        assert_eq!(
-            super::map_event(Screen::Ai, press(KeyCode::Char('n'))),
-            Some(Action::DismissAiPreflight)
-        );
-        assert_eq!(
-            super::map_event(Screen::Ai, press(KeyCode::Char('p'))),
-            Some(Action::CycleAiPreflightPrivacyProfile)
+            None
         );
         assert_eq!(
             super::map_event(Screen::Ai, press(KeyCode::Char('x'))),
             Some(Action::RequestCancelAiRun)
-        );
-        assert_eq!(
-            super::map_event(Screen::Ai, press(KeyCode::Enter)),
-            Some(Action::ConfirmAiPreflight)
         );
     }
 
@@ -3609,8 +3664,68 @@ mod tests {
         );
         assert_eq!(
             super::map_event_with_preflight(Screen::Ai, true, press(KeyCode::Enter)),
-            Some(Action::ConfirmAiPreflight)
+            Some(Action::ActivateFocusedRegion)
         );
+    }
+
+    #[test]
+    fn orientation_strip_marks_the_focused_region() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Ai;
+        app.handle(Action::FocusNextRegion);
+
+        let output = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| panic!("ai snapshot should render: {error}"));
+
+        assert!(output.contains(
+            "Focus: body focus | Views | Browser | Launch points | [Saved artifacts] | Artifact detail"
+        ));
+    }
+
+    #[test]
+    fn search_overlay_shows_query_and_result_navigation() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Review;
+        app.handle(Action::OpenSearch);
+        app.handle(Action::SearchAppend('s'));
+        app.handle(Action::SearchAppend('t'));
+
+        let output = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| panic!("review search snapshot should render: {error}"));
+
+        assert!(output.contains("Find in Current Context"));
+        assert!(output.contains("Query: st"));
+        assert!(output.contains("Enter next  Shift+Enter previous  Esc close"));
+    }
+
+    #[test]
+    fn help_overlay_groups_standard_and_expert_bindings() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Ai;
+        app.handle(Action::ToggleHelp);
+
+        let output = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| panic!("help snapshot should render: {error}"));
+
+        assert!(output.contains("Keyboard Help"));
+        assert!(output.contains("Standard"));
+        assert!(output.contains("Expert aliases"));
+    }
+
+    #[test]
+    fn ai_launch_points_render_selected_item_marker() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Ai;
+
+        let output = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| panic!("ai snapshot should render: {error}"));
+
+        assert!(output.contains("> Review this day"));
+        assert!(output.contains("  Compare this week"));
     }
 
     #[test]

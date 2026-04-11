@@ -93,7 +93,7 @@ pub fn draw(
         .iter()
         .map(|note| ListItem::new(format!("[note] {note}")))
         .chain(std::iter::once(ListItem::new(
-            "[keys] m metric | w/t/s families | 4 Explain for selected day context",
+            "[guide] Use the filter strip to narrow families, then switch views to validate a finding.",
         )))
         .chain(model.ai_actions.iter().cloned().map(ListItem::new))
         .collect::<Vec<_>>();

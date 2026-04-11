@@ -32,7 +32,8 @@ pub struct DesiredWebhookSubscription {
 impl WebhookEventType {
     pub const ALL: [Self; 3] = [Self::Create, Self::Update, Self::Delete];
 
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Create => "create",
             Self::Update => "update",
@@ -40,6 +41,7 @@ impl WebhookEventType {
         }
     }
 
+    #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim() {
             "create" => Some(Self::Create),
@@ -51,6 +53,7 @@ impl WebhookEventType {
 }
 
 impl DesiredWebhookSubscription {
+    #[must_use]
     pub fn normalized_event_types(&self) -> Vec<WebhookEventType> {
         let mut event_types = self.event_types.clone();
         event_types.sort_unstable();
@@ -59,6 +62,7 @@ impl DesiredWebhookSubscription {
     }
 }
 
+#[must_use]
 pub fn default_desired_subscriptions() -> Vec<DesiredWebhookSubscription> {
     SUPPORTED_WEBHOOK_DATA_TYPES
         .into_iter()
@@ -70,10 +74,12 @@ pub fn default_desired_subscriptions() -> Vec<DesiredWebhookSubscription> {
         .collect()
 }
 
+#[must_use]
 pub fn is_supported_data_type(data_type: &str) -> bool {
     SUPPORTED_WEBHOOK_DATA_TYPES.contains(&data_type)
 }
 
+#[must_use]
 pub fn sync_family_for_data_type(data_type: &str) -> Option<SyncFamily> {
     match data_type {
         "daily_sleep" | "daily_readiness" | "daily_activity" => Some(SyncFamily::Daily),

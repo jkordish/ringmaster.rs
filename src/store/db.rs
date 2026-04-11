@@ -25,6 +25,7 @@ pub struct Store {
 }
 
 impl StorePlan {
+    #[must_use]
     pub fn from_config(config: &Config) -> Self {
         Self {
             data_dir: config.paths.state_dir.clone(),
@@ -32,6 +33,11 @@ impl StorePlan {
         }
     }
 
+    /// Ensures the parent directory for the store database exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the on-disk data directory cannot be created.
     pub fn ensure_directories(&self) -> Result<()> {
         if self.db_path.as_os_str() == ":memory:" {
             return Ok(());
@@ -43,11 +49,17 @@ impl StorePlan {
 }
 
 impl Store {
+    /// Opens the configured store, applies migrations, and records bootstrap metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database cannot be opened, configured, migrated,
+    /// or seeded with the application metadata.
     pub fn open(config: &Config) -> Result<Self> {
         let plan = StorePlan::from_config(config);
         plan.ensure_directories()?;
         let mut connection = Connection::open(&plan.db_path)?;
-        configure_connection(&mut connection)?;
+        configure_connection(&connection)?;
         let migration_report = run_migrations(&mut connection)?;
 
         let store = Self {
@@ -61,9 +73,14 @@ impl Store {
     }
 
     #[cfg(test)]
+    /// Opens an isolated in-memory store for tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the in-memory database cannot be opened, configured, or migrated.
     pub fn open_in_memory() -> Result<Self> {
         let mut connection = Connection::open_in_memory()?;
-        configure_connection(&mut connection)?;
+        configure_connection(&connection)?;
         let migration_report = run_migrations(&mut connection)?;
 
         Ok(Self {
@@ -76,48 +93,58 @@ impl Store {
         })
     }
 
-    pub fn plan(&self) -> &StorePlan {
+    #[must_use]
+    pub const fn plan(&self) -> &StorePlan {
         &self.plan
     }
 
-    pub fn migration_report(&self) -> &MigrationReport {
+    #[must_use]
+    pub const fn migration_report(&self) -> &MigrationReport {
         &self.migration_report
     }
 
+    #[must_use]
     pub fn metadata(&self) -> MetadataStore<'_> {
         MetadataStore::new(&self.connection)
     }
 
+    #[must_use]
     pub fn sync_state(&self) -> SyncStateStore<'_> {
         SyncStateStore::new(&self.connection)
     }
 
+    #[must_use]
     pub fn auth(&self) -> AuthStore<'_> {
         AuthStore::new(&self.connection)
     }
 
+    #[must_use]
     pub fn imports(&self) -> ImportStore<'_> {
         ImportStore::new(&self.connection)
     }
 
+    #[must_use]
     pub fn derived(&self) -> DerivedStore<'_> {
         DerivedStore::new(&self.connection)
     }
 
+    #[must_use]
     pub fn analysis(&self) -> AnalysisStore<'_> {
         AnalysisStore::new(&self.connection)
     }
 
+    #[must_use]
     pub fn views(&self) -> ViewStore<'_> {
         ViewStore::new(&self.connection)
     }
 
+    #[must_use]
     pub fn webhook(&self) -> WebhookStore<'_> {
         WebhookStore::new(&self.connection)
     }
 }
 
-fn configure_connection(connection: &mut Connection) -> Result<()> {
+fn configure_connection(connection: &Connection) -> Result<()> {
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.execute_batch(
         "PRAGMA foreign_keys = ON;
