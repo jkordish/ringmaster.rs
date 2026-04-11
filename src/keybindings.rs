@@ -52,6 +52,7 @@ pub enum ChordKey {
 pub struct ChordModifiers {
     pub control: bool,
     pub shift: bool,
+    pub alt: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1159,6 +1160,14 @@ impl KeyChord {
                     modifiers,
                 }
             }
+            ChordKey::BackTab => Self {
+                code: ChordKey::BackTab,
+                modifiers: ChordModifiers {
+                    control: self.modifiers.control,
+                    shift: false,
+                    alt: self.modifiers.alt,
+                },
+            },
             _ => self,
         }
     }
@@ -1170,6 +1179,7 @@ impl KeyChord {
             modifiers: ChordModifiers {
                 control: false,
                 shift: false,
+                alt: false,
             },
         }
         .normalized()
@@ -1182,6 +1192,7 @@ impl KeyChord {
             modifiers: ChordModifiers {
                 control: true,
                 shift: false,
+                alt: false,
             },
         }
         .normalized()
@@ -1194,6 +1205,7 @@ impl KeyChord {
             modifiers: ChordModifiers {
                 control: false,
                 shift: true,
+                alt: false,
             },
         }
         .normalized()
@@ -1223,6 +1235,7 @@ impl KeyChord {
                 modifiers: ChordModifiers {
                     control: event.modifiers.contains(KeyModifiers::CONTROL),
                     shift: event.modifiers.contains(KeyModifiers::SHIFT),
+                    alt: event.modifiers.contains(KeyModifiers::ALT),
                 },
             }
             .normalized(),
@@ -1359,5 +1372,37 @@ mod tests {
         );
 
         assert_eq!(action, Some(Action::ToggleHelp));
+    }
+
+    #[test]
+    fn backtab_bindings_match_terminals_that_keep_shift_modifier() {
+        let action = super::resolve(
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+            BindingContext {
+                active_screen: Screen::Dashboard,
+                focused_region: FocusRegion::TopNav,
+                search_open: false,
+                help_open: false,
+                ai_preflight_open: false,
+            },
+        );
+
+        assert_eq!(action, Some(Action::FocusPreviousRegion));
+    }
+
+    #[test]
+    fn alt_modified_keys_do_not_fall_through_to_plain_bindings() {
+        let action = super::resolve(
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT),
+            BindingContext {
+                active_screen: Screen::Dashboard,
+                focused_region: FocusRegion::TopNav,
+                search_open: false,
+                help_open: false,
+                ai_preflight_open: false,
+            },
+        );
+
+        assert_eq!(action, None);
     }
 }
