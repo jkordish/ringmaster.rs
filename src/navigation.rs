@@ -82,11 +82,13 @@ impl PreflightControl {
 }
 
 const DASHBOARD_REGIONS: [FocusRegion; 2] = [FocusRegion::TopNav, FocusRegion::Primary];
-const TIMELINE_REGIONS: [FocusRegion; 4] = [
+const TIMELINE_REGIONS: [FocusRegion; 6] = [
     FocusRegion::TopNav,
     FocusRegion::ContextPrimary,
+    FocusRegion::ContextSecondary,
     FocusRegion::Primary,
     FocusRegion::Secondary,
+    FocusRegion::Tertiary,
 ];
 const TRENDS_REGIONS: [FocusRegion; 3] = [
     FocusRegion::TopNav,
@@ -95,12 +97,13 @@ const TRENDS_REGIONS: [FocusRegion; 3] = [
 ];
 const EXPLAIN_REGIONS: [FocusRegion; 3] = [
     FocusRegion::TopNav,
+    FocusRegion::ContextPrimary,
     FocusRegion::Primary,
-    FocusRegion::Secondary,
 ];
-const PATTERNS_REGIONS: [FocusRegion; 3] = [
+const PATTERNS_REGIONS: [FocusRegion; 4] = [
     FocusRegion::TopNav,
     FocusRegion::ContextPrimary,
+    FocusRegion::ContextSecondary,
     FocusRegion::Primary,
 ];
 const REVIEW_REGIONS: [FocusRegion; 5] = [
@@ -117,11 +120,7 @@ const AI_REGIONS: [FocusRegion; 5] = [
     FocusRegion::Secondary,
     FocusRegion::Tertiary,
 ];
-const OPS_REGIONS: [FocusRegion; 3] = [
-    FocusRegion::TopNav,
-    FocusRegion::Primary,
-    FocusRegion::Secondary,
-];
+const OPS_REGIONS: [FocusRegion; 2] = [FocusRegion::TopNav, FocusRegion::Primary];
 
 #[must_use]
 pub const fn screen_regions(screen: Screen) -> &'static [FocusRegion] {
@@ -140,8 +139,9 @@ pub const fn screen_regions(screen: Screen) -> &'static [FocusRegion] {
 #[must_use]
 pub const fn default_region(screen: Screen) -> FocusRegion {
     match screen {
-        Screen::Dashboard | Screen::Explain | Screen::Ops => FocusRegion::Primary,
-        Screen::Timeline | Screen::Trends | Screen::Patterns | Screen::Review | Screen::Ai => {
+        Screen::Dashboard | Screen::Ops => FocusRegion::Primary,
+        Screen::Explain | Screen::Patterns => FocusRegion::ContextPrimary,
+        Screen::Timeline | Screen::Trends | Screen::Review | Screen::Ai => {
             FocusRegion::ContextPrimary
         }
     }
@@ -151,16 +151,19 @@ pub const fn default_region(screen: Screen) -> FocusRegion {
 pub const fn region_label(screen: Screen, region: FocusRegion) -> Option<&'static str> {
     match (screen, region) {
         (_, FocusRegion::TopNav) => Some("Views"),
-        (Screen::Dashboard, FocusRegion::Primary) => Some("Drill-down cues"),
-        (Screen::Timeline, FocusRegion::ContextPrimary) => Some("Timeline chart"),
-        (Screen::Timeline, FocusRegion::Primary) => Some("Day events"),
-        (Screen::Timeline, FocusRegion::Secondary) => Some("Selected detail"),
+        (Screen::Dashboard, FocusRegion::Primary) => Some("Dashboard body"),
+        (Screen::Timeline, FocusRegion::ContextPrimary) => Some("Window presets"),
+        (Screen::Timeline, FocusRegion::ContextSecondary)
+        | (Screen::Explain, FocusRegion::ContextPrimary) => Some("Overlay filters"),
+        (Screen::Timeline, FocusRegion::Primary) => Some("Timeline chart"),
+        (Screen::Timeline, FocusRegion::Secondary) => Some("Day events"),
+        (Screen::Timeline, FocusRegion::Tertiary) => Some("Selected detail"),
         (Screen::Trends, FocusRegion::ContextPrimary) => Some("Trend windows"),
         (Screen::Trends, FocusRegion::Primary) => Some("Comparison scan"),
-        (Screen::Explain, FocusRegion::Primary) => Some("Supporting evidence"),
-        (Screen::Explain, FocusRegion::Secondary) => Some("AI launch"),
-        (Screen::Patterns, FocusRegion::ContextPrimary) => Some("Pattern filters"),
-        (Screen::Patterns, FocusRegion::Primary) => Some("Grouped findings"),
+        (Screen::Explain, FocusRegion::Primary) => Some("Explain body"),
+        (Screen::Patterns, FocusRegion::ContextPrimary) => Some("Metric filter"),
+        (Screen::Patterns, FocusRegion::ContextSecondary) => Some("Family filter"),
+        (Screen::Patterns, FocusRegion::Primary) => Some("Patterns browser"),
         (Screen::Review, FocusRegion::ContextPrimary) => Some("Mode"),
         (Screen::Review, FocusRegion::ContextSecondary) => Some("Focus"),
         (Screen::Review, FocusRegion::Primary) => Some("Ranked observations"),
@@ -168,9 +171,8 @@ pub const fn region_label(screen: Screen, region: FocusRegion) -> Option<&'stati
         (Screen::Ai, FocusRegion::ContextPrimary) => Some("Browser"),
         (Screen::Ai, FocusRegion::Primary) => Some("Launch points"),
         (Screen::Ai, FocusRegion::Secondary) => Some("Saved artifacts"),
-        (Screen::Ai, FocusRegion::Tertiary) => Some("Artifact detail"),
-        (Screen::Ops, FocusRegion::Primary) => Some("Family status"),
-        (Screen::Ops, FocusRegion::Secondary) => Some("Diagnostics"),
+        (Screen::Ai, FocusRegion::Tertiary) => Some("Artifact actions"),
+        (Screen::Ops, FocusRegion::Primary) => Some("Status console"),
         _ => None,
     }
 }
@@ -178,7 +180,7 @@ pub const fn region_label(screen: Screen, region: FocusRegion) -> Option<&'stati
 #[must_use]
 pub const fn search_scope(screen: Screen, region: FocusRegion) -> Option<SearchScope> {
     match (screen, region) {
-        (Screen::Timeline, FocusRegion::Primary) => Some(SearchScope::TimelineEvents),
+        (Screen::Timeline, FocusRegion::Secondary) => Some(SearchScope::TimelineEvents),
         (Screen::Review, FocusRegion::Primary) => Some(SearchScope::ReviewCards),
         (Screen::Ai, FocusRegion::Secondary) => Some(SearchScope::AiBrowserItems),
         _ => None,
@@ -203,4 +205,28 @@ pub fn previous_region(screen: Screen, current: FocusRegion) -> FocusRegion {
         .position(|region| *region == current)
         .unwrap_or(0);
     regions[(index + regions.len() - 1) % regions.len()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FocusRegion, default_region, screen_regions};
+    use crate::app::Screen;
+
+    #[test]
+    fn read_mostly_screens_only_expose_real_focus_stops() {
+        assert_eq!(
+            screen_regions(Screen::Ops),
+            &[FocusRegion::TopNav, FocusRegion::Primary]
+        );
+    }
+
+    #[test]
+    fn default_region_matches_the_first_real_body_region() {
+        assert_eq!(
+            default_region(Screen::Patterns),
+            FocusRegion::ContextPrimary
+        );
+        assert_eq!(default_region(Screen::Explain), FocusRegion::ContextPrimary);
+        assert_eq!(default_region(Screen::Ops), FocusRegion::Primary);
+    }
 }

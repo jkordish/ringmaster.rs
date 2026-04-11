@@ -867,18 +867,16 @@ fn now_rfc3339() -> Result<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use rusqlite::{Connection, params};
 
     use super::{MIGRATIONS, current_version, run_migrations};
+    use crate::test_support::ok;
 
     #[test]
     fn applies_bootstrap_schema() {
-        let mut connection = Connection::open_in_memory()
-            .unwrap_or_else(|error| panic!("in-memory db should open: {error}"));
-        let report = run_migrations(&mut connection)
-            .unwrap_or_else(|error| panic!("migrations should succeed: {error}"));
+        let mut connection = ok(Connection::open_in_memory(), "in-memory db should open");
+        let report = ok(run_migrations(&mut connection), "migrations should succeed");
 
         assert_eq!(report.current_version, current_version());
         assert_eq!(
@@ -889,32 +887,34 @@ mod tests {
 
     #[test]
     fn phase3_migration_backfills_existing_workout_and_session_rows() {
-        let mut connection = Connection::open_in_memory()
-            .unwrap_or_else(|error| panic!("in-memory db should open: {error}"));
-        connection
-            .execute_batch(
+        let mut connection = ok(Connection::open_in_memory(), "in-memory db should open");
+        ok(
+            connection.execute_batch(
                 "CREATE TABLE schema_migrations (
                     version INTEGER PRIMARY KEY,
                     name TEXT NOT NULL,
                     applied_at TEXT NOT NULL
                 );",
-            )
-            .unwrap_or_else(|error| panic!("schema migrations table should exist: {error}"));
+            ),
+            "schema migrations table should exist",
+        );
 
         for migration in &MIGRATIONS[..4] {
-            connection
-                .execute_batch(migration.sql)
-                .unwrap_or_else(|error| panic!("phase-2 migration should apply: {error}"));
-            connection
-                .execute(
+            ok(
+                connection.execute_batch(migration.sql),
+                "phase-2 migration should apply",
+            );
+            ok(
+                connection.execute(
                     "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
                     params![migration.version, migration.name, "2026-04-08T00:00:00Z"],
-                )
-                .unwrap_or_else(|error| panic!("migration marker should insert: {error}"));
+                ),
+                "migration marker should insert",
+            );
         }
 
-        connection
-            .execute(
+        ok(
+            connection.execute(
                 "INSERT INTO workouts (
                     workout_id,
                     started_at,
@@ -931,10 +931,11 @@ mod tests {
                     "cache-workout",
                     "2026-04-08T00:00:00Z"
                 ],
-            )
-            .unwrap_or_else(|error| panic!("legacy workout should insert: {error}"));
-        connection
-            .execute(
+            ),
+            "legacy workout should insert",
+        );
+        ok(
+            connection.execute(
                 "INSERT INTO sessions (
                     session_id,
                     started_at,
@@ -951,11 +952,14 @@ mod tests {
                     "cache-session",
                     "2026-04-08T00:00:00Z"
                 ],
-            )
-            .unwrap_or_else(|error| panic!("legacy session should insert: {error}"));
+            ),
+            "legacy session should insert",
+        );
 
-        let report = run_migrations(&mut connection)
-            .unwrap_or_else(|error| panic!("phase-3 migrations should succeed: {error}"));
+        let report = ok(
+            run_migrations(&mut connection),
+            "phase-3 migrations should succeed",
+        );
         assert_eq!(
             report.applied_versions,
             vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
@@ -967,7 +971,7 @@ mod tests {
                 params!["legacy-workout"],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .unwrap_or_else(|error| panic!("backfilled workout should load: {error}"));
+            .unwrap_or_else(|error| unreachable!("backfilled workout should load: {error}"));
         assert_eq!(workout_day, "2026-04-07");
         assert_eq!(workout_title, "running");
 
@@ -977,7 +981,7 @@ mod tests {
                 params!["legacy-session"],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .unwrap_or_else(|error| panic!("backfilled session should load: {error}"));
+            .unwrap_or_else(|error| unreachable!("backfilled session should load: {error}"));
         assert_eq!(session_day, "2026-04-08");
         assert_eq!(session_title, "breathing");
     }
@@ -985,7 +989,7 @@ mod tests {
     #[test]
     fn phase4_migration_rehomes_legacy_webhook_subscriptions() {
         let mut connection = Connection::open_in_memory()
-            .unwrap_or_else(|error| panic!("in-memory db should open: {error}"));
+            .unwrap_or_else(|error| unreachable!("in-memory db should open: {error}"));
         connection
             .execute_batch(
                 "CREATE TABLE schema_migrations (
@@ -994,18 +998,18 @@ mod tests {
                     applied_at TEXT NOT NULL
                 );",
             )
-            .unwrap_or_else(|error| panic!("schema migrations table should exist: {error}"));
+            .unwrap_or_else(|error| unreachable!("schema migrations table should exist: {error}"));
 
         for migration in &MIGRATIONS[..6] {
             connection
                 .execute_batch(migration.sql)
-                .unwrap_or_else(|error| panic!("pre-phase4 migration should apply: {error}"));
+                .unwrap_or_else(|error| unreachable!("pre-phase4 migration should apply: {error}"));
             connection
                 .execute(
                     "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
                     params![migration.version, migration.name, "2026-04-08T00:00:00Z"],
                 )
-                .unwrap_or_else(|error| panic!("migration marker should insert: {error}"));
+                .unwrap_or_else(|error| unreachable!("migration marker should insert: {error}"));
         }
 
         connection
@@ -1027,10 +1031,12 @@ mod tests {
                     "2026-04-08T00:00:00Z"
                 ],
             )
-            .unwrap_or_else(|error| panic!("legacy webhook subscription should insert: {error}"));
+            .unwrap_or_else(|error| {
+                unreachable!("legacy webhook subscription should insert: {error}")
+            });
 
         let report = run_migrations(&mut connection)
-            .unwrap_or_else(|error| panic!("phase4 migrations should succeed: {error}"));
+            .unwrap_or_else(|error| unreachable!("phase4 migrations should succeed: {error}"));
         assert_eq!(
             report.applied_versions,
             vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
@@ -1044,7 +1050,9 @@ mod tests {
                 params!["legacy-subscription"],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
-            .unwrap_or_else(|error| panic!("rehomed webhook subscription should load: {error}"));
+            .unwrap_or_else(|error| {
+                unreachable!("rehomed webhook subscription should load: {error}")
+            });
         assert_eq!(row.0, "legacy-subscription");
         assert_eq!(row.1, "https://example.test/webhooks/oura");
         assert_eq!(row.2, "active");
@@ -1053,7 +1061,7 @@ mod tests {
     #[test]
     fn phase4_migration_adds_daily_summary_oura_ids() {
         let mut connection = Connection::open_in_memory()
-            .unwrap_or_else(|error| panic!("in-memory db should open: {error}"));
+            .unwrap_or_else(|error| unreachable!("in-memory db should open: {error}"));
         connection
             .execute_batch(
                 "CREATE TABLE schema_migrations (
@@ -1062,33 +1070,33 @@ mod tests {
                     applied_at TEXT NOT NULL
                 );",
             )
-            .unwrap_or_else(|error| panic!("schema migrations table should exist: {error}"));
+            .unwrap_or_else(|error| unreachable!("schema migrations table should exist: {error}"));
 
         for migration in &MIGRATIONS[..8] {
             connection
                 .execute_batch(migration.sql)
-                .unwrap_or_else(|error| panic!("pre-phase4 migration should apply: {error}"));
+                .unwrap_or_else(|error| unreachable!("pre-phase4 migration should apply: {error}"));
             connection
                 .execute(
                     "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
                     params![migration.version, migration.name, "2026-04-08T00:00:00Z"],
                 )
-                .unwrap_or_else(|error| panic!("migration marker should insert: {error}"));
+                .unwrap_or_else(|error| unreachable!("migration marker should insert: {error}"));
         }
 
         let report = run_migrations(&mut connection)
-            .unwrap_or_else(|error| panic!("phase4 migration should succeed: {error}"));
+            .unwrap_or_else(|error| unreachable!("phase4 migration should succeed: {error}"));
         assert_eq!(report.applied_versions, vec![9, 10, 11, 12, 13, 14, 15, 16]);
 
         let daily_sleep_columns: Vec<String> = {
             let mut statement = connection
                 .prepare("PRAGMA table_info(daily_sleep)")
-                .unwrap_or_else(|error| panic!("daily_sleep schema should prepare: {error}"));
+                .unwrap_or_else(|error| unreachable!("daily_sleep schema should prepare: {error}"));
             let rows = statement
                 .query_map([], |row| row.get::<_, String>(1))
-                .unwrap_or_else(|error| panic!("daily_sleep schema should query: {error}"));
+                .unwrap_or_else(|error| unreachable!("daily_sleep schema should query: {error}"));
             rows.collect::<std::result::Result<Vec<_>, _>>()
-                .unwrap_or_else(|error| panic!("daily_sleep columns should load: {error}"))
+                .unwrap_or_else(|error| unreachable!("daily_sleep columns should load: {error}"))
         };
         assert!(daily_sleep_columns.iter().any(|column| column == "oura_id"));
     }
@@ -1096,7 +1104,7 @@ mod tests {
     #[test]
     fn phase5_migration_creates_review_family_tables() {
         let mut connection = Connection::open_in_memory()
-            .unwrap_or_else(|error| panic!("in-memory db should open: {error}"));
+            .unwrap_or_else(|error| unreachable!("in-memory db should open: {error}"));
         connection
             .execute_batch(
                 "CREATE TABLE schema_migrations (
@@ -1105,22 +1113,22 @@ mod tests {
                     applied_at TEXT NOT NULL
                 );",
             )
-            .unwrap_or_else(|error| panic!("schema migrations table should exist: {error}"));
+            .unwrap_or_else(|error| unreachable!("schema migrations table should exist: {error}"));
 
         for migration in &MIGRATIONS[..9] {
             connection
                 .execute_batch(migration.sql)
-                .unwrap_or_else(|error| panic!("pre-phase5 migration should apply: {error}"));
+                .unwrap_or_else(|error| unreachable!("pre-phase5 migration should apply: {error}"));
             connection
                 .execute(
                     "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
                     params![migration.version, migration.name, "2026-04-09T00:00:00Z"],
                 )
-                .unwrap_or_else(|error| panic!("migration marker should insert: {error}"));
+                .unwrap_or_else(|error| unreachable!("migration marker should insert: {error}"));
         }
 
         let report = run_migrations(&mut connection)
-            .unwrap_or_else(|error| panic!("phase5 migration should succeed: {error}"));
+            .unwrap_or_else(|error| unreachable!("phase5 migration should succeed: {error}"));
         assert_eq!(report.applied_versions, vec![10, 11, 12, 13, 14, 15, 16]);
 
         let table_names: Vec<String> = {
@@ -1139,12 +1147,12 @@ mod tests {
                        )
                      ORDER BY name ASC",
                 )
-                .unwrap_or_else(|error| panic!("schema query should prepare: {error}"));
+                .unwrap_or_else(|error| unreachable!("schema query should prepare: {error}"));
             let rows = statement
                 .query_map([], |row| row.get::<_, String>(0))
-                .unwrap_or_else(|error| panic!("schema query should run: {error}"));
+                .unwrap_or_else(|error| unreachable!("schema query should run: {error}"));
             rows.collect::<std::result::Result<Vec<_>, _>>()
-                .unwrap_or_else(|error| panic!("table names should load: {error}"))
+                .unwrap_or_else(|error| unreachable!("table names should load: {error}"))
         };
 
         assert_eq!(
@@ -1163,7 +1171,7 @@ mod tests {
     #[test]
     fn phase5_review_signal_migration_creates_snapshot_table() {
         let mut connection = Connection::open_in_memory()
-            .unwrap_or_else(|error| panic!("in-memory db should open: {error}"));
+            .unwrap_or_else(|error| unreachable!("in-memory db should open: {error}"));
         connection
             .execute_batch(
                 "CREATE TABLE schema_migrations (
@@ -1172,24 +1180,25 @@ mod tests {
                     applied_at TEXT NOT NULL
                 );",
             )
-            .unwrap_or_else(|error| panic!("schema migrations table should exist: {error}"));
+            .unwrap_or_else(|error| unreachable!("schema migrations table should exist: {error}"));
 
         for migration in &MIGRATIONS[..10] {
             connection
                 .execute_batch(migration.sql)
                 .unwrap_or_else(|error| {
-                    panic!("pre-review-signal migration should apply: {error}")
+                    unreachable!("pre-review-signal migration should apply: {error}")
                 });
             connection
                 .execute(
                     "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
                     params![migration.version, migration.name, "2026-04-09T00:00:00Z"],
                 )
-                .unwrap_or_else(|error| panic!("migration marker should insert: {error}"));
+                .unwrap_or_else(|error| unreachable!("migration marker should insert: {error}"));
         }
 
-        let report = run_migrations(&mut connection)
-            .unwrap_or_else(|error| panic!("review signal migration should succeed: {error}"));
+        let report = run_migrations(&mut connection).unwrap_or_else(|error| {
+            unreachable!("review signal migration should succeed: {error}")
+        });
         assert_eq!(report.applied_versions, vec![11, 12, 13, 14, 15, 16]);
 
         let table_names: Vec<String> = {
@@ -1200,12 +1209,12 @@ mod tests {
                      WHERE type = 'table'
                        AND name = 'derived_review_signal_days'",
                 )
-                .unwrap_or_else(|error| panic!("schema query should prepare: {error}"));
+                .unwrap_or_else(|error| unreachable!("schema query should prepare: {error}"));
             let rows = statement
                 .query_map([], |row| row.get::<_, String>(0))
-                .unwrap_or_else(|error| panic!("schema query should run: {error}"));
+                .unwrap_or_else(|error| unreachable!("schema query should run: {error}"));
             rows.collect::<std::result::Result<Vec<_>, _>>()
-                .unwrap_or_else(|error| panic!("table names should load: {error}"))
+                .unwrap_or_else(|error| unreachable!("table names should load: {error}"))
         };
 
         assert_eq!(table_names, vec!["derived_review_signal_days".to_owned()]);
@@ -1214,7 +1223,7 @@ mod tests {
     #[test]
     fn phase5_vo2_max_history_migration_preserves_rows_and_composite_key() {
         let mut connection = Connection::open_in_memory()
-            .unwrap_or_else(|error| panic!("in-memory db should open: {error}"));
+            .unwrap_or_else(|error| unreachable!("in-memory db should open: {error}"));
         connection
             .execute_batch(
                 "CREATE TABLE schema_migrations (
@@ -1223,18 +1232,20 @@ mod tests {
                     applied_at TEXT NOT NULL
                 );",
             )
-            .unwrap_or_else(|error| panic!("schema migrations table should exist: {error}"));
+            .unwrap_or_else(|error| unreachable!("schema migrations table should exist: {error}"));
 
         for migration in &MIGRATIONS[..11] {
             connection
                 .execute_batch(migration.sql)
-                .unwrap_or_else(|error| panic!("pre-vo2 history migration should apply: {error}"));
+                .unwrap_or_else(|error| {
+                    unreachable!("pre-vo2 history migration should apply: {error}")
+                });
             connection
                 .execute(
                     "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
                     params![migration.version, migration.name, "2026-04-09T00:00:00Z"],
                 )
-                .unwrap_or_else(|error| panic!("migration marker should insert: {error}"));
+                .unwrap_or_else(|error| unreachable!("migration marker should insert: {error}"));
         }
 
         connection
@@ -1256,25 +1267,25 @@ mod tests {
                     "2026-04-08T09:00:00Z"
                 ],
             )
-            .unwrap_or_else(|error| panic!("legacy vo2 row should seed: {error}"));
+            .unwrap_or_else(|error| unreachable!("legacy vo2 row should seed: {error}"));
 
         let report = run_migrations(&mut connection)
-            .unwrap_or_else(|error| panic!("vo2 history migration should succeed: {error}"));
+            .unwrap_or_else(|error| unreachable!("vo2 history migration should succeed: {error}"));
         assert_eq!(report.applied_versions, vec![12, 13, 14, 15, 16]);
 
         let primary_key_columns: Vec<String> = {
             let mut statement = connection
                 .prepare("PRAGMA table_info(vo2_max)")
-                .unwrap_or_else(|error| panic!("vo2_max schema should prepare: {error}"));
+                .unwrap_or_else(|error| unreachable!("vo2_max schema should prepare: {error}"));
             let rows = statement
                 .query_map([], |row| {
                     let name = row.get::<_, String>(1)?;
                     let pk_position = row.get::<_, i64>(5)?;
                     Ok((name, pk_position))
                 })
-                .unwrap_or_else(|error| panic!("vo2_max schema should query: {error}"));
+                .unwrap_or_else(|error| unreachable!("vo2_max schema should query: {error}"));
             rows.collect::<std::result::Result<Vec<_>, _>>()
-                .unwrap_or_else(|error| panic!("vo2_max columns should load: {error}"))
+                .unwrap_or_else(|error| unreachable!("vo2_max columns should load: {error}"))
                 .into_iter()
                 .filter(|(_, pk_position)| *pk_position > 0)
                 .map(|(name, _)| name)
@@ -1288,7 +1299,7 @@ mod tests {
 
         let row_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM vo2_max", [], |row| row.get(0))
-            .unwrap_or_else(|error| panic!("migrated vo2 rows should count: {error}"));
+            .unwrap_or_else(|error| unreachable!("migrated vo2 rows should count: {error}"));
         assert_eq!(row_count, 1);
     }
 }

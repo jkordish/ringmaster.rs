@@ -13,6 +13,7 @@ The TUI now includes:
 - a centralized keybinding registry with scoped bindings for global, screen, region, and transient behavior
 - one shared keyboard grammar across Dashboard, Timeline, Trends, Explain, Patterns, Review, AI, and Status
 - pane-type consistency so selector panes, list panes, chart/pager panes, and detail panes use the same movement and activation rules wherever they appear
+- read-mostly screens such as Explain and Status collapse informative subpanels into one body region instead of exposing fake focus stops, while Patterns keeps a visible metric selector because it is a real local control
 - a distinct orientation strip that shows the active screen, focused region, and transient state
 - a contextual footer sourced from the registry instead of screen-local hard-coded shortcut copy
 - a scoped `?` help overlay

@@ -9,11 +9,11 @@ use crate::config::{Config, RefreshConfig};
 use crate::error::{Result, RingmasterError};
 use crate::oura::models::CapabilityKind;
 use crate::oura::sync::{SliceReport, SyncOptions, SyncReport, sync_selected};
-use crate::store::Store;
 use crate::store::queries::SyncStateRecord;
 use crate::store::webhook_store::{
     InvalidationRecord, RuntimeHeartbeatRecord, format_rfc3339_utc, now_rfc3339,
 };
+use crate::store::{Store, StorePlan};
 use crate::webhook::WebhookEventType;
 use crate::webhook::sync_family_for_data_type;
 
@@ -68,6 +68,19 @@ struct ClaimedInvalidation {
     attempt_id: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PreparedInvalidationRun {
+    Immediate(InvalidationRunReport),
+    Ready {
+        store_plan: StorePlan,
+        dry_run: bool,
+        fixture_dir: Option<PathBuf>,
+        claimed: Vec<ClaimedInvalidation>,
+        families: Vec<SyncFamily>,
+        trigger_detail: String,
+    },
+}
+
 impl SyncFamily {
     pub const ALL: [Self; 6] = [
         Self::Personal,
@@ -78,7 +91,8 @@ impl SyncFamily {
         Self::Session,
     ];
 
-    pub fn label(self) -> &'static str {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Personal => "personal",
             Self::Daily => "daily",
@@ -89,7 +103,8 @@ impl SyncFamily {
         }
     }
 
-    pub fn sync_key(self) -> &'static str {
+    #[must_use]
+    pub const fn sync_key(self) -> &'static str {
         match self {
             Self::Personal => "oura.personal",
             Self::Daily => "oura.daily",
@@ -100,7 +115,8 @@ impl SyncFamily {
         }
     }
 
-    pub fn capability_kind(self) -> CapabilityKind {
+    #[must_use]
+    pub const fn capability_kind(self) -> CapabilityKind {
         match self {
             Self::Personal => CapabilityKind::Personal,
             Self::Daily => CapabilityKind::Daily,
@@ -111,7 +127,8 @@ impl SyncFamily {
         }
     }
 
-    pub fn interval_secs(self, refresh: &RefreshConfig) -> u64 {
+    #[must_use]
+    pub const fn interval_secs(self, refresh: &RefreshConfig) -> u64 {
         match self {
             Self::Personal => refresh.personal_interval_secs,
             Self::Daily => refresh.daily_interval_secs,
@@ -122,7 +139,8 @@ impl SyncFamily {
         }
     }
 
-    pub fn stale_after_secs(self, refresh: &RefreshConfig) -> u64 {
+    #[must_use]
+    pub const fn stale_after_secs(self, refresh: &RefreshConfig) -> u64 {
         match self {
             Self::Personal => refresh.personal_stale_after_secs,
             Self::Daily => refresh.daily_stale_after_secs,
@@ -134,6 +152,9 @@ impl SyncFamily {
     }
 }
 
+/// # Errors
+///
+/// Returns an error if any sync-state timestamp cannot be parsed while evaluating freshness.
 pub fn due_families(
     config: &Config,
     sync_states: &[SyncStateRecord],
@@ -151,6 +172,9 @@ pub fn due_families(
     Ok(families)
 }
 
+/// # Errors
+///
+/// Returns an error if next-due timestamps cannot be computed from the current sync state.
 pub fn next_wake_duration(
     config: &Config,
     sync_states: &[SyncStateRecord],
@@ -165,7 +189,7 @@ pub fn next_wake_duration(
         .unwrap_or(now + Duration::seconds(1));
 
     let delay = (next_due - now).whole_seconds().max(1);
-    Ok(StdDuration::from_secs(delay as u64))
+    Ok(StdDuration::from_secs(u64::try_from(delay).unwrap_or(1)))
 }
 
 fn watch_idle_sleep_duration(config: &Config, target: StdDuration) -> StdDuration {
@@ -173,29 +197,41 @@ fn watch_idle_sleep_duration(config: &Config, target: StdDuration) -> StdDuratio
     target.min(heartbeat_sleep)
 }
 
-pub async fn run_watch(config: &Config, options: WatchOptions) -> Result<WatchReport> {
-    let store = Store::open(config)?;
-    upsert_watch_heartbeat(
-        &store,
-        config,
-        watch_mode_label(config),
-        Some("watch loop starting".to_owned()),
-    )?;
-    let result = run_watch_inner(config, &store, options).await;
-    match &result {
-        Ok(report) => write_stopped_watch_heartbeat(&store, config, report)?,
-        Err(error) => write_stopped_watch_heartbeat_detail(
+/// # Errors
+///
+/// Returns an error if the watch store cannot be opened, sync iterations fail, or heartbeats cannot be persisted.
+pub fn run_watch(
+    config: &Config,
+    options: WatchOptions,
+) -> impl Future<Output = Result<WatchReport>> + Send + '_ {
+    let store = Store::open(config);
+    async move {
+        let store = store?;
+        let store_plan = store.plan().clone();
+        upsert_watch_heartbeat(
             &store,
             config,
-            format!("watch loop stopped after error: {error}"),
-        )?,
+            watch_mode_label(config),
+            Some("watch loop starting".to_owned()),
+        )?;
+        drop(store);
+        let result = run_watch_inner(config, store_plan.clone(), options).await;
+        let heartbeat_store = reopen_store(config, &store_plan)?;
+        match &result {
+            Ok(report) => write_stopped_watch_heartbeat(&heartbeat_store, config, report)?,
+            Err(error) => write_stopped_watch_heartbeat_detail(
+                &heartbeat_store,
+                config,
+                format!("watch loop stopped after error: {error}"),
+            )?,
+        }
+        result
     }
-    result
 }
 
 async fn run_watch_inner(
     config: &Config,
-    store: &Store,
+    store_plan: StorePlan,
     options: WatchOptions,
 ) -> Result<WatchReport> {
     let fixture_dir = resolve_fixture_dir(config, &options);
@@ -205,7 +241,7 @@ async fn run_watch_inner(
             iterations: 0,
             dry_run,
             demo: options.demo,
-            database_path: store.plan().db_path.display().to_string(),
+            database_path: store_plan.db_path.display().to_string(),
             last_report: None,
             notes: vec![
                 "watch loop stopped before syncing because max_iterations was set to 0".to_owned(),
@@ -213,6 +249,7 @@ async fn run_watch_inner(
         });
     }
     let mut simulated_sync_states = if dry_run {
+        let store = reopen_store(config, &store_plan)?;
         Some(store.sync_state().list()?)
     } else {
         None
@@ -222,16 +259,23 @@ async fn run_watch_inner(
     let mut notes = Vec::new();
 
     loop {
+        let heartbeat_store = reopen_store(config, &store_plan)?;
         upsert_watch_heartbeat(
-            store,
+            &heartbeat_store,
             config,
             watch_mode_label(config),
             Some("watch loop idle".to_owned()),
         )?;
 
+        let invalidation_store = reopen_store(config, &store_plan)?;
         let (invalidation_report, interrupted_during_invalidation) =
             await_non_cancelable_sync_or_interrupt(
-                process_pending_invalidations_once(config, store, dry_run, fixture_dir.clone()),
+                process_pending_invalidations_once(
+                    config,
+                    &invalidation_store,
+                    dry_run,
+                    fixture_dir.clone(),
+                ),
                 tokio::signal::ctrl_c(),
             )
             .await?;
@@ -254,8 +298,7 @@ async fn run_watch_inner(
                 .is_some_and(|max_iterations| iterations >= max_iterations)
             {
                 notes.push(format!(
-                    "watch loop stopped after {} bounded iteration(s)",
-                    iterations
+                    "watch loop stopped after {iterations} bounded iteration(s)"
                 ));
                 break;
             }
@@ -263,6 +306,7 @@ async fn run_watch_inner(
                 let sync_states = if let Some(sync_states) = simulated_sync_states.as_ref() {
                     sync_states.clone()
                 } else {
+                    let store = reopen_store(config, &store_plan)?;
                     store.sync_state().list()?
                 };
                 let sleep_for = watch_idle_sleep_duration(
@@ -299,6 +343,7 @@ async fn run_watch_inner(
         let sync_states = if let Some(sync_states) = simulated_sync_states.as_ref() {
             sync_states.clone()
         } else {
+            let store = reopen_store(config, &store_plan)?;
             store.sync_state().list()?
         };
         let force_all = options.max_iterations.is_some() && iterations == 0;
@@ -320,10 +365,11 @@ async fn run_watch_inner(
             continue;
         }
 
+        let sync_store = reopen_store(config, &store_plan)?;
         let report = match await_sync_or_interrupt(
             sync_selected(
                 config,
-                store,
+                &sync_store,
                 SyncOptions {
                     dry_run,
                     fixture_dir: fixture_dir.clone(),
@@ -359,8 +405,7 @@ async fn run_watch_inner(
             .is_some_and(|max_iterations| iterations >= max_iterations)
         {
             notes.push(format!(
-                "watch loop stopped after {} bounded iteration(s)",
-                iterations
+                "watch loop stopped after {iterations} bounded iteration(s)"
             ));
             break;
         }
@@ -370,19 +415,90 @@ async fn run_watch_inner(
         iterations,
         dry_run,
         demo: options.demo,
-        database_path: store.plan().db_path.display().to_string(),
+        database_path: store_plan.db_path.display().to_string(),
         last_report,
         notes,
     };
     Ok(report)
 }
 
-pub async fn process_pending_invalidations_once(
+/// # Errors
+///
+/// Returns an error if due invalidations cannot be claimed, processed, or recorded.
+pub fn process_pending_invalidations_once<'a>(
+    config: &'a Config,
+    store: &'a Store,
+    dry_run: bool,
+    fixture_dir: Option<PathBuf>,
+) -> impl Future<Output = Result<InvalidationRunReport>> + Send + 'a {
+    let prepared = prepare_invalidation_run(config, store, dry_run, fixture_dir);
+    async move {
+        match prepared? {
+            PreparedInvalidationRun::Immediate(report) => Ok(report),
+            PreparedInvalidationRun::Ready {
+                store_plan,
+                dry_run,
+                fixture_dir,
+                claimed,
+                families,
+                trigger_detail,
+            } => {
+                let sync_store = reopen_store(config, &store_plan)?;
+                let report = sync_selected(
+                    config,
+                    &sync_store,
+                    SyncOptions {
+                        dry_run,
+                        fixture_dir,
+                        families: families.clone(),
+                        trigger_source: Some("webhook".to_owned()),
+                        trigger_detail: Some(trigger_detail),
+                    },
+                )
+                .await;
+                let report = match report {
+                    Ok(report) => report,
+                    Err(error) => {
+                        if !dry_run {
+                            let failure_store = reopen_store(config, &store_plan)?;
+                            record_global_invalidation_failure(
+                                config,
+                                &failure_store,
+                                &claimed,
+                                &error.to_string(),
+                            )?;
+                        }
+                        return Err(error);
+                    }
+                };
+                let notes = if dry_run {
+                    vec![format!(
+                        "Previewed {} pending invalidation(s) across {} family/families.",
+                        claimed.len(),
+                        families.len()
+                    )]
+                } else {
+                    let settle_store = reopen_store(config, &store_plan)?;
+                    settle_processed_invalidations(config, &settle_store, &claimed, &report)?
+                };
+
+                Ok(InvalidationRunReport {
+                    claimed_invalidations: claimed.len(),
+                    families,
+                    sync_report: Some(report),
+                    notes,
+                })
+            }
+        }
+    }
+}
+
+fn prepare_invalidation_run(
     config: &Config,
     store: &Store,
     dry_run: bool,
     fixture_dir: Option<PathBuf>,
-) -> Result<InvalidationRunReport> {
+) -> Result<PreparedInvalidationRun> {
     let now = now_rfc3339()?;
     let lease_until =
         format_rfc3339_utc(OffsetDateTime::now_utc() + invalidation_lease_duration(config)?)?;
@@ -411,12 +527,12 @@ pub async fn process_pending_invalidations_once(
             .collect::<Vec<_>>()
     };
     if claimed.is_empty() {
-        return Ok(InvalidationRunReport {
+        return Ok(PreparedInvalidationRun::Immediate(InvalidationRunReport {
             claimed_invalidations: 0,
             families: Vec::new(),
             sync_report: None,
             notes: Vec::new(),
-        });
+        }));
     }
 
     let families = claimed
@@ -440,7 +556,7 @@ pub async fn process_pending_invalidations_once(
                 )?;
             }
         }
-        return Ok(InvalidationRunReport {
+        return Ok(PreparedInvalidationRun::Immediate(InvalidationRunReport {
             claimed_invalidations: claimed.len(),
             families,
             sync_report: None,
@@ -448,7 +564,7 @@ pub async fn process_pending_invalidations_once(
                 "Webhook invalidations were present but none mapped to supported sync families."
                     .to_owned(),
             ],
-        });
+        }));
     }
 
     let claimed = if dry_run {
@@ -473,42 +589,14 @@ pub async fn process_pending_invalidations_once(
             .map(|claimed| claimed.record.clone())
             .collect::<Vec<_>>(),
     );
-    let report = sync_selected(
-        config,
-        store,
-        SyncOptions {
-            dry_run,
-            fixture_dir,
-            families: families.clone(),
-            trigger_source: Some("webhook".to_owned()),
-            trigger_detail: Some(trigger_detail),
-        },
-    )
-    .await;
-    let report = match report {
-        Ok(report) => report,
-        Err(error) => {
-            if !dry_run {
-                record_global_invalidation_failure(config, store, &claimed, &error.to_string())?;
-            }
-            return Err(error);
-        }
-    };
-    let notes = if dry_run {
-        vec![format!(
-            "Previewed {} pending invalidation(s) across {} family/families.",
-            claimed.len(),
-            families.len()
-        )]
-    } else {
-        settle_processed_invalidations(config, store, &claimed, &report)?
-    };
 
-    Ok(InvalidationRunReport {
-        claimed_invalidations: claimed.len(),
+    Ok(PreparedInvalidationRun::Ready {
+        store_plan: store.plan().clone(),
+        dry_run,
+        fixture_dir,
+        claimed,
         families,
-        sync_report: Some(report),
-        notes,
+        trigger_detail,
     })
 }
 
@@ -764,7 +852,7 @@ fn compute_invalidation_retry_at(
         .saturating_mul(multiplier)
         .min(config.refresh.max_backoff_secs);
 
-    (OffsetDateTime::now_utc() + Duration::seconds(backoff_secs as i64))
+    (OffsetDateTime::now_utc() + Duration::seconds(backoff_secs.cast_signed()))
         .format(&Rfc3339)
         .map_err(|error| {
             RingmasterError::Config(format!(
@@ -826,8 +914,7 @@ fn record_global_invalidation_failure(
             &next_available_at,
             failures_by_family
                 .get(&family)
-                .map(String::as_str)
-                .unwrap_or(detail),
+                .map_or(detail, String::as_str),
         )?;
     }
 
@@ -882,6 +969,10 @@ fn write_stopped_watch_heartbeat_detail(
     upsert_watch_heartbeat(store, config, "stopped", Some(detail))
 }
 
+fn reopen_store(config: &Config, store_plan: &StorePlan) -> Result<Store> {
+    Store::open_with_plan(store_plan.clone(), config.app_name)
+}
+
 fn family_is_due(
     config: &Config,
     sync_states: &[SyncStateRecord],
@@ -924,7 +1015,7 @@ fn next_due_at(
         })?;
     let reference = parse_timestamp(reference)?;
 
-    Ok(reference + Duration::seconds(family.interval_secs(&config.refresh) as i64))
+    Ok(reference + Duration::seconds(family.interval_secs(&config.refresh).cast_signed()))
 }
 
 fn parse_timestamp(value: &str) -> Result<OffsetDateTime> {
@@ -986,9 +1077,9 @@ fn build_simulated_sync_state(
         .iter()
         .find(|state| state.sync_key == slice.sync_key);
     let failure_count = match slice.status {
-        crate::store::queries::SyncRunStatus::Failed => previous
-            .map(|state| state.failure_count.saturating_add(1))
-            .unwrap_or(1),
+        crate::store::queries::SyncRunStatus::Failed => {
+            previous.map_or(1, |state| state.failure_count.saturating_add(1))
+        }
         _ => 0,
     };
     let next_attempt_after = if slice.status == crate::store::queries::SyncRunStatus::Failed {
@@ -1038,7 +1129,7 @@ fn simulated_next_attempt_after(
         .saturating_mul(multiplier)
         .min(config.refresh.max_backoff_secs);
 
-    (OffsetDateTime::now_utc() + Duration::seconds(backoff_secs as i64))
+    (OffsetDateTime::now_utc() + Duration::seconds(backoff_secs.cast_signed()))
         .format(&Rfc3339)
         .ok()
 }
@@ -1058,7 +1149,6 @@ fn upsert_simulated_sync_state(
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use super::{
         SyncFamily, WatchOptions, due_families, next_wake_duration, watch_idle_sleep_duration,
@@ -1090,7 +1180,7 @@ mod tests {
                 unique_root.join("state"),
                 unique_root.join("cache"),
             )
-            .unwrap_or_else(|error| panic!("paths should resolve: {error}")),
+            .unwrap_or_else(|error| unreachable!("paths should resolve: {error}")),
             logging: LoggingConfig {
                 filter: "ringmaster=debug".to_owned(),
             },
@@ -1108,7 +1198,7 @@ mod tests {
                     .join("oura-tokens.json"),
                 callback_bind: "127.0.0.1:8788"
                     .parse()
-                    .unwrap_or_else(|error| panic!("socket should parse: {error}")),
+                    .unwrap_or_else(|error| unreachable!("socket should parse: {error}")),
                 callback_path: "/callback".to_owned(),
                 requested_scopes: vec![
                     "personal".to_owned(),
@@ -1179,7 +1269,7 @@ mod tests {
         object_id: &str,
     ) -> i64 {
         let received_at = crate::store::webhook_store::now_rfc3339()
-            .unwrap_or_else(|error| panic!("timestamp should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("timestamp should render: {error}"));
         let delivery = store
             .webhook()
             .insert_accepted_delivery(&crate::store::webhook_store::AcceptedWebhookDeliveryInput {
@@ -1193,7 +1283,7 @@ mod tests {
                 headers_json: "{}".to_owned(),
                 query_json: "{}".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("accepted delivery should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("accepted delivery should persist: {error}"));
 
         match delivery {
             crate::store::webhook_store::AcceptedWebhookDeliveryResult::Inserted(record)
@@ -1230,7 +1320,7 @@ mod tests {
             now,
             false,
         )
-        .unwrap_or_else(|error| panic!("due families should compute: {error}"));
+        .unwrap_or_else(|error| unreachable!("due families should compute: {error}"));
 
         assert!(!families.contains(&SyncFamily::Heartrate));
     }
@@ -1239,7 +1329,7 @@ mod tests {
     fn next_wake_duration_is_positive() {
         let config = test_config();
         let duration = next_wake_duration(&config, &[], OffsetDateTime::now_utc())
-            .unwrap_or_else(|error| panic!("next wake should compute: {error}"));
+            .unwrap_or_else(|error| unreachable!("next wake should compute: {error}"));
         assert!(duration.as_secs() >= 1);
     }
 
@@ -1247,7 +1337,7 @@ mod tests {
     fn watch_idle_sleep_is_capped_to_heartbeat_cadence() {
         let config = test_config();
         let base = OffsetDateTime::parse("2026-04-08T06:00:00Z", &Rfc3339)
-            .unwrap_or_else(|error| panic!("timestamp should parse: {error}"));
+            .unwrap_or_else(|error| unreachable!("timestamp should parse: {error}"));
         let granted_scopes = vec![
             "personal".to_owned(),
             "daily".to_owned(),
@@ -1274,7 +1364,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let next_wake = next_wake_duration(&config, &sync_states, base)
-            .unwrap_or_else(|error| panic!("next wake should compute: {error}"));
+            .unwrap_or_else(|error| unreachable!("next wake should compute: {error}"));
 
         assert_eq!(next_wake.as_secs(), config.refresh.heartrate_interval_secs);
         assert_eq!(
@@ -1287,7 +1377,7 @@ mod tests {
     fn dry_run_reports_advance_local_schedule_state() {
         let config = test_config();
         let base = OffsetDateTime::parse("2026-04-08T06:00:00Z", &Rfc3339)
-            .unwrap_or_else(|error| panic!("timestamp should parse: {error}"));
+            .unwrap_or_else(|error| unreachable!("timestamp should parse: {error}"));
         let mut sync_states = Vec::new();
         let scopes = vec![
             "personal".to_owned(),
@@ -1371,11 +1461,11 @@ mod tests {
         );
 
         let due = due_families(&config, &sync_states, base + Duration::seconds(1), false)
-            .unwrap_or_else(|error| panic!("due families should compute: {error}"));
+            .unwrap_or_else(|error| unreachable!("due families should compute: {error}"));
         assert!(due.is_empty());
 
         let next_wake = next_wake_duration(&config, &sync_states, base)
-            .unwrap_or_else(|error| panic!("next wake should compute: {error}"));
+            .unwrap_or_else(|error| unreachable!("next wake should compute: {error}"));
         assert_eq!(next_wake.as_secs(), config.refresh.heartrate_interval_secs);
     }
 
@@ -1392,19 +1482,19 @@ mod tests {
             },
         )
         .await
-        .unwrap_or_else(|error| panic!("watch should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("watch should succeed: {error}"));
 
         assert_eq!(report.iterations, 1);
         assert!(report.dry_run);
         assert!(report.last_report.is_some());
         let heartbeat = Store::open(&config)
-            .unwrap_or_else(|error| panic!("store should reopen after watch: {error}"))
+            .unwrap_or_else(|error| unreachable!("store should reopen after watch: {error}"))
             .webhook()
             .list_runtime_heartbeats()
-            .unwrap_or_else(|error| panic!("heartbeats should load after watch: {error}"))
+            .unwrap_or_else(|error| unreachable!("heartbeats should load after watch: {error}"))
             .into_iter()
             .find(|record| record.component == "sync.watch")
-            .unwrap_or_else(|| panic!("sync.watch heartbeat should exist after bounded run"));
+            .unwrap_or_else(|| unreachable!("sync.watch heartbeat should exist after bounded run"));
         assert_eq!(heartbeat.mode, "stopped");
     }
 
@@ -1421,7 +1511,7 @@ mod tests {
             },
         )
         .await
-        .unwrap_or_else(|error| panic!("zero-iteration watch should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("zero-iteration watch should succeed: {error}"));
 
         assert_eq!(report.iterations, 0);
         assert!(report.dry_run);
@@ -1438,9 +1528,9 @@ mod tests {
     async fn watch_error_still_records_stopped_heartbeat() {
         let config = test_config();
         let store = Store::open(&config)
-            .unwrap_or_else(|error| panic!("store should open before watch error: {error}"));
+            .unwrap_or_else(|error| unreachable!("store should open before watch error: {error}"));
         let queued_at = crate::store::webhook_store::now_rfc3339()
-            .unwrap_or_else(|error| panic!("timestamp should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("timestamp should render: {error}"));
         let delivery_id = seed_delivery(
             &store,
             "daily_sleep",
@@ -1459,13 +1549,13 @@ mod tests {
                 available_at: queued_at,
             })
             .unwrap_or_else(|error| {
-                panic!("invalidation should queue before watch error: {error}")
+                unreachable!("invalidation should queue before watch error: {error}")
             });
         store
             .webhook()
             .overwrite_invalidation_available_at(invalidation.invalidation_id, "not-a-timestamp")
             .unwrap_or_else(|error| {
-                panic!("invalidation timestamp should corrupt before watch error: {error}")
+                unreachable!("invalidation timestamp should corrupt before watch error: {error}")
             });
         let error = run_watch(
             &config,
@@ -1478,21 +1568,23 @@ mod tests {
         )
         .await
         .err()
-        .unwrap_or_else(|| panic!("watch should fail when invalidation timestamps are malformed"));
+        .unwrap_or_else(|| {
+            unreachable!("watch should fail when invalidation timestamps are malformed")
+        });
 
         assert!(error.to_string().contains("invalid"));
         let heartbeat = Store::open(&config)
             .unwrap_or_else(|open_error| {
-                panic!("store should reopen after watch error: {open_error}")
+                unreachable!("store should reopen after watch error: {open_error}")
             })
             .webhook()
             .list_runtime_heartbeats()
             .unwrap_or_else(|load_error| {
-                panic!("heartbeats should load after watch error: {load_error}")
+                unreachable!("heartbeats should load after watch error: {load_error}")
             })
             .into_iter()
             .find(|record| record.component == "sync.watch")
-            .unwrap_or_else(|| panic!("sync.watch heartbeat should exist after watch error"));
+            .unwrap_or_else(|| unreachable!("sync.watch heartbeat should exist after watch error"));
         assert_eq!(heartbeat.mode, "stopped");
         assert!(
             heartbeat
@@ -1515,7 +1607,7 @@ mod tests {
             },
         )
         .await
-        .unwrap_or_else(|error| panic!("interrupt should be handled: {error}"));
+        .unwrap_or_else(|error| unreachable!("interrupt should be handled: {error}"));
 
         assert_eq!(interrupted, super::SyncInterruption::Interrupted);
     }
@@ -1533,7 +1625,7 @@ mod tests {
             },
         )
         .await
-        .unwrap_or_else(|error| panic!("interrupt should wait for completion: {error}"));
+        .unwrap_or_else(|error| unreachable!("interrupt should wait for completion: {error}"));
 
         assert_eq!(completed, "settled");
         assert!(interrupted);
@@ -1542,10 +1634,10 @@ mod tests {
     #[tokio::test]
     async fn invalidation_processing_updates_trigger_provenance_and_clears_queue() {
         let config = test_config();
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let queued_at = crate::store::webhook_store::now_rfc3339()
-            .unwrap_or_else(|error| panic!("timestamp should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("timestamp should render: {error}"));
         let delivery_id = seed_delivery(
             &store,
             "daily_sleep",
@@ -1563,7 +1655,7 @@ mod tests {
                 queued_at: queued_at.clone(),
                 available_at: queued_at,
             })
-            .unwrap_or_else(|error| panic!("invalidation should queue: {error}"));
+            .unwrap_or_else(|error| unreachable!("invalidation should queue: {error}"));
 
         let report = super::process_pending_invalidations_once(
             &config,
@@ -1572,7 +1664,7 @@ mod tests {
             Some(baseline_fixture_dir()),
         )
         .await
-        .unwrap_or_else(|error| panic!("invalidation processing should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("invalidation processing should succeed: {error}"));
 
         assert_eq!(report.claimed_invalidations, 1);
         assert_eq!(report.families, vec![SyncFamily::Daily]);
@@ -1581,20 +1673,20 @@ mod tests {
             store
                 .webhook()
                 .list_pending_invalidations()
-                .unwrap_or_else(|error| panic!("queue should read: {error}"))
+                .unwrap_or_else(|error| unreachable!("queue should read: {error}"))
                 .is_empty()
         );
         let attempts = store
             .webhook()
             .list_recent_processing_attempts(8)
-            .unwrap_or_else(|error| panic!("attempts should read: {error}"));
+            .unwrap_or_else(|error| unreachable!("attempts should read: {error}"));
         assert_eq!(attempts.len(), 1);
         assert_eq!(attempts[0].outcome, "success");
         let daily_state = store
             .sync_state()
             .get(SyncFamily::Daily.sync_key())
-            .unwrap_or_else(|error| panic!("daily sync state should read: {error}"))
-            .unwrap_or_else(|| panic!("daily sync state should exist"));
+            .unwrap_or_else(|error| unreachable!("daily sync state should read: {error}"))
+            .unwrap_or_else(|| unreachable!("daily sync state should exist"));
         assert_eq!(daily_state.last_trigger_source.as_deref(), Some("webhook"));
         let trigger_detail = daily_state.last_trigger_detail.unwrap_or_default();
         assert!(trigger_detail.contains("daily_sleep:create:sleep_2026-04-08"));
@@ -1603,8 +1695,8 @@ mod tests {
     #[tokio::test]
     async fn invalidation_delete_side_effect_removes_deleted_workout() {
         let config = test_config();
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let seed_report = crate::oura::sync::sync_selected(
             &config,
             &store,
@@ -1617,19 +1709,19 @@ mod tests {
             },
         )
         .await
-        .unwrap_or_else(|error| panic!("seed sync should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("seed sync should succeed: {error}"));
         assert_eq!(seed_report.status, SyncRunStatus::Success);
         assert_eq!(
             store
                 .views()
                 .record_counts()
-                .unwrap_or_else(|error| panic!("counts should read: {error}"))
+                .unwrap_or_else(|error| unreachable!("counts should read: {error}"))
                 .workouts,
             3
         );
 
         let queued_at = crate::store::webhook_store::now_rfc3339()
-            .unwrap_or_else(|error| panic!("timestamp should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("timestamp should render: {error}"));
         let delivery_id = seed_delivery(
             &store,
             "workout",
@@ -1647,7 +1739,7 @@ mod tests {
                 queued_at: queued_at.clone(),
                 available_at: queued_at,
             })
-            .unwrap_or_else(|error| panic!("delete invalidation should queue: {error}"));
+            .unwrap_or_else(|error| unreachable!("delete invalidation should queue: {error}"));
 
         let report = super::process_pending_invalidations_once(
             &config,
@@ -1656,7 +1748,9 @@ mod tests {
             Some(baseline_fixture_dir()),
         )
         .await
-        .unwrap_or_else(|error| panic!("delete invalidation processing should succeed: {error}"));
+        .unwrap_or_else(|error| {
+            unreachable!("delete invalidation processing should succeed: {error}")
+        });
 
         assert_eq!(report.claimed_invalidations, 1);
         assert_eq!(report.families, vec![SyncFamily::Workout]);
@@ -1664,7 +1758,7 @@ mod tests {
             store
                 .views()
                 .record_counts()
-                .unwrap_or_else(|error| panic!("counts should read: {error}"))
+                .unwrap_or_else(|error| unreachable!("counts should read: {error}"))
                 .workouts,
             2
         );
@@ -1672,7 +1766,7 @@ mod tests {
             store
                 .webhook()
                 .list_pending_invalidations()
-                .unwrap_or_else(|error| panic!("queue should read: {error}"))
+                .unwrap_or_else(|error| unreachable!("queue should read: {error}"))
                 .is_empty()
         );
     }
@@ -1680,8 +1774,8 @@ mod tests {
     #[tokio::test]
     async fn invalidation_delete_side_effect_removes_deleted_daily_sleep() {
         let config = test_config();
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         store
             .imports()
             .upsert_daily_sleep(&DailySleepRecord {
@@ -1691,10 +1785,10 @@ mod tests {
                 raw_cache_key: Some("raw_daily_sleep".to_owned()),
                 updated_at: "2026-04-08T00:00:00Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("daily sleep row should seed: {error}"));
+            .unwrap_or_else(|error| unreachable!("daily sleep row should seed: {error}"));
 
         let queued_at = crate::store::webhook_store::now_rfc3339()
-            .unwrap_or_else(|error| panic!("timestamp should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("timestamp should render: {error}"));
         let delivery_id = match store
             .webhook()
             .insert_accepted_delivery(&AcceptedWebhookDeliveryInput {
@@ -1708,7 +1802,7 @@ mod tests {
                 headers_json: "{}".to_owned(),
                 query_json: "{}".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("daily delete delivery should insert: {error}"))
+            .unwrap_or_else(|error| unreachable!("daily delete delivery should insert: {error}"))
         {
             crate::store::webhook_store::AcceptedWebhookDeliveryResult::Inserted(record)
             | crate::store::webhook_store::AcceptedWebhookDeliveryResult::Duplicate(record) => {
@@ -1726,12 +1820,14 @@ mod tests {
                 queued_at: queued_at.clone(),
                 available_at: queued_at,
             })
-            .unwrap_or_else(|error| panic!("daily delete invalidation should queue: {error}"));
+            .unwrap_or_else(|error| {
+                unreachable!("daily delete invalidation should queue: {error}")
+            });
 
         let report = super::process_pending_invalidations_once(&config, &store, false, None)
             .await
             .unwrap_or_else(|error| {
-                panic!("daily delete invalidation processing should succeed: {error}")
+                unreachable!("daily delete invalidation processing should succeed: {error}")
             });
 
         assert_eq!(report.claimed_invalidations, 1);
@@ -1739,7 +1835,7 @@ mod tests {
             store
                 .views()
                 .record_counts()
-                .unwrap_or_else(|error| panic!("counts should read: {error}"))
+                .unwrap_or_else(|error| unreachable!("counts should read: {error}"))
                 .daily_sleep,
             0
         );

@@ -1167,7 +1167,6 @@ fn is_empty_path(path: &Path) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use std::path::PathBuf;
 
@@ -1177,17 +1176,20 @@ mod tests {
         OuraSecretBackend, PromptCacheMode, RefreshConfig, WebhookConfig, default_requested_scopes,
         parse_webhook_subscription_env,
     };
+    use crate::test_support::ok;
     use crate::webhook::{WebhookEventType, default_desired_subscriptions};
 
     #[test]
     fn builds_xdg_paths_from_roots() {
-        let paths = AppPaths::from_roots(
-            PathBuf::from("/home/tester"),
-            PathBuf::from("/tmp/config"),
-            PathBuf::from("/tmp/state"),
-            PathBuf::from("/tmp/cache"),
-        )
-        .unwrap_or_else(|error| panic!("expected path resolution to succeed: {error}"));
+        let paths = ok(
+            AppPaths::from_roots(
+                PathBuf::from("/home/tester"),
+                PathBuf::from("/tmp/config"),
+                PathBuf::from("/tmp/state"),
+                PathBuf::from("/tmp/cache"),
+            ),
+            "expected path resolution to succeed",
+        );
 
         assert_eq!(
             paths.config_file,

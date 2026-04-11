@@ -72,7 +72,8 @@ struct NumericSeriesIndex {
 }
 
 impl ReviewSufficiency {
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Missing => "missing",
             Self::Thin => "thin",
@@ -81,7 +82,8 @@ impl ReviewSufficiency {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Missing => "Missing",
             Self::Thin => "Thin",
@@ -90,7 +92,8 @@ impl ReviewSufficiency {
         }
     }
 
-    pub fn from_comparable_days(comparable_days: usize) -> Self {
+    #[must_use]
+    pub const fn from_comparable_days(comparable_days: usize) -> Self {
         if comparable_days == 0 {
             Self::Missing
         } else if comparable_days < COMPARABLE_MEDIUM_DAYS {
@@ -102,7 +105,8 @@ impl ReviewSufficiency {
         }
     }
 
-    pub fn from_comparable_weeks(comparable_weeks: usize) -> Self {
+    #[must_use]
+    pub const fn from_comparable_weeks(comparable_weeks: usize) -> Self {
         if comparable_weeks == 0 {
             Self::Missing
         } else if comparable_weeks < COMPARABLE_MEDIUM_WEEKS {
@@ -115,6 +119,9 @@ impl ReviewSufficiency {
     }
 }
 
+/// # Errors
+///
+/// Returns an error if source timestamps cannot be parsed or signal metadata cannot be serialized.
 pub fn build_review_signal_days(inputs: &FeatureInputs<'_>) -> Result<Vec<ReviewSignalDayRecord>> {
     let captured_day = parse_day(&captured_day(inputs.captured_at)?)?;
     let mut series: BTreeMap<&'static str, Vec<SeedPoint>> = BTreeMap::new();
@@ -125,21 +132,21 @@ pub fn build_review_signal_days(inputs: &FeatureInputs<'_>) -> Result<Vec<Review
             "sleep_score",
             &row.day,
             row.sleep_score.map(f64::from),
-            json!({ "source_family": "daily_sleep" }),
+            &json!({ "source_family": "daily_sleep" }),
         )?;
         insert_numeric_seed(
             &mut series,
             "readiness_score",
             &row.day,
             row.readiness_score.map(f64::from),
-            json!({ "source_family": "daily_readiness" }),
+            &json!({ "source_family": "daily_readiness" }),
         )?;
         insert_numeric_seed(
             &mut series,
             "activity_score",
             &row.day,
             row.activity_score.map(f64::from),
-            json!({ "source_family": "daily_activity" }),
+            &json!({ "source_family": "daily_activity" }),
         )?;
     }
 
@@ -148,15 +155,15 @@ pub fn build_review_signal_days(inputs: &FeatureInputs<'_>) -> Result<Vec<Review
             &mut series,
             "active_calories",
             &row.day,
-            Some(row.active_calories as f64),
-            json!({ "source_family": "daily_activity" }),
+            Some(crate::numeric::i64_to_f64(row.active_calories)),
+            &json!({ "source_family": "daily_activity" }),
         )?;
         insert_numeric_seed(
             &mut series,
             "steps",
             &row.day,
-            Some(row.steps as f64),
-            json!({ "source_family": "daily_activity" }),
+            Some(crate::numeric::i64_to_f64(row.steps)),
+            &json!({ "source_family": "daily_activity" }),
         )?;
     }
 
@@ -166,7 +173,7 @@ pub fn build_review_signal_days(inputs: &FeatureInputs<'_>) -> Result<Vec<Review
             "temperature_deviation",
             &row.day,
             row.temperature_deviation,
-            json!({
+            &json!({
                 "source_family": "daily_readiness",
                 "temperature_trend_deviation": row.temperature_trend_deviation,
             }),
@@ -178,8 +185,8 @@ pub fn build_review_signal_days(inputs: &FeatureInputs<'_>) -> Result<Vec<Review
             &mut series,
             "stress_high",
             &row.day,
-            row.stress_high.map(|value| value as f64),
-            json!({
+            row.stress_high.map(crate::numeric::i64_to_f64),
+            &json!({
                 "source_family": "daily_stress",
                 "day_summary": row.day_summary,
             }),
@@ -188,8 +195,8 @@ pub fn build_review_signal_days(inputs: &FeatureInputs<'_>) -> Result<Vec<Review
             &mut series,
             "recovery_high",
             &row.day,
-            row.recovery_high.map(|value| value as f64),
-            json!({
+            row.recovery_high.map(crate::numeric::i64_to_f64),
+            &json!({
                 "source_family": "daily_stress",
                 "day_summary": row.day_summary,
             }),
@@ -202,7 +209,7 @@ pub fn build_review_signal_days(inputs: &FeatureInputs<'_>) -> Result<Vec<Review
             "resilience_level",
             &row.day,
             Some(f64::from(resilience_level_score(&row.level))),
-            json!({
+            &json!({
                 "source_family": "daily_resilience",
                 "level": row.level,
             }),
@@ -212,21 +219,21 @@ pub fn build_review_signal_days(inputs: &FeatureInputs<'_>) -> Result<Vec<Review
             "sleep_recovery",
             &row.day,
             Some(row.sleep_recovery),
-            json!({ "source_family": "daily_resilience" }),
+            &json!({ "source_family": "daily_resilience" }),
         )?;
         insert_numeric_seed(
             &mut series,
             "daytime_recovery",
             &row.day,
             Some(row.daytime_recovery),
-            json!({ "source_family": "daily_resilience" }),
+            &json!({ "source_family": "daily_resilience" }),
         )?;
         insert_numeric_seed(
             &mut series,
             "resilience_stress",
             &row.day,
             Some(row.stress),
-            json!({ "source_family": "daily_resilience" }),
+            &json!({ "source_family": "daily_resilience" }),
         )?;
     }
 
@@ -235,8 +242,8 @@ pub fn build_review_signal_days(inputs: &FeatureInputs<'_>) -> Result<Vec<Review
             &mut series,
             "cardiovascular_age",
             &row.day,
-            row.vascular_age.map(|value| value as f64),
-            json!({ "source_family": "daily_cardiovascular_age" }),
+            row.vascular_age.map(crate::numeric::i64_to_f64),
+            &json!({ "source_family": "daily_cardiovascular_age" }),
         )?;
     }
 
@@ -246,7 +253,7 @@ pub fn build_review_signal_days(inputs: &FeatureInputs<'_>) -> Result<Vec<Review
             "vo2_max",
             &row.day,
             row.vo2_max,
-            json!({
+            &json!({
                 "source_family": "vo2_max",
                 "recorded_at": row.recorded_at,
             }),
@@ -259,7 +266,7 @@ pub fn build_review_signal_days(inputs: &FeatureInputs<'_>) -> Result<Vec<Review
             "sleep_time_status",
             &row.day,
             row.status.clone(),
-            json!({
+            &json!({
                 "source_family": "sleep_time",
                 "recommendation": row.recommendation,
                 "optimal_bedtime_start_offset": row.optimal_bedtime_start_offset,
@@ -276,7 +283,7 @@ pub fn build_review_signal_days(inputs: &FeatureInputs<'_>) -> Result<Vec<Review
             "rest_mode_active",
             &day,
             Some(1.0),
-            json!({ "source_family": "rest_mode_period" }),
+            &json!({ "source_family": "rest_mode_period" }),
         )?;
     }
 
@@ -356,13 +363,13 @@ fn insert_numeric_seed(
     signal_key: &'static str,
     day: &str,
     numeric_value: Option<f64>,
-    metadata: serde_json::Value,
+    metadata: &serde_json::Value,
 ) -> Result<()> {
     let seed_point = SeedPoint {
         day: day.to_owned(),
         numeric_value,
         text_value: None,
-        metadata_json: serde_json::to_string(&metadata)?,
+        metadata_json: serde_json::to_string(metadata)?,
     };
     upsert_seed_point(series.entry(signal_key).or_default(), seed_point);
     Ok(())
@@ -373,13 +380,13 @@ fn insert_text_seed(
     signal_key: &'static str,
     day: &str,
     text_value: Option<String>,
-    metadata: serde_json::Value,
+    metadata: &serde_json::Value,
 ) -> Result<()> {
     let seed_point = SeedPoint {
         day: day.to_owned(),
         numeric_value: None,
         text_value,
-        metadata_json: serde_json::to_string(&metadata)?,
+        metadata_json: serde_json::to_string(metadata)?,
     };
     upsert_seed_point(series.entry(signal_key).or_default(), seed_point);
     Ok(())
@@ -515,10 +522,10 @@ impl NumericSeriesIndex {
         }
 
         let sum = self.prefix_sums[target_index] - self.prefix_sums[start_index];
-        let mean = sum / count as f64;
+        let mean = sum / crate::numeric::usize_to_f64(count);
         let squared_sum =
             self.prefix_squared_sums[target_index] - self.prefix_squared_sums[start_index];
-        let variance = mean.mul_add(-mean, squared_sum / count as f64);
+        let variance = mean.mul_add(-mean, squared_sum / crate::numeric::usize_to_f64(count));
 
         ComparableStats {
             count,
@@ -674,101 +681,136 @@ mod tests {
         );
     }
 
+    fn make_daily_overview_row(
+        day: &str,
+        sleep_score: u8,
+        readiness_score: u8,
+        activity_score: u8,
+    ) -> DailyOverviewRow {
+        DailyOverviewRow {
+            day: day.to_owned(),
+            sleep_score: Some(sleep_score),
+            readiness_score: Some(readiness_score),
+            activity_score: Some(activity_score),
+            updated_at: format!("{day}T08:00:00Z"),
+        }
+    }
+
+    fn make_daily_activity_record() -> DailyActivityRecord {
+        DailyActivityRecord {
+            oura_id: Some("act-1".to_owned()),
+            day: "2026-04-02".to_owned(),
+            activity_score: Some(70),
+            active_calories: 400,
+            steps: 5000,
+            total_calories: 2200,
+            raw_cache_key: None,
+            updated_at: "2026-04-02T08:00:00Z".to_owned(),
+        }
+    }
+
+    fn make_daily_readiness_record() -> DailyReadinessRecord {
+        DailyReadinessRecord {
+            oura_id: Some("ready-1".to_owned()),
+            day: "2026-04-02".to_owned(),
+            readiness_score: Some(76),
+            temperature_deviation: Some(0.4),
+            temperature_trend_deviation: Some(0.2),
+            raw_cache_key: None,
+            updated_at: "2026-04-02T08:00:00Z".to_owned(),
+        }
+    }
+
+    fn make_daily_stress_record() -> DailyStressRecord {
+        DailyStressRecord {
+            oura_id: Some("stress-1".to_owned()),
+            day: "2026-04-02".to_owned(),
+            stress_high: Some(180),
+            recovery_high: Some(40),
+            day_summary: Some("stressed".to_owned()),
+            raw_cache_key: None,
+            updated_at: "2026-04-02T08:00:00Z".to_owned(),
+        }
+    }
+
+    fn make_daily_resilience_record() -> DailyResilienceRecord {
+        DailyResilienceRecord {
+            oura_id: Some("res-1".to_owned()),
+            day: "2026-04-02".to_owned(),
+            level: "solid".to_owned(),
+            sleep_recovery: 78.0,
+            daytime_recovery: 64.0,
+            stress: 55.0,
+            raw_cache_key: None,
+            updated_at: "2026-04-02T08:00:00Z".to_owned(),
+        }
+    }
+
+    fn make_daily_cardiovascular_age_record() -> DailyCardiovascularAgeRecord {
+        DailyCardiovascularAgeRecord {
+            day: "2026-04-02".to_owned(),
+            vascular_age: Some(37),
+            raw_cache_key: None,
+            updated_at: "2026-04-02T08:00:00Z".to_owned(),
+        }
+    }
+
+    fn make_vo2_max_record() -> Vo2MaxRecord {
+        Vo2MaxRecord {
+            oura_id: Some("vo2-1".to_owned()),
+            day: "2026-04-02".to_owned(),
+            recorded_at: "2026-04-02T08:00:00Z".to_owned(),
+            vo2_max: Some(42.5),
+            raw_cache_key: None,
+            updated_at: "2026-04-02T08:00:00Z".to_owned(),
+        }
+    }
+
+    fn make_sleep_time_record() -> SleepTimeRecord {
+        SleepTimeRecord {
+            oura_id: Some("sleep-time-1".to_owned()),
+            day: "2026-04-02".to_owned(),
+            status: Some("optimal_found".to_owned()),
+            recommendation: Some("follow_optimal_bedtime".to_owned()),
+            optimal_bedtime_start_offset: Some(79200),
+            optimal_bedtime_end_offset: Some(82800),
+            optimal_bedtime_day_tz: Some(0),
+            raw_cache_key: None,
+            updated_at: "2026-04-02T08:00:00Z".to_owned(),
+        }
+    }
+
+    fn make_rest_mode_period_record() -> RestModePeriodRecord {
+        RestModePeriodRecord {
+            period_id: "rest-1".to_owned(),
+            start_day: "2026-04-02".to_owned(),
+            start_time: Some("2026-04-02T00:00:00Z".to_owned()),
+            end_day: Some("2026-04-03".to_owned()),
+            end_time: Some("2026-04-03T12:00:00Z".to_owned()),
+            episode_count: 1,
+            tags_json: "[]".to_owned(),
+            raw_cache_key: None,
+            updated_at: "2026-04-02T08:00:00Z".to_owned(),
+        }
+    }
+
     #[test]
     fn feature_builder_emits_phase5_signal_rows() {
         let daily_history = vec![
-            DailyOverviewRow {
-                day: "2026-04-01".to_owned(),
-                sleep_score: Some(80),
-                readiness_score: Some(82),
-                activity_score: Some(79),
-                updated_at: "2026-04-01T08:00:00Z".to_owned(),
-            },
-            DailyOverviewRow {
-                day: "2026-04-02".to_owned(),
-                sleep_score: Some(74),
-                readiness_score: Some(76),
-                activity_score: Some(70),
-                updated_at: "2026-04-02T08:00:00Z".to_owned(),
-            },
+            make_daily_overview_row("2026-04-01", 80, 82, 79),
+            make_daily_overview_row("2026-04-02", 74, 76, 70),
         ];
 
         let rows = build_review_signal_days(&FeatureInputs {
             daily_history: &daily_history,
-            daily_activity: &[DailyActivityRecord {
-                oura_id: Some("act-1".to_owned()),
-                day: "2026-04-02".to_owned(),
-                activity_score: Some(70),
-                active_calories: 400,
-                steps: 5000,
-                total_calories: 2200,
-                raw_cache_key: None,
-                updated_at: "2026-04-02T08:00:00Z".to_owned(),
-            }],
-            daily_readiness: &[DailyReadinessRecord {
-                oura_id: Some("ready-1".to_owned()),
-                day: "2026-04-02".to_owned(),
-                readiness_score: Some(76),
-                temperature_deviation: Some(0.4),
-                temperature_trend_deviation: Some(0.2),
-                raw_cache_key: None,
-                updated_at: "2026-04-02T08:00:00Z".to_owned(),
-            }],
-            daily_stress: &[DailyStressRecord {
-                oura_id: Some("stress-1".to_owned()),
-                day: "2026-04-02".to_owned(),
-                stress_high: Some(180),
-                recovery_high: Some(40),
-                day_summary: Some("stressed".to_owned()),
-                raw_cache_key: None,
-                updated_at: "2026-04-02T08:00:00Z".to_owned(),
-            }],
-            daily_resilience: &[DailyResilienceRecord {
-                oura_id: Some("res-1".to_owned()),
-                day: "2026-04-02".to_owned(),
-                level: "solid".to_owned(),
-                sleep_recovery: 78.0,
-                daytime_recovery: 64.0,
-                stress: 55.0,
-                raw_cache_key: None,
-                updated_at: "2026-04-02T08:00:00Z".to_owned(),
-            }],
-            daily_cardiovascular_age: &[DailyCardiovascularAgeRecord {
-                day: "2026-04-02".to_owned(),
-                vascular_age: Some(37),
-                raw_cache_key: None,
-                updated_at: "2026-04-02T08:00:00Z".to_owned(),
-            }],
-            vo2_max: &[Vo2MaxRecord {
-                oura_id: Some("vo2-1".to_owned()),
-                day: "2026-04-02".to_owned(),
-                recorded_at: "2026-04-02T08:00:00Z".to_owned(),
-                vo2_max: Some(42.5),
-                raw_cache_key: None,
-                updated_at: "2026-04-02T08:00:00Z".to_owned(),
-            }],
-            sleep_time: &[SleepTimeRecord {
-                oura_id: Some("sleep-time-1".to_owned()),
-                day: "2026-04-02".to_owned(),
-                status: Some("optimal_found".to_owned()),
-                recommendation: Some("follow_optimal_bedtime".to_owned()),
-                optimal_bedtime_start_offset: Some(79200),
-                optimal_bedtime_end_offset: Some(82800),
-                optimal_bedtime_day_tz: Some(0),
-                raw_cache_key: None,
-                updated_at: "2026-04-02T08:00:00Z".to_owned(),
-            }],
-            rest_mode_periods: &[RestModePeriodRecord {
-                period_id: "rest-1".to_owned(),
-                start_day: "2026-04-02".to_owned(),
-                start_time: Some("2026-04-02T00:00:00Z".to_owned()),
-                end_day: Some("2026-04-03".to_owned()),
-                end_time: Some("2026-04-03T12:00:00Z".to_owned()),
-                episode_count: 1,
-                tags_json: "[]".to_owned(),
-                raw_cache_key: None,
-                updated_at: "2026-04-02T08:00:00Z".to_owned(),
-            }],
+            daily_activity: &[make_daily_activity_record()],
+            daily_readiness: &[make_daily_readiness_record()],
+            daily_stress: &[make_daily_stress_record()],
+            daily_resilience: &[make_daily_resilience_record()],
+            daily_cardiovascular_age: &[make_daily_cardiovascular_age_record()],
+            vo2_max: &[make_vo2_max_record()],
+            sleep_time: &[make_sleep_time_record()],
+            rest_mode_periods: &[make_rest_mode_period_record()],
             captured_at: "2026-04-03T10:00:00Z",
         })
         .unwrap_or_else(|error| panic!("feature build should succeed: {error}"));

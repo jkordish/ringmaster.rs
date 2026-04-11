@@ -110,6 +110,8 @@ Pane behavior is now consistent by pane type:
 - detail panes use `Enter` / `Space` and `Esc` to return cleanly
 - `Esc` backs out region-by-region instead of jumping straight to top-level navigation
 
+Only panes with their own keyboard contract become major focus stops. Timeline now exposes visible window and overlay selectors, Explain and Patterns expose visible overlay-family selectors, and the AI workbench exposes a dedicated artifact-actions pane. Read-mostly screens such as Explain and Status still stay lean everywhere else instead of pretending that every visible subpanel is independently operable.
+
 Wide layouts keep the primary `Views` navigation visible. Compact layouts keep the same interaction model while collapsing secondary content more aggressively. Optional expert aliases still exist, but they are supplemental rather than required. The canonical reference lives in [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md).
 
 ## AI in the TUI
@@ -117,9 +119,10 @@ Wide layouts keep the primary `Views` navigation visible. Compact layouts keep t
 AI is now a top-level product workflow, not a CLI-only add-on.
 
 - the dedicated `AI` workbench is one of the visible `Views` tabs
-- the workbench follows the same region model as the rest of the app: `Views`, browser tabs, launch points, saved artifacts, and artifact detail
+- the workbench follows the same region model as the rest of the app: `Views`, browser tabs, launch points, saved artifacts, artifact actions, and read-only artifact detail
 - `Ctrl+F` searches saved-artifact lists and `?` opens the current keyboard help without leaving the screen
 - every launch routes through an explicit preflight that shows snapshot scope, privacy profile, provider/model, stateless mode, tools-disabled status, content classes, payload size estimate, and the exact local artifact path that will be sent
+- saved-artifact actions are now visible canonical controls instead of hidden letter-only workflows
 - the workbench browses saved snapshots, AI runs, reports, and persisted eval runs in one place
 - saved AI runs render structured findings, evidence, counterevidence, uncertainty, and provenance directly in the TUI
 - saved eval runs render fixture manifest summaries, baseline-vs-candidate rollups, failing graders first, and lineage back to saved snapshots, AI runs, and reports when those local handles are available

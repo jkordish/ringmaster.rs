@@ -51,9 +51,9 @@ The interactive TUI now uses one shared navigation model across every primary sc
 Region model:
 
 1. `Views` top navigation
-2. screen-local controls such as trend windows, review mode/focus tabs, or AI browser tabs
-3. primary working region such as a list, launch-point group, or main content pane
-4. secondary or detail regions when the screen has them
+2. screen-local controls such as trend windows, review mode/focus tabs, or AI browser tabs when the screen has a real selector pane
+3. primary working region such as a list, launch-point group, chart, or main content pane
+4. secondary or detail regions when the screen has a real drill-down or independently operable companion pane
 
 Keyboard rules:
 
@@ -66,12 +66,14 @@ Keyboard rules:
 
 Pane-type rules:
 
-- selector panes such as `Views`, trend windows, review mode/focus, and AI browser tabs use `Left` / `Right` for one-step moves and `Home` / `End` or `PageUp` / `PageDown` for edge jumps
-- list panes such as Timeline events, Review cards, AI launch points, and saved artifacts use `Up` / `Down`, `Home` / `End`, and `PageUp` / `PageDown`
+- selector panes such as `Views`, Timeline window presets, Timeline / Explain / Patterns overlay selectors, trend windows, the Patterns metric filter, review mode/focus, AI browser tabs, and AI preflight controls use `Left` / `Right` for one-step moves and `Home` / `End` or `PageUp` / `PageDown` for edge jumps
+- list panes such as Timeline events, Review cards, AI launch points, saved artifacts, and AI artifact actions use `Up` / `Down`, `Home` / `End`, and `PageUp` / `PageDown`
 - chart/pager panes such as the Timeline chart use `Left` / `Right` within the active day and `PageUp` / `PageDown` for larger day shifts
 - detail panes are explicit drill-down surfaces; `Enter` / `Space` and `Esc` return to the invoking region instead of inventing screen-specific navigation keys
 
 Back-out is now consistent with screen region order. `Esc` walks to the previous major region on the current screen before it returns to `Views`.
+
+Read-mostly screens do not manufacture extra focus stops. If a visible section does not have its own movement or activation contract, it stays inside the screen's body region instead of becoming a separate keyboard destination.
 
 Search works today on the current list-heavy surfaces:
 
@@ -80,6 +82,14 @@ Search works today on the current list-heavy surfaces:
 - AI saved-artifact browser list
 
 The footer is registry-driven and intentionally concise. The help overlay is the place for the full scoped command list, including optional expert aliases.
+
+Canonical promoted controls now include:
+
+- Timeline `Window presets` plus `Overlay filters`
+- Explain `Overlay filters`
+- Patterns `Metric filter` plus `Family filter`
+- AI `Artifact actions`
+- AI preflight `Controls`
 
 Navigation regression coverage now lives in the app, keybinding, and TUI test suites plus the deterministic `ui snapshot --demo` artifact pass.
 
@@ -150,8 +160,8 @@ The workbench is intentionally guided rather than conversational:
 The in-app flow is:
 
 1. open the AI workbench directly or route there from an inline launch point
-2. select a bounded launch such as review, compare, rerun, or follow-up
-3. inspect the preflight panel before any provider call
+2. select a bounded launch or inspect a saved artifact and move into `Artifact actions`
+3. inspect the preflight panel and its visible `Controls` row before any provider call
 4. move between preflight controls with `Tab` / `Shift+Tab` or `Left` / `Right`, then confirm with `Enter` / `Space` or cancel with `Esc`
 5. monitor the persisted run lifecycle in-app
 6. inspect the saved structured result, linked reports, and source snapshot lineage
@@ -202,6 +212,7 @@ Saved AI runs can launch bounded follow-up actions from the AI workbench:
 - generate a report from the selected saved artifact
 
 Model-backed follow-up actions stay schema-bound and snapshot-bounded. They do not open an arbitrary prompt surface.
+The visible `Artifact actions` pane is the canonical path for these workflows. Letter bindings such as `e`, `g`, `u`, and `m` remain optional expert aliases only.
 
 ### Output handling
 
@@ -249,6 +260,7 @@ The preflight view shows:
 - whether notes or free text are included
 - approximate payload size and token estimate
 - any warnings such as disabled providers or recent failures
+- a visible `Controls` row for confirm, rotate privacy, and cancel
 
 The user must confirm explicitly. Dismissing preflight performs no hidden network action.
 
@@ -269,6 +281,7 @@ The browser uses a consistent list/detail model and keeps provenance visible:
 - linked artifacts and linked reports
 - exported report output path and verification metadata
 - eval fixture manifests, baseline-vs-candidate summaries, and failing graders
+- a visible `Artifact actions` list that changes truthfully with the selected run, snapshot, report, or eval
 
 ## Report export runtime
 
@@ -304,7 +317,7 @@ Each report includes:
 - provenance references
 - explicit privacy profile and AI usage marker
 
-The same report export flow is available from the AI workbench through the guided `g` action on saved runs and related artifacts.
+The same report export flow is available from the AI workbench through the visible `Generate report` artifact action on eligible saved runs and snapshots. The `g` binding remains an expert alias.
 
 ## Eval runtime
 

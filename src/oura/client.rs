@@ -34,7 +34,7 @@ pub struct PageFetch<T> {
     pub documents: Vec<T>,
 }
 
-pub trait OuraClient {
+pub trait OuraClient: Send + Sync {
     fn capability_report(&self) -> CapabilityReport;
 
     fn fetch_personal_info(&self) -> ClientFuture<'_, SingleFetch<PersonalInfoDocument>>;
@@ -120,6 +120,9 @@ pub struct FixtureOuraClient {
 }
 
 impl ReqwestOuraClient {
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be constructed.
     pub fn new(config: &Config, access_token: String, granted_scopes: &[String]) -> Result<Self> {
         let http = HttpClient::builder()
             .user_agent(OURA_API_USER_AGENT)
@@ -503,6 +506,9 @@ impl OuraClient for ReqwestOuraClient {
 }
 
 impl FixtureOuraClient {
+    /// # Errors
+    ///
+    /// Returns an error if the fixture directory cannot be prepared for fixture-backed API reads.
     pub fn new(config: &Config, fixture_dir: impl Into<PathBuf>) -> Result<Self> {
         let fixture_dir = fixture_dir.into();
         let granted_scopes = available_fixture_scopes(&fixture_dir);
@@ -1090,8 +1096,10 @@ fn parse_api_problem(status: StatusCode, payload: &str) -> OuraProblem {
         .as_ref()
         .and_then(|value| value.get("title"))
         .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| format!("request failed with HTTP {}", status.as_u16()));
+        .map_or_else(
+            || format!("request failed with HTTP {}", status.as_u16()),
+            ToOwned::to_owned,
+        );
     let detail = json
         .as_ref()
         .and_then(|value| value.get("detail"))
@@ -1131,21 +1139,27 @@ fn now_rfc3339() -> Result<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use std::fs;
 
+    use crate::test_support::ok;
     use tempfile::tempdir;
 
     #[test]
     fn fixture_scope_detection_includes_stress_and_heart_health_families() {
-        let tempdir = tempdir().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
-        fs::write(tempdir.path().join("daily_sleep.json"), "[]")
-            .unwrap_or_else(|error| panic!("daily fixture should write: {error}"));
-        fs::write(tempdir.path().join("sleep_time.json"), "[]")
-            .unwrap_or_else(|error| panic!("stress fixture should write: {error}"));
-        fs::write(tempdir.path().join("daily_resilience.json"), "[]")
-            .unwrap_or_else(|error| panic!("heart health fixture should write: {error}"));
+        let tempdir = ok(tempdir(), "tempdir should succeed");
+        ok(
+            fs::write(tempdir.path().join("daily_sleep.json"), "[]"),
+            "daily fixture should write",
+        );
+        ok(
+            fs::write(tempdir.path().join("sleep_time.json"), "[]"),
+            "stress fixture should write",
+        );
+        ok(
+            fs::write(tempdir.path().join("daily_resilience.json"), "[]"),
+            "heart health fixture should write",
+        );
 
         let scopes = super::available_fixture_scopes(tempdir.path());
 

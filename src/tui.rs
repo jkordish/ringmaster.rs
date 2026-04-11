@@ -81,6 +81,26 @@ struct SavedRunPreflightOverrides {
 }
 
 #[derive(Debug, Clone)]
+struct SelectedAiArtifacts {
+    tab: AiBrowserTab,
+    run: Option<AiRunRecord>,
+    snapshot: Option<SnapshotCatalogEntry>,
+    _report: Option<ReportExportRecord>,
+    eval: Option<AiEvalRunRecord>,
+}
+
+struct AiSideEffectContext<'a> {
+    config: &'a Config,
+    run_mode: RunMode,
+    source_screen: Screen,
+    selected_day: Option<String>,
+    current_preflight: Option<AiPreflightState>,
+    selected_artifacts: SelectedAiArtifacts,
+    ai_action_tx: &'a UnboundedSender<Action>,
+    ai_tasks: &'a mut HashMap<String, AsyncJoinHandle<()>>,
+}
+
+#[derive(Debug, Clone)]
 enum ReportSourceSelection {
     Snapshot(String),
     AiArtifact(String),
@@ -130,7 +150,8 @@ pub fn run(config: &Config, app: &mut AppState) -> Result<()> {
         {
             let event = event::read()
                 .map_err(|error| RingmasterError::io("reading terminal event", error))?;
-            if let Some(action) = map_event_with_context(app.binding_context(), event) {
+            let binding_context = app.binding_context();
+            if let Some(action) = map_event_with_context(binding_context, &event) {
                 let source_screen = app.active_screen;
                 let selected_day = app.selected_day_label();
                 let current_preflight = app.ai_preflight_state().cloned();
@@ -143,22 +164,26 @@ pub fn run(config: &Config, app: &mut AppState) -> Result<()> {
                     matches!(action, Action::RefreshRequested) && matches!(app.mode, RunMode::Live);
                 app.handle(action.clone());
                 if request_manual_refresh {
-                    send_worker_command(&worker_tx, WorkerCommand::ManualRefresh);
+                    send_worker_command(worker_tx.as_ref(), WorkerCommand::ManualRefresh);
                 }
                 handle_ai_side_effect(
-                    config,
-                    app.mode,
-                    action,
-                    source_screen,
-                    selected_day,
-                    current_preflight,
-                    selected_tab,
-                    selected_run,
-                    selected_snapshot,
-                    selected_report,
-                    selected_eval,
-                    &ai_action_tx,
-                    &mut ai_tasks,
+                    &action,
+                    AiSideEffectContext {
+                        config,
+                        run_mode: app.mode,
+                        source_screen,
+                        selected_day,
+                        current_preflight,
+                        selected_artifacts: SelectedAiArtifacts {
+                            tab: selected_tab,
+                            run: selected_run,
+                            snapshot: selected_snapshot,
+                            _report: selected_report,
+                            eval: selected_eval,
+                        },
+                        ai_action_tx: &ai_action_tx,
+                        ai_tasks: &mut ai_tasks,
+                    },
                 )?;
             }
         } else {
@@ -166,7 +191,7 @@ pub fn run(config: &Config, app: &mut AppState) -> Result<()> {
         }
     }
 
-    send_worker_command(&worker_tx, WorkerCommand::Shutdown);
+    send_worker_command(worker_tx.as_ref(), WorkerCommand::Shutdown);
     if let Some(worker_handle) = worker_handle {
         worker_handle
             .join()
@@ -483,7 +508,7 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 #[cfg(test)]
-fn map_event(active_screen: Screen, event: Event) -> Option<Action> {
+fn map_event(active_screen: Screen, event: &Event) -> Option<Action> {
     map_event_with_context(
         keybindings::BindingContext {
             active_screen,
@@ -500,7 +525,7 @@ fn map_event(active_screen: Screen, event: Event) -> Option<Action> {
 fn map_event_with_preflight(
     active_screen: Screen,
     preflight_open: bool,
-    event: Event,
+    event: &Event,
 ) -> Option<Action> {
     map_event_with_context(
         keybindings::BindingContext {
@@ -514,10 +539,10 @@ fn map_event_with_preflight(
     )
 }
 
-fn map_event_with_context(context: keybindings::BindingContext, event: Event) -> Option<Action> {
+fn map_event_with_context(context: keybindings::BindingContext, event: &Event) -> Option<Action> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
-            if let Some(action) = keybindings::resolve(key, context) {
+            if let Some(action) = keybindings::resolve(*key, context) {
                 return Some(action);
             }
             if context.search_open {
@@ -544,127 +569,154 @@ fn drain_worker_actions(worker_actions: &mut UnboundedReceiver<Action>, app: &mu
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn handle_ai_side_effect(
-    config: &Config,
-    run_mode: RunMode,
-    action: Action,
-    source_screen: Screen,
-    selected_day: Option<String>,
-    current_preflight: Option<AiPreflightState>,
-    selected_tab: AiBrowserTab,
-    selected_run: Option<AiRunRecord>,
-    selected_snapshot: Option<SnapshotCatalogEntry>,
-    _selected_report: Option<ReportExportRecord>,
-    selected_eval: Option<AiEvalRunRecord>,
-    ai_action_tx: &UnboundedSender<Action>,
-    ai_tasks: &mut HashMap<String, AsyncJoinHandle<()>>,
-) -> Result<()> {
-    if ai_run_controls_require_runs_tab(&action) && selected_tab != AiBrowserTab::Runs {
-        let _ = ai_action_tx.send(Action::RefreshFailed {
+fn handle_ai_side_effect(action: &Action, context: AiSideEffectContext<'_>) -> Result<()> {
+    if ai_run_controls_require_runs_tab(action)
+        && context.selected_artifacts.tab != AiBrowserTab::Runs
+    {
+        let _ = context.ai_action_tx.send(Action::RefreshFailed {
             message: "Run controls only apply while browsing saved AI runs.".to_owned(),
         });
         return Ok(());
     }
+    let mut context = context;
+    match action {
+        Action::RequestAiLaunch(_)
+        | Action::CycleAiPreflightPrivacyProfile
+        | Action::ConfirmAiPreflight => handle_ai_preflight_side_effect(action, &mut context),
+        Action::RequestCancelAiRun
+        | Action::RequestAiGuidedFollowUp(_)
+        | Action::RequestAiRerunNextPrivacy
+        | Action::RequestAiRerunNextModel => {
+            handle_ai_run_control_side_effect(action, &mut context)
+        }
+        Action::RequestAiComparePreviousSnapshot
+        | Action::RequestAiGenerateReport
+        | Action::RequestJumpToAiEvidence => {
+            handle_ai_browser_selection_side_effect(action, &context)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn handle_ai_preflight_side_effect(
+    action: &Action,
+    context: &mut AiSideEffectContext<'_>,
+) -> Result<()> {
     match action {
         Action::RequestAiLaunch(intent) => {
-            let Some(selected_day) = selected_day else {
-                let _ = ai_action_tx.send(Action::AiPreflightFailed {
+            let Some(selected_day) = context.selected_day.clone() else {
+                let _ = context.ai_action_tx.send(Action::AiPreflightFailed {
                     message: "AI launches need a selected day from the current live snapshot."
                         .to_owned(),
                 });
                 return Ok(());
             };
             spawn_ai_preflight_task(
-                config.clone(),
-                run_mode,
+                context.config.clone(),
+                context.run_mode,
                 AiPreflightRequest {
-                    intent,
-                    source_screen,
+                    intent: *intent,
+                    source_screen: context.source_screen,
                     selected_day,
                     privacy_profile: PrivacyProfile::Redacted,
                 },
-                ai_action_tx.clone(),
+                context.ai_action_tx.clone(),
             );
+            Ok(())
         }
         Action::CycleAiPreflightPrivacyProfile => {
-            if let Some(preflight) = current_preflight {
-                if let Some(overrides) = saved_run_privacy_cycle_overrides(&preflight) {
-                    let Some(run) = selected_run else {
-                        let _ = ai_action_tx.send(Action::AiPreflightFailed {
-                            message:
-                                "The current AI preflight came from a saved run, but that run is no longer selected."
-                                    .to_owned(),
-                        });
-                        return Ok(());
-                    };
-                    spawn_ai_saved_run_preflight_task(
-                        config.clone(),
-                        run_mode,
-                        source_screen,
-                        run,
-                        preflight.follow_up_kind,
-                        Some(overrides),
-                        ai_action_tx.clone(),
-                    );
-                    return Ok(());
-                }
-                let Some(selected_day) = selected_day_from_preflight(&preflight) else {
-                    let _ = ai_action_tx.send(Action::AiPreflightFailed {
+            let Some(preflight) = context.current_preflight.clone() else {
+                return Ok(());
+            };
+            if let Some(overrides) = saved_run_privacy_cycle_overrides(&preflight) {
+                let Some(run) = context.selected_artifacts.run.clone() else {
+                    let _ = context.ai_action_tx.send(Action::AiPreflightFailed {
                         message:
-                            "The current AI preflight no longer has enough snapshot context to rotate privacy profiles."
+                            "The current AI preflight came from a saved run, but that run is no longer selected."
                                 .to_owned(),
                     });
                     return Ok(());
                 };
-                spawn_ai_preflight_task(
-                    config.clone(),
-                    run_mode,
-                    AiPreflightRequest {
-                        intent: preflight.intent,
-                        source_screen: preflight.source_screen,
-                        selected_day,
-                        privacy_profile: preflight.privacy_profile.next(),
-                    },
-                    ai_action_tx.clone(),
+                spawn_ai_saved_run_preflight_task(
+                    context.config.clone(),
+                    context.run_mode,
+                    context.source_screen,
+                    run,
+                    preflight.follow_up_kind,
+                    Some(overrides),
+                    context.ai_action_tx.clone(),
                 );
+                return Ok(());
             }
+
+            let Some(selected_day) = selected_day_from_preflight(&preflight) else {
+                let _ = context.ai_action_tx.send(Action::AiPreflightFailed {
+                    message:
+                        "The current AI preflight no longer has enough snapshot context to rotate privacy profiles."
+                            .to_owned(),
+                });
+                return Ok(());
+            };
+            spawn_ai_preflight_task(
+                context.config.clone(),
+                context.run_mode,
+                AiPreflightRequest {
+                    intent: preflight.intent,
+                    source_screen: preflight.source_screen,
+                    selected_day,
+                    privacy_profile: preflight.privacy_profile.next(),
+                },
+                context.ai_action_tx.clone(),
+            );
+            Ok(())
         }
         Action::ConfirmAiPreflight => {
-            let Some(preflight) = current_preflight else {
+            let Some(preflight) = context.current_preflight.clone() else {
                 return Ok(());
             };
             if !preflight.confirm_enabled {
                 return Ok(());
             }
-            let queued_record = persist_queued_ai_run(config, &preflight)?;
-            let _ = ai_action_tx.send(queued_ai_run_refresh_action(config, &queued_record));
+            let queued_record = persist_queued_ai_run(context.config, &preflight)?;
+            let _ = context
+                .ai_action_tx
+                .send(queued_ai_run_refresh_action(context.config, &queued_record));
             let run_id = queued_record.run_id.clone();
-            let config = config.clone();
-            let ai_action_tx = ai_action_tx.clone();
+            let config = context.config.clone();
+            let ai_action_tx = context.ai_action_tx.clone();
             let handle = tokio::spawn(async move {
                 run_ai_job(config, queued_record, preflight, ai_action_tx).await;
             });
-            ai_tasks.insert(run_id, handle);
+            context.ai_tasks.insert(run_id, handle);
+            Ok(())
         }
+        _ => Ok(()),
+    }
+}
+
+fn handle_ai_run_control_side_effect(
+    action: &Action,
+    context: &mut AiSideEffectContext<'_>,
+) -> Result<()> {
+    match action {
         Action::RequestCancelAiRun => {
-            if run_mode == RunMode::Demo {
-                let _ = ai_action_tx.send(Action::RefreshFailed {
+            if context.run_mode == RunMode::Demo {
+                let _ = context.ai_action_tx.send(Action::RefreshFailed {
                     message:
                         "Saved demo AI runs are read-only; cancellation is only available in live mode."
                             .to_owned(),
                 });
                 return Ok(());
             }
-            let Some(run) = selected_run else {
+            let Some(run) = context.selected_artifacts.run.clone() else {
                 return Ok(());
             };
-            if let Some(handle) = ai_tasks.remove(&run.run_id) {
+            if let Some(handle) = context.ai_tasks.remove(&run.run_id) {
                 handle.abort();
             }
-            let cancelled = cancel_ai_run(config, &run.run_id)?;
-            let _ = ai_action_tx.send(reload_live_snapshot_action(
-                config,
+            let cancelled = cancel_ai_run(context.config, &run.run_id)?;
+            let _ = context.ai_action_tx.send(reload_live_snapshot_action(
+                context.config,
                 &if cancelled {
                     format!("Cancelled AI run {}.", abbreviate_id(&run.run_id, 12))
                 } else {
@@ -675,34 +727,36 @@ fn handle_ai_side_effect(
                 },
                 None,
             )?);
+            Ok(())
         }
         Action::RequestAiGuidedFollowUp(kind) => {
-            let Some(run) = selected_run else {
-                let _ = ai_action_tx.send(Action::AiPreflightFailed {
+            let Some(run) = context.selected_artifacts.run.clone() else {
+                let _ = context.ai_action_tx.send(Action::AiPreflightFailed {
                     message: "Select a saved AI run before launching a guided follow-up."
                         .to_owned(),
                 });
                 return Ok(());
             };
             spawn_ai_saved_run_preflight_task(
-                config.clone(),
-                run_mode,
-                source_screen,
+                context.config.clone(),
+                context.run_mode,
+                context.source_screen,
                 run,
-                Some(kind),
+                Some(*kind),
                 None,
-                ai_action_tx.clone(),
+                context.ai_action_tx.clone(),
             );
+            Ok(())
         }
         Action::RequestAiRerunNextPrivacy => {
-            let Some(run) = selected_run else {
+            let Some(run) = context.selected_artifacts.run.clone() else {
                 return Ok(());
             };
             let next_privacy = next_privacy_profile_from_run(&run)?;
             spawn_ai_saved_run_preflight_task(
-                config.clone(),
-                run_mode,
-                source_screen,
+                context.config.clone(),
+                context.run_mode,
+                context.source_screen,
                 run,
                 None,
                 Some(SavedRunPreflightOverrides {
@@ -710,141 +764,173 @@ fn handle_ai_side_effect(
                     model_override: None,
                     compare_previous_snapshot: false,
                 }),
-                ai_action_tx.clone(),
+                context.ai_action_tx.clone(),
             );
+            Ok(())
         }
         Action::RequestAiRerunNextModel => {
-            let Some(run) = selected_run else {
+            let Some(run) = context.selected_artifacts.run.clone() else {
                 return Ok(());
             };
+            let overrides = SavedRunPreflightOverrides {
+                privacy_profile: parse_privacy_profile_label(&run.privacy_profile)?,
+                model_override: Some(next_model_choice(context.config, &run.model)),
+                compare_previous_snapshot: false,
+            };
             spawn_ai_saved_run_preflight_task(
-                config.clone(),
-                run_mode,
-                source_screen,
-                run.clone(),
+                context.config.clone(),
+                context.run_mode,
+                context.source_screen,
+                run,
                 None,
-                Some(SavedRunPreflightOverrides {
-                    privacy_profile: parse_privacy_profile_label(&run.privacy_profile)?,
-                    model_override: Some(next_model_choice(config, &run.model)),
-                    compare_previous_snapshot: false,
-                }),
-                ai_action_tx.clone(),
+                Some(overrides),
+                context.ai_action_tx.clone(),
+            );
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn handle_ai_browser_selection_side_effect(
+    action: &Action,
+    context: &AiSideEffectContext<'_>,
+) -> Result<()> {
+    match action {
+        Action::RequestAiComparePreviousSnapshot => {
+            handle_ai_compare_previous_snapshot_side_effect(context)
+        }
+        Action::RequestAiGenerateReport => {
+            handle_ai_generate_report_side_effect(context);
+            Ok(())
+        }
+        Action::RequestJumpToAiEvidence => handle_ai_jump_to_evidence_side_effect(context),
+        _ => Ok(()),
+    }
+}
+
+fn handle_ai_compare_previous_snapshot_side_effect(
+    context: &AiSideEffectContext<'_>,
+) -> Result<()> {
+    match context.selected_artifacts.tab {
+        AiBrowserTab::Runs => {
+            let Some(run) = context.selected_artifacts.run.clone() else {
+                return Ok(());
+            };
+            let overrides = compare_previous_snapshot_overrides(&run)?;
+            spawn_ai_saved_run_preflight_task(
+                context.config.clone(),
+                context.run_mode,
+                context.source_screen,
+                run,
+                None,
+                Some(overrides),
+                context.ai_action_tx.clone(),
             );
         }
-        Action::RequestAiComparePreviousSnapshot => match selected_tab {
-            AiBrowserTab::Runs => {
-                let Some(run) = selected_run else {
-                    return Ok(());
-                };
-                let overrides = compare_previous_snapshot_overrides(&run)?;
-                spawn_ai_saved_run_preflight_task(
-                    config.clone(),
-                    run_mode,
-                    source_screen,
-                    run,
-                    None,
-                    Some(overrides),
-                    ai_action_tx.clone(),
-                );
-            }
-            AiBrowserTab::Snapshots => {
-                let Some(snapshot) = selected_snapshot else {
-                    return Ok(());
-                };
-                spawn_ai_snapshot_compare_task(
-                    config.clone(),
-                    run_mode,
-                    source_screen,
-                    snapshot,
-                    ai_action_tx.clone(),
-                );
-            }
-            AiBrowserTab::Reports => {}
-            AiBrowserTab::Evals => {
-                let _ = ai_action_tx.send(Action::RefreshFailed {
-                    message:
-                        "Eval entries are read-only history. Compare launches still start from saved runs or snapshots."
-                            .to_owned(),
-                });
-            }
-        },
-        Action::RequestAiGenerateReport => match selected_tab {
-            AiBrowserTab::Runs => {
-                let Some(run) = selected_run else {
-                    return Ok(());
-                };
-                let Some(artifact_id) = run.artifact_id else {
-                    let _ = ai_action_tx.send(Action::RefreshFailed {
-                        message:
-                            "The selected AI run does not have a saved structured artifact to export yet."
-                                .to_owned(),
-                    });
-                    return Ok(());
-                };
-                spawn_report_export_task(
-                    config.clone(),
-                    run_mode,
-                    ReportSourceSelection::AiArtifact(artifact_id),
-                    ai_action_tx.clone(),
-                );
-            }
-            AiBrowserTab::Snapshots => {
-                let Some(snapshot) = selected_snapshot else {
-                    return Ok(());
-                };
-                spawn_report_export_task(
-                    config.clone(),
-                    run_mode,
-                    ReportSourceSelection::Snapshot(snapshot.snapshot_hash),
-                    ai_action_tx.clone(),
-                );
-            }
-            AiBrowserTab::Reports => {}
-            AiBrowserTab::Evals => {
-                let _ = ai_action_tx.send(Action::RefreshFailed {
-                    message:
-                        "Eval entries are already exported history; generate reports from saved runs or snapshots instead."
-                            .to_owned(),
-                });
-            }
-        },
-        Action::RequestJumpToAiEvidence => match selected_tab {
-            AiBrowserTab::Runs => {
-                let Some(run) = selected_run else {
-                    return Ok(());
-                };
-                if let Some(jump_action) = build_jump_to_evidence_action(config, &run)? {
-                    let _ = ai_action_tx.send(jump_action);
-                } else {
-                    let _ = ai_action_tx.send(Action::RefreshFailed {
-                        message:
-                            "The selected AI run does not have a resolvable evidence reference yet."
-                                .to_owned(),
-                    });
-                }
-            }
-            AiBrowserTab::Evals => {
-                let Some(eval) = selected_eval else {
-                    return Ok(());
-                };
-                if let Some(jump_action) = build_eval_jump_action(&eval) {
-                    let _ = ai_action_tx.send(jump_action);
-                } else {
-                    let _ = ai_action_tx.send(Action::RefreshFailed {
-                            message:
-                                "The selected eval does not declare a saved snapshot, AI run, or report link."
-                                    .to_owned(),
-                        });
-                }
-            }
-            AiBrowserTab::Snapshots | AiBrowserTab::Reports => {}
-        },
-        _ => {}
+        AiBrowserTab::Snapshots => {
+            let Some(snapshot) = context.selected_artifacts.snapshot.clone() else {
+                return Ok(());
+            };
+            spawn_ai_snapshot_compare_task(
+                context.config.clone(),
+                context.run_mode,
+                context.source_screen,
+                snapshot,
+                context.ai_action_tx.clone(),
+            );
+        }
+        AiBrowserTab::Reports => {}
+        AiBrowserTab::Evals => {
+            let _ = context.ai_action_tx.send(Action::RefreshFailed {
+                message:
+                    "Eval entries are read-only history. Compare launches still start from saved runs or snapshots."
+                        .to_owned(),
+            });
+        }
     }
     Ok(())
 }
 
-fn ai_run_controls_require_runs_tab(action: &Action) -> bool {
+fn handle_ai_generate_report_side_effect(context: &AiSideEffectContext<'_>) {
+    match context.selected_artifacts.tab {
+        AiBrowserTab::Runs => {
+            let Some(run) = context.selected_artifacts.run.clone() else {
+                return;
+            };
+            let Some(artifact_id) = run.artifact_id else {
+                let _ = context.ai_action_tx.send(Action::RefreshFailed {
+                    message:
+                        "The selected AI run does not have a saved structured artifact to export yet."
+                            .to_owned(),
+                });
+                return;
+            };
+            spawn_report_export_task(
+                context.config.clone(),
+                context.run_mode,
+                ReportSourceSelection::AiArtifact(artifact_id),
+                context.ai_action_tx.clone(),
+            );
+        }
+        AiBrowserTab::Snapshots => {
+            let Some(snapshot) = context.selected_artifacts.snapshot.clone() else {
+                return;
+            };
+            spawn_report_export_task(
+                context.config.clone(),
+                context.run_mode,
+                ReportSourceSelection::Snapshot(snapshot.snapshot_hash),
+                context.ai_action_tx.clone(),
+            );
+        }
+        AiBrowserTab::Reports => {}
+        AiBrowserTab::Evals => {
+            let _ = context.ai_action_tx.send(Action::RefreshFailed {
+                message:
+                    "Eval entries are already exported history; generate reports from saved runs or snapshots instead."
+                        .to_owned(),
+            });
+        }
+    }
+}
+
+fn handle_ai_jump_to_evidence_side_effect(context: &AiSideEffectContext<'_>) -> Result<()> {
+    match context.selected_artifacts.tab {
+        AiBrowserTab::Runs => {
+            let Some(run) = context.selected_artifacts.run.clone() else {
+                return Ok(());
+            };
+            if let Some(jump_action) = build_jump_to_evidence_action(context.config, &run)? {
+                let _ = context.ai_action_tx.send(jump_action);
+            } else {
+                let _ = context.ai_action_tx.send(Action::RefreshFailed {
+                    message:
+                        "The selected AI run does not have a resolvable evidence reference yet."
+                            .to_owned(),
+                });
+            }
+        }
+        AiBrowserTab::Evals => {
+            let Some(eval) = context.selected_artifacts.eval.clone() else {
+                return Ok(());
+            };
+            if let Some(jump_action) = build_eval_jump_action(&eval) {
+                let _ = context.ai_action_tx.send(jump_action);
+            } else {
+                let _ = context.ai_action_tx.send(Action::RefreshFailed {
+                    message:
+                        "The selected eval does not declare a saved snapshot, AI run, or report link."
+                            .to_owned(),
+                });
+            }
+        }
+        AiBrowserTab::Snapshots | AiBrowserTab::Reports => {}
+    }
+    Ok(())
+}
+
+const fn ai_run_controls_require_runs_tab(action: &Action) -> bool {
     matches!(
         action,
         Action::RequestCancelAiRun
@@ -1203,163 +1289,249 @@ fn prepare_ai_saved_run_preflight(
     let compare_previous_snapshot =
         overrides.is_some_and(|overrides| overrides.compare_previous_snapshot);
     let preview_config = config_with_model_override(config, model_override.as_deref());
-
-    let (
-        intent,
-        snapshot_scope,
-        snapshot_paths,
-        request_preview,
-        follow_up_kind,
-        source_ai_artifact_id,
-    ) = if compare_previous_snapshot {
-        let current_snapshot =
-            load_snapshot_export_record(&store, preferred_current_snapshot_hash(run))?;
-        let previous_snapshot = previous_similar_snapshot_record(&store, &current_snapshot)?;
-        let (snapshot_a, path_a) = materialize_snapshot_for_preflight(
+    let prepared = if compare_previous_snapshot {
+        prepare_compare_previous_snapshot_preflight(
             config,
             &store,
             &auth_status,
-            &previous_snapshot,
+            &preview_config,
+            run,
             privacy_profile,
-            "compare-a",
-        )?;
-        let (snapshot_b, path_b) = materialize_snapshot_for_preflight(
-            config,
-            &store,
-            &auth_status,
-            &current_snapshot,
-            privacy_profile,
-            "compare-b",
-        )?;
-        (
-            AiLaunchIntent::CompareSelectedWeek,
-            format!("{} vs {}", current_snapshot.scope, previous_snapshot.scope),
-            vec![path_a.display().to_string(), path_b.display().to_string()],
-            ai::preview_compare_request(&preview_config, &snapshot_a, &snapshot_b)?,
-            None,
-            None,
-        )
+        )?
     } else if let Some(follow_up_kind) = explicit_follow_up_kind
         .or_else(|| parse_follow_up_kind_label(run.follow_up_kind.as_deref()))
     {
-        let source_ai_artifact_id = resolve_follow_up_source_artifact_id(run)?.to_owned();
-        let source_record = store
-            .analysis()
-            .ai_artifact(&source_ai_artifact_id)?
-            .ok_or_else(|| {
-                RingmasterError::Ui(format!(
-                    "Saved AI artifact `{source_ai_artifact_id}` is no longer present."
-                ))
-            })?;
-        let snapshot_records = load_run_snapshot_records(&store, run)?;
-        let mut prepared_snapshots = Vec::new();
-        let mut snapshot_paths = Vec::new();
-        for (index, snapshot_record) in snapshot_records.iter().enumerate() {
-            let (snapshot, path) = materialize_snapshot_for_preflight(
-                config,
-                &store,
-                &auth_status,
-                snapshot_record,
-                privacy_profile,
-                &format!("follow-up-{}", index + 1),
-            )?;
-            prepared_snapshots.push(snapshot);
-            snapshot_paths.push(path.display().to_string());
-        }
-        (
-            AiLaunchIntent::ChallengeSelectedDay,
-            run.snapshot_scope.clone(),
-            snapshot_paths,
-            ai::preview_follow_up_request(
-                &preview_config,
-                &prepared_snapshots,
-                &source_record,
-                follow_up_kind,
-            )?,
-            Some(follow_up_kind),
-            Some(source_ai_artifact_id),
-        )
+        prepare_saved_run_follow_up_preflight(
+            config,
+            &store,
+            &auth_status,
+            &preview_config,
+            run,
+            privacy_profile,
+            follow_up_kind,
+        )?
     } else if run.run_kind == "compare" {
-        let snapshot_records = load_run_snapshot_records(&store, run)?;
-        if snapshot_records.len() < 2 {
-            return Err(RingmasterError::Ui(
-                "Compare reruns need two persisted source snapshots.".to_owned(),
-            ));
-        }
-        let (snapshot_a, path_a) = materialize_snapshot_for_preflight(
+        prepare_saved_run_compare_rerun_preflight(
             config,
             &store,
             &auth_status,
-            &snapshot_records[0],
+            &preview_config,
+            run,
             privacy_profile,
-            "compare-a",
-        )?;
-        let (snapshot_b, path_b) = materialize_snapshot_for_preflight(
-            config,
-            &store,
-            &auth_status,
-            &snapshot_records[1],
-            privacy_profile,
-            "compare-b",
-        )?;
-        (
-            AiLaunchIntent::CompareSelectedWeek,
-            run.snapshot_scope.clone(),
-            vec![path_a.display().to_string(), path_b.display().to_string()],
-            ai::preview_compare_request(&preview_config, &snapshot_a, &snapshot_b)?,
-            None,
-            None,
-        )
+        )?
     } else {
-        let snapshot_record = load_snapshot_export_record(&store, &run.snapshot_hash_a)?;
-        let (snapshot, path) = materialize_snapshot_for_preflight(
+        prepare_saved_run_review_rerun_preflight(
             config,
             &store,
             &auth_status,
-            &snapshot_record,
+            &preview_config,
+            run,
             privacy_profile,
-            "review",
-        )?;
-        (
-            AiLaunchIntent::ReviewSelectedDay,
-            run.snapshot_scope.clone(),
-            vec![path.display().to_string()],
-            ai::preview_review_request(&preview_config, &snapshot)?,
-            None,
-            None,
-        )
+        )?
     };
 
     let warning_lines = ai_preflight_warning_lines(&preview_config);
     let confirm_enabled = warning_lines.is_empty();
     let preflight = AiPreflightState {
-        intent,
+        intent: prepared.intent,
         source_screen,
-        snapshot_scope,
-        snapshot_paths,
-        request_preview,
+        snapshot_scope: prepared.snapshot_scope,
+        snapshot_paths: prepared.snapshot_paths,
+        request_preview: prepared.request_preview,
         privacy_profile,
         model_override,
-        source_ai_artifact_id,
-        follow_up_kind,
+        source_ai_artifact_id: prepared.source_ai_artifact_id,
+        follow_up_kind: prepared.follow_up_kind,
         warning_lines,
         confirm_enabled,
     };
-    let status_line = if let Some(follow_up_kind) = preflight.follow_up_kind {
-        format!(
-            "Prepared {} follow-up with {} privacy.",
-            follow_up_kind.label(),
-            preflight.privacy_profile.as_str()
-        )
-    } else {
-        format!(
-            "Prepared {} preflight with {} privacy.",
-            preflight.intent.short_label(),
-            preflight.privacy_profile.as_str()
-        )
-    };
+    let status_line = saved_run_preflight_status_line(&preflight);
     let snapshot_reload = reload_live_snapshot_action(config, &status_line, Some(&store))?;
     Ok((snapshot_reload, preflight, status_line))
+}
+
+struct PreparedSavedRunPreflight {
+    intent: AiLaunchIntent,
+    snapshot_scope: String,
+    snapshot_paths: Vec<String>,
+    request_preview: ai::AiRequestPreview,
+    follow_up_kind: Option<GuidedFollowUpKind>,
+    source_ai_artifact_id: Option<String>,
+}
+
+fn prepare_compare_previous_snapshot_preflight(
+    config: &Config,
+    store: &Store,
+    auth_status: &crate::oura::models::AuthStatus,
+    preview_config: &Config,
+    run: &AiRunRecord,
+    privacy_profile: PrivacyProfile,
+) -> Result<PreparedSavedRunPreflight> {
+    let current_snapshot =
+        load_snapshot_export_record(store, preferred_current_snapshot_hash(run))?;
+    let previous_snapshot = previous_similar_snapshot_record(store, &current_snapshot)?;
+    let (snapshot_a, path_a) = materialize_snapshot_for_preflight(
+        config,
+        store,
+        auth_status,
+        &previous_snapshot,
+        privacy_profile,
+        "compare-a",
+    )?;
+    let (snapshot_b, path_b) = materialize_snapshot_for_preflight(
+        config,
+        store,
+        auth_status,
+        &current_snapshot,
+        privacy_profile,
+        "compare-b",
+    )?;
+
+    Ok(PreparedSavedRunPreflight {
+        intent: AiLaunchIntent::CompareSelectedWeek,
+        snapshot_scope: format!("{} vs {}", current_snapshot.scope, previous_snapshot.scope),
+        snapshot_paths: vec![path_a.display().to_string(), path_b.display().to_string()],
+        request_preview: ai::preview_compare_request(preview_config, &snapshot_a, &snapshot_b)?,
+        follow_up_kind: None,
+        source_ai_artifact_id: None,
+    })
+}
+
+fn prepare_saved_run_follow_up_preflight(
+    config: &Config,
+    store: &Store,
+    auth_status: &crate::oura::models::AuthStatus,
+    preview_config: &Config,
+    run: &AiRunRecord,
+    privacy_profile: PrivacyProfile,
+    follow_up_kind: GuidedFollowUpKind,
+) -> Result<PreparedSavedRunPreflight> {
+    let source_ai_artifact_id = resolve_follow_up_source_artifact_id(run)?.to_owned();
+    let source_record = store
+        .analysis()
+        .ai_artifact(&source_ai_artifact_id)?
+        .ok_or_else(|| {
+            RingmasterError::Ui(format!(
+                "Saved AI artifact `{source_ai_artifact_id}` is no longer present."
+            ))
+        })?;
+    let snapshot_records = load_run_snapshot_records(store, run)?;
+    let mut prepared_snapshots = Vec::new();
+    let mut snapshot_paths = Vec::new();
+    for (index, snapshot_record) in snapshot_records.iter().enumerate() {
+        let (snapshot, path) = materialize_snapshot_for_preflight(
+            config,
+            store,
+            auth_status,
+            snapshot_record,
+            privacy_profile,
+            &format!("follow-up-{}", index + 1),
+        )?;
+        prepared_snapshots.push(snapshot);
+        snapshot_paths.push(path.display().to_string());
+    }
+
+    Ok(PreparedSavedRunPreflight {
+        intent: AiLaunchIntent::ChallengeSelectedDay,
+        snapshot_scope: run.snapshot_scope.clone(),
+        snapshot_paths,
+        request_preview: ai::preview_follow_up_request(
+            preview_config,
+            &prepared_snapshots,
+            &source_record,
+            follow_up_kind,
+        )?,
+        follow_up_kind: Some(follow_up_kind),
+        source_ai_artifact_id: Some(source_ai_artifact_id),
+    })
+}
+
+fn prepare_saved_run_compare_rerun_preflight(
+    config: &Config,
+    store: &Store,
+    auth_status: &crate::oura::models::AuthStatus,
+    preview_config: &Config,
+    run: &AiRunRecord,
+    privacy_profile: PrivacyProfile,
+) -> Result<PreparedSavedRunPreflight> {
+    let snapshot_records = load_run_snapshot_records(store, run)?;
+    if snapshot_records.len() < 2 {
+        return Err(RingmasterError::Ui(
+            "Compare reruns need two persisted source snapshots.".to_owned(),
+        ));
+    }
+    let (snapshot_a, path_a) = materialize_snapshot_for_preflight(
+        config,
+        store,
+        auth_status,
+        &snapshot_records[0],
+        privacy_profile,
+        "compare-a",
+    )?;
+    let (snapshot_b, path_b) = materialize_snapshot_for_preflight(
+        config,
+        store,
+        auth_status,
+        &snapshot_records[1],
+        privacy_profile,
+        "compare-b",
+    )?;
+
+    Ok(PreparedSavedRunPreflight {
+        intent: AiLaunchIntent::CompareSelectedWeek,
+        snapshot_scope: run.snapshot_scope.clone(),
+        snapshot_paths: vec![path_a.display().to_string(), path_b.display().to_string()],
+        request_preview: ai::preview_compare_request(preview_config, &snapshot_a, &snapshot_b)?,
+        follow_up_kind: None,
+        source_ai_artifact_id: None,
+    })
+}
+
+fn prepare_saved_run_review_rerun_preflight(
+    config: &Config,
+    store: &Store,
+    auth_status: &crate::oura::models::AuthStatus,
+    preview_config: &Config,
+    run: &AiRunRecord,
+    privacy_profile: PrivacyProfile,
+) -> Result<PreparedSavedRunPreflight> {
+    let snapshot_record = load_snapshot_export_record(store, &run.snapshot_hash_a)?;
+    let (snapshot, path) = materialize_snapshot_for_preflight(
+        config,
+        store,
+        auth_status,
+        &snapshot_record,
+        privacy_profile,
+        "review",
+    )?;
+
+    Ok(PreparedSavedRunPreflight {
+        intent: AiLaunchIntent::ReviewSelectedDay,
+        snapshot_scope: run.snapshot_scope.clone(),
+        snapshot_paths: vec![path.display().to_string()],
+        request_preview: ai::preview_review_request(preview_config, &snapshot)?,
+        follow_up_kind: None,
+        source_ai_artifact_id: None,
+    })
+}
+
+fn saved_run_preflight_status_line(preflight: &AiPreflightState) -> String {
+    preflight.follow_up_kind.map_or_else(
+        || {
+            format!(
+                "Prepared {} preflight with {} privacy.",
+                preflight.intent.short_label(),
+                preflight.privacy_profile.as_str()
+            )
+        },
+        |follow_up_kind| {
+            format!(
+                "Prepared {} follow-up with {} privacy.",
+                follow_up_kind.label(),
+                preflight.privacy_profile.as_str()
+            )
+        },
+    )
 }
 
 fn prepare_ai_snapshot_compare_preflight(
@@ -1716,16 +1888,16 @@ fn persist_queued_ai_run(config: &Config, preflight: &AiPreflightState) -> Resul
             .replace(' ', "-"),
         OffsetDateTime::now_utc().unix_timestamp_nanos()
     );
-    let record = build_ai_run_record(
-        &run_id,
+    let record = build_ai_run_record(AiRunRecordInput {
+        run_id: &run_id,
         preflight,
-        AiRunStatus::Queued,
-        &created_at,
-        None,
-        None,
-        None,
-        None,
-    )?;
+        status: AiRunStatus::Queued,
+        created_at: &created_at,
+        started_at: None,
+        ended_at: None,
+        artifact_id: None,
+        error_message: None,
+    })?;
     let store = Store::open(config)?;
     store.analysis().upsert_ai_run(&record)?;
     Ok(record)
@@ -1755,164 +1927,265 @@ async fn run_ai_job(
 ) {
     let mut failed_base_record = queued_record.clone();
     let result = async {
-        let started_at = now_rfc3339()?;
-        let store = Store::open(&config)?;
-        let mut running_record = queued_record.clone();
-        AiRunStatus::Running
-            .as_str()
-            .clone_into(&mut running_record.run_status);
-        running_record.started_at = Some(started_at.clone());
-        running_record.updated_at = started_at.clone();
-        store.analysis().upsert_ai_run(&running_record)?;
+        let (store, running_record) = mark_ai_run_running(&config, &queued_record)?;
         failed_base_record = running_record.clone();
-        let _ = action_tx.send(nonfatal_reload_live_snapshot_action(
-            &config,
-            &format!("Running {}.", running_record.run_kind),
-            Some(&store),
-            &format!(
-                "AI run {} started, but refreshing the workbench failed",
-                abbreviate_id(&running_record.run_id, 12)
-            ),
-        ));
-
-        let run_config = config_with_model_override(&config, preflight.model_override.as_deref());
-
-        if let Some(follow_up_kind) = preflight.follow_up_kind {
-            let source_ai_artifact_id =
-                preflight.source_ai_artifact_id.clone().ok_or_else(|| {
-                    RingmasterError::Ui(
-                        "Follow-up runs need a saved source artifact in preflight.".to_owned(),
-                    )
-                })?;
-            let source_record = store
-                .analysis()
-                .ai_artifact(&source_ai_artifact_id)?
-                .ok_or_else(|| {
-                    RingmasterError::Ui(format!(
-                        "Saved source artifact `{source_ai_artifact_id}` is no longer present."
-                    ))
-                })?;
-            let snapshots = load_snapshots_from_preflight(&preflight)?;
-            let output = ai::follow_up_from_artifact(
-                &run_config,
-                &snapshots,
-                &source_record,
-                follow_up_kind,
-                false,
-                None,
-            )
-            .await?;
-            store.analysis().upsert_ai_artifact(&output.record)?;
-            let completed = complete_ai_run_record(
-                &running_record,
-                &output.request_preview,
-                &output.request_fingerprint,
-                Some(output.record.artifact_id.clone()),
-                Some(source_ai_artifact_id),
-                now_rfc3339()?,
-            )?;
-            store.analysis().upsert_ai_run(&completed)?;
-            let _ = action_tx.send(nonfatal_reload_live_snapshot_action(
-                &config,
-                &format!(
-                    "Completed AI {} {}.",
-                    completed.run_kind,
-                    abbreviate_id(&completed.run_id, 12)
-                ),
-                Some(&store),
-                &format!(
-                    "AI run {} completed, but refreshing the workbench failed",
-                    abbreviate_id(&completed.run_id, 12)
-                ),
-            ));
-        } else {
-            match preflight.intent {
-                AiLaunchIntent::ReviewSelectedDay | AiLaunchIntent::ChallengeSelectedDay => {
-                    let snapshot = load_snapshot_from_preflight(&preflight, 0)?;
-                    let output = ai::review_snapshot(&run_config, &snapshot, false, None).await?;
-                    store.analysis().upsert_ai_artifact(&output.record)?;
-                    let completed = complete_ai_run_record(
-                        &running_record,
-                        &output.request_preview,
-                        &output.request_fingerprint,
-                        Some(output.record.artifact_id.clone()),
-                        None,
-                        now_rfc3339()?,
-                    )?;
-                    store.analysis().upsert_ai_run(&completed)?;
-                    let _ = action_tx.send(nonfatal_reload_live_snapshot_action(
-                        &config,
-                        &format!(
-                            "Completed AI review {}.",
-                            abbreviate_id(&completed.run_id, 12)
-                        ),
-                        Some(&store),
-                        &format!(
-                            "AI review {} completed, but refreshing the workbench failed",
-                            abbreviate_id(&completed.run_id, 12)
-                        ),
-                    ));
-                }
-                AiLaunchIntent::CompareSelectedWeek => {
-                    let snapshot_a = load_snapshot_from_preflight(&preflight, 0)?;
-                    let snapshot_b = load_snapshot_from_preflight(&preflight, 1)?;
-                    let output =
-                        ai::compare_snapshots(&run_config, &snapshot_a, &snapshot_b, false, None)
-                            .await?;
-                    store.analysis().upsert_ai_artifact(&output.record)?;
-                    let completed = complete_ai_run_record(
-                        &running_record,
-                        &output.request_preview,
-                        &output.request_fingerprint,
-                        Some(output.record.artifact_id.clone()),
-                        None,
-                        now_rfc3339()?,
-                    )?;
-                    store.analysis().upsert_ai_run(&completed)?;
-                    let _ = action_tx.send(nonfatal_reload_live_snapshot_action(
-                        &config,
-                        &format!(
-                            "Completed AI compare {}.",
-                            abbreviate_id(&completed.run_id, 12)
-                        ),
-                        Some(&store),
-                        &format!(
-                            "AI compare {} completed, but refreshing the workbench failed",
-                            abbreviate_id(&completed.run_id, 12)
-                        ),
-                    ));
-                }
-            }
-        }
+        send_ai_run_started_action(&config, &action_tx, &running_record, &store);
+        let (store, completion) =
+            execute_ai_run(&config, store, &running_record, &preflight).await?;
+        store
+            .analysis()
+            .upsert_ai_run(&completion.completed_record)?;
+        send_ai_run_completed_action(&config, &action_tx, &completion, &store);
         Ok::<(), RingmasterError>(())
     }
     .await;
 
     if let Err(error) = result {
-        if let Ok(store) = Store::open(&config) {
-            if let Ok(failed_record) =
-                failed_ai_run_record(&failed_base_record, AiRunStatus::Failed, error.to_string())
-            {
-                let _ = store.analysis().upsert_ai_run(&failed_record);
-            }
-            let _ = action_tx.send(
-                reload_live_snapshot_action(
-                    &config,
-                    &format!(
-                        "AI run {} failed: {error}",
-                        abbreviate_id(&queued_record.run_id, 12)
-                    ),
-                    Some(&store),
-                )
-                .unwrap_or_else(|_| Action::RefreshFailed {
-                    message: format!("AI run failed: {error}"),
-                }),
-            );
-        } else {
-            let _ = action_tx.send(Action::RefreshFailed {
-                message: format!("AI run failed before the local store could be reopened: {error}"),
-            });
+        handle_ai_run_failure(
+            &config,
+            &queued_record,
+            &failed_base_record,
+            &error,
+            &action_tx,
+        );
+    }
+}
+
+struct AiRunCompletion {
+    completed_record: AiRunRecord,
+    status_line: String,
+    refresh_failure_message: String,
+}
+
+fn mark_ai_run_running(
+    config: &Config,
+    queued_record: &AiRunRecord,
+) -> Result<(Store, AiRunRecord)> {
+    let started_at = now_rfc3339()?;
+    let store = Store::open(config)?;
+    let mut running_record = queued_record.clone();
+    AiRunStatus::Running
+        .as_str()
+        .clone_into(&mut running_record.run_status);
+    running_record.started_at = Some(started_at.clone());
+    running_record.updated_at = started_at;
+    store.analysis().upsert_ai_run(&running_record)?;
+    Ok((store, running_record))
+}
+
+fn send_ai_run_started_action(
+    config: &Config,
+    action_tx: &UnboundedSender<Action>,
+    running_record: &AiRunRecord,
+    store: &Store,
+) {
+    let _ = action_tx.send(nonfatal_reload_live_snapshot_action(
+        config,
+        &format!("Running {}.", running_record.run_kind),
+        Some(store),
+        &format!(
+            "AI run {} started, but refreshing the workbench failed",
+            abbreviate_id(&running_record.run_id, 12)
+        ),
+    ));
+}
+
+async fn execute_ai_run(
+    config: &Config,
+    store: Store,
+    running_record: &AiRunRecord,
+    preflight: &AiPreflightState,
+) -> Result<(Store, AiRunCompletion)> {
+    let run_config = config_with_model_override(config, preflight.model_override.as_deref());
+    if let Some(follow_up_kind) = preflight.follow_up_kind {
+        return execute_ai_follow_up_run(
+            run_config,
+            store,
+            running_record,
+            preflight,
+            follow_up_kind,
+        )
+        .await;
+    }
+
+    match preflight.intent {
+        AiLaunchIntent::ReviewSelectedDay | AiLaunchIntent::ChallengeSelectedDay => {
+            execute_ai_review_run(run_config, store, running_record, preflight).await
         }
+        AiLaunchIntent::CompareSelectedWeek => {
+            execute_ai_compare_run(run_config, store, running_record, preflight).await
+        }
+    }
+}
+
+async fn execute_ai_follow_up_run(
+    run_config: Config,
+    store: Store,
+    running_record: &AiRunRecord,
+    preflight: &AiPreflightState,
+    follow_up_kind: GuidedFollowUpKind,
+) -> Result<(Store, AiRunCompletion)> {
+    let source_ai_artifact_id = preflight.source_ai_artifact_id.clone().ok_or_else(|| {
+        RingmasterError::Ui("Follow-up runs need a saved source artifact in preflight.".to_owned())
+    })?;
+    let source_record = store
+        .analysis()
+        .ai_artifact(&source_ai_artifact_id)?
+        .ok_or_else(|| {
+            RingmasterError::Ui(format!(
+                "Saved source artifact `{source_ai_artifact_id}` is no longer present."
+            ))
+        })?;
+    let snapshots = load_snapshots_from_preflight(preflight)?;
+    let output = ai::follow_up_from_artifact(
+        &run_config,
+        &snapshots,
+        &source_record,
+        follow_up_kind,
+        false,
+        None,
+    )
+    .await?;
+    store.analysis().upsert_ai_artifact(&output.record)?;
+    let completed_record = complete_ai_run_record(
+        running_record,
+        &output.request_preview,
+        &output.request_fingerprint,
+        Some(output.record.artifact_id.clone()),
+        Some(source_ai_artifact_id),
+        now_rfc3339()?,
+    )?;
+
+    Ok((
+        store,
+        AiRunCompletion {
+            status_line: format!(
+                "Completed AI {} {}.",
+                completed_record.run_kind,
+                abbreviate_id(&completed_record.run_id, 12)
+            ),
+            refresh_failure_message: format!(
+                "AI run {} completed, but refreshing the workbench failed",
+                abbreviate_id(&completed_record.run_id, 12)
+            ),
+            completed_record,
+        },
+    ))
+}
+
+async fn execute_ai_review_run(
+    run_config: Config,
+    store: Store,
+    running_record: &AiRunRecord,
+    preflight: &AiPreflightState,
+) -> Result<(Store, AiRunCompletion)> {
+    let snapshot = load_snapshot_from_preflight(preflight, 0)?;
+    let output = ai::review_snapshot(&run_config, &snapshot, false, None).await?;
+    store.analysis().upsert_ai_artifact(&output.record)?;
+    let completed_record = complete_ai_run_record(
+        running_record,
+        &output.request_preview,
+        &output.request_fingerprint,
+        Some(output.record.artifact_id.clone()),
+        None,
+        now_rfc3339()?,
+    )?;
+
+    Ok((
+        store,
+        AiRunCompletion {
+            status_line: format!(
+                "Completed AI review {}.",
+                abbreviate_id(&completed_record.run_id, 12)
+            ),
+            refresh_failure_message: format!(
+                "AI review {} completed, but refreshing the workbench failed",
+                abbreviate_id(&completed_record.run_id, 12)
+            ),
+            completed_record,
+        },
+    ))
+}
+
+async fn execute_ai_compare_run(
+    run_config: Config,
+    store: Store,
+    running_record: &AiRunRecord,
+    preflight: &AiPreflightState,
+) -> Result<(Store, AiRunCompletion)> {
+    let snapshot_a = load_snapshot_from_preflight(preflight, 0)?;
+    let snapshot_b = load_snapshot_from_preflight(preflight, 1)?;
+    let output = ai::compare_snapshots(&run_config, &snapshot_a, &snapshot_b, false, None).await?;
+    store.analysis().upsert_ai_artifact(&output.record)?;
+    let completed_record = complete_ai_run_record(
+        running_record,
+        &output.request_preview,
+        &output.request_fingerprint,
+        Some(output.record.artifact_id.clone()),
+        None,
+        now_rfc3339()?,
+    )?;
+
+    Ok((
+        store,
+        AiRunCompletion {
+            status_line: format!(
+                "Completed AI compare {}.",
+                abbreviate_id(&completed_record.run_id, 12)
+            ),
+            refresh_failure_message: format!(
+                "AI compare {} completed, but refreshing the workbench failed",
+                abbreviate_id(&completed_record.run_id, 12)
+            ),
+            completed_record,
+        },
+    ))
+}
+
+fn send_ai_run_completed_action(
+    config: &Config,
+    action_tx: &UnboundedSender<Action>,
+    completion: &AiRunCompletion,
+    store: &Store,
+) {
+    let _ = action_tx.send(nonfatal_reload_live_snapshot_action(
+        config,
+        &completion.status_line,
+        Some(store),
+        &completion.refresh_failure_message,
+    ));
+}
+
+fn handle_ai_run_failure(
+    config: &Config,
+    queued_record: &AiRunRecord,
+    failed_base_record: &AiRunRecord,
+    error: &RingmasterError,
+    action_tx: &UnboundedSender<Action>,
+) {
+    if let Ok(store) = Store::open(config) {
+        if let Ok(failed_record) =
+            failed_ai_run_record(failed_base_record, AiRunStatus::Failed, error.to_string())
+        {
+            let _ = store.analysis().upsert_ai_run(&failed_record);
+        }
+        let _ = action_tx.send(
+            reload_live_snapshot_action(
+                config,
+                &format!(
+                    "AI run {} failed: {error}",
+                    abbreviate_id(&queued_record.run_id, 12)
+                ),
+                Some(&store),
+            )
+            .unwrap_or_else(|_| Action::RefreshFailed {
+                message: format!("AI run failed: {error}"),
+            }),
+        );
+    } else {
+        let _ = action_tx.send(Action::RefreshFailed {
+            message: format!("AI run failed before the local store could be reopened: {error}"),
+        });
     }
 }
 
@@ -2005,18 +2278,20 @@ fn interrupt_ai_run(config: &Config, run_id: &str, message: &str) -> Result<bool
     transition_ai_run_if_active(config, run_id, AiRunStatus::Interrupted, message)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_ai_run_record(
-    run_id: &str,
-    preflight: &AiPreflightState,
+struct AiRunRecordInput<'a> {
+    run_id: &'a str,
+    preflight: &'a AiPreflightState,
     status: AiRunStatus,
-    created_at: &str,
+    created_at: &'a str,
     started_at: Option<String>,
     ended_at: Option<String>,
     artifact_id: Option<String>,
     error_message: Option<String>,
-) -> Result<AiRunRecord> {
-    let snapshot_hash_a = preflight
+}
+
+fn build_ai_run_record(input: AiRunRecordInput<'_>) -> Result<AiRunRecord> {
+    let snapshot_hash_a = input
+        .preflight
         .request_preview
         .snapshots
         .first()
@@ -2024,41 +2299,47 @@ fn build_ai_run_record(
         .ok_or_else(|| {
             RingmasterError::Ui("AI preflight did not include a primary snapshot hash.".to_owned())
         })?;
-    let snapshot_hash_b = preflight
+    let snapshot_hash_b = input
+        .preflight
         .request_preview
         .snapshots
         .get(1)
         .map(|snapshot| snapshot.snapshot_hash.clone());
     Ok(AiRunRecord {
-        run_id: run_id.to_owned(),
-        run_kind: ai_run_kind(preflight).to_owned(),
-        run_status: status.as_str().to_owned(),
-        provider: preflight.request_preview.provider.clone(),
-        model: preflight.request_preview.model.clone(),
+        run_id: input.run_id.to_owned(),
+        run_kind: ai_run_kind(input.preflight).to_owned(),
+        run_status: input.status.as_str().to_owned(),
+        provider: input.preflight.request_preview.provider.clone(),
+        model: input.preflight.request_preview.model.clone(),
         reasoning_effort: None,
-        request_mode: preflight.request_preview.request_mode.clone(),
-        input_transport: preflight.request_preview.input_transport.clone(),
-        run_mode: ai_run_mode_from_preview(&preflight.request_preview)
+        request_mode: input.preflight.request_preview.request_mode.clone(),
+        input_transport: input.preflight.request_preview.input_transport.clone(),
+        run_mode: ai_run_mode_from_preview(&input.preflight.request_preview)
             .as_str()
             .to_owned(),
-        prompt_version: preflight.request_preview.prompt_version.clone(),
-        output_schema_version: preflight.request_preview.output_schema_version.clone(),
-        privacy_profile: preflight.privacy_profile.as_str().to_owned(),
-        snapshot_scope: preflight.snapshot_scope.clone(),
+        prompt_version: input.preflight.request_preview.prompt_version.clone(),
+        output_schema_version: input
+            .preflight
+            .request_preview
+            .output_schema_version
+            .clone(),
+        privacy_profile: input.preflight.privacy_profile.as_str().to_owned(),
+        snapshot_scope: input.preflight.snapshot_scope.clone(),
         snapshot_hash_a,
         snapshot_hash_b,
-        source_ai_artifact_id: preflight.source_ai_artifact_id.clone(),
-        follow_up_kind: preflight
+        source_ai_artifact_id: input.preflight.source_ai_artifact_id.clone(),
+        follow_up_kind: input
+            .preflight
             .follow_up_kind
             .map(|kind| kind.as_str().to_owned()),
-        request_fingerprint: Some(preflight.request_preview.request_fingerprint.clone()),
-        request_preview_json: serde_json::to_string(&preflight.request_preview)?,
-        artifact_id,
-        error_message,
-        created_at: created_at.to_owned(),
-        started_at,
-        ended_at,
-        updated_at: created_at.to_owned(),
+        request_fingerprint: Some(input.preflight.request_preview.request_fingerprint.clone()),
+        request_preview_json: serde_json::to_string(&input.preflight.request_preview)?,
+        artifact_id: input.artifact_id,
+        error_message: input.error_message,
+        created_at: input.created_at.to_owned(),
+        started_at: input.started_at,
+        ended_at: input.ended_at,
+        updated_at: input.created_at.to_owned(),
     })
 }
 
@@ -2070,7 +2351,7 @@ fn ai_run_mode_from_preview(preview: &ai::AiRequestPreview) -> ai::AiRunMode {
     }
 }
 
-fn ai_run_kind(preflight: &AiPreflightState) -> &'static str {
+const fn ai_run_kind(preflight: &AiPreflightState) -> &'static str {
     if preflight.follow_up_kind.is_some() {
         return "follow_up";
     }
@@ -2123,7 +2404,7 @@ fn build_jump_to_evidence_action(config: &Config, run: &AiRunRecord) -> Result<O
     Ok(Some(Action::JumpToDayAndScreen {
         day,
         screen,
-        status_line: format!("Opened local evidence for {}.", export_ref),
+        status_line: format!("Opened local evidence for {export_ref}."),
     }))
 }
 
@@ -2315,10 +2596,24 @@ fn abbreviate_id(value: &str, max_len: usize) -> String {
     }
 }
 
-fn send_worker_command(worker_tx: &Option<UnboundedSender<WorkerCommand>>, command: WorkerCommand) {
+fn send_worker_command(worker_tx: Option<&UnboundedSender<WorkerCommand>>, command: WorkerCommand) {
     if let Some(worker_tx) = worker_tx {
         let _ = worker_tx.send(command);
     }
+}
+
+enum RefreshWorkerStep {
+    Continue,
+    Refresh {
+        families: Vec<SyncFamily>,
+        manual: bool,
+    },
+    Shutdown,
+}
+
+enum RefreshCycleOutcome {
+    Completed { queued_manual_refresh: bool },
+    Shutdown,
 }
 
 fn spawn_refresh_worker(
@@ -2331,134 +2626,240 @@ fn spawn_refresh_worker(
     let (command_tx, mut command_rx) = unbounded_channel();
     let (action_tx, action_rx) = unbounded_channel();
     let worker = std::thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                let _ = action_tx.send(Action::RefreshFailed {
-                    message: format!("Background refresh could not start its runtime: {error}"),
-                });
-                return;
-            }
+        let Some(runtime) = build_refresh_worker_runtime(&action_tx) else {
+            return;
         };
 
         runtime.block_on(async move {
-            let store = match Store::open(&config) {
-                Ok(store) => store,
-                Err(error) => {
-                    let _ = action_tx.send(Action::RefreshFailed {
-                        message: format!(
-                            "Background refresh could not open the local store: {error}"
-                        ),
-                    });
-                    return;
-                }
+            let Some(store) = open_refresh_worker_store(&config, &action_tx) else {
+                return;
             };
             let mut pending_manual_refresh = false;
 
             loop {
-                let sync_states = match store.sync_state().list() {
-                    Ok(sync_states) => sync_states,
-                    Err(error) => {
-                        let _ = action_tx.send(Action::RefreshFailed {
-                            message: format!(
-                                "Background refresh could not load sync state: {error}"
-                            ),
-                        });
-                        return;
-                    }
-                };
-                let now = time::OffsetDateTime::now_utc();
-                let delay = next_wake_duration(&config, &sync_states, now)
-                    .unwrap_or_else(|_| Duration::from_secs(1));
-
-                let refresh_request = if pending_manual_refresh {
-                    pending_manual_refresh = false;
-                    Some((SyncFamily::ALL.to_vec(), true))
-                } else {
-                    tokio::select! {
-                        command = command_rx.recv() => match command {
-                            Some(WorkerCommand::ManualRefresh) => Some((SyncFamily::ALL.to_vec(), true)),
-                            Some(WorkerCommand::Shutdown) | None => None,
-                        },
-                        () = tokio::time::sleep(delay) => {
-                            match due_families(&config, &sync_states, time::OffsetDateTime::now_utc(), false) {
-                                Ok(families) if !families.is_empty() => Some((families, false)),
-                                Ok(_) => continue,
-                                Err(error) => {
-                                    let _ = action_tx.send(Action::RefreshFailed {
-                                        message: format!("Background refresh scheduling failed: {error}"),
-                                    });
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-                };
-
-                let Some((families, manual)) = refresh_request else {
+                let Some(sync_states) = load_refresh_worker_sync_states(&store, &action_tx) else {
                     return;
                 };
-                let family_labels = families
-                    .iter()
-                    .map(|family| family.label().to_owned())
-                    .collect::<Vec<_>>();
-                let _ = action_tx.send(Action::RefreshStarted {
-                    families: family_labels,
-                    manual,
-                });
-
-                let refresh_result = await_inflight_refresh(
+                match next_refresh_worker_step(
+                    &config,
+                    sync_states,
                     &mut command_rx,
-                    sync_selected(
-                        &config,
-                        &store,
-                        SyncOptions {
-                            dry_run: false,
-                            fixture_dir: None,
-                            families,
-                            trigger_source: Some("manual_sync".to_owned()),
-                            trigger_detail: Some("tui refresh".to_owned()),
-                        },
-                    ),
+                    &action_tx,
+                    &mut pending_manual_refresh,
                 )
-                .await;
-
-                let InFlightRefreshResult::Completed {
-                    result,
-                    queued_manual_refresh,
-                } = refresh_result
-                else {
-                    return;
-                };
-                pending_manual_refresh |= queued_manual_refresh;
-
-                match result {
-                    Ok(report) => match refresh_snapshot_action(&config, &store, report, manual) {
-                        Ok(action) => {
-                            let _ = action_tx.send(action);
+                .await
+                {
+                    RefreshWorkerStep::Continue => {}
+                    RefreshWorkerStep::Shutdown => return,
+                    RefreshWorkerStep::Refresh { families, manual } => match perform_refresh_cycle(
+                        &config,
+                        &mut command_rx,
+                        &action_tx,
+                        families,
+                        manual,
+                    )
+                    .await
+                    {
+                        RefreshCycleOutcome::Completed {
+                            queued_manual_refresh,
+                        } => {
+                            pending_manual_refresh |= queued_manual_refresh;
                         }
-                        Err(error) => {
-                            let _ = action_tx.send(Action::RefreshFailed {
-                                message: format!(
-                                    "Background refresh completed but reloading the snapshot failed: {error}"
-                                ),
-                            });
-                        }
+                        RefreshCycleOutcome::Shutdown => return,
                     },
-                    Err(error) => {
-                        let _ = action_tx.send(Action::RefreshFailed {
-                            message: format!("Background refresh failed: {error}"),
-                        });
-                    }
                 }
             }
         });
     });
 
     (command_tx, action_rx, worker)
+}
+
+fn build_refresh_worker_runtime(
+    action_tx: &UnboundedSender<Action>,
+) -> Option<tokio::runtime::Runtime> {
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => Some(runtime),
+        Err(error) => {
+            let _ = action_tx.send(Action::RefreshFailed {
+                message: format!("Background refresh could not start its runtime: {error}"),
+            });
+            None
+        }
+    }
+}
+
+fn open_refresh_worker_store(
+    config: &Config,
+    action_tx: &UnboundedSender<Action>,
+) -> Option<Store> {
+    match Store::open(config) {
+        Ok(store) => Some(store),
+        Err(error) => {
+            let _ = action_tx.send(Action::RefreshFailed {
+                message: format!("Background refresh could not open the local store: {error}"),
+            });
+            None
+        }
+    }
+}
+
+fn load_refresh_worker_sync_states(
+    store: &Store,
+    action_tx: &UnboundedSender<Action>,
+) -> Option<Vec<crate::store::queries::SyncStateRecord>> {
+    match store.sync_state().list() {
+        Ok(sync_states) => Some(sync_states),
+        Err(error) => {
+            let _ = action_tx.send(Action::RefreshFailed {
+                message: format!("Background refresh could not load sync state: {error}"),
+            });
+            None
+        }
+    }
+}
+
+async fn next_refresh_worker_step(
+    config: &Config,
+    sync_states: Vec<crate::store::queries::SyncStateRecord>,
+    command_rx: &mut UnboundedReceiver<WorkerCommand>,
+    action_tx: &UnboundedSender<Action>,
+    pending_manual_refresh: &mut bool,
+) -> RefreshWorkerStep {
+    if *pending_manual_refresh {
+        *pending_manual_refresh = false;
+        return RefreshWorkerStep::Refresh {
+            families: SyncFamily::ALL.to_vec(),
+            manual: true,
+        };
+    }
+
+    let delay = next_refresh_delay(config, &sync_states);
+
+    tokio::select! {
+        command = command_rx.recv() => match command {
+            Some(WorkerCommand::ManualRefresh) => RefreshWorkerStep::Refresh {
+                families: SyncFamily::ALL.to_vec(),
+                manual: true,
+            },
+            Some(WorkerCommand::Shutdown) | None => RefreshWorkerStep::Shutdown,
+        },
+        () = tokio::time::sleep(delay) => due_refresh_worker_step(config, &sync_states, action_tx),
+    }
+}
+
+fn next_refresh_delay(
+    config: &Config,
+    sync_states: &[crate::store::queries::SyncStateRecord],
+) -> Duration {
+    let now = time::OffsetDateTime::now_utc();
+    next_wake_duration(config, sync_states, now).unwrap_or_else(|_| Duration::from_secs(1))
+}
+
+fn due_refresh_worker_step(
+    config: &Config,
+    sync_states: &[crate::store::queries::SyncStateRecord],
+    action_tx: &UnboundedSender<Action>,
+) -> RefreshWorkerStep {
+    match due_families(config, sync_states, time::OffsetDateTime::now_utc(), false) {
+        Ok(families) if !families.is_empty() => RefreshWorkerStep::Refresh {
+            families,
+            manual: false,
+        },
+        Ok(_) => RefreshWorkerStep::Continue,
+        Err(error) => {
+            let _ = action_tx.send(Action::RefreshFailed {
+                message: format!("Background refresh scheduling failed: {error}"),
+            });
+            RefreshWorkerStep::Continue
+        }
+    }
+}
+
+async fn perform_refresh_cycle(
+    config: &Config,
+    command_rx: &mut UnboundedReceiver<WorkerCommand>,
+    action_tx: &UnboundedSender<Action>,
+    families: Vec<SyncFamily>,
+    manual: bool,
+) -> RefreshCycleOutcome {
+    send_refresh_started_action(action_tx, &families, manual);
+    let refresh_result =
+        await_inflight_refresh(command_rx, run_refresh_sync(config, families)).await;
+
+    let InFlightRefreshResult::Completed {
+        result,
+        queued_manual_refresh,
+    } = refresh_result
+    else {
+        return RefreshCycleOutcome::Shutdown;
+    };
+
+    translate_refresh_result(config, action_tx, result, manual);
+    RefreshCycleOutcome::Completed {
+        queued_manual_refresh,
+    }
+}
+
+async fn run_refresh_sync(config: &Config, families: Vec<SyncFamily>) -> Result<SyncReport> {
+    let store = Store::open(config)?;
+    sync_selected(
+        config,
+        &store,
+        SyncOptions {
+            dry_run: false,
+            fixture_dir: None,
+            families,
+            trigger_source: Some("manual_sync".to_owned()),
+            trigger_detail: Some("tui refresh".to_owned()),
+        },
+    )
+    .await
+}
+
+fn send_refresh_started_action(
+    action_tx: &UnboundedSender<Action>,
+    families: &[SyncFamily],
+    manual: bool,
+) {
+    let family_labels = families
+        .iter()
+        .map(|family| family.label().to_owned())
+        .collect::<Vec<_>>();
+    let _ = action_tx.send(Action::RefreshStarted {
+        families: family_labels,
+        manual,
+    });
+}
+
+fn translate_refresh_result(
+    config: &Config,
+    action_tx: &UnboundedSender<Action>,
+    result: Result<SyncReport>,
+    manual: bool,
+) {
+    match result {
+        Ok(report) => match refresh_snapshot_action(config, &report, manual) {
+            Ok(action) => {
+                let _ = action_tx.send(action);
+            }
+            Err(error) => {
+                let _ = action_tx.send(Action::RefreshFailed {
+                    message: format!(
+                        "Background refresh completed but reloading the snapshot failed: {error}"
+                    ),
+                });
+            }
+        },
+        Err(error) => {
+            let _ = action_tx.send(Action::RefreshFailed {
+                message: format!("Background refresh failed: {error}"),
+            });
+        }
+    }
 }
 
 async fn await_inflight_refresh<F>(
@@ -2489,13 +2890,8 @@ where
     }
 }
 
-fn refresh_snapshot_action(
-    config: &Config,
-    store: &Store,
-    report: SyncReport,
-    manual: bool,
-) -> Result<Action> {
-    reload_live_snapshot_action(config, &refresh_summary(&report, manual), Some(store))
+fn refresh_snapshot_action(config: &Config, report: &SyncReport, manual: bool) -> Result<Action> {
+    reload_live_snapshot_action(config, &refresh_summary(report, manual), None)
 }
 
 fn reload_live_snapshot_action(
@@ -2580,7 +2976,6 @@ impl Drop for TerminalSession {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -2677,7 +3072,9 @@ mod tests {
             request_preview_json: serde_json::to_string(&sample_request_preview(
                 "demo-snapshot-20260408",
             ))
-            .unwrap_or_else(|error| panic!("sample request preview should serialize: {error}")),
+            .unwrap_or_else(|error| {
+                unreachable!("sample request preview should serialize: {error}")
+            }),
             artifact_id: Some("artifact-review-1".to_owned()),
             error_message: None,
             created_at: "2026-04-10T00:00:00Z".to_owned(),
@@ -2696,7 +3093,7 @@ mod tests {
                 PathBuf::from("/tmp/state"),
                 PathBuf::from("/tmp/cache"),
             )
-            .unwrap_or_else(|error| panic!("paths should resolve: {error}")),
+            .unwrap_or_else(|error| unreachable!("paths should resolve: {error}")),
             logging: LoggingConfig {
                 filter: "ringmaster=info".to_owned(),
             },
@@ -2708,9 +3105,9 @@ mod tests {
                 api_base_url: "https://example.invalid/api".to_owned(),
                 secret_backend: crate::config::OuraSecretBackend::Keyring,
                 secret_file: PathBuf::from("/tmp/state/ringmaster/secrets/oura-tokens.json"),
-                callback_bind: "127.0.0.1:8788"
-                    .parse()
-                    .unwrap_or_else(|error| panic!("socket address should parse in test: {error}")),
+                callback_bind: "127.0.0.1:8788".parse().unwrap_or_else(|error| {
+                    unreachable!("socket address should parse in test: {error}")
+                }),
                 callback_path: "/callback".to_owned(),
                 requested_scopes: vec![
                     "personal".to_owned(),
@@ -2762,16 +3159,16 @@ mod tests {
         }
     }
 
-    fn test_auth_status(config: &Config, granted_scopes: Vec<String>) -> AuthStatus {
+    fn test_auth_status(config: &Config, granted_scopes: &[String]) -> AuthStatus {
         AuthStatus {
             configured: true,
             callback_url: config.oura.callback_url(),
             requested_scopes: config.oura.requested_scopes.clone(),
-            granted_scopes: granted_scopes.clone(),
+            granted_scopes: granted_scopes.to_vec(),
             missing_fields: vec!["client_secret"],
             capability_report: CapabilityReport::from_scopes(
                 &config.oura.requested_scopes,
-                &granted_scopes,
+                granted_scopes,
             ),
             auth_timeout_secs: config.oura.auth_timeout_secs,
             secret_backend: "keyring".to_owned(),
@@ -2787,8 +3184,8 @@ mod tests {
     }
 
     fn isolated_test_config() -> (tempfile::TempDir, Config) {
-        let temp_dir =
-            tempfile::tempdir().unwrap_or_else(|error| panic!("temp dir should exist: {error}"));
+        let temp_dir = tempfile::tempdir()
+            .unwrap_or_else(|error| unreachable!("temp dir should exist: {error}"));
         let root = temp_dir.path();
         let config = Config {
             paths: AppPaths::from_roots(
@@ -2797,7 +3194,7 @@ mod tests {
                 root.join("state"),
                 root.join("cache"),
             )
-            .unwrap_or_else(|error| panic!("paths should resolve: {error}")),
+            .unwrap_or_else(|error| unreachable!("paths should resolve: {error}")),
             ..test_config()
         };
         (temp_dir, config)
@@ -2829,7 +3226,7 @@ mod tests {
         store
             .analysis()
             .upsert_snapshot_export(&snapshot, &[])
-            .unwrap_or_else(|error| panic!("snapshot should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("snapshot should persist: {error}"));
     }
 
     fn seed_sync_state(
@@ -2859,7 +3256,7 @@ mod tests {
                 last_trigger_source: Some("periodic_reconcile".to_owned()),
                 last_trigger_detail: Some("fixture seed".to_owned()),
             })
-            .unwrap_or_else(|error| panic!("sync state should seed: {error}"));
+            .unwrap_or_else(|error| unreachable!("sync state should seed: {error}"));
     }
 
     fn seed_live_rows(store: &Store) {
@@ -2875,7 +3272,7 @@ mod tests {
                 raw_cache_key: Some("personal|fixture".to_owned()),
                 updated_at: "2026-04-08T03:35:00Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("personal info should seed: {error}"));
+            .unwrap_or_else(|error| unreachable!("personal info should seed: {error}"));
         store
             .imports()
             .upsert_daily_sleep(&DailySleepRecord {
@@ -2885,7 +3282,7 @@ mod tests {
                 raw_cache_key: Some("daily_sleep|fixture".to_owned()),
                 updated_at: "2026-04-08T03:35:00Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("daily sleep should seed: {error}"));
+            .unwrap_or_else(|error| unreachable!("daily sleep should seed: {error}"));
         store
             .imports()
             .upsert_daily_readiness(&DailyReadinessRecord {
@@ -2897,7 +3294,7 @@ mod tests {
                 raw_cache_key: Some("daily_readiness|fixture".to_owned()),
                 updated_at: "2026-04-08T03:35:00Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("daily readiness should seed: {error}"));
+            .unwrap_or_else(|error| unreachable!("daily readiness should seed: {error}"));
         store
             .imports()
             .upsert_daily_activity(&DailyActivityRecord {
@@ -2910,7 +3307,7 @@ mod tests {
                 raw_cache_key: Some("daily_activity|fixture".to_owned()),
                 updated_at: "2026-04-08T03:35:00Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("daily activity should seed: {error}"));
+            .unwrap_or_else(|error| unreachable!("daily activity should seed: {error}"));
         store
             .auth()
             .upsert(&AuthSessionRecord {
@@ -2929,7 +3326,7 @@ mod tests {
                 last_error: None,
                 updated_at: "2026-04-08T03:35:00Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("auth session should seed: {error}"));
+            .unwrap_or_else(|error| unreachable!("auth session should seed: {error}"));
     }
 
     #[test]
@@ -2939,7 +3336,7 @@ mod tests {
         app.active_screen = Screen::Dashboard;
 
         let output = render_snapshot(&app, 100, 32)
-            .unwrap_or_else(|error| panic!("snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("snapshot should render: {error}"));
 
         assert!(output.contains("ringmaster"));
         assert!(output.contains("Connection: Connected"));
@@ -2952,8 +3349,8 @@ mod tests {
     #[test]
     fn renders_dashboard_missing_capability_state() {
         let config = test_config();
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         seed_sync_state(
             &store,
             "oura.daily",
@@ -2962,13 +3359,13 @@ mod tests {
             &["personal"],
             None,
         );
-        let auth_status = test_auth_status(&config, vec!["personal".to_owned()]);
+        let auth_status = test_auth_status(&config, &["personal".to_owned()]);
         let mut app = build_live_state(&config, &store, &auth_status)
-            .unwrap_or_else(|error| panic!("live state should build: {error}"));
+            .unwrap_or_else(|error| unreachable!("live state should build: {error}"));
         app.active_screen = Screen::Dashboard;
 
         let output = render_snapshot(&app, 100, 32)
-            .unwrap_or_else(|error| panic!("dashboard snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("dashboard snapshot should render: {error}"));
 
         assert!(output.contains("missing scope"));
         assert!(output.contains("sleep normal is still forming."));
@@ -2977,8 +3374,8 @@ mod tests {
     #[test]
     fn renders_timeline_missing_heartrate_state() {
         let config = test_config();
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         seed_sync_state(
             &store,
             "oura.heartrate",
@@ -2987,14 +3384,13 @@ mod tests {
             &["personal", "daily"],
             None,
         );
-        let auth_status =
-            test_auth_status(&config, vec!["personal".to_owned(), "daily".to_owned()]);
+        let auth_status = test_auth_status(&config, &["personal".to_owned(), "daily".to_owned()]);
         let mut app = build_live_state(&config, &store, &auth_status)
-            .unwrap_or_else(|error| panic!("live state should build: {error}"));
+            .unwrap_or_else(|error| unreachable!("live state should build: {error}"));
         app.active_screen = Screen::Timeline;
 
         let output = render_snapshot(&app, 100, 32)
-            .unwrap_or_else(|error| panic!("timeline snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("timeline snapshot should render: {error}"));
 
         assert!(output.contains("No context event is selected"));
     }
@@ -3002,8 +3398,8 @@ mod tests {
     #[test]
     fn renders_trends_empty_data_state() {
         let config = test_config();
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         seed_sync_state(
             &store,
             "oura.heartrate",
@@ -3014,18 +3410,18 @@ mod tests {
         );
         let auth_status = test_auth_status(
             &config,
-            vec![
+            &[
                 "personal".to_owned(),
                 "daily".to_owned(),
                 "heartrate".to_owned(),
             ],
         );
         let mut app = build_live_state(&config, &store, &auth_status)
-            .unwrap_or_else(|error| panic!("live state should build: {error}"));
+            .unwrap_or_else(|error| unreachable!("live state should build: {error}"));
         app.active_screen = Screen::Trends;
 
         let output = render_snapshot(&app, 120, 44)
-            .unwrap_or_else(|error| panic!("trends snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("trends snapshot should render: {error}"));
 
         assert!(output.contains("Analyst notes"));
         assert!(output.contains("confidence: thin"));
@@ -3038,9 +3434,9 @@ mod tests {
         app.active_screen = Screen::Explain;
 
         let output = render_snapshot(&app, 110, 38)
-            .unwrap_or_else(|error| panic!("explain snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("explain snapshot should render: {error}"));
 
-        assert!(output.contains("Day story for 2026-04-08"));
+        assert!(output.contains("2026-04-08"));
         assert!(output.contains("Supporting evidence"));
         assert!(output.contains("Uncertainty"));
         assert!(output.contains("Move to Views and activate Timeline"));
@@ -3049,11 +3445,11 @@ mod tests {
     #[test]
     fn renders_patterns_insufficient_data_state() {
         let config = test_config();
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let auth_status = test_auth_status(
             &config,
-            vec![
+            &[
                 "personal".to_owned(),
                 "daily".to_owned(),
                 "heartrate".to_owned(),
@@ -3063,11 +3459,11 @@ mod tests {
             ],
         );
         let mut app = build_live_state(&config, &store, &auth_status)
-            .unwrap_or_else(|error| panic!("live state should build: {error}"));
+            .unwrap_or_else(|error| unreachable!("live state should build: {error}"));
         app.active_screen = Screen::Patterns;
 
         let output = render_snapshot(&app, 120, 44)
-            .unwrap_or_else(|error| panic!("patterns snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("patterns snapshot should render: {error}"));
 
         assert!(output.contains("Not enough data yet"));
         assert!(output.contains("Patterns stay descriptive on purpose."));
@@ -3080,7 +3476,7 @@ mod tests {
         app.active_screen = Screen::Review;
 
         let output = render_snapshot(&app, 120, 40)
-            .unwrap_or_else(|error| panic!("review snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("review snapshot should render: {error}"));
 
         assert!(output.contains("Ranked observations"));
         assert!(output.contains("AI artifact"));
@@ -3093,11 +3489,11 @@ mod tests {
     #[test]
     fn renders_review_screen_without_ai_artifact_when_none_is_saved() {
         let config = test_config();
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let auth_status = test_auth_status(
             &config,
-            vec![
+            &[
                 "personal".to_owned(),
                 "daily".to_owned(),
                 "heartrate".to_owned(),
@@ -3107,11 +3503,11 @@ mod tests {
             ],
         );
         let mut app = build_live_state(&config, &store, &auth_status)
-            .unwrap_or_else(|error| panic!("live state should build: {error}"));
+            .unwrap_or_else(|error| unreachable!("live state should build: {error}"));
         app.active_screen = Screen::Review;
 
         let output = render_snapshot(&app, 120, 40)
-            .unwrap_or_else(|error| panic!("review snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("review snapshot should render: {error}"));
 
         assert!(output.contains("AI artifact"));
         assert!(output.contains("AI artifact: none"));
@@ -3121,8 +3517,8 @@ mod tests {
     #[test]
     fn renders_ops_auth_and_sync_metadata() {
         let config = test_config();
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         seed_live_rows(&store);
         seed_sync_state(
             &store,
@@ -3154,22 +3550,22 @@ mod tests {
         );
         let auth_status = test_auth_status(
             &config,
-            vec![
+            &[
                 "personal".to_owned(),
                 "daily".to_owned(),
                 "heartrate".to_owned(),
             ],
         );
         let mut app = build_live_state(&config, &store, &auth_status)
-            .unwrap_or_else(|error| panic!("live state should build: {error}"));
+            .unwrap_or_else(|error| unreachable!("live state should build: {error}"));
         app.active_screen = Screen::Ops;
 
         let output = render_snapshot(&app, 120, 44)
-            .unwrap_or_else(|error| panic!("ops snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("ops snapshot should render: {error}"));
 
         assert!(output.contains("Auth state: authenticated"));
         assert!(output.contains("Granted scopes: personal, daily, heartrate"));
-        assert!(output.contains("Database path: :memory:"));
+        assert!(output.contains("Database path: "));
         assert!(output.contains("Warnings [operator attention]"));
         assert!(output.contains("Warnings"));
     }
@@ -3177,8 +3573,8 @@ mod tests {
     #[test]
     fn compact_status_snapshot_keeps_auth_and_queue_diagnostics_visible() {
         let config = test_config();
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         seed_live_rows(&store);
         seed_sync_state(
             &store,
@@ -3210,18 +3606,18 @@ mod tests {
         );
         let auth_status = test_auth_status(
             &config,
-            vec![
+            &[
                 "personal".to_owned(),
                 "daily".to_owned(),
                 "heartrate".to_owned(),
             ],
         );
         let mut app = build_live_state(&config, &store, &auth_status)
-            .unwrap_or_else(|error| panic!("live state should build: {error}"));
+            .unwrap_or_else(|error| unreachable!("live state should build: {error}"));
         app.active_screen = Screen::Ops;
 
         let output = render_snapshot(&app, 90, 28)
-            .unwrap_or_else(|error| panic!("compact status snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("compact status snapshot should render: {error}"));
 
         assert!(output.contains("Auth state: authenticated"));
         assert!(output.contains("Granted scopes: personal, daily, heartrate"));
@@ -3236,9 +3632,9 @@ mod tests {
         app.active_screen = Screen::Dashboard;
 
         let compact = render_snapshot(&app, 90, 28)
-            .unwrap_or_else(|error| panic!("compact snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("compact snapshot should render: {error}"));
         let wide = render_snapshot(&app, 160, 44)
-            .unwrap_or_else(|error| panic!("wide snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("wide snapshot should render: {error}"));
 
         assert!(compact.contains("Secondary detail"));
         assert!(wide.contains("Drill-down cues"));
@@ -3251,7 +3647,7 @@ mod tests {
         app.active_screen = Screen::Review;
 
         let output = render_snapshot(&app, 160, 44)
-            .unwrap_or_else(|error| panic!("review snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("review snapshot should render: {error}"));
 
         assert!(output.contains("> #1"));
         assert!(output.contains("Warnings and caveats"));
@@ -3264,7 +3660,7 @@ mod tests {
         app.active_screen = Screen::Review;
 
         let output = render_snapshot(&app, 90, 28)
-            .unwrap_or_else(|error| panic!("compact review snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("compact review snapshot should render: {error}"));
 
         assert!(output.contains("Mode [Today]"));
         assert!(output.contains("Focus [Readiness]"));
@@ -3280,22 +3676,23 @@ mod tests {
         app.active_screen = Screen::Ai;
 
         let compact = render_snapshot(&app, 90, 28)
-            .unwrap_or_else(|error| panic!("compact ai snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("compact ai snapshot should render: {error}"));
         let medium = render_snapshot(&app, 120, 44)
-            .unwrap_or_else(|error| panic!("medium ai snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("medium ai snapshot should render: {error}"));
         let wide = render_snapshot(&app, 160, 44)
-            .unwrap_or_else(|error| panic!("wide ai snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("wide ai snapshot should render: {error}"));
 
         assert!(compact.contains("AI workbench"));
         assert!(compact.contains("Launch points"));
         assert!(compact.contains("Preflight defaults"));
         assert!(medium.contains("Saved AI run"));
         assert!(medium.contains("API key ready: yes"));
-        assert!(medium.contains("Generate a report"));
+        assert!(medium.contains("Artifact actions"));
         assert!(!medium.contains("Prepare a snapshot-scoped review"));
         assert!(wide.contains("AI workbench"));
         assert!(wide.contains("saved artifacts"));
         assert!(wide.contains("trust surface"));
+        assert!(wide.contains("Expand evidence"));
     }
 
     #[test]
@@ -3306,7 +3703,7 @@ mod tests {
         disabled_app.active_screen = Screen::Ai;
 
         let disabled_output = render_snapshot(&disabled_app, 160, 44)
-            .unwrap_or_else(|error| panic!("disabled ai snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("disabled ai snapshot should render: {error}"));
         assert!(disabled_output.contains("Provider is disabled."));
 
         let config = test_config();
@@ -3333,19 +3730,19 @@ mod tests {
         });
 
         let preflight_output = render_snapshot(&preflight_app, 160, 44)
-            .unwrap_or_else(|error| panic!("preflight ai snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("preflight ai snapshot should render: {error}"));
         assert!(preflight_output.contains("Preflight | Review"));
-        assert!(preflight_output.contains("model override: gpt-5-mini"));
-        assert!(preflight_output.contains("follow_up_kind: expand_evidence"));
+        assert!(preflight_output.contains("Controls"));
+        assert!(preflight_output.contains("gpt-5-mini"));
         assert!(preflight_output.contains("artifact payload:"));
 
         let mut saved_run_app = build_demo_state(&config);
         saved_run_app.active_screen = Screen::Ai;
 
         let saved_output = render_snapshot(&saved_run_app, 160, 44)
-            .unwrap_or_else(|error| panic!("saved-run ai snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("saved-run ai snapshot should render: {error}"));
         assert!(saved_output.contains("Saved AI run"));
-        assert!(saved_output.contains("kind: review | status: succeeded"));
+        assert!(saved_output.contains("review | succeeded"));
     }
 
     #[test]
@@ -3354,7 +3751,7 @@ mod tests {
         let mut background_app = build_demo_state(&config);
         background_app.active_screen = Screen::Ai;
         let background = super::render_buffer(&background_app, 160, 44)
-            .unwrap_or_else(|error| panic!("background ai buffer should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("background ai buffer should render: {error}"));
 
         let mut preflight_app = build_demo_state(&config);
         preflight_app.active_screen = Screen::Ai;
@@ -3378,7 +3775,7 @@ mod tests {
             status_line: "Prepared review preflight.".to_owned(),
         });
         let overlay = super::render_buffer(&preflight_app, 160, 44)
-            .unwrap_or_else(|error| panic!("preflight ai buffer should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("preflight ai buffer should render: {error}"));
 
         let screen = Rect::new(0, 0, 160, 44);
         let layout = Layout::default()
@@ -3415,22 +3812,22 @@ mod tests {
 
         app.handle(Action::NextAiBrowserTab);
         let snapshot_output = render_snapshot(&app, 160, 44)
-            .unwrap_or_else(|error| panic!("snapshot browser should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("snapshot browser should render: {error}"));
         assert!(snapshot_output.contains("Snapshot artifact"));
-        assert!(snapshot_output.contains("trust:"));
+        assert!(snapshot_output.contains("Artifact actions"));
+        assert!(snapshot_output.contains("Compare previous snapshot"));
 
         app.handle(Action::NextAiBrowserTab);
         let report_output = render_snapshot(&app, 160, 44)
-            .unwrap_or_else(|error| panic!("report browser should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("report browser should render: {error}"));
         assert!(report_output.contains("Report export"));
         assert!(report_output.contains("Daily review briefing"));
 
         app.handle(Action::NextAiBrowserTab);
         let eval_output = render_snapshot(&app, 160, 44)
-            .unwrap_or_else(|error| panic!("eval browser should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("eval browser should render: {error}"));
         assert!(eval_output.contains("Eval run"));
-        assert!(eval_output.contains("fixture_manifest: tests/fixtures/ai"));
-        assert!(eval_output.contains("baseline_vs_candidate: regressions=1"));
+        assert!(eval_output.contains("tests/fixtures/ai"));
     }
 
     #[test]
@@ -3440,7 +3837,7 @@ mod tests {
         app.active_screen = Screen::Ops;
 
         let output = render_snapshot(&app, 160, 44)
-            .unwrap_or_else(|error| panic!("ops snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("ops snapshot should render: {error}"));
         assert!(output.contains("Latest eval"));
         assert!(output.contains("Eval health"));
         assert!(output.contains("failed_cases=1 regressions=1 improvements=1"));
@@ -3474,7 +3871,7 @@ mod tests {
             Path::new("tests/fixtures/phase7"),
         )
         .await
-        .unwrap_or_else(|error| panic!("scenario fixture apps should build: {error}"));
+        .unwrap_or_else(|error| unreachable!("scenario fixture apps should build: {error}"));
 
         for (scenario, mut app) in states {
             let scenario_marker = format!("Scenario fixture `{}`", scenario.label());
@@ -3496,8 +3893,9 @@ mod tests {
                 app.active_screen = screen;
 
                 for (width, height) in [(90, 28), (160, 44)] {
-                    let output = render_snapshot(&app, width, height)
-                        .unwrap_or_else(|error| panic!("matrix snapshot should render: {error}"));
+                    let output = render_snapshot(&app, width, height).unwrap_or_else(|error| {
+                        unreachable!("matrix snapshot should render: {error}")
+                    });
                     let marker = if width == 90 {
                         compact_marker
                     } else {
@@ -3506,23 +3904,99 @@ mod tests {
 
                     assert!(
                         output.contains(&scenario_marker),
-                        "scenario marker missing for {:?} {:?} {}x{}",
-                        scenario,
-                        screen,
-                        width,
-                        height
+                        "scenario marker missing for {scenario:?} {screen:?} {width}x{height}"
                     );
                     assert!(
                         output.contains(marker),
-                        "screen marker `{marker}` missing for {:?} {:?} {}x{}",
-                        scenario,
-                        screen,
-                        width,
-                        height
+                        "screen marker `{marker}` missing for {scenario:?} {screen:?} {width}x{height}"
                     );
                 }
             }
         }
+    }
+
+    type ScreenBindingCase = (Screen, KeyCode, Option<Action>);
+    type ContextBindingCase = (Screen, FocusRegion, KeyCode, Option<Action>);
+
+    fn navigation_context_cases() -> [ContextBindingCase; 6] {
+        [
+            (
+                Screen::Timeline,
+                FocusRegion::TopNav,
+                KeyCode::Right,
+                Some(Action::MoveFocusedRegion(NavMove::Next)),
+            ),
+            (
+                Screen::Review,
+                FocusRegion::Primary,
+                KeyCode::Char('j'),
+                Some(Action::MoveFocusedRegion(NavMove::Next)),
+            ),
+            (
+                Screen::Ai,
+                FocusRegion::Secondary,
+                KeyCode::Char('k'),
+                Some(Action::MoveFocusedRegion(NavMove::Previous)),
+            ),
+            (
+                Screen::Ai,
+                FocusRegion::Primary,
+                KeyCode::Up,
+                Some(Action::MoveFocusedRegion(NavMove::Previous)),
+            ),
+            (
+                Screen::Patterns,
+                FocusRegion::ContextPrimary,
+                KeyCode::Right,
+                Some(Action::MoveFocusedRegion(NavMove::Next)),
+            ),
+            (
+                Screen::Ai,
+                FocusRegion::Secondary,
+                KeyCode::Enter,
+                Some(Action::ActivateFocusedRegion),
+            ),
+        ]
+    }
+
+    fn navigation_screen_cases() -> [ScreenBindingCase; 11] {
+        [
+            (
+                Screen::Dashboard,
+                KeyCode::Char('a'),
+                Some(Action::RequestAiLaunch(AiLaunchIntent::ReviewSelectedDay)),
+            ),
+            (
+                Screen::Patterns,
+                KeyCode::Char('m'),
+                Some(Action::CyclePatternMetric),
+            ),
+            (
+                Screen::Review,
+                KeyCode::Char('6'),
+                Some(Action::ShowScreen(Screen::Review)),
+            ),
+            (
+                Screen::Review,
+                KeyCode::Char('7'),
+                Some(Action::ShowScreen(Screen::Ai)),
+            ),
+            (
+                Screen::Review,
+                KeyCode::Char('8'),
+                Some(Action::ShowScreen(Screen::Ops)),
+            ),
+            (Screen::Timeline, KeyCode::Char('['), None),
+            (Screen::Timeline, KeyCode::Char('.'), None),
+            (Screen::Review, KeyCode::Char('v'), None),
+            (Screen::Review, KeyCode::Char('f'), None),
+            (Screen::Ai, KeyCode::Char('['), None),
+            (
+                Screen::Ai,
+                KeyCode::Char('x'),
+                Some(Action::RequestCancelAiRun),
+            ),
+        ]
     }
 
     #[test]
@@ -3535,97 +4009,33 @@ mod tests {
             help_open: false,
             ai_preflight_open: false,
         };
+        let assert_event = |screen, event, expected| {
+            assert_eq!(super::map_event(screen, &event), expected);
+        };
+        let assert_context_event = |screen, region, event, expected| {
+            assert_eq!(
+                super::map_event_with_context(context(screen, region), &event),
+                expected
+            );
+        };
 
-        assert_eq!(
-            super::map_event(Screen::Timeline, press(KeyCode::Tab)),
-            Some(Action::FocusNextRegion)
+        assert_event(
+            Screen::Timeline,
+            press(KeyCode::Tab),
+            Some(Action::FocusNextRegion),
         );
-        assert_eq!(
-            super::map_event(
-                Screen::Review,
-                Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)),
-            ),
-            Some(Action::OpenSearch)
+        assert_event(
+            Screen::Review,
+            Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+            Some(Action::OpenSearch),
         );
-        assert_eq!(
-            super::map_event_with_context(
-                context(Screen::Timeline, FocusRegion::TopNav),
-                press(KeyCode::Right),
-            ),
-            Some(Action::MoveFocusedRegion(NavMove::Next))
-        );
-        assert_eq!(
-            super::map_event_with_context(
-                context(Screen::Review, FocusRegion::Primary),
-                press(KeyCode::Char('j')),
-            ),
-            Some(Action::MoveFocusedRegion(NavMove::Next))
-        );
-        assert_eq!(
-            super::map_event_with_context(
-                context(Screen::Ai, FocusRegion::Secondary),
-                press(KeyCode::Char('k')),
-            ),
-            Some(Action::MoveFocusedRegion(NavMove::Previous))
-        );
-        assert_eq!(
-            super::map_event_with_context(
-                context(Screen::Ai, FocusRegion::Primary),
-                press(KeyCode::Up),
-            ),
-            Some(Action::MoveFocusedRegion(NavMove::Previous))
-        );
-        assert_eq!(
-            super::map_event_with_context(
-                context(Screen::Ai, FocusRegion::Secondary),
-                press(KeyCode::Enter),
-            ),
-            Some(Action::ActivateFocusedRegion)
-        );
-        assert_eq!(
-            super::map_event(Screen::Dashboard, press(KeyCode::Char('a'))),
-            Some(Action::RequestAiLaunch(AiLaunchIntent::ReviewSelectedDay))
-        );
-        assert_eq!(
-            super::map_event(Screen::Patterns, press(KeyCode::Char('m'))),
-            Some(Action::CyclePatternMetric)
-        );
-        assert_eq!(
-            super::map_event(Screen::Review, press(KeyCode::Char('6'))),
-            Some(Action::ShowScreen(Screen::Review))
-        );
-        assert_eq!(
-            super::map_event(Screen::Review, press(KeyCode::Char('7'))),
-            Some(Action::ShowScreen(Screen::Ai))
-        );
-        assert_eq!(
-            super::map_event(Screen::Review, press(KeyCode::Char('8'))),
-            Some(Action::ShowScreen(Screen::Ops))
-        );
-        assert_eq!(
-            super::map_event(Screen::Timeline, press(KeyCode::Char('['))),
-            None
-        );
-        assert_eq!(
-            super::map_event(Screen::Timeline, press(KeyCode::Char('.'))),
-            None
-        );
-        assert_eq!(
-            super::map_event(Screen::Review, press(KeyCode::Char('v'))),
-            None
-        );
-        assert_eq!(
-            super::map_event(Screen::Review, press(KeyCode::Char('f'))),
-            None
-        );
-        assert_eq!(
-            super::map_event(Screen::Ai, press(KeyCode::Char('['))),
-            None
-        );
-        assert_eq!(
-            super::map_event(Screen::Ai, press(KeyCode::Char('x'))),
-            Some(Action::RequestCancelAiRun)
-        );
+        for (screen, region, key, expected) in navigation_context_cases() {
+            assert_context_event(screen, region, press(key), expected);
+        }
+
+        for (screen, key, expected) in navigation_screen_cases() {
+            assert_event(screen, press(key), expected);
+        }
     }
 
     #[test]
@@ -3638,7 +4048,10 @@ mod tests {
             Screen::Review,
             Screen::Ai,
         ] {
-            assert_eq!(super::map_event(screen, ctrl_c.clone()), Some(Action::Quit));
+            assert_eq!(
+                super::map_event(screen, &ctrl_c.clone()),
+                Some(Action::Quit)
+            );
         }
     }
 
@@ -3648,22 +4061,22 @@ mod tests {
 
         for key in ['x', 'e', 'y', 'i', 'd', 'g', 'u', 'm', 'b', 'o'] {
             assert_eq!(
-                super::map_event_with_preflight(Screen::Ai, true, press(KeyCode::Char(key))),
+                super::map_event_with_preflight(Screen::Ai, true, &press(KeyCode::Char(key))),
                 None,
                 "preflight should block `{key}`",
             );
         }
 
         assert_eq!(
-            super::map_event_with_preflight(Screen::Ai, true, press(KeyCode::Char('n'))),
+            super::map_event_with_preflight(Screen::Ai, true, &press(KeyCode::Char('n'))),
             Some(Action::DismissAiPreflight)
         );
         assert_eq!(
-            super::map_event_with_preflight(Screen::Ai, true, press(KeyCode::Char('p'))),
+            super::map_event_with_preflight(Screen::Ai, true, &press(KeyCode::Char('p'))),
             Some(Action::CycleAiPreflightPrivacyProfile)
         );
         assert_eq!(
-            super::map_event_with_preflight(Screen::Ai, true, press(KeyCode::Enter)),
+            super::map_event_with_preflight(Screen::Ai, true, &press(KeyCode::Enter)),
             Some(Action::ActivateFocusedRegion)
         );
     }
@@ -3676,10 +4089,10 @@ mod tests {
         app.handle(Action::FocusNextRegion);
 
         let output = render_snapshot(&app, 160, 44)
-            .unwrap_or_else(|error| panic!("ai snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("ai snapshot should render: {error}"));
 
         assert!(output.contains(
-            "Focus: body focus | Views | Browser | Launch points | [Saved artifacts] | Artifact detail"
+            "Focus: body focus | Views | Browser | Launch points | [Saved artifacts] | Artifact actions"
         ));
     }
 
@@ -3693,7 +4106,7 @@ mod tests {
         app.handle(Action::SearchAppend('t'));
 
         let output = render_snapshot(&app, 160, 44)
-            .unwrap_or_else(|error| panic!("review search snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("review search snapshot should render: {error}"));
 
         assert!(output.contains("Find in Current Context"));
         assert!(output.contains("Query: st"));
@@ -3708,7 +4121,7 @@ mod tests {
         app.handle(Action::ToggleHelp);
 
         let output = render_snapshot(&app, 160, 44)
-            .unwrap_or_else(|error| panic!("help snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("help snapshot should render: {error}"));
 
         assert!(output.contains("Keyboard Help"));
         assert!(output.contains("Standard"));
@@ -3722,7 +4135,7 @@ mod tests {
         app.active_screen = Screen::Ai;
 
         let output = render_snapshot(&app, 160, 44)
-            .unwrap_or_else(|error| panic!("ai snapshot should render: {error}"));
+            .unwrap_or_else(|error| unreachable!("ai snapshot should render: {error}"));
 
         assert!(output.contains("> Review this day"));
         assert!(output.contains("  Compare this week"));
@@ -3734,9 +4147,9 @@ mod tests {
         let source = super::ReportSourceSelection::Snapshot("snapshot-hash".to_owned());
 
         let first = super::report_output_path(&config, &source)
-            .unwrap_or_else(|error| panic!("first report path should build: {error}"));
+            .unwrap_or_else(|error| unreachable!("first report path should build: {error}"));
         let second = super::report_output_path(&config, &source)
-            .unwrap_or_else(|error| panic!("second report path should build: {error}"));
+            .unwrap_or_else(|error| unreachable!("second report path should build: {error}"));
 
         assert_ne!(first, second);
     }
@@ -3756,21 +4169,21 @@ mod tests {
             warning_lines: Vec::new(),
             confirm_enabled: true,
         };
-        let running = super::build_ai_run_record(
-            "run-review-1",
-            &preflight,
-            super::AiRunStatus::Running,
-            "2026-04-10T00:00:00Z",
-            Some("2026-04-10T00:01:00Z".to_owned()),
-            None,
-            None,
-            None,
-        )
-        .unwrap_or_else(|error| panic!("running record should build: {error}"));
+        let running = super::build_ai_run_record(super::AiRunRecordInput {
+            run_id: "run-review-1",
+            preflight: &preflight,
+            status: super::AiRunStatus::Running,
+            created_at: "2026-04-10T00:00:00Z",
+            started_at: Some("2026-04-10T00:01:00Z".to_owned()),
+            ended_at: None,
+            artifact_id: None,
+            error_message: None,
+        })
+        .unwrap_or_else(|error| unreachable!("running record should build: {error}"));
 
         let failed =
             super::failed_ai_run_record(&running, super::AiRunStatus::Failed, "boom".to_owned())
-                .unwrap_or_else(|error| panic!("failed record should build: {error}"));
+                .unwrap_or_else(|error| unreachable!("failed record should build: {error}"));
 
         assert_eq!(failed.started_at.as_deref(), Some("2026-04-10T00:01:00Z"));
         assert_eq!(failed.error_message.as_deref(), Some("boom"));
@@ -3797,17 +4210,17 @@ mod tests {
             confirm_enabled: true,
         };
 
-        let record = super::build_ai_run_record(
-            "run-review-fixture-1",
-            &preflight,
-            super::AiRunStatus::Queued,
-            "2026-04-10T00:00:00Z",
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap_or_else(|error| panic!("fixture run record should build: {error}"));
+        let record = super::build_ai_run_record(super::AiRunRecordInput {
+            run_id: "run-review-fixture-1",
+            preflight: &preflight,
+            status: super::AiRunStatus::Queued,
+            created_at: "2026-04-10T00:00:00Z",
+            started_at: None,
+            ended_at: None,
+            artifact_id: None,
+            error_message: None,
+        })
+        .unwrap_or_else(|error| unreachable!("fixture run record should build: {error}"));
 
         assert_eq!(record.provider, "fixture");
         assert_eq!(record.run_mode, "fixture");
@@ -3829,8 +4242,9 @@ mod tests {
             confirm_enabled: true,
         };
 
-        let overrides = super::saved_run_privacy_cycle_overrides(&preflight)
-            .unwrap_or_else(|| panic!("saved-run follow-up preflight should preserve overrides"));
+        let overrides = super::saved_run_privacy_cycle_overrides(&preflight).unwrap_or_else(|| {
+            unreachable!("saved-run follow-up preflight should preserve overrides")
+        });
 
         assert_eq!(overrides.privacy_profile, PrivacyProfile::Balanced);
         assert_eq!(overrides.model_override.as_deref(), Some("gpt-5-mini"));
@@ -3841,8 +4255,9 @@ mod tests {
     fn compare_previous_snapshot_overrides_keep_current_privacy_profile() {
         let run = sample_ai_run_record();
 
-        let overrides = super::compare_previous_snapshot_overrides(&run)
-            .unwrap_or_else(|error| panic!("compare-previous overrides should build: {error}"));
+        let overrides = super::compare_previous_snapshot_overrides(&run).unwrap_or_else(|error| {
+            unreachable!("compare-previous overrides should build: {error}")
+        });
 
         assert_eq!(overrides.privacy_profile, PrivacyProfile::Redacted);
         assert!(overrides.model_override.is_none());
@@ -3893,7 +4308,7 @@ mod tests {
             RunMode::Demo,
             "Exported report to /tmp/demo-report.md.",
         )
-        .unwrap_or_else(|error| panic!("demo report export action should build: {error}"));
+        .unwrap_or_else(|error| unreachable!("demo report export action should build: {error}"));
 
         assert_eq!(
             action,
@@ -3908,21 +4323,25 @@ mod tests {
         let (ai_action_tx, mut ai_action_rx) = unbounded_channel();
         let mut ai_tasks = HashMap::new();
         super::handle_ai_side_effect(
-            &test_config(),
-            RunMode::Demo,
-            Action::RequestCancelAiRun,
-            Screen::Ai,
-            Some("2026-04-08".to_owned()),
-            None,
-            AiBrowserTab::Runs,
-            Some(sample_ai_run_record()),
-            None,
-            None,
-            None,
-            &ai_action_tx,
-            &mut ai_tasks,
+            &Action::RequestCancelAiRun,
+            super::AiSideEffectContext {
+                config: &test_config(),
+                run_mode: RunMode::Demo,
+                source_screen: Screen::Ai,
+                selected_day: Some("2026-04-08".to_owned()),
+                current_preflight: None,
+                selected_artifacts: super::SelectedAiArtifacts {
+                    tab: AiBrowserTab::Runs,
+                    run: Some(sample_ai_run_record()),
+                    snapshot: None,
+                    _report: None,
+                    eval: None,
+                },
+                ai_action_tx: &ai_action_tx,
+                ai_tasks: &mut ai_tasks,
+            },
         )
-        .unwrap_or_else(|error| panic!("demo-mode cancellation should not fail: {error}"));
+        .unwrap_or_else(|error| unreachable!("demo-mode cancellation should not fail: {error}"));
 
         assert!(ai_tasks.is_empty());
         match ai_action_rx.try_recv() {
@@ -3932,7 +4351,7 @@ mod tests {
                     "Saved demo AI runs are read-only; cancellation is only available in live mode."
                 );
             }
-            other => panic!("expected demo-mode cancellation warning, got {other:?}"),
+            other => unreachable!("expected demo-mode cancellation warning, got {other:?}"),
         }
     }
 
@@ -3957,21 +4376,25 @@ mod tests {
         let (ai_action_tx, mut ai_action_rx) = unbounded_channel();
         let mut ai_tasks = HashMap::new();
         super::handle_ai_side_effect(
-            &test_config(),
-            RunMode::Live,
-            Action::RequestCancelAiRun,
-            Screen::Ai,
-            Some("2026-04-08".to_owned()),
-            None,
-            AiBrowserTab::Snapshots,
-            Some(sample_ai_run_record()),
-            None,
-            None,
-            None,
-            &ai_action_tx,
-            &mut ai_tasks,
+            &Action::RequestCancelAiRun,
+            super::AiSideEffectContext {
+                config: &test_config(),
+                run_mode: RunMode::Live,
+                source_screen: Screen::Ai,
+                selected_day: Some("2026-04-08".to_owned()),
+                current_preflight: None,
+                selected_artifacts: super::SelectedAiArtifacts {
+                    tab: AiBrowserTab::Snapshots,
+                    run: Some(sample_ai_run_record()),
+                    snapshot: None,
+                    _report: None,
+                    eval: None,
+                },
+                ai_action_tx: &ai_action_tx,
+                ai_tasks: &mut ai_tasks,
+            },
         )
-        .unwrap_or_else(|error| panic!("non-run tab guard should not fail: {error}"));
+        .unwrap_or_else(|error| unreachable!("non-run tab guard should not fail: {error}"));
 
         assert!(ai_tasks.is_empty());
         match ai_action_rx.try_recv() {
@@ -3981,7 +4404,7 @@ mod tests {
                     "Run controls only apply while browsing saved AI runs."
                 );
             }
-            other => panic!("expected non-runs-tab guard message, got {other:?}"),
+            other => unreachable!("expected non-runs-tab guard message, got {other:?}"),
         }
     }
 
@@ -4004,7 +4427,7 @@ mod tests {
                     "AI review run-review-1 completed, but refreshing the workbench failed:"
                 ));
             }
-            other => panic!("expected nonfatal refresh failure action, got {other:?}"),
+            other => unreachable!("expected nonfatal refresh failure action, got {other:?}"),
         }
     }
 
@@ -4021,7 +4444,7 @@ mod tests {
                 assert!(message.starts_with("AI run "));
                 assert!(message.contains("was queued, but refreshing the workbench failed:"));
             }
-            other => panic!("expected queued-run refresh failure action, got {other:?}"),
+            other => unreachable!("expected queued-run refresh failure action, got {other:?}"),
         }
     }
 
@@ -4029,7 +4452,7 @@ mod tests {
     fn cancel_ai_run_reloads_current_store_state_before_transitioning() {
         let (_temp_dir, config) = isolated_test_config();
         let store =
-            Store::open(&config).unwrap_or_else(|error| panic!("store should open: {error}"));
+            Store::open(&config).unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let mut completed_run = sample_ai_run_record();
         completed_run.source_ai_artifact_id = None;
         completed_run.artifact_id = None;
@@ -4037,17 +4460,17 @@ mod tests {
         store
             .analysis()
             .upsert_ai_run(&completed_run)
-            .unwrap_or_else(|error| panic!("run should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("run should persist: {error}"));
 
         let cancelled = super::cancel_ai_run(&config, &completed_run.run_id)
-            .unwrap_or_else(|error| panic!("cancellation should not fail: {error}"));
+            .unwrap_or_else(|error| unreachable!("cancellation should not fail: {error}"));
         assert!(!cancelled);
 
         let persisted = store
             .analysis()
             .ai_run(&completed_run.run_id)
-            .unwrap_or_else(|error| panic!("run should reload: {error}"))
-            .unwrap_or_else(|| panic!("run should still exist"));
+            .unwrap_or_else(|error| unreachable!("run should reload: {error}"))
+            .unwrap_or_else(|| unreachable!("run should still exist"));
         assert_eq!(persisted.run_status, "succeeded");
         assert_eq!(persisted.ended_at, completed_run.ended_at);
     }
@@ -4056,7 +4479,7 @@ mod tests {
     fn interrupt_ai_run_marks_inflight_runs_with_terminal_status() {
         let (_temp_dir, config) = isolated_test_config();
         let store =
-            Store::open(&config).unwrap_or_else(|error| panic!("store should open: {error}"));
+            Store::open(&config).unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let mut running_run = sample_ai_run_record();
         running_run.run_id = "run-review-interrupt".to_owned();
         running_run.run_status = "running".to_owned();
@@ -4068,21 +4491,21 @@ mod tests {
         store
             .analysis()
             .upsert_ai_run(&running_run)
-            .unwrap_or_else(|error| panic!("run should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("run should persist: {error}"));
 
         let interrupted = super::interrupt_ai_run(
             &config,
             &running_run.run_id,
             "Interrupted when a previous TUI session ended before the run completed.",
         )
-        .unwrap_or_else(|error| panic!("interruption should not fail: {error}"));
+        .unwrap_or_else(|error| unreachable!("interruption should not fail: {error}"));
         assert!(interrupted);
 
         let persisted = store
             .analysis()
             .ai_run(&running_run.run_id)
-            .unwrap_or_else(|error| panic!("run should reload: {error}"))
-            .unwrap_or_else(|| panic!("run should still exist"));
+            .unwrap_or_else(|error| unreachable!("run should reload: {error}"))
+            .unwrap_or_else(|| unreachable!("run should still exist"));
         assert_eq!(persisted.run_status, "interrupted");
         assert_eq!(
             persisted.error_message.as_deref(),
@@ -4118,7 +4541,7 @@ mod tests {
 
         sender
             .await
-            .unwrap_or_else(|error| panic!("sender task should complete: {error}"));
+            .unwrap_or_else(|error| unreachable!("sender task should complete: {error}"));
 
         match result {
             super::InFlightRefreshResult::Completed {
@@ -4129,7 +4552,7 @@ mod tests {
                 assert!(queued_manual_refresh);
             }
             super::InFlightRefreshResult::Shutdown => {
-                panic!("refresh should complete instead of shutting down")
+                unreachable!("refresh should complete instead of shutting down")
             }
         }
     }

@@ -33,6 +33,7 @@ This audit captures the concrete navigation problems present before the Phase 8 
 - There is no explicit focus model in app state, so focus cannot be restored intentionally.
 - AI preflight blocks some shortcuts, but there is no general transient focus system.
 - Some screens are effectively read-only from a focus perspective, so keyboard users rely on memorized global shortcuts instead of discoverable region movement.
+- Several visible subpanels look like separate panes but are not actually operable with their own keyboard contract, which makes `Tab` order feel longer and less truthful than the screen really is.
 
 ## Illogical focus order
 

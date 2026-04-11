@@ -213,13 +213,17 @@ Important implemented state concepts:
 - `help_open`: scoped help-overlay state
 - `search`: current-context search state, including query, match counts, and prior region for focus restore
 - `overlay_filters`: shared family toggles for workouts, tags, and sessions
+- `selected_overlay_toggle_index`: shared focused overlay-selector state for Timeline, Explain, and Patterns
+- `window_hours`: selected Timeline chart window preset
 - `PatternMetricFilter`: shared pattern metric filtering for the Patterns screen
 - `review_mode`: Today, Week, or Investigate within the Review screen
 - `review_focus`: readiness, sleep, recovery, stress, or activity within Investigate mode
 - `selected_review_card_index`: selected ranked card within Review
 - `ai_preflight`: explicit in-app send gate state for AI launches
+- `ai_preflight_control`: focused preflight control inside the transient confirm/privacy/cancel row
 - `ai_browser_tab`: shared browser state for saved `runs`, `snapshots`, `reports`, and `evals`
-- `selected_ai_run_index`, `selected_snapshot_catalog_index`, `selected_report_export_index`, `selected_ai_eval_run_index`: stable list/detail selection state inside the AI workbench
+- `selected_ai_run_index`, `selected_snapshot_catalog_index`, `selected_report_export_index`, `selected_ai_eval_run_index`: stable saved-artifact list selection state inside the AI workbench
+- `selected_ai_artifact_action_index`: focused action inside the visible AI artifact-action pane
 - `ai_artifacts_by_day`: preloaded day-keyed summaries derived from `ai_artifacts` joined through `snapshot_exports`, used for Review provenance display
 
 ### `src/tui.rs`
@@ -289,6 +293,8 @@ Responsibilities:
 - canonical major-region ordering per screen
 - typed navigation movement semantics
 - pane-type semantics for selectors, lists, chart/pager regions, and detail panes
+- truthful region labels for promoted controls such as Timeline window presets, overlay selectors, and AI artifact actions
+- honest focus-stop definitions so read-only subpanels stay inside a screen body region instead of becoming fake keyboard regions
 - search-scope definitions
 - transient-layer definitions
 - focused-control labels used by chrome and reducer logic
@@ -330,7 +336,8 @@ Responsibilities:
 - render the dedicated AI workbench surface
 - render the unified list/detail browser for snapshots, AI runs, and reports
 - render launch points and trust defaults
-- render the preflight overlay as a compact, legible confirmation gate
+- render the visible AI artifact-action pane
+- render the preflight overlay as a compact, legible confirmation gate with a visible control row
 
 Non-responsibilities:
 

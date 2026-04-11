@@ -97,7 +97,7 @@ pub struct OuraProblem {
 
 impl RingmasterError {
     #[must_use]
-    pub fn io(context: &'static str, source: io::Error) -> Self {
+    pub const fn io(context: &'static str, source: io::Error) -> Self {
         Self::Io { context, source }
     }
 }

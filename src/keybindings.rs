@@ -375,17 +375,28 @@ fn build_bindings() -> Vec<Keybinding> {
         ),
     ]);
 
-    bindings.extend(list_region_bindings(Screen::Timeline, Primary));
+    bindings.extend(list_region_bindings(Screen::Timeline, Secondary));
     bindings.extend(list_region_bindings(Screen::Review, Primary));
     bindings.extend(list_region_bindings(Screen::Ai, Primary));
     bindings.extend(list_region_bindings(Screen::Ai, Secondary));
+    bindings.extend(list_region_bindings(Screen::Ai, Tertiary));
 
     bindings.extend(horizontal_region_bindings(Screen::Trends, ContextPrimary));
+    bindings.extend(horizontal_region_bindings(Screen::Explain, ContextPrimary));
+    bindings.extend(horizontal_region_bindings(Screen::Patterns, ContextPrimary));
+    bindings.extend(horizontal_region_bindings(
+        Screen::Patterns,
+        ContextSecondary,
+    ));
     bindings.extend(horizontal_region_bindings(Screen::Review, ContextPrimary));
     bindings.extend(horizontal_region_bindings(Screen::Review, ContextSecondary));
     bindings.extend(horizontal_region_bindings(Screen::Ai, ContextPrimary));
 
     bindings.extend(horizontal_region_bindings(Screen::Timeline, ContextPrimary));
+    bindings.extend(horizontal_region_bindings(
+        Screen::Timeline,
+        ContextSecondary,
+    ));
 
     bindings.extend([
         key(
@@ -421,7 +432,55 @@ fn build_bindings() -> Vec<Keybinding> {
             false,
         ),
         key(
-            ScreenRegion(Screen::Timeline, Primary),
+            ScreenRegion(Screen::Timeline, ContextSecondary),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` toggle selected overlay",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Timeline, ContextSecondary),
+            Standard,
+            KeyChord::plain(Char(' ')),
+            ActivateFocusedRegion,
+            "`Space` toggle selected overlay",
+            false,
+        ),
+        key(
+            ScreenRegion(Screen::Explain, ContextPrimary),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` toggle selected overlay",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Explain, ContextPrimary),
+            Standard,
+            KeyChord::plain(Char(' ')),
+            ActivateFocusedRegion,
+            "`Space` toggle selected overlay",
+            false,
+        ),
+        key(
+            ScreenRegion(Screen::Patterns, ContextSecondary),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` toggle selected overlay",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Patterns, ContextSecondary),
+            Standard,
+            KeyChord::plain(Char(' ')),
+            ActivateFocusedRegion,
+            "`Space` toggle selected overlay",
+            false,
+        ),
+        key(
+            ScreenRegion(Screen::Timeline, Secondary),
             Standard,
             KeyChord::plain(Enter),
             ActivateFocusedRegion,
@@ -429,11 +488,27 @@ fn build_bindings() -> Vec<Keybinding> {
             true,
         ),
         key(
-            ScreenRegion(Screen::Timeline, Primary),
+            ScreenRegion(Screen::Timeline, Secondary),
             Standard,
             KeyChord::plain(Char(' ')),
             ActivateFocusedRegion,
             "`Space` inspect selected event",
+            false,
+        ),
+        key(
+            ScreenRegion(Screen::Timeline, Tertiary),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` return to events",
+            false,
+        ),
+        key(
+            ScreenRegion(Screen::Timeline, Tertiary),
+            Standard,
+            KeyChord::plain(Char(' ')),
+            ActivateFocusedRegion,
+            "`Space` return to events",
             false,
         ),
         key(
@@ -457,7 +532,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Standard,
             KeyChord::plain(Enter),
             ActivateFocusedRegion,
-            "`Enter` run detail action",
+            "`Enter` activate selected action",
             true,
         ),
         key(
@@ -465,23 +540,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Standard,
             KeyChord::plain(Char(' ')),
             ActivateFocusedRegion,
-            "`Space` run detail action",
-            false,
-        ),
-        key(
-            ScreenRegion(Screen::Timeline, Secondary),
-            Standard,
-            KeyChord::plain(Enter),
-            ActivateFocusedRegion,
-            "`Enter` return to events",
-            false,
-        ),
-        key(
-            ScreenRegion(Screen::Timeline, Secondary),
-            Standard,
-            KeyChord::plain(Char(' ')),
-            ActivateFocusedRegion,
-            "`Space` return to events",
+            "`Space` activate selected action",
             false,
         ),
         key(
@@ -1111,7 +1170,7 @@ impl KeyChord {
         }
     }
 
-    fn from_key_event(event: KeyEvent) -> Option<Self> {
+    const fn from_key_event(event: KeyEvent) -> Option<Self> {
         let code = match event.code {
             KeyCode::Char(character) => ChordKey::Char(character),
             KeyCode::Tab => ChordKey::Tab,

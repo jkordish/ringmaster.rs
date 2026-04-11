@@ -153,7 +153,6 @@ where
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use std::path::PathBuf;
 
@@ -166,18 +165,22 @@ mod tests {
     use crate::{
         app::{Screen, build_demo_state},
         config::{AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig},
+        test_support::ok,
     };
 
     fn test_config() -> Config {
-        Config {
-            app_name: "ringmaster",
-            paths: AppPaths::from_roots(
+        let paths = ok(
+            AppPaths::from_roots(
                 PathBuf::from("/home/tester"),
                 PathBuf::from("/tmp/config"),
                 PathBuf::from("/tmp/state"),
                 PathBuf::from("/tmp/cache"),
-            )
-            .unwrap_or_else(|error| panic!("paths should resolve: {error}")),
+            ),
+            "paths should resolve",
+        );
+        Config {
+            app_name: "ringmaster",
+            paths,
             logging: LoggingConfig {
                 filter: "ringmaster=info".to_owned(),
             },

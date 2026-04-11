@@ -46,17 +46,8 @@ fn draw_wide(frame: &mut Frame<'_>, area: Rect, model: &DashboardModel, theme: &
         .constraints([Constraint::Length(4), Constraint::Min(5)])
         .split(top[1]);
 
-    let lead_body = format!(
-        "{}\n{}",
-        model.change_summary,
-        model
-            .highlights
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "No secondary highlight is available yet.".to_owned())
-    );
     frame.render_widget(
-        Paragraph::new(lead_body)
+        Paragraph::new(lead_body(model))
             .style(theme.hero())
             .block(chrome::panel(
                 theme,
@@ -87,23 +78,8 @@ fn draw_wide(frame: &mut Frame<'_>, area: Rect, model: &DashboardModel, theme: &
         right[0],
     );
 
-    let capability_lines = model
-        .capabilities
-        .iter()
-        .map(|capability| {
-            let prefix = if capability.available {
-                "[ready]"
-            } else {
-                "[wait]"
-            };
-            ListItem::new(format!(
-                "{prefix} {} | {}",
-                capability.label, capability.note
-            ))
-        })
-        .collect::<Vec<_>>();
     frame.render_widget(
-        List::new(capability_lines).block(chrome::panel(
+        List::new(capability_items(model)).block(chrome::panel(
             theme,
             Line::from("Capabilities"),
             PanelKind::Subtle,
@@ -132,7 +108,48 @@ fn draw_wide(frame: &mut Frame<'_>, area: Rect, model: &DashboardModel, theme: &
         );
     }
 
-    let highlights = model
+    frame.render_widget(
+        List::new(highlight_items(model)).block(chrome::panel(
+            theme,
+            Line::from("Drill-down cues"),
+            PanelKind::Section,
+        )),
+        layout[2],
+    );
+}
+
+fn lead_body(model: &DashboardModel) -> String {
+    format!(
+        "{}\n{}",
+        model.change_summary,
+        model
+            .highlights
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "No secondary highlight is available yet.".to_owned())
+    )
+}
+
+fn capability_items(model: &DashboardModel) -> Vec<ListItem<'static>> {
+    model
+        .capabilities
+        .iter()
+        .map(|capability| {
+            let prefix = if capability.available {
+                "[ready]"
+            } else {
+                "[wait]"
+            };
+            ListItem::new(format!(
+                "{prefix} {} | {}",
+                capability.label, capability.note
+            ))
+        })
+        .collect()
+}
+
+fn highlight_items(model: &DashboardModel) -> Vec<ListItem<'static>> {
+    model
         .highlights
         .iter()
         .enumerate()
@@ -141,15 +158,7 @@ fn draw_wide(frame: &mut Frame<'_>, area: Rect, model: &DashboardModel, theme: &
             ListItem::new(format!("{prefix} {line}"))
         })
         .chain(model.ai_actions.iter().cloned().map(ListItem::new))
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        List::new(highlights).block(chrome::panel(
-            theme,
-            Line::from("Drill-down cues"),
-            PanelKind::Section,
-        )),
-        layout[2],
-    );
+        .collect()
 }
 
 fn draw_compact(frame: &mut Frame<'_>, area: Rect, model: &DashboardModel, theme: &Theme) {

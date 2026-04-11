@@ -89,6 +89,7 @@ The app has real product depth now, but navigation is still encoded as screen-sp
 - `cargo test --all` passed after the navigation and entrypoint cleanup work, including the deterministic navigation smoke path and the existing CLI smoke suite.
 - `cargo run -- doctor` passed.
 - `cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-nav-ui` passed.
+- Read-mostly screens were tightened further so only genuinely operable panes remain in the major-region map. Explain and Status now expose one body region instead of separate pseudo-panes for informative subpanels, while Patterns keeps a visible metric-filter selector because it has a real local choice model.
 - `cargo clippy --all-targets --all-features -- -D warnings` still fails on a broad repo-wide pedantic/nursery/cargo backlog outside the navigation surface. The pass fixed the navigation-specific clippy findings it introduced and cleaned up several nearby entrypoints and helpers, but the remaining blockers now mostly fall into two buckets:
   - transitive `clippy::cargo` `multiple_crate_versions` findings caused by dependency ecosystem splits such as `reqwest`, `thiserror`, `sha2`, `windows-*`, and related crates
   - older repo-wide lint debt such as `future_not_send`, `missing_errors_doc`, `too_many_lines`, and numeric cast/style issues across modules like `src/ai.rs`, `src/app.rs`, `src/lib.rs`, `src/oura/*`, `src/store/queries.rs`, and webhook support code

@@ -1,18 +1,30 @@
-#![allow(clippy::panic)]
-
 use tempfile::tempdir;
 
 use ringmaster::cli::{AuthCommand, Cli, Command};
+
+fn ok<T, E>(result: Result<T, E>, context: &str) -> T
+where
+    E: std::fmt::Display,
+{
+    match result {
+        Ok(value) => value,
+        Err(error) => unreachable!("{context}: {error}"),
+    }
+}
+
+fn some<T>(option: Option<T>, context: &str) -> T {
+    match option {
+        Some(value) => value,
+        None => unreachable!("{context}"),
+    }
+}
 
 #[test]
 fn parses_no_command_as_none() {
     let result = Cli::parse_from(["ringmaster"]);
     assert!(result.is_ok(), "cli should parse without a subcommand");
 
-    let cli = match result {
-        Ok(cli) => cli,
-        Err(error) => panic!("unexpected parse failure: {error}"),
-    };
+    let cli = ok(result, "unexpected parse failure");
     assert_eq!(cli.command, None);
 }
 
@@ -21,10 +33,7 @@ fn parses_doctor_command() {
     let result = Cli::parse_from(["ringmaster", "doctor"]);
     assert!(result.is_ok(), "cli should parse doctor");
 
-    let cli = match result {
-        Ok(cli) => cli,
-        Err(error) => panic!("unexpected parse failure: {error}"),
-    };
+    let cli = ok(result, "unexpected parse failure");
     assert_eq!(cli.command, Some(Command::Doctor));
 }
 
@@ -33,10 +42,7 @@ fn parses_nested_auth_login_command() {
     let result = Cli::parse_from(["ringmaster", "auth", "login"]);
     assert!(result.is_ok(), "cli should parse nested auth command");
 
-    let cli = match result {
-        Ok(cli) => cli,
-        Err(error) => panic!("unexpected parse failure: {error}"),
-    };
+    let cli = ok(result, "unexpected parse failure");
     assert_eq!(
         cli.command,
         Some(Command::Auth {
@@ -50,25 +56,24 @@ async fn demo_output_mentions_dashboard() {
     let result = ringmaster::run_from(["ringmaster", "demo"]).await;
     assert!(result.is_ok(), "demo should run");
 
-    let output = match result {
-        Ok(Some(output)) => output,
-        Ok(None) => panic!("non-interactive demo should render a snapshot"),
-        Err(error) => panic!("unexpected demo failure: {error}"),
-    };
+    let output = some(
+        ok(result, "unexpected demo failure"),
+        "non-interactive demo should render a snapshot",
+    );
 
     assert!(output.contains("ringmaster"));
     assert!(output.contains("Connection: Connected"));
     assert!(output.contains("Latest sync:"));
     assert!(output.contains("What matters now | 2026-04-08"));
     assert!(output.contains("Capabilities"));
-    assert!(output.contains("Drill-down cues"));
+    assert!(output.contains("Dashboard body"));
     assert!(output.contains("Review"));
     assert!(output.contains("Stress high time is higher than usual."));
 }
 
 #[tokio::test]
 async fn ui_snapshot_demo_writes_artifacts() {
-    let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
+    let out_dir = ok(tempdir(), "tempdir should build");
     let out_path = out_dir.path().join("snapshots");
     let out_arg = out_path.to_string_lossy().into_owned();
 
@@ -91,11 +96,10 @@ async fn ui_snapshot_demo_writes_artifacts() {
     .await;
     assert!(result.is_ok(), "ui snapshot should run");
 
-    let output = match result {
-        Ok(Some(output)) => output,
-        Ok(None) => panic!("ui snapshot should render command output"),
-        Err(error) => panic!("unexpected ui snapshot failure: {error}"),
-    };
+    let output = some(
+        ok(result, "unexpected ui snapshot failure"),
+        "ui snapshot should render command output",
+    );
 
     assert!(output.contains("ringmaster ui snapshot"));
     assert!(output.contains("dashboard"));
@@ -106,7 +110,7 @@ async fn ui_snapshot_demo_writes_artifacts() {
 
 #[tokio::test]
 async fn ui_snapshot_ai_demo_writes_ai_workbench_artifacts() {
-    let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
+    let out_dir = ok(tempdir(), "tempdir should build");
     let out_path = out_dir.path().join("ai-snapshots");
     let out_arg = out_path.to_string_lossy().into_owned();
 
@@ -127,11 +131,10 @@ async fn ui_snapshot_ai_demo_writes_ai_workbench_artifacts() {
     .await;
     assert!(result.is_ok(), "ai ui snapshot should run");
 
-    let output = match result {
-        Ok(Some(output)) => output,
-        Ok(None) => panic!("ai ui snapshot should render command output"),
-        Err(error) => panic!("unexpected ai ui snapshot failure: {error}"),
-    };
+    let output = some(
+        ok(result, "unexpected ai ui snapshot failure"),
+        "ai ui snapshot should render command output",
+    );
 
     assert!(output.contains("ringmaster ui snapshot"));
     assert!(output.contains("ai"));
@@ -141,7 +144,7 @@ async fn ui_snapshot_ai_demo_writes_ai_workbench_artifacts() {
 
 #[tokio::test]
 async fn ui_snapshot_scenario_fixture_root_writes_scenario_tagged_artifacts() {
-    let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
+    let out_dir = ok(tempdir(), "tempdir should build");
     let out_path = out_dir.path().join("phase7");
     let out_arg = out_path.to_string_lossy().into_owned();
 
@@ -165,11 +168,10 @@ async fn ui_snapshot_scenario_fixture_root_writes_scenario_tagged_artifacts() {
     .await;
     assert!(result.is_ok(), "scenario fixture ui snapshot should run");
 
-    let output = match result {
-        Ok(Some(output)) => output,
-        Ok(None) => panic!("scenario fixture ui snapshot should render command output"),
-        Err(error) => panic!("unexpected scenario fixture ui snapshot failure: {error}"),
-    };
+    let output = some(
+        ok(result, "unexpected scenario fixture ui snapshot failure"),
+        "scenario fixture ui snapshot should render command output",
+    );
 
     assert!(output.contains("scenario fixture root"));
     assert!(output.contains("strong, weak, empty, stale, error"));
@@ -183,11 +185,10 @@ async fn review_today_demo_renders_ranked_output() {
     let result = ringmaster::run_from(["ringmaster", "review", "today", "--demo"]).await;
     assert!(result.is_ok(), "review today demo should run");
 
-    let output = match result {
-        Ok(Some(output)) => output,
-        Ok(None) => panic!("review today demo should render text output"),
-        Err(error) => panic!("unexpected review today failure: {error}"),
-    };
+    let output = some(
+        ok(result, "unexpected review today failure"),
+        "review today demo should render text output",
+    );
 
     assert!(output.contains("ringmaster review today"));
     assert!(output.contains("top_observations:"));
@@ -199,11 +200,10 @@ async fn review_week_demo_renders_ranked_output() {
     let result = ringmaster::run_from(["ringmaster", "review", "week", "--demo"]).await;
     assert!(result.is_ok(), "review week demo should run");
 
-    let output = match result {
-        Ok(Some(output)) => output,
-        Ok(None) => panic!("review week demo should render text output"),
-        Err(error) => panic!("unexpected review week failure: {error}"),
-    };
+    let output = some(
+        ok(result, "unexpected review week failure"),
+        "review week demo should render text output",
+    );
 
     assert!(output.contains("ringmaster review week"));
     assert!(output.contains("top_observations:"));

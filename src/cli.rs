@@ -519,7 +519,6 @@ impl Cli {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use std::path::PathBuf;
 
@@ -532,26 +531,29 @@ mod tests {
         SyncCommand, SyncOnceArgs, SyncWatchArgs, UiCommand, UiSnapshotArgs, WebhookCommand,
         WebhookReplayArgs, WebhookSubscriptionCommand, WebhookSubscriptionsSyncArgs,
     };
+    use crate::test_support::ok;
 
     #[test]
     fn parses_nested_subcommands() {
-        let cli = Cli::parse_from(["ringmaster", "auth", "login"]).unwrap_or_else(|error| {
-            panic!("expected clap parsing to succeed in test: {error}");
-        });
+        let cli = ok(
+            Cli::parse_from(["ringmaster", "auth", "login"]),
+            "expected clap parsing to succeed in test",
+        );
 
         match cli.command {
             Some(Command::Auth {
                 command: AuthCommand::Login,
             }) => {}
-            other => panic!("unexpected command: {other:?}"),
+            other => unreachable!("unexpected command: {other:?}"),
         }
     }
 
     #[test]
     fn parses_sync_once() {
-        let cli = Cli::parse_from(["ringmaster", "sync", "once"]).unwrap_or_else(|error| {
-            panic!("expected clap parsing to succeed in test: {error}");
-        });
+        let cli = ok(
+            Cli::parse_from(["ringmaster", "sync", "once"]),
+            "expected clap parsing to succeed in test",
+        );
 
         match cli.command {
             Some(Command::Sync {

@@ -16,7 +16,7 @@ use crate::store::Store;
 use crate::store::queries::{
     AiArtifactRecord, ContextEventFamily, ContextEventRecord, DailyActivityRecord,
     DailyCardiovascularAgeRecord, DailyOverviewRow, DailyResilienceRecord, DailyStressRecord,
-    EffectDirection, PatternMetric, PatternRelationWindow, PatternSummaryRecord,
+    EffectDirection, PatternMetric, PatternRelationWindow, PatternSummaryRecord, RecordCounts,
     RestModePeriodRecord, ReviewSignalDayRecord, SleepTimeRecord, SnapshotExportRecord,
     SnapshotProvenanceRefRecord, SyncRunStatus, SyncStateRecord, Vo2MaxRecord,
 };
@@ -110,6 +110,56 @@ struct GeneratedAtInputs<'a> {
     context_events: &'a [ContextEventRecord],
     pattern_summaries: &'a [PatternSummaryRecord],
     review_signals: &'a [ReviewSignalDayRecord],
+}
+
+struct SnapshotSourceData {
+    sync_states: Vec<SyncStateRecord>,
+    capability_report: CapabilityReport,
+    daily_history_all: Vec<DailyOverviewRow>,
+    daily_history: Vec<DailyOverviewRow>,
+    daily_activity: Vec<DailyActivityRecord>,
+    sleep_time: Vec<SleepTimeRecord>,
+    daily_stress: Vec<DailyStressRecord>,
+    daily_resilience: Vec<DailyResilienceRecord>,
+    cardiovascular_age: Vec<DailyCardiovascularAgeRecord>,
+    vo2_max: Vec<Vo2MaxRecord>,
+    rest_mode_periods: Vec<RestModePeriodRecord>,
+    context_events: Vec<ContextEventRecord>,
+    pattern_summaries: Vec<PatternSummaryRecord>,
+    review_signals: Vec<ReviewSignalDayRecord>,
+    heartrate_daily_averages: Vec<DayValuePoint>,
+    latest_source_day: Option<String>,
+    latest_review_day: Option<String>,
+    record_counts: RecordCounts,
+    generated_at: String,
+    schema_version: u32,
+}
+
+struct SnapshotMetricExports {
+    daily_scores: Vec<SnapshotDailyScore>,
+    activity: Vec<SnapshotActivityDay>,
+    heartrate_daily_averages: Vec<SnapshotMetricPoint>,
+    sleep_windows: Vec<SnapshotSleepWindow>,
+    stress: Vec<SnapshotStressDay>,
+    resilience: Vec<SnapshotResilienceDay>,
+    cardiovascular_age: Vec<SnapshotMetricPoint>,
+    vo2_max: Vec<SnapshotMetricPoint>,
+    rest_mode_periods: Vec<SnapshotRestModePeriod>,
+    context_events: Vec<SnapshotContextEvent>,
+    pattern_summaries: Vec<SnapshotPatternSummary>,
+    review_signals: Vec<SnapshotReviewSignal>,
+    provenance_records: Vec<SnapshotProvenanceRefRecord>,
+}
+
+struct SnapshotManifestContext<'a> {
+    compact_json: &'a str,
+    fixture_dir: Option<&'a Path>,
+    scope: &'a ResolvedSnapshotScope,
+    privacy_profile: PrivacyProfile,
+    source_mode: SnapshotSourceMode,
+    snapshot_hash: &'a str,
+    generated_at: &'a str,
+    catalog_summary: &'a SnapshotCatalogSummary,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -329,6 +379,7 @@ pub struct SnapshotFollowUpTarget {
     pub reason: String,
 }
 
+#[must_use]
 pub fn summarize_snapshot_bundle(
     bundle: &SnapshotBundleV1,
     provenance_refs: &[SnapshotProvenanceRefRecord],
@@ -393,6 +444,9 @@ pub fn summarize_snapshot_bundle(
     }
 }
 
+/// # Errors
+///
+/// Returns an error if the scope syntax is invalid or any referenced day cannot be parsed.
 pub fn resolve_scope(store: &Store, raw_spec: &str) -> Result<ResolvedSnapshotScope> {
     let trimmed = raw_spec.trim();
     if trimmed.is_empty() {
@@ -436,6 +490,9 @@ pub fn resolve_scope(store: &Store, raw_spec: &str) -> Result<ResolvedSnapshotSc
     )))
 }
 
+/// # Errors
+///
+/// Returns an error if store reads, derivation, serialization, validation, or manifest construction fails.
 pub fn export_snapshot(
     _config: &Config,
     store: &Store,
@@ -445,6 +502,32 @@ pub fn export_snapshot(
     scope: &ResolvedSnapshotScope,
     privacy_profile: PrivacyProfile,
 ) -> Result<SnapshotExportOutput> {
+    let source = load_snapshot_source_data(store, auth_status, scope)?;
+    let exports = build_snapshot_metric_exports(&source, privacy_profile);
+    let bundle = build_snapshot_bundle(
+        auth_status,
+        scope,
+        privacy_profile,
+        source_mode,
+        &source,
+        &exports,
+    )?;
+    finalize_snapshot_output(
+        bundle,
+        fixture_dir,
+        scope,
+        privacy_profile,
+        source_mode,
+        &source,
+        exports,
+    )
+}
+
+fn load_snapshot_source_data(
+    store: &Store,
+    auth_status: &AuthStatus,
+    scope: &ResolvedSnapshotScope,
+) -> Result<SnapshotSourceData> {
     let sync_states = store.sync_state().list()?;
     let capability_report = capability_report(auth_status, &sync_states);
     let daily_history_all = store.views().daily_history_all()?;
@@ -477,15 +560,12 @@ pub fn export_snapshot(
         &scope.start_day,
         &scope.end_day,
     )?;
-    let context_events = derived.context_events;
-    let pattern_summaries = derived.pattern_summaries;
-    let review_signals = derived.review_signal_days;
     let heartrate_daily_averages =
         load_heartrate_daily_averages(store, &scope.start_day, &scope.end_day)?;
     let latest_source_day = store.views().latest_source_day()?;
     let latest_review_day = store.views().latest_review_day()?;
     let record_counts = store.views().record_counts()?;
-    let generated_at = deterministic_generated_at(GeneratedAtInputs {
+    let generated_at = deterministic_generated_at(&GeneratedAtInputs {
         auth_status,
         sync_states: &sync_states,
         daily_history: &daily_history,
@@ -496,21 +576,224 @@ pub fn export_snapshot(
         cardiovascular_age: &cardiovascular_age,
         vo2_max: &vo2_max,
         rest_mode_periods: &rest_mode_periods,
-        context_events: &context_events,
-        pattern_summaries: &pattern_summaries,
-        review_signals: &review_signals,
+        context_events: &derived.context_events,
+        pattern_summaries: &derived.pattern_summaries,
+        review_signals: &derived.review_signal_days,
     })?;
 
+    Ok(SnapshotSourceData {
+        sync_states,
+        capability_report,
+        daily_history_all,
+        daily_history,
+        daily_activity,
+        sleep_time,
+        daily_stress,
+        daily_resilience,
+        cardiovascular_age,
+        vo2_max,
+        rest_mode_periods,
+        context_events: derived.context_events,
+        pattern_summaries: derived.pattern_summaries,
+        review_signals: derived.review_signal_days,
+        heartrate_daily_averages,
+        latest_source_day,
+        latest_review_day,
+        record_counts,
+        generated_at,
+        schema_version: store.metadata().schema_version()?,
+    })
+}
+
+fn build_snapshot_metric_exports(
+    source: &SnapshotSourceData,
+    privacy_profile: PrivacyProfile,
+) -> SnapshotMetricExports {
+    let generated_at = &source.generated_at;
     let mut provenance_records = Vec::new();
-    let daily_scores = daily_history
-        .iter()
+    let daily_scores =
+        export_daily_scores(&source.daily_history, generated_at, &mut provenance_records);
+    let activity = export_activity_days(
+        &source.daily_activity,
+        generated_at,
+        &mut provenance_records,
+    );
+    let sleep_windows =
+        export_sleep_windows(&source.sleep_time, generated_at, &mut provenance_records);
+    let stress = export_stress_days(
+        &source.daily_stress,
+        privacy_profile,
+        generated_at,
+        &mut provenance_records,
+    );
+    let resilience = export_resilience_days(
+        &source.daily_resilience,
+        generated_at,
+        &mut provenance_records,
+    );
+    let cardiovascular_age = export_cardiovascular_age_points(
+        &source.cardiovascular_age,
+        generated_at,
+        &mut provenance_records,
+    );
+    let vo2_max = export_vo2_max_points(&source.vo2_max, generated_at, &mut provenance_records);
+    let rest_mode_periods = export_rest_mode_periods(
+        &source.rest_mode_periods,
+        generated_at,
+        &mut provenance_records,
+    );
+    let heartrate_daily_averages = export_heartrate_daily_average_points(
+        &source.heartrate_daily_averages,
+        generated_at,
+        &mut provenance_records,
+    );
+    let context_events = export_context_events(
+        &source.context_events,
+        privacy_profile,
+        generated_at,
+        &mut provenance_records,
+    );
+    let pattern_summaries = export_pattern_summaries(
+        &source.pattern_summaries,
+        privacy_profile,
+        generated_at,
+        &mut provenance_records,
+    );
+    let review_signals = export_review_signals(
+        &source.review_signals,
+        privacy_profile,
+        generated_at,
+        &mut provenance_records,
+    );
+    provenance_records.sort_by(|left, right| left.export_ref.cmp(&right.export_ref));
+
+    SnapshotMetricExports {
+        daily_scores,
+        activity,
+        heartrate_daily_averages,
+        sleep_windows,
+        stress,
+        resilience,
+        cardiovascular_age,
+        vo2_max,
+        rest_mode_periods,
+        context_events,
+        pattern_summaries,
+        review_signals,
+        provenance_records,
+    }
+}
+
+fn build_snapshot_bundle(
+    auth_status: &AuthStatus,
+    scope: &ResolvedSnapshotScope,
+    privacy_profile: PrivacyProfile,
+    source_mode: SnapshotSourceMode,
+    source: &SnapshotSourceData,
+    exports: &SnapshotMetricExports,
+) -> Result<SnapshotBundleV1> {
+    let baselines = build_baselines(&source.daily_history_all, scope)?;
+    let trend_summaries = build_trend_summaries(
+        &source.daily_history_all,
+        &exports.heartrate_daily_averages,
+        scope,
+    )?;
+    let follow_up_targets =
+        build_follow_up_targets(scope, &baselines, &trend_summaries, &exports.review_signals);
+    let warnings = build_freshness_warnings(
+        &source.sync_states,
+        source.latest_source_day.as_deref(),
+        source.latest_review_day.as_deref(),
+        &source.capability_report,
+    );
+
+    Ok(SnapshotBundleV1 {
+        schema_version: SNAPSHOT_SCHEMA_VERSION.to_owned(),
+        metadata: SnapshotMetadata {
+            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            generated_at: source.generated_at.clone(),
+            snapshot_hash: String::new(),
+            scope: scope.normalized_spec.clone(),
+            start_day: scope.start_day.clone(),
+            end_day: scope.end_day.clone(),
+            anchor_day: scope.anchor_day.clone(),
+            privacy_profile,
+            source_mode,
+            schema_version: source.schema_version,
+        },
+        freshness: build_snapshot_freshness(source, warnings),
+        capabilities: build_snapshot_capabilities(auth_status, &source.capability_report),
+        record_counts: build_snapshot_record_counts(&source.record_counts, exports),
+        metrics: SnapshotMetrics {
+            daily_scores: exports.daily_scores.clone(),
+            activity: exports.activity.clone(),
+            heartrate_daily_averages: exports.heartrate_daily_averages.clone(),
+            sleep_windows: exports.sleep_windows.clone(),
+            stress: exports.stress.clone(),
+            resilience: exports.resilience.clone(),
+            cardiovascular_age: exports.cardiovascular_age.clone(),
+            vo2_max: exports.vo2_max.clone(),
+            rest_mode_periods: exports.rest_mode_periods.clone(),
+        },
+        baselines,
+        trend_summaries,
+        context_events: exports.context_events.clone(),
+        pattern_summaries: exports.pattern_summaries.clone(),
+        review_signals: exports.review_signals.clone(),
+        follow_up_targets,
+    })
+}
+
+fn finalize_snapshot_output(
+    mut bundle: SnapshotBundleV1,
+    fixture_dir: Option<&Path>,
+    scope: &ResolvedSnapshotScope,
+    privacy_profile: PrivacyProfile,
+    source_mode: SnapshotSourceMode,
+    source: &SnapshotSourceData,
+    exports: SnapshotMetricExports,
+) -> Result<SnapshotExportOutput> {
+    let snapshot_hash = snapshot_hash_for_bundle(&bundle)?;
+    bundle.metadata.snapshot_hash.clone_from(&snapshot_hash);
+
+    let bundle = round_trip_snapshot_bundle(&bundle)?;
+    let compact_json = serde_json::to_string(&bundle)?;
+    let pretty_json = serde_json::to_string_pretty(&bundle)?;
+    validate_snapshot_bundle(&bundle)?;
+    let provenance_records = attach_snapshot_hash(exports.provenance_records, &snapshot_hash);
+    let catalog_summary = summarize_snapshot_bundle(&bundle, &provenance_records);
+
+    Ok(SnapshotExportOutput {
+        manifest_record: snapshot_manifest_record(&SnapshotManifestContext {
+            compact_json: &compact_json,
+            fixture_dir,
+            scope,
+            privacy_profile,
+            source_mode,
+            snapshot_hash: &snapshot_hash,
+            generated_at: &source.generated_at,
+            catalog_summary: &catalog_summary,
+        })?,
+        bundle,
+        compact_json,
+        pretty_json,
+        provenance_records,
+    })
+}
+
+fn export_daily_scores(
+    rows: &[DailyOverviewRow],
+    generated_at: &str,
+    provenance_records: &mut Vec<SnapshotProvenanceRefRecord>,
+) -> Vec<SnapshotDailyScore> {
+    rows.iter()
         .map(|row| {
             let export_ref = format!("daily:{}", row.day);
             provenance_records.push(provenance_record(
                 &export_ref,
                 "daily_overview",
                 &row.day,
-                &generated_at,
+                generated_at,
             ));
             SnapshotDailyScore {
                 export_ref,
@@ -520,16 +803,22 @@ pub fn export_snapshot(
                 activity_score: row.activity_score,
             }
         })
-        .collect::<Vec<_>>();
-    let activity = daily_activity
-        .iter()
+        .collect()
+}
+
+fn export_activity_days(
+    rows: &[DailyActivityRecord],
+    generated_at: &str,
+    provenance_records: &mut Vec<SnapshotProvenanceRefRecord>,
+) -> Vec<SnapshotActivityDay> {
+    rows.iter()
         .map(|row| {
             let export_ref = format!("activity:{}", row.day);
             provenance_records.push(provenance_record(
                 &export_ref,
                 "daily_activity",
                 &row.day,
-                &generated_at,
+                generated_at,
             ));
             SnapshotActivityDay {
                 export_ref,
@@ -539,16 +828,22 @@ pub fn export_snapshot(
                 total_calories: row.total_calories,
             }
         })
-        .collect::<Vec<_>>();
-    let sleep_windows = sleep_time
-        .iter()
+        .collect()
+}
+
+fn export_sleep_windows(
+    rows: &[SleepTimeRecord],
+    generated_at: &str,
+    provenance_records: &mut Vec<SnapshotProvenanceRefRecord>,
+) -> Vec<SnapshotSleepWindow> {
+    rows.iter()
         .map(|row| {
             let export_ref = format!("sleep_time:{}", row.day);
             provenance_records.push(provenance_record(
                 &export_ref,
                 "sleep_time",
                 &row.day,
-                &generated_at,
+                generated_at,
             ));
             SnapshotSleepWindow {
                 export_ref,
@@ -557,16 +852,23 @@ pub fn export_snapshot(
                 recommendation: row.recommendation.clone(),
             }
         })
-        .collect::<Vec<_>>();
-    let stress = daily_stress
-        .iter()
+        .collect()
+}
+
+fn export_stress_days(
+    rows: &[DailyStressRecord],
+    privacy_profile: PrivacyProfile,
+    generated_at: &str,
+    provenance_records: &mut Vec<SnapshotProvenanceRefRecord>,
+) -> Vec<SnapshotStressDay> {
+    rows.iter()
         .map(|row| {
             let export_ref = format!("stress:{}", row.day);
             provenance_records.push(provenance_record(
                 &export_ref,
                 "daily_stress",
                 &row.day,
-                &generated_at,
+                generated_at,
             ));
             SnapshotStressDay {
                 export_ref,
@@ -576,16 +878,22 @@ pub fn export_snapshot(
                 summary: redact_optional_text(privacy_profile, row.day_summary.as_deref()),
             }
         })
-        .collect::<Vec<_>>();
-    let resilience = daily_resilience
-        .iter()
+        .collect()
+}
+
+fn export_resilience_days(
+    rows: &[DailyResilienceRecord],
+    generated_at: &str,
+    provenance_records: &mut Vec<SnapshotProvenanceRefRecord>,
+) -> Vec<SnapshotResilienceDay> {
+    rows.iter()
         .map(|row| {
             let export_ref = format!("resilience:{}", row.day);
             provenance_records.push(provenance_record(
                 &export_ref,
                 "daily_resilience",
                 &row.day,
-                &generated_at,
+                generated_at,
             ));
             SnapshotResilienceDay {
                 export_ref,
@@ -596,33 +904,45 @@ pub fn export_snapshot(
                 stress: row.stress,
             }
         })
-        .collect::<Vec<_>>();
-    let cardiovascular_age = cardiovascular_age
-        .iter()
+        .collect()
+}
+
+fn export_cardiovascular_age_points(
+    rows: &[DailyCardiovascularAgeRecord],
+    generated_at: &str,
+    provenance_records: &mut Vec<SnapshotProvenanceRefRecord>,
+) -> Vec<SnapshotMetricPoint> {
+    rows.iter()
         .map(|row| {
             let export_ref = format!("cardio_age:{}", row.day);
             provenance_records.push(provenance_record(
                 &export_ref,
                 "daily_cardiovascular_age",
                 &row.day,
-                &generated_at,
+                generated_at,
             ));
             SnapshotMetricPoint {
                 export_ref,
                 day: row.day.clone(),
-                value: row.vascular_age.map(|value| value as f64),
+                value: row.vascular_age.map(crate::numeric::i64_to_f64),
             }
         })
-        .collect::<Vec<_>>();
-    let vo2_max = vo2_max
-        .iter()
+        .collect()
+}
+
+fn export_vo2_max_points(
+    rows: &[Vo2MaxRecord],
+    generated_at: &str,
+    provenance_records: &mut Vec<SnapshotProvenanceRefRecord>,
+) -> Vec<SnapshotMetricPoint> {
+    rows.iter()
         .map(|row| {
             let export_ref = format!("vo2_max:{}:{}", row.day, row.recorded_at);
             provenance_records.push(provenance_record(
                 &export_ref,
                 "vo2_max",
                 &format!("{}|{}", row.day, row.recorded_at),
-                &generated_at,
+                generated_at,
             ));
             SnapshotMetricPoint {
                 export_ref,
@@ -630,16 +950,22 @@ pub fn export_snapshot(
                 value: row.vo2_max,
             }
         })
-        .collect::<Vec<_>>();
-    let rest_mode_periods = rest_mode_periods
-        .iter()
+        .collect()
+}
+
+fn export_rest_mode_periods(
+    rows: &[RestModePeriodRecord],
+    generated_at: &str,
+    provenance_records: &mut Vec<SnapshotProvenanceRefRecord>,
+) -> Vec<SnapshotRestModePeriod> {
+    rows.iter()
         .map(|row| {
             let export_ref = format!("rest_mode:{}", row.period_id);
             provenance_records.push(provenance_record(
                 &export_ref,
                 "rest_mode_period",
                 &row.period_id,
-                &generated_at,
+                generated_at,
             ));
             SnapshotRestModePeriod {
                 export_ref,
@@ -649,25 +975,40 @@ pub fn export_snapshot(
                 tag_count: count_json_array_items(&row.tags_json),
             }
         })
-        .collect::<Vec<_>>();
-    let heartrate_daily_averages = heartrate_daily_averages
-        .into_iter()
+        .collect()
+}
+
+fn export_heartrate_daily_average_points(
+    points: &[DayValuePoint],
+    generated_at: &str,
+    provenance_records: &mut Vec<SnapshotProvenanceRefRecord>,
+) -> Vec<SnapshotMetricPoint> {
+    points
+        .iter()
         .map(|point| {
             let export_ref = format!("heartrate:{}", point.day);
             provenance_records.push(provenance_record(
                 &export_ref,
                 "heartrate_day",
                 &point.day,
-                &generated_at,
+                generated_at,
             ));
             SnapshotMetricPoint {
                 export_ref,
-                day: point.day,
+                day: point.day.clone(),
                 value: Some(point.value),
             }
         })
-        .collect::<Vec<_>>();
-    let context_events = context_events
+        .collect()
+}
+
+fn export_context_events(
+    records: &[ContextEventRecord],
+    privacy_profile: PrivacyProfile,
+    generated_at: &str,
+    provenance_records: &mut Vec<SnapshotProvenanceRefRecord>,
+) -> Vec<SnapshotContextEvent> {
+    records
         .iter()
         .map(|record| {
             let export_ref = format!("context:{}", record.context_event_id);
@@ -675,7 +1016,7 @@ pub fn export_snapshot(
                 &export_ref,
                 "context_event",
                 &record.context_event_id,
-                &generated_at,
+                generated_at,
             ));
             SnapshotContextEvent {
                 export_ref,
@@ -687,8 +1028,16 @@ pub fn export_snapshot(
                 summary: context_summary(privacy_profile, record),
             }
         })
-        .collect::<Vec<_>>();
-    let pattern_summaries = pattern_summaries
+        .collect()
+}
+
+fn export_pattern_summaries(
+    records: &[PatternSummaryRecord],
+    privacy_profile: PrivacyProfile,
+    generated_at: &str,
+    provenance_records: &mut Vec<SnapshotProvenanceRefRecord>,
+) -> Vec<SnapshotPatternSummary> {
+    records
         .iter()
         .map(|record| {
             let export_ref = format!("pattern:{}", record.summary_id);
@@ -696,7 +1045,7 @@ pub fn export_snapshot(
                 &export_ref,
                 "pattern_summary",
                 &record.summary_id,
-                &generated_at,
+                generated_at,
             ));
             SnapshotPatternSummary {
                 export_ref,
@@ -711,8 +1060,16 @@ pub fn export_snapshot(
                 summary: pattern_summary_text(record),
             }
         })
-        .collect::<Vec<_>>();
-    let review_signals = review_signals
+        .collect()
+}
+
+fn export_review_signals(
+    records: &[ReviewSignalDayRecord],
+    privacy_profile: PrivacyProfile,
+    generated_at: &str,
+    provenance_records: &mut Vec<SnapshotProvenanceRefRecord>,
+) -> Vec<SnapshotReviewSignal> {
+    records
         .iter()
         .map(|record| {
             let export_ref = format!("signal:{}:{}", record.signal_key, record.day);
@@ -720,7 +1077,7 @@ pub fn export_snapshot(
                 &export_ref,
                 "review_signal",
                 &format!("{}|{}", record.signal_key, record.day),
-                &generated_at,
+                generated_at,
             ));
             SnapshotReviewSignal {
                 export_ref,
@@ -738,22 +1095,79 @@ pub fn export_snapshot(
                 stale_days: record.stale_days,
             }
         })
-        .collect::<Vec<_>>();
-    provenance_records.sort_by(|left, right| left.export_ref.cmp(&right.export_ref));
+        .collect()
+}
 
-    let baselines = build_baselines(&daily_history_all, scope)?;
-    let trend_summaries =
-        build_trend_summaries(&daily_history_all, &heartrate_daily_averages, scope)?;
-    let follow_up_targets =
-        build_follow_up_targets(scope, &baselines, &trend_summaries, &review_signals);
-    let warnings = build_freshness_warnings(
-        &sync_states,
-        latest_source_day.as_deref(),
-        latest_review_day.as_deref(),
-        &capability_report,
-    );
+fn build_snapshot_freshness(
+    source: &SnapshotSourceData,
+    warnings: Vec<String>,
+) -> SnapshotFreshness {
+    SnapshotFreshness {
+        latest_source_day: source.latest_source_day.clone(),
+        latest_review_day: source.latest_review_day.clone(),
+        warnings,
+        sync_states: source
+            .sync_states
+            .iter()
+            .map(|state| SnapshotSyncState {
+                sync_key: state.sync_key.clone(),
+                status: sync_status_string(&state.status),
+                last_attempted_at: state.last_attempted_at.clone(),
+                last_completed_at: state.last_completed_at.clone(),
+                failure_count: state.failure_count,
+                next_attempt_after: state.next_attempt_after.clone(),
+                message: state.message.clone(),
+            })
+            .collect(),
+    }
+}
 
-    let raw_tables = BTreeMap::from([
+fn build_snapshot_capabilities(
+    auth_status: &AuthStatus,
+    capability_report: &CapabilityReport,
+) -> SnapshotCapabilities {
+    SnapshotCapabilities {
+        requested_scopes: auth_status.requested_scopes.clone(),
+        granted_scopes: capability_report
+            .granted_scope_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        missing_scopes: capability_report
+            .missing_scope_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        entries: capability_report
+            .entries
+            .iter()
+            .map(|entry| SnapshotCapabilityEntry {
+                key: entry.kind.scope_name().to_owned(),
+                label: entry.kind.label().to_owned(),
+                requested: entry.requested,
+                granted: entry.granted,
+                note: entry.note.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn build_snapshot_record_counts(
+    record_counts: &RecordCounts,
+    exports: &SnapshotMetricExports,
+) -> SnapshotRecordCounts {
+    SnapshotRecordCounts {
+        daily_history_days: exports.daily_scores.len(),
+        heartrate_days: exports.heartrate_daily_averages.len(),
+        context_events: exports.context_events.len(),
+        pattern_summaries: exports.pattern_summaries.len(),
+        review_signals: exports.review_signals.len(),
+        raw_tables: build_snapshot_raw_tables(record_counts),
+    }
+}
+
+fn build_snapshot_raw_tables(record_counts: &RecordCounts) -> BTreeMap<String, u64> {
+    BTreeMap::from([
         ("raw_payloads".to_owned(), record_counts.raw_payloads),
         ("personal_info".to_owned(), record_counts.personal_info),
         ("daily_sleep".to_owned(), record_counts.daily_sleep),
@@ -794,154 +1208,65 @@ pub fn export_snapshot(
             "derived_review_signal_days".to_owned(),
             record_counts.derived_review_signal_days,
         ),
-    ]);
+    ])
+}
 
-    let mut bundle = SnapshotBundleV1 {
-        schema_version: SNAPSHOT_SCHEMA_VERSION.to_owned(),
-        metadata: SnapshotMetadata {
-            app_version: env!("CARGO_PKG_VERSION").to_owned(),
-            generated_at: generated_at.clone(),
-            snapshot_hash: String::new(),
-            scope: scope.normalized_spec.clone(),
-            start_day: scope.start_day.clone(),
-            end_day: scope.end_day.clone(),
-            anchor_day: scope.anchor_day.clone(),
-            privacy_profile,
-            source_mode,
-            schema_version: store.metadata().schema_version()?,
-        },
-        freshness: SnapshotFreshness {
-            latest_source_day,
-            latest_review_day,
-            warnings,
-            sync_states: sync_states
-                .iter()
-                .map(|state| SnapshotSyncState {
-                    sync_key: state.sync_key.clone(),
-                    status: sync_status_string(&state.status),
-                    last_attempted_at: state.last_attempted_at.clone(),
-                    last_completed_at: state.last_completed_at.clone(),
-                    failure_count: state.failure_count,
-                    next_attempt_after: state.next_attempt_after.clone(),
-                    message: state.message.clone(),
-                })
-                .collect(),
-        },
-        capabilities: SnapshotCapabilities {
-            requested_scopes: auth_status.requested_scopes.clone(),
-            granted_scopes: capability_report
-                .granted_scope_names()
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-            missing_scopes: capability_report
-                .missing_scope_names()
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-            entries: capability_report
-                .entries
-                .iter()
-                .map(|entry| SnapshotCapabilityEntry {
-                    key: entry.kind.scope_name().to_owned(),
-                    label: entry.kind.label().to_owned(),
-                    requested: entry.requested,
-                    granted: entry.granted,
-                    note: entry.note.clone(),
-                })
-                .collect(),
-        },
-        record_counts: SnapshotRecordCounts {
-            daily_history_days: daily_scores.len(),
-            heartrate_days: heartrate_daily_averages.len(),
-            context_events: context_events.len(),
-            pattern_summaries: pattern_summaries.len(),
-            review_signals: review_signals.len(),
-            raw_tables,
-        },
-        metrics: SnapshotMetrics {
-            daily_scores,
-            activity,
-            heartrate_daily_averages,
-            sleep_windows,
-            stress,
-            resilience,
-            cardiovascular_age,
-            vo2_max,
-            rest_mode_periods,
-        },
-        baselines,
-        trend_summaries,
-        context_events,
-        pattern_summaries,
-        review_signals,
-        follow_up_targets,
-    };
-
-    let serialized_without_hash = serde_json::to_string(&bundle)?;
+fn snapshot_hash_for_bundle(bundle: &SnapshotBundleV1) -> Result<String> {
+    let serialized_without_hash = serde_json::to_string(bundle)?;
     let round_tripped_without_hash =
         serde_json::from_str::<SnapshotBundleV1>(&serialized_without_hash)?;
     let canonical_without_hash = serde_json::to_string(&round_tripped_without_hash)?;
-    let snapshot_hash = hex::encode(Sha256::digest(canonical_without_hash.as_bytes()));
-    bundle.metadata.snapshot_hash.clone_from(&snapshot_hash);
+    Ok(hex::encode(Sha256::digest(
+        canonical_without_hash.as_bytes(),
+    )))
+}
 
-    let serialized_with_hash = serde_json::to_string(&bundle)?;
-    let bundle = serde_json::from_str::<SnapshotBundleV1>(&serialized_with_hash)?;
-    let compact_json = serde_json::to_string(&bundle)?;
-    let pretty_json = serde_json::to_string_pretty(&bundle)?;
-    validate_snapshot_bundle(&bundle)?;
-    let manifest_record = SnapshotExportRecord {
-        snapshot_hash: snapshot_hash.clone(),
-        schema_version: SNAPSHOT_SCHEMA_VERSION.to_owned(),
-        app_version: env!("CARGO_PKG_VERSION").to_owned(),
-        generated_at,
-        scope: scope.normalized_spec.clone(),
-        start_day: String::new(),
-        end_day: String::new(),
-        anchor_day: String::new(),
-        day_count: 0,
-        privacy_profile: privacy_profile.as_str().to_owned(),
-        source_mode: source_mode.as_str().to_owned(),
-        fixture_dir: fixture_dir.map(|path| path.display().to_string()),
-        latest_source_day: None,
-        latest_review_day: None,
-        freshness_summary: String::new(),
-        trust_summary: String::new(),
-        capability_summary: String::new(),
-        provenance_summary: String::new(),
-        snapshot_json: compact_json.clone(),
-        created_at: now_rfc3339()?,
-    };
-    let provenance_records = provenance_records
+fn round_trip_snapshot_bundle(bundle: &SnapshotBundleV1) -> Result<SnapshotBundleV1> {
+    let serialized_with_hash = serde_json::to_string(bundle)?;
+    serde_json::from_str::<SnapshotBundleV1>(&serialized_with_hash).map_err(Into::into)
+}
+
+fn attach_snapshot_hash(
+    provenance_records: Vec<SnapshotProvenanceRefRecord>,
+    snapshot_hash: &str,
+) -> Vec<SnapshotProvenanceRefRecord> {
+    provenance_records
         .into_iter()
         .map(|mut record| {
-            record.snapshot_hash.clone_from(&snapshot_hash);
+            snapshot_hash.clone_into(&mut record.snapshot_hash);
             record
         })
-        .collect::<Vec<_>>();
-    let catalog_summary = summarize_snapshot_bundle(&bundle, &provenance_records);
+        .collect()
+}
 
-    Ok(SnapshotExportOutput {
-        bundle,
-        compact_json,
-        pretty_json,
-        manifest_record: SnapshotExportRecord {
-            start_day: scope.start_day.clone(),
-            end_day: scope.end_day.clone(),
-            anchor_day: scope.anchor_day.clone(),
-            day_count: u32::try_from(scope.day_count).unwrap_or(u32::MAX),
-            latest_source_day: catalog_summary.latest_source_day,
-            latest_review_day: catalog_summary.latest_review_day,
-            freshness_summary: catalog_summary.freshness_summary,
-            trust_summary: catalog_summary.trust_summary,
-            capability_summary: catalog_summary.capability_summary,
-            provenance_summary: catalog_summary.provenance_summary,
-            ..manifest_record
-        },
-        provenance_records,
+fn snapshot_manifest_record(context: &SnapshotManifestContext<'_>) -> Result<SnapshotExportRecord> {
+    Ok(SnapshotExportRecord {
+        snapshot_hash: context.snapshot_hash.to_owned(),
+        schema_version: SNAPSHOT_SCHEMA_VERSION.to_owned(),
+        app_version: env!("CARGO_PKG_VERSION").to_owned(),
+        generated_at: context.generated_at.to_owned(),
+        scope: context.scope.normalized_spec.clone(),
+        start_day: context.scope.start_day.clone(),
+        end_day: context.scope.end_day.clone(),
+        anchor_day: context.scope.anchor_day.clone(),
+        day_count: u32::try_from(context.scope.day_count).unwrap_or(u32::MAX),
+        privacy_profile: context.privacy_profile.as_str().to_owned(),
+        source_mode: context.source_mode.as_str().to_owned(),
+        fixture_dir: context.fixture_dir.map(|path| path.display().to_string()),
+        latest_source_day: context.catalog_summary.latest_source_day.clone(),
+        latest_review_day: context.catalog_summary.latest_review_day.clone(),
+        freshness_summary: context.catalog_summary.freshness_summary.clone(),
+        trust_summary: context.catalog_summary.trust_summary.clone(),
+        capability_summary: context.catalog_summary.capability_summary.clone(),
+        provenance_summary: context.catalog_summary.provenance_summary.clone(),
+        snapshot_json: context.compact_json.to_owned(),
+        created_at: now_rfc3339()?,
     })
 }
 
+/// # Errors
+///
+/// Returns an error if the artifact file cannot be read or the snapshot payload is invalid.
 pub fn load_snapshot_artifact(path: &Path) -> Result<LoadedSnapshotArtifact> {
     let raw_json = fs::read_to_string(path)
         .map_err(|error| RingmasterError::io("reading snapshot artifact", error))?;
@@ -953,6 +1278,7 @@ pub fn load_snapshot_artifact(path: &Path) -> Result<LoadedSnapshotArtifact> {
     })
 }
 
+#[must_use]
 pub fn rebuild_follow_up_targets(bundle: &SnapshotBundleV1) -> Vec<SnapshotFollowUpTarget> {
     let scope = ResolvedSnapshotScope {
         raw_spec: bundle.metadata.scope.clone(),
@@ -970,6 +1296,7 @@ pub fn rebuild_follow_up_targets(bundle: &SnapshotBundleV1) -> Vec<SnapshotFollo
     )
 }
 
+#[must_use]
 pub fn catalog_record_from_loaded_artifact(
     artifact: &LoadedSnapshotArtifact,
     fixture_dir: Option<&Path>,
@@ -1014,17 +1341,26 @@ pub fn catalog_record_from_loaded_artifact(
     }
 }
 
+/// # Errors
+///
+/// Returns an error if the JSON cannot be decoded or the decoded bundle fails validation.
 pub fn deserialize_snapshot_bundle(raw_json: &str) -> Result<SnapshotBundleV1> {
     let bundle = serde_json::from_str::<SnapshotBundleV1>(raw_json)?;
     validate_snapshot_bundle(&bundle)?;
     Ok(bundle)
 }
 
+/// # Errors
+///
+/// Returns an error if the bundle is invalid or cannot be serialized canonically.
 pub fn canonicalize_snapshot_bundle(bundle: &SnapshotBundleV1) -> Result<String> {
     validate_snapshot_bundle(bundle)?;
     serde_json::to_string(bundle).map_err(Into::into)
 }
 
+/// # Errors
+///
+/// Returns an error if the artifact directory cannot be created or the artifact cannot be written.
 pub fn write_snapshot_artifact(path: &Path, compact_json: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -1035,6 +1371,9 @@ pub fn write_snapshot_artifact(path: &Path, compact_json: &str) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns an error if the bundle schema version or content hash is invalid.
 pub fn validate_snapshot_bundle(bundle: &SnapshotBundleV1) -> Result<()> {
     if bundle.schema_version != SNAPSHOT_SCHEMA_VERSION {
         return Err(RingmasterError::Config(format!(
@@ -1062,6 +1401,9 @@ pub fn validate_snapshot_bundle(bundle: &SnapshotBundleV1) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns an error if the artifact payload, overview, or rendered briefing cannot be normalized.
 pub fn artifact_record(input: ArtifactRecordInput<'_>) -> Result<AiArtifactRecord> {
     Ok(AiArtifactRecord {
         artifact_id: input.artifact_id,
@@ -1187,7 +1529,7 @@ fn load_heartrate_daily_averages(
             .iter()
             .map(|sample| f64::from(sample.bpm))
             .sum::<f64>();
-        let average = sum / samples.len() as f64;
+        let average = sum / crate::numeric::usize_to_f64(samples.len());
         points.push(DayValuePoint {
             day,
             value: round_metric(average),
@@ -1203,7 +1545,7 @@ struct DayValuePoint {
     value: f64,
 }
 
-fn deterministic_generated_at(inputs: GeneratedAtInputs<'_>) -> Result<String> {
+fn deterministic_generated_at(inputs: &GeneratedAtInputs<'_>) -> Result<String> {
     let mut timestamps = Vec::new();
     timestamps.extend(inputs.auth_status.access_token_expires_at.iter().cloned());
     timestamps.extend(inputs.auth_status.last_authenticated_at.iter().cloned());
@@ -1425,38 +1767,38 @@ fn build_trend_summaries(
     summaries.push(build_metric_trend(
         "sleep_score",
         "Sleep score",
-        scope_values
+        &scope_values
             .iter()
             .filter_map(|row| row.sleep_score.map(f64::from))
-            .collect(),
-        previous_values
+            .collect::<Vec<_>>(),
+        &previous_values
             .iter()
             .filter_map(|row| row.sleep_score.map(f64::from))
-            .collect(),
+            .collect::<Vec<_>>(),
     ));
     summaries.push(build_metric_trend(
         "readiness_score",
         "Readiness score",
-        scope_values
+        &scope_values
             .iter()
             .filter_map(|row| row.readiness_score.map(f64::from))
-            .collect(),
-        previous_values
+            .collect::<Vec<_>>(),
+        &previous_values
             .iter()
             .filter_map(|row| row.readiness_score.map(f64::from))
-            .collect(),
+            .collect::<Vec<_>>(),
     ));
     summaries.push(build_metric_trend(
         "activity_score",
         "Activity score",
-        scope_values
+        &scope_values
             .iter()
             .filter_map(|row| row.activity_score.map(f64::from))
-            .collect(),
-        previous_values
+            .collect::<Vec<_>>(),
+        &previous_values
             .iter()
             .filter_map(|row| row.activity_score.map(f64::from))
-            .collect(),
+            .collect::<Vec<_>>(),
     ));
 
     if !heartrate_daily_averages.is_empty() {
@@ -1474,8 +1816,8 @@ fn build_trend_summaries(
         summaries.push(build_metric_trend(
             "heartrate_daily_average",
             "Daily heartrate average",
-            current,
-            previous,
+            &current,
+            &previous,
         ));
     }
 
@@ -1488,27 +1830,26 @@ fn build_trend_summaries(
 fn build_metric_trend(
     metric_key: &str,
     label: &str,
-    current_values: Vec<f64>,
-    previous_values: Vec<f64>,
+    current_values: &[f64],
+    previous_values: &[f64],
 ) -> SnapshotTrendSummary {
-    let current_average = average(&current_values);
-    let previous_average = average(&previous_values);
-    let direction = current_average
-        .zip(previous_average)
-        .map(|(current, previous)| {
-            if (current - previous).abs() < 0.5 {
-                "flat"
-            } else if current > previous {
-                "higher"
-            } else {
-                "lower"
-            }
-        })
-        .unwrap_or("insufficient");
+    let current_average = average(current_values);
+    let previous_average = average(previous_values);
+    let direction =
+        current_average
+            .zip(previous_average)
+            .map_or("insufficient", |(current, previous)| {
+                if (current - previous).abs() < 0.5 {
+                    "flat"
+                } else if current > previous {
+                    "higher"
+                } else {
+                    "lower"
+                }
+            });
     let summary = match current_average.zip(previous_average) {
         Some((current, previous)) => format!(
-            "{label} averaged {:.1} in-scope versus {:.1} in the comparison window.",
-            current, previous
+            "{label} averaged {current:.1} in-scope versus {previous:.1} in the comparison window."
         ),
         None => format!("Not enough {label} samples were available to compare windows."),
     };
@@ -1635,8 +1976,8 @@ fn ranked_signal_targets(
             (sufficiency > 0).then_some((
                 focus,
                 sufficiency,
-                signal.z_score.map(f64::abs).unwrap_or(0.0),
-                signal.delta.map(f64::abs).unwrap_or(0.0),
+                signal.z_score.map_or(0.0, f64::abs),
+                signal.delta.map_or(0.0, f64::abs),
                 signal.persistence_days,
                 signal.stale_days,
                 signal,
@@ -1686,8 +2027,8 @@ fn ranked_missing_signal_targets(
             let focus = signal_focus(&signal.signal_key)?;
             Some((
                 focus,
-                signal.z_score.map(f64::abs).unwrap_or(0.0),
-                signal.delta.map(f64::abs).unwrap_or(0.0),
+                signal.z_score.map_or(0.0, f64::abs),
+                signal.delta.map_or(0.0, f64::abs),
                 signal.persistence_days,
                 signal.stale_days,
                 signal,
@@ -1844,7 +2185,7 @@ fn pattern_summary_text(record: &PatternSummaryRecord) -> String {
     )
 }
 
-fn relation_verb(window: PatternRelationWindow) -> &'static str {
+const fn relation_verb(window: PatternRelationWindow) -> &'static str {
     match window {
         PatternRelationWindow::SameDayActivity => "to shift same-day",
         PatternRelationWindow::NextDayReadiness => "to shift next-day",
@@ -1852,7 +2193,7 @@ fn relation_verb(window: PatternRelationWindow) -> &'static str {
     }
 }
 
-fn family_label(family: ContextEventFamily) -> &'static str {
+const fn family_label(family: ContextEventFamily) -> &'static str {
     match family {
         ContextEventFamily::Workout => "Workout",
         ContextEventFamily::Tag => "Tag",
@@ -1894,7 +2235,7 @@ fn average(values: &[f64]) -> Option<f64> {
         None
     } else {
         Some(round_metric(
-            values.iter().sum::<f64>() / values.len() as f64,
+            values.iter().sum::<f64>() / crate::numeric::usize_to_f64(values.len()),
         ))
     }
 }
@@ -1910,7 +2251,8 @@ fn now_rfc3339() -> Result<String> {
 }
 
 impl PrivacyProfile {
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Redacted => "redacted",
             Self::Balanced => "balanced",
@@ -1919,7 +2261,7 @@ impl PrivacyProfile {
     }
 
     #[must_use]
-    pub fn next(self) -> Self {
+    pub const fn next(self) -> Self {
         match self {
             Self::Redacted => Self::Balanced,
             Self::Balanced => Self::Full,
@@ -1929,7 +2271,8 @@ impl PrivacyProfile {
 }
 
 impl SnapshotSourceMode {
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Live => "live",
             Self::Demo => "demo",
@@ -1962,7 +2305,6 @@ impl From<PatternMetric> for String {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use super::{
         PrivacyProfile, ResolvedSnapshotScope, SNAPSHOT_SCHEMA_VERSION, SnapshotBaseline,
@@ -1975,6 +2317,7 @@ mod tests {
     use crate::store::queries::{
         DailyActivityRecord, DailyReadinessRecord, DailySleepRecord, WorkoutRecord,
     };
+    use crate::test_support::{ok, some};
 
     fn seed_history(store: &Store) {
         for (day, sleep, readiness, activity) in [
@@ -1982,31 +2325,32 @@ mod tests {
             ("2026-04-07", 82, 75, 71),
             ("2026-04-08", 84, 78, 73),
         ] {
-            store
-                .imports()
-                .upsert_daily_sleep(&DailySleepRecord {
+            ok(
+                store.imports().upsert_daily_sleep(&DailySleepRecord {
                     oura_id: None,
                     day: day.to_owned(),
                     sleep_score: Some(sleep),
                     raw_cache_key: None,
                     updated_at: format!("{day}T06:00:00Z"),
-                })
-                .unwrap_or_else(|error| panic!("sleep row should seed: {error}"));
-            store
-                .imports()
-                .upsert_daily_readiness(&DailyReadinessRecord {
-                    oura_id: None,
-                    day: day.to_owned(),
-                    readiness_score: Some(readiness),
-                    temperature_deviation: None,
-                    temperature_trend_deviation: None,
-                    raw_cache_key: None,
-                    updated_at: format!("{day}T06:01:00Z"),
-                })
-                .unwrap_or_else(|error| panic!("readiness row should seed: {error}"));
-            store
-                .imports()
-                .upsert_daily_activity(&DailyActivityRecord {
+                }),
+                "sleep row should seed",
+            );
+            ok(
+                store
+                    .imports()
+                    .upsert_daily_readiness(&DailyReadinessRecord {
+                        oura_id: None,
+                        day: day.to_owned(),
+                        readiness_score: Some(readiness),
+                        temperature_deviation: None,
+                        temperature_trend_deviation: None,
+                        raw_cache_key: None,
+                        updated_at: format!("{day}T06:01:00Z"),
+                    }),
+                "readiness row should seed",
+            );
+            ok(
+                store.imports().upsert_daily_activity(&DailyActivityRecord {
                     oura_id: None,
                     day: day.to_owned(),
                     activity_score: Some(activity),
@@ -2015,8 +2359,9 @@ mod tests {
                     total_calories: 2_300,
                     raw_cache_key: None,
                     updated_at: format!("{day}T06:02:00Z"),
-                })
-                .unwrap_or_else(|error| panic!("activity row should seed: {error}"));
+                }),
+                "activity row should seed",
+            );
         }
     }
 
@@ -2033,31 +2378,32 @@ mod tests {
             ("2026-01-08", 87, 84, 66),
             ("2026-04-08", 80, 76, 61),
         ] {
-            store
-                .imports()
-                .upsert_daily_sleep(&DailySleepRecord {
+            ok(
+                store.imports().upsert_daily_sleep(&DailySleepRecord {
                     oura_id: None,
                     day: day.to_owned(),
                     sleep_score: Some(sleep),
                     raw_cache_key: None,
                     updated_at: updated_at.to_owned(),
-                })
-                .unwrap_or_else(|error| panic!("sleep row should seed: {error}"));
-            store
-                .imports()
-                .upsert_daily_readiness(&DailyReadinessRecord {
-                    oura_id: None,
-                    day: day.to_owned(),
-                    readiness_score: Some(readiness),
-                    temperature_deviation: None,
-                    temperature_trend_deviation: None,
-                    raw_cache_key: None,
-                    updated_at: updated_at.to_owned(),
-                })
-                .unwrap_or_else(|error| panic!("readiness row should seed: {error}"));
-            store
-                .imports()
-                .upsert_daily_activity(&DailyActivityRecord {
+                }),
+                "sleep row should seed",
+            );
+            ok(
+                store
+                    .imports()
+                    .upsert_daily_readiness(&DailyReadinessRecord {
+                        oura_id: None,
+                        day: day.to_owned(),
+                        readiness_score: Some(readiness),
+                        temperature_deviation: None,
+                        temperature_trend_deviation: None,
+                        raw_cache_key: None,
+                        updated_at: updated_at.to_owned(),
+                    }),
+                "readiness row should seed",
+            );
+            ok(
+                store.imports().upsert_daily_activity(&DailyActivityRecord {
                     oura_id: None,
                     day: day.to_owned(),
                     activity_score: Some(activity),
@@ -2066,17 +2412,17 @@ mod tests {
                     total_calories: 2_300,
                     raw_cache_key: None,
                     updated_at: updated_at.to_owned(),
-                })
-                .unwrap_or_else(|error| panic!("activity row should seed: {error}"));
+                }),
+                "activity row should seed",
+            );
         }
 
         for (index, day) in ["2026-01-02", "2026-01-04", "2026-01-06", "2026-01-08"]
             .into_iter()
             .enumerate()
         {
-            store
-                .imports()
-                .upsert_workout(&WorkoutRecord {
+            ok(
+                store.imports().upsert_workout(&WorkoutRecord {
                     workout_id: format!("workout-{index}"),
                     day: day.to_owned(),
                     started_at: format!("{day}T18:00:00Z"),
@@ -2090,8 +2436,9 @@ mod tests {
                     source: Some("manual".to_owned()),
                     raw_cache_key: None,
                     updated_at: updated_at.to_owned(),
-                })
-                .unwrap_or_else(|error| panic!("workout row should seed: {error}"));
+                }),
+                "workout row should seed",
+            );
         }
     }
 
@@ -2121,12 +2468,10 @@ mod tests {
 
     #[test]
     fn resolves_today_scope_from_latest_source_day() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = ok(Store::open_in_memory(), "store should open");
         seed_history(&store);
 
-        let scope = resolve_scope(&store, "today")
-            .unwrap_or_else(|error| panic!("scope should resolve: {error}"));
+        let scope = ok(resolve_scope(&store, "today"), "scope should resolve");
 
         assert_eq!(scope.start_day, "2026-04-08");
         assert_eq!(scope.end_day, "2026-04-08");
@@ -2134,22 +2479,25 @@ mod tests {
 
     #[test]
     fn redacted_export_omits_personal_identifiers() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = ok(Store::open_in_memory(), "store should open");
         seed_history(&store);
-        let config = Config::load().unwrap_or_else(|error| panic!("config should load: {error}"));
-        let scope = resolve_scope(&store, "day:2026-04-08")
-            .unwrap_or_else(|error| panic!("scope should resolve: {error}"));
-        let export = super::export_snapshot(
-            &config,
-            &store,
-            &auth_status(),
-            super::SnapshotSourceMode::Live,
-            None,
-            &scope,
-            PrivacyProfile::Redacted,
-        )
-        .unwrap_or_else(|error| panic!("snapshot export should succeed: {error}"));
+        let config = ok(Config::load(), "config should load");
+        let scope = ok(
+            resolve_scope(&store, "day:2026-04-08"),
+            "scope should resolve",
+        );
+        let export = ok(
+            super::export_snapshot(
+                &config,
+                &store,
+                &auth_status(),
+                super::SnapshotSourceMode::Live,
+                None,
+                &scope,
+                PrivacyProfile::Redacted,
+            ),
+            "snapshot export should succeed",
+        );
 
         assert_eq!(export.bundle.schema_version, SNAPSHOT_SCHEMA_VERSION);
         assert!(!export.pretty_json.contains("user@example.com"));
@@ -2159,32 +2507,41 @@ mod tests {
 
     #[test]
     fn redacted_catalog_metadata_stays_compact_and_safe() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = ok(Store::open_in_memory(), "store should open");
         seed_history(&store);
-        let config = Config::load().unwrap_or_else(|error| panic!("config should load: {error}"));
-        let scope = resolve_scope(&store, "day:2026-04-08")
-            .unwrap_or_else(|error| panic!("scope should resolve: {error}"));
-        let export = super::export_snapshot(
-            &config,
-            &store,
-            &auth_status(),
-            super::SnapshotSourceMode::Live,
-            None,
-            &scope,
-            PrivacyProfile::Redacted,
-        )
-        .unwrap_or_else(|error| panic!("snapshot export should succeed: {error}"));
-        store
-            .analysis()
-            .upsert_snapshot_export(&export.manifest_record, &export.provenance_records)
-            .unwrap_or_else(|error| panic!("snapshot export should persist: {error}"));
+        let config = ok(Config::load(), "config should load");
+        let scope = ok(
+            resolve_scope(&store, "day:2026-04-08"),
+            "scope should resolve",
+        );
+        let export = ok(
+            super::export_snapshot(
+                &config,
+                &store,
+                &auth_status(),
+                super::SnapshotSourceMode::Live,
+                None,
+                &scope,
+                PrivacyProfile::Redacted,
+            ),
+            "snapshot export should succeed",
+        );
+        ok(
+            store
+                .analysis()
+                .upsert_snapshot_export(&export.manifest_record, &export.provenance_records),
+            "snapshot export should persist",
+        );
 
-        let record = store
-            .analysis()
-            .snapshot_export(&export.bundle.metadata.snapshot_hash)
-            .unwrap_or_else(|error| panic!("snapshot export should load: {error}"))
-            .unwrap_or_else(|| panic!("snapshot export should exist"));
+        let record = some(
+            ok(
+                store
+                    .analysis()
+                    .snapshot_export(&export.bundle.metadata.snapshot_hash),
+                "snapshot export should load",
+            ),
+            "snapshot export should exist",
+        );
 
         assert!(!record.freshness_summary.contains("user@example.com"));
         assert!(!record.capability_summary.contains("user-123"));
@@ -2194,23 +2551,26 @@ mod tests {
 
     #[test]
     fn snapshot_export_derives_artifacts_across_requested_range() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = ok(Store::open_in_memory(), "store should open");
         seed_wide_history(&store);
-        let config = Config::load().unwrap_or_else(|error| panic!("config should load: {error}"));
-        let scope = resolve_scope(&store, "range:2026-01-01..2026-04-08")
-            .unwrap_or_else(|error| panic!("scope should resolve: {error}"));
+        let config = ok(Config::load(), "config should load");
+        let scope = ok(
+            resolve_scope(&store, "range:2026-01-01..2026-04-08"),
+            "scope should resolve",
+        );
 
-        let export = super::export_snapshot(
-            &config,
-            &store,
-            &auth_status(),
-            super::SnapshotSourceMode::Live,
-            None,
-            &scope,
-            PrivacyProfile::Redacted,
-        )
-        .unwrap_or_else(|error| panic!("snapshot export should succeed: {error}"));
+        let export = ok(
+            super::export_snapshot(
+                &config,
+                &store,
+                &auth_status(),
+                super::SnapshotSourceMode::Live,
+                None,
+                &scope,
+                PrivacyProfile::Redacted,
+            ),
+            "snapshot export should succeed",
+        );
 
         assert!(
             export

@@ -294,7 +294,8 @@ impl ReviewFocus {
         Self::Activity,
     ];
 
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Readiness => "readiness",
             Self::Sleep => "sleep",
@@ -304,7 +305,8 @@ impl ReviewFocus {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Readiness => "Readiness",
             Self::Sleep => "Sleep",
@@ -315,7 +317,7 @@ impl ReviewFocus {
     }
 
     #[must_use]
-    pub fn next(self) -> Self {
+    pub const fn next(self) -> Self {
         match self {
             Self::Readiness => Self::Sleep,
             Self::Sleep => Self::Recovery,
@@ -325,7 +327,8 @@ impl ReviewFocus {
         }
     }
 
-    pub fn primary_signal_keys(self) -> &'static [&'static str] {
+    #[must_use]
+    pub const fn primary_signal_keys(self) -> &'static [&'static str] {
         match self {
             Self::Readiness => &[
                 "readiness_score",
@@ -364,10 +367,12 @@ impl ReviewFocus {
     }
 }
 
-pub fn signal_definitions() -> &'static [SignalDefinition] {
+#[must_use]
+pub const fn signal_definitions() -> &'static [SignalDefinition] {
     &SIGNALS
 }
 
+#[must_use]
 pub fn signal_definition(key: &str) -> Option<&'static SignalDefinition> {
     SIGNALS.iter().find(|definition| definition.key == key)
 }

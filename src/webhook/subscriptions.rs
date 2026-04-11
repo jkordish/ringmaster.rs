@@ -7,10 +7,10 @@ use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::config::Config;
 use crate::error::{OuraApiError, OuraProblem, Result, RingmasterError};
-use crate::store::Store;
 use crate::store::webhook_store::{
     DesiredWebhookSubscriptionRecord, RemoteWebhookSubscriptionRecord, now_rfc3339,
 };
+use crate::store::{Store, StorePlan};
 use crate::webhook::WebhookEventType;
 
 const FIXTURE_REMOTE_FILE: &str = "subscriptions.remote.json";
@@ -95,6 +95,22 @@ struct SyncContext {
     verification_token: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreparedSubscriptionList {
+    store_plan: StorePlan,
+    fixture_dir: Option<PathBuf>,
+    desired: Vec<DesiredWebhookSubscriptionTarget>,
+    callback_url: Option<String>,
+    verification_token_configured: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreparedSubscriptionSync {
+    store_plan: StorePlan,
+    options: SubscriptionSyncOptions,
+    desired: Vec<DesiredWebhookSubscriptionTarget>,
+}
+
 #[derive(Debug, Clone)]
 struct LiveWebhookAdminClient {
     http: HttpClient,
@@ -136,33 +152,41 @@ struct UpdateWebhookSubscriptionRequest<'a> {
 ///
 /// Returns an error when desired targets cannot be derived, snapshot persistence
 /// fails, or the fixture/live admin client cannot list subscriptions.
-pub async fn list_subscriptions(
-    config: &Config,
-    store: &Store,
+pub fn list_subscriptions<'a>(
+    config: &'a Config,
+    store: &'a Store,
     fixture_dir: Option<PathBuf>,
-) -> Result<SubscriptionListReport> {
-    let desired = desired_targets(config, fixture_dir.as_deref())?;
-    persist_desired_snapshot(config, store, &desired)?;
+) -> impl std::future::Future<Output = Result<SubscriptionListReport>> + Send + 'a {
+    let prepared = prepare_subscription_list(config, store, fixture_dir);
+    async move {
+        let PreparedSubscriptionList {
+            store_plan,
+            fixture_dir,
+            desired,
+            callback_url,
+            verification_token_configured,
+        } = prepared?;
+        let mut client = admin_client(config, fixture_dir.clone())?;
+        let remote = client.list().await?;
+        let persist_store = reopen_store(config, &store_plan)?;
+        persist_remote_snapshot(config, &persist_store, &desired, &remote)?;
 
-    let mut client = admin_client(config, fixture_dir.clone())?;
-    let remote = client.list().await?;
-    persist_remote_snapshot(config, store, &desired, &remote)?;
+        let mut notes = Vec::new();
+        if fixture_dir.is_some() {
+            notes.push("Loaded remote subscriptions from fixture data.".to_owned());
+        } else {
+            notes.push("Loaded remote subscriptions from the Oura admin API.".to_owned());
+        }
 
-    let mut notes = Vec::new();
-    if fixture_dir.is_some() {
-        notes.push("Loaded remote subscriptions from fixture data.".to_owned());
-    } else {
-        notes.push("Loaded remote subscriptions from the Oura admin API.".to_owned());
+        Ok(SubscriptionListReport {
+            callback_url,
+            verification_token_configured,
+            fixture_dir,
+            desired,
+            remote,
+            notes,
+        })
     }
-
-    Ok(SubscriptionListReport {
-        callback_url: desired.first().map(|entry| entry.callback_url.clone()),
-        verification_token_configured: config.webhook.verification_token.is_some(),
-        fixture_dir,
-        desired,
-        remote,
-        notes,
-    })
 }
 
 /// Reconciles remote webhook subscriptions with the locally configured targets.
@@ -172,65 +196,76 @@ pub async fn list_subscriptions(
 /// Returns an error when desired targets cannot be derived, the sync plan cannot
 /// be built, fixture/live admin operations fail, or state snapshots cannot be
 /// persisted.
-pub async fn sync_subscriptions(
-    config: &Config,
-    store: &Store,
+pub fn sync_subscriptions<'a>(
+    config: &'a Config,
+    store: &'a Store,
     options: SubscriptionSyncOptions,
-) -> Result<SubscriptionSyncReport> {
-    let desired = desired_targets(config, options.fixture_dir.as_deref())?;
-    persist_desired_snapshot(config, store, &desired)?;
+) -> impl std::future::Future<Output = Result<SubscriptionSyncReport>> + Send + 'a {
+    let prepared = prepare_subscription_sync(config, store, options);
+    async move {
+        let PreparedSubscriptionSync {
+            store_plan,
+            options,
+            desired,
+        } = prepared?;
 
-    let mut client = admin_client(config, options.fixture_dir.clone())?;
-    let remote_before = client.list().await?;
-    let plan = build_sync_plan(
-        &desired,
-        &remote_before,
-        config.webhook.renewal_lead_secs,
-        options.prune,
-    )?;
+        let mut client = admin_client(config, options.fixture_dir.clone())?;
+        let remote_before = client.list().await?;
+        let plan = build_sync_plan(
+            &desired,
+            &remote_before,
+            config.webhook.renewal_lead_secs,
+            options.prune,
+        )?;
 
-    let remote_after = if options.dry_run {
-        remote_before.clone()
-    } else {
-        client.apply(&plan).await?;
-        client.list().await?
-    };
-    persist_remote_snapshot(config, store, &desired, &remote_after)?;
+        let remote_after = if options.dry_run {
+            remote_before.clone()
+        } else {
+            client.apply(&plan).await?;
+            client.list().await?
+        };
+        let persist_store = reopen_store(config, &store_plan)?;
+        persist_remote_snapshot(config, &persist_store, &desired, &remote_after)?;
 
-    let mut notes = Vec::new();
-    if options.dry_run {
-        notes.push(
-            "Dry-run mode reported the webhook diff without mutating the remote service."
-                .to_owned(),
-        );
-    } else if options.fixture_dir.is_some() {
-        notes.push(
-            "Applied webhook subscription changes against fixture-backed remote state.".to_owned(),
-        );
-    } else {
-        notes.push("Converged remote webhook subscriptions toward local desired state.".to_owned());
+        let mut notes = Vec::new();
+        if options.dry_run {
+            notes.push(
+                "Dry-run mode reported the webhook diff without mutating the remote service."
+                    .to_owned(),
+            );
+        } else if options.fixture_dir.is_some() {
+            notes.push(
+                "Applied webhook subscription changes against fixture-backed remote state."
+                    .to_owned(),
+            );
+        } else {
+            notes.push(
+                "Converged remote webhook subscriptions toward local desired state.".to_owned(),
+            );
+        }
+        if options.prune {
+            notes.push("Prune mode was enabled for out-of-spec remote subscriptions.".to_owned());
+        }
+
+        Ok(SubscriptionSyncReport {
+            dry_run: options.dry_run,
+            prune_requested: options.prune,
+            fixture_dir: options.fixture_dir,
+            callback_url: desired
+                .first()
+                .map(|entry| entry.callback_url.clone())
+                .ok_or_else(|| {
+                    RingmasterError::Config(
+                        "webhook sync requires at least one enabled desired subscription"
+                            .to_owned(),
+                    )
+                })?,
+            plan,
+            remote_before,
+            remote_after,
+            notes,
+        })
     }
-    if options.prune {
-        notes.push("Prune mode was enabled for out-of-spec remote subscriptions.".to_owned());
-    }
-
-    Ok(SubscriptionSyncReport {
-        dry_run: options.dry_run,
-        prune_requested: options.prune,
-        fixture_dir: options.fixture_dir,
-        callback_url: desired
-            .first()
-            .map(|entry| entry.callback_url.clone())
-            .ok_or_else(|| {
-                RingmasterError::Config(
-                    "webhook sync requires at least one enabled desired subscription".to_owned(),
-                )
-            })?,
-        plan,
-        remote_before,
-        remote_after,
-        notes,
-    })
 }
 
 /// Builds a reconciliation plan for desired versus remote webhook subscriptions.
@@ -463,7 +498,7 @@ impl LiveWebhookAdminClient {
     async fn send<T, B>(&self, method: reqwest::Method, path: &str, body: Option<&B>) -> Result<T>
     where
         T: for<'de> Deserialize<'de>,
-        B: Serialize + ?Sized,
+        B: Serialize + Sync + ?Sized,
     {
         let url = format!("{}{}", self.api_base_url, path);
         let builder = self
@@ -513,7 +548,7 @@ impl LiveWebhookAdminClient {
 }
 
 impl FixtureWebhookAdminClient {
-    fn load(fixture_dir: PathBuf) -> Result<Self> {
+    fn load(fixture_dir: &Path) -> Result<Self> {
         let remote_path = fixture_dir.join(FIXTURE_REMOTE_FILE);
         let payload = std::fs::read_to_string(&remote_path)
             .map_err(|error| RingmasterError::io("reading webhook subscription fixture", error))?;
@@ -577,12 +612,46 @@ impl FixtureWebhookAdminClient {
 fn admin_client(config: &Config, fixture_dir: Option<PathBuf>) -> Result<WebhookAdminClient> {
     match fixture_dir {
         Some(path) => Ok(WebhookAdminClient::Fixture(
-            FixtureWebhookAdminClient::load(path)?,
+            FixtureWebhookAdminClient::load(&path)?,
         )),
         None => Ok(WebhookAdminClient::Live(LiveWebhookAdminClient::new(
             config,
         )?)),
     }
+}
+
+fn reopen_store(config: &Config, store_plan: &StorePlan) -> Result<Store> {
+    Store::open_with_plan(store_plan.clone(), config.app_name)
+}
+
+fn prepare_subscription_list(
+    config: &Config,
+    store: &Store,
+    fixture_dir: Option<PathBuf>,
+) -> Result<PreparedSubscriptionList> {
+    let desired = desired_targets(config, fixture_dir.as_deref())?;
+    persist_desired_snapshot(config, store, &desired)?;
+    Ok(PreparedSubscriptionList {
+        store_plan: store.plan().clone(),
+        callback_url: desired.first().map(|entry| entry.callback_url.clone()),
+        verification_token_configured: config.webhook.verification_token.is_some(),
+        fixture_dir,
+        desired,
+    })
+}
+
+fn prepare_subscription_sync(
+    config: &Config,
+    store: &Store,
+    options: SubscriptionSyncOptions,
+) -> Result<PreparedSubscriptionSync> {
+    let desired = desired_targets(config, options.fixture_dir.as_deref())?;
+    persist_desired_snapshot(config, store, &desired)?;
+    Ok(PreparedSubscriptionSync {
+        store_plan: store.plan().clone(),
+        options,
+        desired,
+    })
 }
 
 fn desired_targets(
@@ -800,7 +869,6 @@ fn parse_api_problem(status: reqwest::StatusCode, payload: &str) -> OuraProblem 
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use super::{
         DesiredWebhookSubscriptionTarget, RemoteWebhookSubscription, SubscriptionSyncOptions,
@@ -822,7 +890,7 @@ mod tests {
         }"#;
 
         let subscription: RemoteWebhookSubscription = serde_json::from_str(payload)
-            .unwrap_or_else(|error| panic!("live write response should decode: {error}"));
+            .unwrap_or_else(|error| unreachable!("live write response should decode: {error}"));
 
         assert_eq!(subscription.id, "sub-1");
         assert_eq!(
@@ -874,7 +942,7 @@ mod tests {
         ];
 
         let plan = build_sync_plan(&desired, &remote, 60, true)
-            .unwrap_or_else(|error| panic!("plan should build: {error}"));
+            .unwrap_or_else(|error| unreachable!("plan should build: {error}"));
 
         assert_eq!(plan.create.len(), 0);
         assert_eq!(plan.update.len(), 1);
@@ -902,7 +970,7 @@ mod tests {
         }];
 
         let plan = build_sync_plan(&desired, &remote, 60, false)
-            .unwrap_or_else(|error| panic!("plan should build: {error}"));
+            .unwrap_or_else(|error| unreachable!("plan should build: {error}"));
 
         assert_eq!(plan.update.len(), 1);
         assert_eq!(plan.renew.len(), 1);
@@ -913,21 +981,22 @@ mod tests {
     #[tokio::test]
     async fn fixture_backed_sync_dry_run_persists_snapshots() {
         let fixture_dir =
-            tempdir().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+            tempdir().unwrap_or_else(|error| unreachable!("tempdir should succeed: {error}"));
         std::fs::write(
             fixture_dir.path().join("subscriptions.context.json"),
             r#"{"callback_url":"https://fixture.test/webhooks/oura","verification_token":"fixture-token"}"#,
         )
-        .unwrap_or_else(|error| panic!("context fixture write should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("context fixture write should succeed: {error}"));
         std::fs::write(
             fixture_dir.path().join("subscriptions.remote.json"),
             r#"[{"id":"sub-1","callback_url":"https://fixture.test/webhooks/oura","event_type":"create","data_type":"daily_sleep","expiration_time":"2099-01-01T00:00:00Z"}]"#,
         )
-        .unwrap_or_else(|error| panic!("remote fixture write should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("remote fixture write should succeed: {error}"));
 
-        let config = Config::load().unwrap_or_else(|error| panic!("config should load: {error}"));
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let config =
+            Config::load().unwrap_or_else(|error| unreachable!("config should load: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let report = sync_subscriptions(
             &config,
             &store,
@@ -938,7 +1007,7 @@ mod tests {
             },
         )
         .await
-        .unwrap_or_else(|error| panic!("fixture sync should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("fixture sync should succeed: {error}"));
 
         assert!(report.dry_run);
         assert_eq!(report.remote_before.len(), 1);
@@ -946,14 +1015,14 @@ mod tests {
             !store
                 .webhook()
                 .list_desired_subscriptions()
-                .unwrap_or_else(|error| panic!("desired snapshot should load: {error}"))
+                .unwrap_or_else(|error| unreachable!("desired snapshot should load: {error}"))
                 .is_empty()
         );
         assert_eq!(
             store
                 .webhook()
                 .list_remote_subscriptions()
-                .unwrap_or_else(|error| panic!("remote snapshot should load: {error}"))
+                .unwrap_or_else(|error| unreachable!("remote snapshot should load: {error}"))
                 .len(),
             1
         );
@@ -962,17 +1031,17 @@ mod tests {
     #[tokio::test]
     async fn fixture_backed_sync_dedupes_repeated_desired_targets_before_snapshot_persistence() {
         let fixture_dir =
-            tempdir().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+            tempdir().unwrap_or_else(|error| unreachable!("tempdir should succeed: {error}"));
         std::fs::write(
             fixture_dir.path().join("subscriptions.context.json"),
             r#"{"callback_url":"https://fixture.test/webhooks/oura","verification_token":"fixture-token"}"#,
         )
-        .unwrap_or_else(|error| panic!("context fixture write should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("context fixture write should succeed: {error}"));
         std::fs::write(fixture_dir.path().join("subscriptions.remote.json"), r"[]")
-            .unwrap_or_else(|error| panic!("remote fixture write should succeed: {error}"));
+            .unwrap_or_else(|error| unreachable!("remote fixture write should succeed: {error}"));
 
         let mut config =
-            Config::load().unwrap_or_else(|error| panic!("config should load: {error}"));
+            Config::load().unwrap_or_else(|error| unreachable!("config should load: {error}"));
         config
             .webhook
             .subscriptions
@@ -982,8 +1051,8 @@ mod tests {
                 enabled: true,
             });
 
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let report = sync_subscriptions(
             &config,
             &store,
@@ -994,12 +1063,12 @@ mod tests {
             },
         )
         .await
-        .unwrap_or_else(|error| panic!("fixture sync should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("fixture sync should succeed: {error}"));
 
         let desired = store
             .webhook()
             .list_desired_subscriptions()
-            .unwrap_or_else(|error| panic!("desired snapshot should load: {error}"));
+            .unwrap_or_else(|error| unreachable!("desired snapshot should load: {error}"));
         let unique_keys = desired
             .iter()
             .map(|record| (record.data_type.clone(), record.event_type))
@@ -1020,21 +1089,22 @@ mod tests {
     #[tokio::test]
     async fn fixture_list_uses_context_when_local_config_is_incomplete() {
         let fixture_dir =
-            tempdir().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+            tempdir().unwrap_or_else(|error| unreachable!("tempdir should succeed: {error}"));
         std::fs::write(
             fixture_dir.path().join("subscriptions.context.json"),
             r#"{"callback_url":"https://fixture.test/webhooks/oura","verification_token":"fixture-token"}"#,
         )
-        .unwrap_or_else(|error| panic!("context fixture write should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("context fixture write should succeed: {error}"));
         std::fs::write(fixture_dir.path().join("subscriptions.remote.json"), r"[]")
-            .unwrap_or_else(|error| panic!("remote fixture write should succeed: {error}"));
+            .unwrap_or_else(|error| unreachable!("remote fixture write should succeed: {error}"));
 
-        let config = Config::load().unwrap_or_else(|error| panic!("config should load: {error}"));
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let config =
+            Config::load().unwrap_or_else(|error| unreachable!("config should load: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let report = list_subscriptions(&config, &store, Some(fixture_dir.path().to_path_buf()))
             .await
-            .unwrap_or_else(|error| panic!("fixture list should succeed: {error}"));
+            .unwrap_or_else(|error| unreachable!("fixture list should succeed: {error}"));
 
         assert_eq!(
             report.callback_url.as_deref(),

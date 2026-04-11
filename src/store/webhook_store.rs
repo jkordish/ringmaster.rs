@@ -140,7 +140,7 @@ const SORTABLE_UTC_TIMESTAMP: &[time::format_description::FormatItem<'_>] =
     format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:9]Z");
 
 impl<'connection> WebhookStore<'connection> {
-    pub fn new(connection: &'connection Connection) -> Self {
+    pub const fn new(connection: &'connection Connection) -> Self {
         Self { connection }
     }
 
@@ -198,7 +198,7 @@ impl<'connection> WebhookStore<'connection> {
         let rows = statement.query_map([], |row| {
             Ok(DesiredWebhookSubscriptionRecord {
                 data_type: row.get(0)?,
-                event_type: parse_event_type(row.get::<_, String>(1)?)?,
+                event_type: parse_event_type(&row.get::<_, String>(1)?)?,
                 enabled: row.get::<_, i64>(2)? != 0,
                 callback_url: row.get(3)?,
                 updated_at: row.get(4)?,
@@ -285,7 +285,7 @@ impl<'connection> WebhookStore<'connection> {
             Ok(RemoteWebhookSubscriptionRecord {
                 subscription_id: row.get(0)?,
                 callback_url: row.get(1)?,
-                event_type: parse_event_type(row.get::<_, String>(2)?)?,
+                event_type: parse_event_type(&row.get::<_, String>(2)?)?,
                 data_type: row.get(3)?,
                 expiration_time: row.get(4)?,
                 drift_status: row.get(5)?,
@@ -393,7 +393,10 @@ impl<'connection> WebhookStore<'connection> {
              ORDER BY delivery_id DESC
              LIMIT ?1",
         )?;
-        let rows = statement.query_map(params![bounded_limit as i64], read_delivery_row)?;
+        let rows = statement.query_map(
+            params![crate::numeric::usize_to_i64(bounded_limit)],
+            read_delivery_row,
+        )?;
         let mut records = Vec::new();
         for row in rows {
             records.push(row?);
@@ -655,7 +658,7 @@ impl<'connection> WebhookStore<'connection> {
                  LIMIT ?2",
             )?;
             let rows = statement.query_map(
-                params![claimed_at, bounded_limit as i64],
+                params![claimed_at, crate::numeric::usize_to_i64(bounded_limit)],
                 read_invalidation_row,
             )?;
             let mut records = Vec::new();
@@ -872,16 +875,19 @@ impl<'connection> WebhookStore<'connection> {
              ORDER BY attempt_id DESC
              LIMIT ?1",
         )?;
-        let rows = statement.query_map(params![bounded_limit as i64], |row| {
-            Ok(ProcessingAttemptRecord {
-                attempt_id: row.get(0)?,
-                invalidation_id: row.get(1)?,
-                started_at: row.get(2)?,
-                finished_at: row.get(3)?,
-                outcome: row.get(4)?,
-                detail: row.get(5)?,
-            })
-        })?;
+        let rows = statement.query_map(
+            params![crate::numeric::usize_to_i64(bounded_limit)],
+            |row| {
+                Ok(ProcessingAttemptRecord {
+                    attempt_id: row.get(0)?,
+                    invalidation_id: row.get(1)?,
+                    started_at: row.get(2)?,
+                    finished_at: row.get(3)?,
+                    outcome: row.get(4)?,
+                    detail: row.get(5)?,
+                })
+            },
+        )?;
         let mut records = Vec::new();
         for row in rows {
             records.push(row?);
@@ -970,8 +976,8 @@ impl<'connection> WebhookStore<'connection> {
     }
 }
 
-fn parse_event_type(value: String) -> rusqlite::Result<WebhookEventType> {
-    WebhookEventType::parse(&value).ok_or_else(|| {
+fn parse_event_type(value: &str) -> rusqlite::Result<WebhookEventType> {
+    WebhookEventType::parse(value).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
             value.len(),
             rusqlite::types::Type::Text,
@@ -991,6 +997,7 @@ fn read_delivery_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AcceptedWebhoo
         data_type: row.get(4)?,
         event_type: row
             .get::<_, Option<String>>(5)?
+            .as_deref()
             .map(parse_event_type)
             .transpose()?,
         object_id: row.get(6)?,
@@ -1006,7 +1013,7 @@ fn read_invalidation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Invalidati
         invalidation_id: row.get(0)?,
         queue_key: row.get(1)?,
         data_type: row.get(2)?,
-        event_type: parse_event_type(row.get::<_, String>(3)?)?,
+        event_type: parse_event_type(&row.get::<_, String>(3)?)?,
         object_id: row.get(4)?,
         delivery_id: row.get(5)?,
         first_queued_at: row.get(6)?,
@@ -1032,7 +1039,6 @@ pub fn format_rfc3339_utc(timestamp: OffsetDateTime) -> Result<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use super::{
         AcceptedWebhookDeliveryInput, AcceptedWebhookDeliveryResult,
@@ -1040,30 +1046,32 @@ mod tests {
         format_rfc3339_utc, now_rfc3339,
     };
     use crate::store::db::Store;
+    use crate::test_support::ok;
     use crate::webhook::WebhookEventType;
     use time::OffsetDateTime;
 
     #[test]
     fn replaces_desired_subscriptions() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
-        let updated_at = now_rfc3339().unwrap_or_else(|error| panic!("timestamp: {error}"));
+        let store = ok(Store::open_in_memory(), "store should open");
+        let updated_at = ok(now_rfc3339(), "timestamp");
 
-        store
-            .webhook()
-            .replace_desired_subscriptions(&[DesiredWebhookSubscriptionRecord {
-                data_type: "daily_sleep".to_owned(),
-                event_type: WebhookEventType::Create,
-                enabled: true,
-                callback_url: Some("https://example.test/webhooks/oura".to_owned()),
-                updated_at: updated_at.clone(),
-            }])
-            .unwrap_or_else(|error| panic!("desired subscriptions should persist: {error}"));
+        ok(
+            store
+                .webhook()
+                .replace_desired_subscriptions(&[DesiredWebhookSubscriptionRecord {
+                    data_type: "daily_sleep".to_owned(),
+                    event_type: WebhookEventType::Create,
+                    enabled: true,
+                    callback_url: Some("https://example.test/webhooks/oura".to_owned()),
+                    updated_at: updated_at.clone(),
+                }]),
+            "desired subscriptions should persist",
+        );
 
-        let records = store
-            .webhook()
-            .list_desired_subscriptions()
-            .unwrap_or_else(|error| panic!("desired subscriptions should load: {error}"));
+        let records = ok(
+            store.webhook().list_desired_subscriptions(),
+            "desired subscriptions should load",
+        );
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].data_type, "daily_sleep");
         assert_eq!(records[0].updated_at, updated_at);
@@ -1071,44 +1079,49 @@ mod tests {
 
     #[test]
     fn dedupes_accepted_deliveries_by_fingerprint() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
-        let first = store
-            .webhook()
-            .insert_accepted_delivery(&AcceptedWebhookDeliveryInput {
-                delivery_fingerprint: "dup".to_owned(),
-                received_at: "2026-04-08T00:00:00Z".to_owned(),
-                signature_timestamp: Some("2026-04-08T00:00:00Z".to_owned()),
-                data_type: Some("daily_sleep".to_owned()),
-                event_type: Some(WebhookEventType::Create),
-                object_id: Some("sleep_1".to_owned()),
-                payload_json: "{}".to_owned(),
-                headers_json: "{}".to_owned(),
-                query_json: "{}".to_owned(),
-            })
-            .unwrap_or_else(|error| panic!("accepted delivery should insert: {error}"));
-        let second = store
-            .webhook()
-            .insert_accepted_delivery(&AcceptedWebhookDeliveryInput {
-                delivery_fingerprint: "dup".to_owned(),
-                received_at: "2026-04-08T00:01:00Z".to_owned(),
-                signature_timestamp: Some("2026-04-08T00:00:00Z".to_owned()),
-                data_type: Some("daily_sleep".to_owned()),
-                event_type: Some(WebhookEventType::Create),
-                object_id: Some("sleep_1".to_owned()),
-                payload_json: "{}".to_owned(),
-                headers_json: "{}".to_owned(),
-                query_json: "{}".to_owned(),
-            })
-            .unwrap_or_else(|error| panic!("duplicate delivery should resolve: {error}"));
+        let store = ok(Store::open_in_memory(), "store should open");
+        let first = ok(
+            store
+                .webhook()
+                .insert_accepted_delivery(&AcceptedWebhookDeliveryInput {
+                    delivery_fingerprint: "dup".to_owned(),
+                    received_at: "2026-04-08T00:00:00Z".to_owned(),
+                    signature_timestamp: Some("2026-04-08T00:00:00Z".to_owned()),
+                    data_type: Some("daily_sleep".to_owned()),
+                    event_type: Some(WebhookEventType::Create),
+                    object_id: Some("sleep_1".to_owned()),
+                    payload_json: "{}".to_owned(),
+                    headers_json: "{}".to_owned(),
+                    query_json: "{}".to_owned(),
+                }),
+            "accepted delivery should insert",
+        );
+        let second = ok(
+            store
+                .webhook()
+                .insert_accepted_delivery(&AcceptedWebhookDeliveryInput {
+                    delivery_fingerprint: "dup".to_owned(),
+                    received_at: "2026-04-08T00:01:00Z".to_owned(),
+                    signature_timestamp: Some("2026-04-08T00:00:00Z".to_owned()),
+                    data_type: Some("daily_sleep".to_owned()),
+                    event_type: Some(WebhookEventType::Create),
+                    object_id: Some("sleep_1".to_owned()),
+                    payload_json: "{}".to_owned(),
+                    headers_json: "{}".to_owned(),
+                    query_json: "{}".to_owned(),
+                }),
+            "duplicate delivery should resolve",
+        );
 
         let first_id = match first {
             AcceptedWebhookDeliveryResult::Inserted(record) => record.delivery_id,
-            AcceptedWebhookDeliveryResult::Duplicate(_) => panic!("first insert should be new"),
+            AcceptedWebhookDeliveryResult::Duplicate(_) => {
+                unreachable!("first insert should be new")
+            }
         };
         match second {
             AcceptedWebhookDeliveryResult::Inserted(_) => {
-                panic!("duplicate delivery should not insert a new row");
+                unreachable!("duplicate delivery should not insert a new row");
             }
             AcceptedWebhookDeliveryResult::Duplicate(record) => {
                 assert_eq!(record.delivery_id, first_id);
@@ -1118,11 +1131,10 @@ mod tests {
 
     #[test]
     fn coalesces_invalidations_by_queue_key() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = ok(Store::open_in_memory(), "store should open");
         let webhook = store.webhook();
-        let delivery_id = match webhook
-            .insert_accepted_delivery(&AcceptedWebhookDeliveryInput {
+        let delivery_id = match ok(
+            webhook.insert_accepted_delivery(&AcceptedWebhookDeliveryInput {
                 delivery_fingerprint: "queue-source".to_owned(),
                 received_at: "2026-04-08T00:00:00Z".to_owned(),
                 signature_timestamp: Some("2026-04-08T00:00:00Z".to_owned()),
@@ -1132,9 +1144,9 @@ mod tests {
                 payload_json: "{}".to_owned(),
                 headers_json: "{}".to_owned(),
                 query_json: "{}".to_owned(),
-            })
-            .unwrap_or_else(|error| panic!("accepted delivery should insert: {error}"))
-        {
+            }),
+            "accepted delivery should insert",
+        ) {
             AcceptedWebhookDeliveryResult::Inserted(record)
             | AcceptedWebhookDeliveryResult::Duplicate(record) => record.delivery_id,
         };
@@ -1148,7 +1160,7 @@ mod tests {
                 queued_at: "2026-04-08T00:00:00Z".to_owned(),
                 available_at: "2026-04-08T00:00:00Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("invalidation should insert: {error}"));
+            .unwrap_or_else(|error| unreachable!("invalidation should insert: {error}"));
         let second = webhook
             .enqueue_invalidation(&InvalidationInput {
                 queue_key: "daily_sleep:create:sleep_1".to_owned(),
@@ -1159,20 +1171,22 @@ mod tests {
                 queued_at: "2026-04-08T00:01:00Z".to_owned(),
                 available_at: "2026-04-08T00:01:00Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("duplicate invalidation should coalesce: {error}"));
+            .unwrap_or_else(|error| {
+                unreachable!("duplicate invalidation should coalesce: {error}")
+            });
 
         assert_eq!(first.invalidation_id, second.invalidation_id);
         assert_eq!(second.delivery_id, delivery_id);
         let pending = webhook
             .list_pending_invalidations()
-            .unwrap_or_else(|error| panic!("pending invalidations should load: {error}"));
+            .unwrap_or_else(|error| unreachable!("pending invalidations should load: {error}"));
         assert_eq!(pending.len(), 1);
     }
 
     #[test]
     fn reactivating_completed_invalidation_resets_retry_state() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let webhook = store.webhook();
         let delivery_id = match webhook
             .insert_accepted_delivery(&AcceptedWebhookDeliveryInput {
@@ -1186,7 +1200,7 @@ mod tests {
                 headers_json: "{}".to_owned(),
                 query_json: "{}".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("accepted delivery should insert: {error}"))
+            .unwrap_or_else(|error| unreachable!("accepted delivery should insert: {error}"))
         {
             AcceptedWebhookDeliveryResult::Inserted(record)
             | AcceptedWebhookDeliveryResult::Duplicate(record) => record.delivery_id,
@@ -1201,10 +1215,10 @@ mod tests {
                 queued_at: "2026-04-08T00:00:00Z".to_owned(),
                 available_at: "2026-04-08T00:00:00Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("invalidation should insert: {error}"));
+            .unwrap_or_else(|error| unreachable!("invalidation should insert: {error}"));
         let failed_attempt = webhook
             .start_processing_attempt(queued.invalidation_id, "2026-04-08T00:01:00Z")
-            .unwrap_or_else(|error| panic!("attempt should start: {error}"));
+            .unwrap_or_else(|error| unreachable!("attempt should start: {error}"));
         let failed = webhook
             .complete_processing_attempt_failure(
                 queued.invalidation_id,
@@ -1213,10 +1227,10 @@ mod tests {
                 "2026-04-08T00:03:00Z",
                 "temporary failure",
             )
-            .unwrap_or_else(|error| panic!("attempt should fail: {error}"));
+            .unwrap_or_else(|error| unreachable!("attempt should fail: {error}"));
         let success_attempt = webhook
             .start_processing_attempt(failed.invalidation_id, "2026-04-08T00:04:00Z")
-            .unwrap_or_else(|error| panic!("second attempt should start: {error}"));
+            .unwrap_or_else(|error| unreachable!("second attempt should start: {error}"));
         webhook
             .complete_processing_attempt_success(
                 failed.invalidation_id,
@@ -1224,7 +1238,7 @@ mod tests {
                 "2026-04-08T00:05:00Z",
                 Some("processed"),
             )
-            .unwrap_or_else(|error| panic!("attempt should complete successfully: {error}"));
+            .unwrap_or_else(|error| unreachable!("attempt should complete successfully: {error}"));
 
         let reactivated = webhook
             .enqueue_invalidation(&InvalidationInput {
@@ -1236,7 +1250,9 @@ mod tests {
                 queued_at: "2026-04-08T01:00:00Z".to_owned(),
                 available_at: "2026-04-08T01:00:00Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("completed invalidation should reactivate: {error}"));
+            .unwrap_or_else(|error| {
+                unreachable!("completed invalidation should reactivate: {error}")
+            });
 
         assert_eq!(reactivated.attempt_count, 0);
         assert_eq!(reactivated.first_queued_at, "2026-04-08T01:00:00Z");
@@ -1246,8 +1262,8 @@ mod tests {
 
     #[test]
     fn requeue_during_active_lease_stays_pending_for_follow_up_processing() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let webhook = store.webhook();
         let first_delivery_id = match webhook
             .insert_accepted_delivery(&AcceptedWebhookDeliveryInput {
@@ -1261,7 +1277,7 @@ mod tests {
                 headers_json: "{}".to_owned(),
                 query_json: "{}".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("first accepted delivery should insert: {error}"))
+            .unwrap_or_else(|error| unreachable!("first accepted delivery should insert: {error}"))
         {
             AcceptedWebhookDeliveryResult::Inserted(record)
             | AcceptedWebhookDeliveryResult::Duplicate(record) => record.delivery_id,
@@ -1278,7 +1294,7 @@ mod tests {
                 headers_json: "{}".to_owned(),
                 query_json: "{}".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("second accepted delivery should insert: {error}"))
+            .unwrap_or_else(|error| unreachable!("second accepted delivery should insert: {error}"))
         {
             AcceptedWebhookDeliveryResult::Inserted(record)
             | AcceptedWebhookDeliveryResult::Duplicate(record) => record.delivery_id,
@@ -1294,7 +1310,7 @@ mod tests {
                 queued_at: "2026-04-08T00:00:00Z".to_owned(),
                 available_at: "2026-04-08T00:00:00Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("invalidation should insert: {error}"));
+            .unwrap_or_else(|error| unreachable!("invalidation should insert: {error}"));
         let claimed = webhook
             .claim_available_invalidations(
                 "watch-test",
@@ -1302,11 +1318,11 @@ mod tests {
                 "2026-04-08T00:06:00Z",
                 8,
             )
-            .unwrap_or_else(|error| panic!("invalidation should claim: {error}"));
+            .unwrap_or_else(|error| unreachable!("invalidation should claim: {error}"));
         assert_eq!(claimed.len(), 1);
         let attempt = webhook
             .start_processing_attempt(queued.invalidation_id, "2026-04-08T00:01:05Z")
-            .unwrap_or_else(|error| panic!("attempt should start: {error}"));
+            .unwrap_or_else(|error| unreachable!("attempt should start: {error}"));
 
         let requeued = webhook
             .enqueue_invalidation(&InvalidationInput {
@@ -1318,7 +1334,7 @@ mod tests {
                 queued_at: "2026-04-08T00:01:30Z".to_owned(),
                 available_at: "2026-04-08T00:01:30Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("in-flight invalidation should requeue: {error}"));
+            .unwrap_or_else(|error| unreachable!("in-flight invalidation should requeue: {error}"));
         assert_eq!(requeued.delivery_id, second_delivery_id);
         assert_eq!(requeued.leased_at.as_deref(), Some("2026-04-08T00:01:00Z"));
         assert_eq!(requeued.lease_owner.as_deref(), Some("watch-test"));
@@ -1331,11 +1347,11 @@ mod tests {
                 "2026-04-08T00:02:00Z",
                 Some("processed"),
             )
-            .unwrap_or_else(|error| panic!("attempt should complete successfully: {error}"));
+            .unwrap_or_else(|error| unreachable!("attempt should complete successfully: {error}"));
 
         let pending = webhook
             .list_pending_invalidations()
-            .unwrap_or_else(|error| panic!("pending invalidations should load: {error}"));
+            .unwrap_or_else(|error| unreachable!("pending invalidations should load: {error}"));
         assert_eq!(pending.len(), 1);
         let pending = &pending[0];
         assert_eq!(pending.delivery_id, second_delivery_id);
@@ -1348,8 +1364,8 @@ mod tests {
 
     #[test]
     fn persists_runtime_heartbeat() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         store
             .webhook()
             .upsert_runtime_heartbeat(&RuntimeHeartbeatRecord {
@@ -1360,12 +1376,12 @@ mod tests {
                 detail: Some("ready".to_owned()),
                 last_seen_at: "2026-04-08T00:00:00Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("heartbeat should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("heartbeat should persist: {error}"));
 
         let heartbeats = store
             .webhook()
             .list_runtime_heartbeats()
-            .unwrap_or_else(|error| panic!("heartbeats should load: {error}"));
+            .unwrap_or_else(|error| unreachable!("heartbeats should load: {error}"));
         assert_eq!(heartbeats.len(), 1);
         assert_eq!(heartbeats[0].component, "receiver");
     }
@@ -1373,19 +1389,19 @@ mod tests {
     #[test]
     fn now_rfc3339_uses_fixed_width_subseconds() {
         let timestamp =
-            now_rfc3339().unwrap_or_else(|error| panic!("timestamp should render: {error}"));
+            now_rfc3339().unwrap_or_else(|error| unreachable!("timestamp should render: {error}"));
 
         let (_, fractional) = timestamp
             .split_once('.')
-            .unwrap_or_else(|| panic!("timestamp should include fractional seconds"));
+            .unwrap_or_else(|| unreachable!("timestamp should include fractional seconds"));
         assert_eq!(fractional.len(), 10);
         assert!(fractional.ends_with('Z'));
     }
 
     #[test]
     fn claim_available_invalidations_handles_mixed_timestamp_precision() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let webhook = store.webhook();
         let delivery_id = match webhook
             .insert_accepted_delivery(&AcceptedWebhookDeliveryInput {
@@ -1399,7 +1415,7 @@ mod tests {
                 headers_json: "{}".to_owned(),
                 query_json: "{}".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("accepted delivery should insert: {error}"))
+            .unwrap_or_else(|error| unreachable!("accepted delivery should insert: {error}"))
         {
             AcceptedWebhookDeliveryResult::Inserted(record)
             | AcceptedWebhookDeliveryResult::Duplicate(record) => record.delivery_id,
@@ -1414,7 +1430,7 @@ mod tests {
                 queued_at: "2026-04-08T00:00:00Z".to_owned(),
                 available_at: "2026-04-08T00:00:00Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("first invalidation should queue: {error}"));
+            .unwrap_or_else(|error| unreachable!("first invalidation should queue: {error}"));
         webhook
             .enqueue_invalidation(&InvalidationInput {
                 queue_key: "daily_sleep:update:sleep_1".to_owned(),
@@ -1425,20 +1441,20 @@ mod tests {
                 queued_at: "2026-04-08T00:00:00.100000000Z".to_owned(),
                 available_at: "2026-04-08T00:00:00.100000000Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("second invalidation should queue: {error}"));
+            .unwrap_or_else(|error| unreachable!("second invalidation should queue: {error}"));
 
         let claimed_at = format_rfc3339_utc(
             OffsetDateTime::parse(
                 "2026-04-08T00:00:00.050000000Z",
                 &time::format_description::well_known::Rfc3339,
             )
-            .unwrap_or_else(|error| panic!("claimed_at should parse: {error}")),
+            .unwrap_or_else(|error| unreachable!("claimed_at should parse: {error}")),
         )
-        .unwrap_or_else(|error| panic!("claimed_at should format: {error}"));
+        .unwrap_or_else(|error| unreachable!("claimed_at should format: {error}"));
         let lease_until = "2026-04-08T00:05:00.000000000Z".to_owned();
         let claimed = webhook
             .claim_available_invalidations("watch-test", &claimed_at, &lease_until, 8)
-            .unwrap_or_else(|error| panic!("claim should succeed: {error}"));
+            .unwrap_or_else(|error| unreachable!("claim should succeed: {error}"));
 
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].event_type, WebhookEventType::Create);

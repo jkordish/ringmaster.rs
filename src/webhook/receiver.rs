@@ -11,7 +11,7 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use hmac::{Hmac, KeyInit, Mac};
+use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -166,7 +166,7 @@ pub async fn serve(config: &Config) -> Result<WebhookServeReport> {
     write_heartbeat(
         config,
         "running",
-        Some(format!("listening on {}", bind_address)),
+        Some(format!("listening on {bind_address}")),
     )?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let heartbeat_shutdown_tx = shutdown_tx.clone();
@@ -215,7 +215,7 @@ pub async fn serve(config: &Config) -> Result<WebhookServeReport> {
 pub fn process_inbound_request(
     security: &ReceiverSecurityConfig,
     store: &Store,
-    request: InboundWebhookRequest,
+    request: &InboundWebhookRequest,
 ) -> Result<ReceiverResponse> {
     let received_at = now_rfc3339()?;
     match request.method.to_ascii_uppercase().as_str() {
@@ -224,7 +224,7 @@ pub fn process_inbound_request(
         other => reject_request(
             store,
             RejectionContext {
-                request: &request,
+                request,
                 received_at,
                 reason_code: "method_not_allowed",
                 detail: format!("unsupported webhook method `{other}`"),
@@ -235,6 +235,9 @@ pub fn process_inbound_request(
     }
 }
 
+/// # Errors
+///
+/// Returns an error if replay input selection is invalid, fixtures cannot be loaded, or replay persistence fails.
 pub fn replay(
     config: &Config,
     store: &Store,
@@ -254,7 +257,7 @@ pub fn replay(
         let fixture = load_fixture(&path)?;
         let security = fixture_security(config, &fixture)?;
         let request = fixture_into_request(fixture, Some(security.signature_secret.as_str()))?;
-        let response = process_inbound_request(&security, store, request)?;
+        let response = process_inbound_request(&security, store, &request)?;
         return Ok(WebhookReplayReport {
             entries: vec![entry_from_receiver_response(path.display().to_string(), response)],
             notes: vec![
@@ -297,6 +300,9 @@ pub fn replay(
     })
 }
 
+/// # Errors
+///
+/// Returns an error if the configured verification token or signature secret is missing.
 pub fn security_from_config(config: &Config) -> Result<ReceiverSecurityConfig> {
     let verification_token = config.webhook.verification_token.clone().ok_or_else(|| {
         RingmasterError::Config(
@@ -384,13 +390,13 @@ async fn execute_receiver_request(
     request: InboundWebhookRequest,
 ) -> Result<ReceiverResponse> {
     let store = state.store.lock().await;
-    process_inbound_request(&state.security, &store, request)
+    process_inbound_request(&state.security, &store, &request)
 }
 
 fn handle_challenge(
     security: &ReceiverSecurityConfig,
     store: &Store,
-    request: InboundWebhookRequest,
+    request: &InboundWebhookRequest,
     received_at: String,
 ) -> Result<ReceiverResponse> {
     let provided_token = request.query.get("verification_token").cloned();
@@ -399,7 +405,7 @@ fn handle_challenge(
         return reject_request(
             store,
             RejectionContext {
-                request: &request,
+                request,
                 received_at,
                 reason_code: "missing_challenge",
                 detail: "verification challenge requests must include `challenge`".to_owned(),
@@ -412,7 +418,7 @@ fn handle_challenge(
         return reject_request(
             store,
             RejectionContext {
-                request: &request,
+                request,
                 received_at,
                 reason_code: "verification_token_mismatch",
                 detail: "verification token did not match the configured receiver token".to_owned(),
@@ -432,7 +438,7 @@ fn handle_challenge(
 fn handle_signed_delivery(
     security: &ReceiverSecurityConfig,
     store: &Store,
-    request: InboundWebhookRequest,
+    request: &InboundWebhookRequest,
     received_at: String,
 ) -> Result<ReceiverResponse> {
     let signature = match request.headers.get("x-oura-signature") {
@@ -441,7 +447,7 @@ fn handle_signed_delivery(
             return reject_request(
                 store,
                 RejectionContext {
-                    request: &request,
+                    request,
                     received_at,
                     reason_code: "missing_signature",
                     detail: "webhook delivery did not include x-oura-signature".to_owned(),
@@ -457,7 +463,7 @@ fn handle_signed_delivery(
             return reject_request(
                 store,
                 RejectionContext {
-                    request: &request,
+                    request,
                     received_at,
                     reason_code: "missing_timestamp",
                     detail: "webhook delivery did not include x-oura-timestamp".to_owned(),
@@ -474,7 +480,7 @@ fn handle_signed_delivery(
             return reject_request(
                 store,
                 RejectionContext {
-                    request: &request,
+                    request,
                     received_at,
                     reason_code: "invalid_timestamp",
                     detail,
@@ -489,7 +495,7 @@ fn handle_signed_delivery(
         return reject_request(
             store,
             RejectionContext {
-                request: &request,
+                request,
                 received_at,
                 reason_code: "stale_timestamp",
                 detail: "webhook delivery timestamp is outside the configured tolerance window"
@@ -509,7 +515,7 @@ fn handle_signed_delivery(
         return reject_request(
             store,
             RejectionContext {
-                request: &request,
+                request,
                 received_at,
                 reason_code: "signature_mismatch",
                 detail: "webhook signature verification failed".to_owned(),
@@ -525,7 +531,7 @@ fn handle_signed_delivery(
             return reject_request(
                 store,
                 RejectionContext {
-                    request: &request,
+                    request,
                     received_at,
                     reason_code: "invalid_payload_json",
                     detail: format!(
@@ -948,7 +954,7 @@ async fn heartbeat_loop(
         if let Err(error) = write_heartbeat(
             &config,
             "running",
-            Some(format!("listening on {}", bind_address)),
+            Some(format!("listening on {bind_address}")),
         ) {
             warn!("failed to update webhook receiver heartbeat: {error}");
         }
@@ -966,7 +972,6 @@ async fn heartbeat_loop(
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use std::collections::BTreeMap;
     use std::net::TcpListener as StdTcpListener;
@@ -984,7 +989,7 @@ mod tests {
     use crate::webhook::default_desired_subscriptions;
     use crate::webhook::receiver::{WebhookReplayOptions, delivery_fingerprint};
     use axum::http::StatusCode;
-    use hmac::{Hmac, KeyInit, Mac};
+    use hmac::{Hmac, Mac};
     use rusqlite::Connection;
     use serde_json::json;
     use sha2::Sha256;
@@ -996,7 +1001,7 @@ mod tests {
 
     fn sign(timestamp: &str, body: &str, secret: &str) -> String {
         let mut mac = TestHmacSha256::new_from_slice(secret.as_bytes())
-            .unwrap_or_else(|error| panic!("hmac init should succeed in test: {error}"));
+            .unwrap_or_else(|error| unreachable!("hmac init should succeed in test: {error}"));
         mac.update(timestamp.as_bytes());
         mac.update(body.as_bytes());
         hex::encode_upper(mac.finalize().into_bytes())
@@ -1011,7 +1016,8 @@ mod tests {
     }
 
     fn test_config(bind: std::net::SocketAddr) -> (tempfile::TempDir, Config) {
-        let tempdir = tempdir().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let tempdir =
+            tempdir().unwrap_or_else(|error| unreachable!("tempdir should succeed: {error}"));
         let root = tempdir.path();
         let config_root = root.join("config");
         let state_root = root.join("state");
@@ -1021,7 +1027,7 @@ mod tests {
             .join("oura-tokens.json");
         let cache_root = root.join("cache");
         let paths = AppPaths::from_roots(root.to_path_buf(), config_root, state_root, cache_root)
-            .unwrap_or_else(|error| panic!("paths should resolve: {error}"));
+            .unwrap_or_else(|error| unreachable!("paths should resolve: {error}"));
 
         (
             tempdir,
@@ -1039,9 +1045,9 @@ mod tests {
                     api_base_url: "https://example.invalid/api".to_owned(),
                     secret_backend: crate::config::OuraSecretBackend::Keyring,
                     secret_file,
-                    callback_bind: "127.0.0.1:8788"
-                        .parse()
-                        .unwrap_or_else(|error| panic!("callback bind should parse: {error}")),
+                    callback_bind: "127.0.0.1:8788".parse().unwrap_or_else(|error| {
+                        unreachable!("callback bind should parse: {error}")
+                    }),
                     callback_path: "/callback".to_owned(),
                     requested_scopes: vec!["daily".to_owned()],
                     auth_timeout_secs: 120,
@@ -1089,28 +1095,28 @@ mod tests {
 
     fn metadata_updated_at(database_path: &std::path::Path) -> String {
         let connection = Connection::open(database_path)
-            .unwrap_or_else(|error| panic!("connection should open: {error}"));
+            .unwrap_or_else(|error| unreachable!("connection should open: {error}"));
         connection
             .query_row(
                 "SELECT updated_at FROM app_metadata WHERE key = 'app_name'",
                 [],
                 |row| row.get::<_, String>(0),
             )
-            .unwrap_or_else(|error| panic!("app metadata timestamp should load: {error}"))
+            .unwrap_or_else(|error| unreachable!("app metadata timestamp should load: {error}"))
     }
 
     #[test]
     fn accepts_valid_signed_delivery_and_enqueues_invalidation() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let timestamp = OffsetDateTime::now_utc()
             .format(&Rfc3339)
-            .unwrap_or_else(|error| panic!("timestamp should format: {error}"));
+            .unwrap_or_else(|error| unreachable!("timestamp should format: {error}"));
         let body = r#"{"data_type":"daily_sleep","event_type":"create","object_id":"sleep_123"}"#;
         let response = process_inbound_request(
             &security_config(),
             &store,
-            InboundWebhookRequest {
+            &InboundWebhookRequest {
                 method: "POST".to_owned(),
                 query: BTreeMap::new(),
                 headers: BTreeMap::from([
@@ -1123,7 +1129,7 @@ mod tests {
                 body: body.to_owned(),
             },
         )
-        .unwrap_or_else(|error| panic!("delivery should be accepted: {error}"));
+        .unwrap_or_else(|error| unreachable!("delivery should be accepted: {error}"));
 
         match response.outcome {
             ReceiverOutcome::Accepted {
@@ -1134,13 +1140,15 @@ mod tests {
                 assert!(!duplicate);
                 assert!(invalidation_id.is_some());
             }
-            other => panic!("unexpected receiver outcome: {other:?}"),
+            other => unreachable!("unexpected receiver outcome: {other:?}"),
         }
         assert_eq!(
             store
                 .webhook()
                 .list_pending_invalidations()
-                .unwrap_or_else(|error| { panic!("pending invalidations should load: {error}") })
+                .unwrap_or_else(|error| {
+                    unreachable!("pending invalidations should load: {error}")
+                })
                 .len(),
             1
         );
@@ -1150,7 +1158,7 @@ mod tests {
     async fn heartbeat_loop_exits_when_shutdown_sender_is_dropped() {
         let bind = "127.0.0.1:0"
             .parse()
-            .unwrap_or_else(|error| panic!("bind should parse: {error}"));
+            .unwrap_or_else(|error| unreachable!("bind should parse: {error}"));
         let (_tempdir, mut config) = test_config(bind);
         config.webhook.heartbeat_secs = 60;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -1161,20 +1169,23 @@ mod tests {
             super::heartbeat_loop(config, bind, shutdown_rx),
         )
         .await
-        .unwrap_or_else(|error| panic!("heartbeat loop should exit after sender drop: {error}"));
+        .unwrap_or_else(|error| {
+            unreachable!("heartbeat loop should exit after sender drop: {error}")
+        });
     }
 
     #[tokio::test]
     async fn execute_receiver_request_reuses_initialized_store_without_reopening() {
         let bind = "127.0.0.1:0"
             .parse()
-            .unwrap_or_else(|error| panic!("bind should parse: {error}"));
+            .unwrap_or_else(|error| unreachable!("bind should parse: {error}"));
         let (_tempdir, config) = test_config(bind);
         let security =
-            super::security_from_config(&config).unwrap_or_else(|error| panic!("{error}"));
-        let store = Arc::new(Mutex::new(
-            Store::open(&config).unwrap_or_else(|error| panic!("store should open: {error}")),
-        ));
+            super::security_from_config(&config).unwrap_or_else(|error| unreachable!("{error}"));
+        let store =
+            Arc::new(Mutex::new(Store::open(&config).unwrap_or_else(|error| {
+                unreachable!("store should open: {error}")
+            })));
         let state = ReceiverState { security, store };
         let before = metadata_updated_at(&config.paths.database_file);
 
@@ -1191,26 +1202,26 @@ mod tests {
             },
         )
         .await
-        .unwrap_or_else(|error| panic!("request should complete: {error}"));
+        .unwrap_or_else(|error| unreachable!("request should complete: {error}"));
         let after = metadata_updated_at(&config.paths.database_file);
 
         match response.outcome {
             ReceiverOutcome::Rejected { reason_code } => {
                 assert_eq!(reason_code, "verification_token_mismatch");
             }
-            other => panic!("unexpected receiver outcome: {other:?}"),
+            other => unreachable!("unexpected receiver outcome: {other:?}"),
         }
         assert_eq!(before, after);
     }
 
     #[test]
     fn rejects_invalid_verification_challenge_token() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let response = process_inbound_request(
             &security_config(),
             &store,
-            InboundWebhookRequest {
+            &InboundWebhookRequest {
                 method: "GET".to_owned(),
                 query: BTreeMap::from([
                     ("challenge".to_owned(), "abc123".to_owned()),
@@ -1220,32 +1231,32 @@ mod tests {
                 body: "{}".to_owned(),
             },
         )
-        .unwrap_or_else(|error| panic!("challenge should produce response: {error}"));
+        .unwrap_or_else(|error| unreachable!("challenge should produce response: {error}"));
 
         match response.outcome {
             ReceiverOutcome::Rejected { reason_code } => {
                 assert_eq!(reason_code, "verification_token_mismatch");
             }
-            other => panic!("unexpected receiver outcome: {other:?}"),
+            other => unreachable!("unexpected receiver outcome: {other:?}"),
         }
         assert!(
             store
                 .webhook()
                 .latest_rejected_delivery()
-                .unwrap_or_else(|error| panic!("latest rejection should load: {error}"))
+                .unwrap_or_else(|error| unreachable!("latest rejection should load: {error}"))
                 .is_some()
         );
     }
 
     #[test]
     fn rejects_malformed_timestamp_instead_of_returning_internal_error() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let body = r#"{"data_type":"daily_sleep","event_type":"create","object_id":"sleep_123"}"#;
         let response = process_inbound_request(
             &security_config(),
             &store,
-            InboundWebhookRequest {
+            &InboundWebhookRequest {
                 method: "POST".to_owned(),
                 query: BTreeMap::new(),
                 headers: BTreeMap::from([
@@ -1258,30 +1269,32 @@ mod tests {
                 body: body.to_owned(),
             },
         )
-        .unwrap_or_else(|error| panic!("malformed timestamp should produce a rejection: {error}"));
+        .unwrap_or_else(|error| {
+            unreachable!("malformed timestamp should produce a rejection: {error}")
+        });
 
         assert_eq!(response.status_code, StatusCode::BAD_REQUEST.as_u16());
         match response.outcome {
             ReceiverOutcome::Rejected { reason_code } => {
                 assert_eq!(reason_code, "invalid_timestamp");
             }
-            other => panic!("unexpected receiver outcome: {other:?}"),
+            other => unreachable!("unexpected receiver outcome: {other:?}"),
         }
         let rejection = store
             .webhook()
             .latest_rejected_delivery()
-            .unwrap_or_else(|error| panic!("latest rejection should load: {error}"))
-            .unwrap_or_else(|| panic!("a rejected delivery should be recorded"));
+            .unwrap_or_else(|error| unreachable!("latest rejection should load: {error}"))
+            .unwrap_or_else(|| unreachable!("a rejected delivery should be recorded"));
         assert_eq!(rejection.reason_code, "invalid_timestamp");
     }
 
     #[test]
     fn dedupes_duplicate_signed_delivery() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let timestamp = OffsetDateTime::now_utc()
             .format(&Rfc3339)
-            .unwrap_or_else(|error| panic!("timestamp should format: {error}"));
+            .unwrap_or_else(|error| unreachable!("timestamp should format: {error}"));
         let body = r#"{"data_type":"daily_sleep","event_type":"create","object_id":"sleep_123"}"#;
         let headers = BTreeMap::from([
             (
@@ -1293,29 +1306,29 @@ mod tests {
         let first = process_inbound_request(
             &security_config(),
             &store,
-            InboundWebhookRequest {
+            &InboundWebhookRequest {
                 method: "POST".to_owned(),
                 query: BTreeMap::new(),
                 headers: headers.clone(),
                 body: body.to_owned(),
             },
         )
-        .unwrap_or_else(|error| panic!("first delivery should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("first delivery should succeed: {error}"));
         let second = process_inbound_request(
             &security_config(),
             &store,
-            InboundWebhookRequest {
+            &InboundWebhookRequest {
                 method: "POST".to_owned(),
                 query: BTreeMap::new(),
                 headers,
                 body: body.to_owned(),
             },
         )
-        .unwrap_or_else(|error| panic!("second delivery should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("second delivery should succeed: {error}"));
 
         let first_delivery_id = match first.outcome {
             ReceiverOutcome::Accepted { delivery_id, .. } => delivery_id,
-            other => panic!("unexpected first outcome: {other:?}"),
+            other => unreachable!("unexpected first outcome: {other:?}"),
         };
         match second.outcome {
             ReceiverOutcome::Accepted {
@@ -1326,21 +1339,21 @@ mod tests {
                 assert!(duplicate);
                 assert_eq!(delivery_id, first_delivery_id);
             }
-            other => panic!("unexpected second outcome: {other:?}"),
+            other => unreachable!("unexpected second outcome: {other:?}"),
         }
         assert_eq!(
             delivery_fingerprint(&timestamp, body),
             store
                 .webhook()
                 .list_recent_deliveries(1)
-                .unwrap_or_else(|error| panic!("recent deliveries should load: {error}"))[0]
+                .unwrap_or_else(|error| unreachable!("recent deliveries should load: {error}"))[0]
                 .delivery_fingerprint
         );
         assert_eq!(
             store
                 .webhook()
                 .list_pending_invalidations()
-                .unwrap_or_else(|error| panic!("pending invalidations should load: {error}"))
+                .unwrap_or_else(|error| unreachable!("pending invalidations should load: {error}"))
                 .len(),
             1
         );
@@ -1348,16 +1361,16 @@ mod tests {
 
     #[test]
     fn rejects_invalid_json_after_signature_verification() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let timestamp = OffsetDateTime::now_utc()
             .format(&Rfc3339)
-            .unwrap_or_else(|error| panic!("timestamp should format: {error}"));
+            .unwrap_or_else(|error| unreachable!("timestamp should format: {error}"));
         let body = "{not-json";
         let response = process_inbound_request(
             &security_config(),
             &store,
-            InboundWebhookRequest {
+            &InboundWebhookRequest {
                 method: "POST".to_owned(),
                 query: BTreeMap::new(),
                 headers: BTreeMap::from([
@@ -1370,29 +1383,31 @@ mod tests {
                 body: body.to_owned(),
             },
         )
-        .unwrap_or_else(|error| panic!("invalid payload should produce a rejection: {error}"));
+        .unwrap_or_else(|error| {
+            unreachable!("invalid payload should produce a rejection: {error}")
+        });
 
         match response.outcome {
             ReceiverOutcome::Rejected { reason_code } => {
                 assert_eq!(reason_code, "invalid_payload_json");
             }
-            other => panic!("unexpected receiver outcome: {other:?}"),
+            other => unreachable!("unexpected receiver outcome: {other:?}"),
         }
         let rejection = store
             .webhook()
             .latest_rejected_delivery()
-            .unwrap_or_else(|error| panic!("latest rejection should load: {error}"))
-            .unwrap_or_else(|| panic!("a rejected delivery should be recorded"));
+            .unwrap_or_else(|error| unreachable!("latest rejection should load: {error}"))
+            .unwrap_or_else(|| unreachable!("a rejected delivery should be recorded"));
         assert_eq!(rejection.reason_code, "invalid_payload_json");
     }
 
     #[test]
     fn duplicate_signed_delivery_does_not_requeue_completed_invalidation() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let timestamp = OffsetDateTime::now_utc()
             .format(&Rfc3339)
-            .unwrap_or_else(|error| panic!("timestamp should format: {error}"));
+            .unwrap_or_else(|error| unreachable!("timestamp should format: {error}"));
         let body = r#"{"data_type":"daily_sleep","event_type":"create","object_id":"sleep_123"}"#;
         let headers = BTreeMap::from([
             (
@@ -1405,33 +1420,33 @@ mod tests {
         let first = process_inbound_request(
             &security_config(),
             &store,
-            InboundWebhookRequest {
+            &InboundWebhookRequest {
                 method: "POST".to_owned(),
                 query: BTreeMap::new(),
                 headers: headers.clone(),
                 body: body.to_owned(),
             },
         )
-        .unwrap_or_else(|error| panic!("first delivery should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("first delivery should succeed: {error}"));
         let invalidation_id = match first.outcome {
             ReceiverOutcome::Accepted {
                 invalidation_id: Some(invalidation_id),
                 ..
             } => invalidation_id,
-            other => panic!("unexpected first outcome: {other:?}"),
+            other => unreachable!("unexpected first outcome: {other:?}"),
         };
         let processing_started_at = OffsetDateTime::now_utc()
             .saturating_add(time::Duration::seconds(1))
             .format(&Rfc3339)
-            .unwrap_or_else(|error| panic!("processing start should format: {error}"));
+            .unwrap_or_else(|error| unreachable!("processing start should format: {error}"));
         let processing_finished_at = OffsetDateTime::now_utc()
             .saturating_add(time::Duration::seconds(2))
             .format(&Rfc3339)
-            .unwrap_or_else(|error| panic!("processing finish should format: {error}"));
+            .unwrap_or_else(|error| unreachable!("processing finish should format: {error}"));
         let attempt = store
             .webhook()
             .start_processing_attempt(invalidation_id, &processing_started_at)
-            .unwrap_or_else(|error| panic!("attempt should start: {error}"));
+            .unwrap_or_else(|error| unreachable!("attempt should start: {error}"));
         store
             .webhook()
             .complete_processing_attempt_success(
@@ -1440,26 +1455,26 @@ mod tests {
                 &processing_finished_at,
                 Some("processed"),
             )
-            .unwrap_or_else(|error| panic!("attempt should complete: {error}"));
+            .unwrap_or_else(|error| unreachable!("attempt should complete: {error}"));
         assert!(
             store
                 .webhook()
                 .list_pending_invalidations()
-                .unwrap_or_else(|error| panic!("pending invalidations should load: {error}"))
+                .unwrap_or_else(|error| unreachable!("pending invalidations should load: {error}"))
                 .is_empty()
         );
 
         let duplicate = process_inbound_request(
             &security_config(),
             &store,
-            InboundWebhookRequest {
+            &InboundWebhookRequest {
                 method: "POST".to_owned(),
                 query: BTreeMap::new(),
                 headers,
                 body: body.to_owned(),
             },
         )
-        .unwrap_or_else(|error| panic!("duplicate delivery should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("duplicate delivery should succeed: {error}"));
 
         match duplicate.outcome {
             ReceiverOutcome::Accepted {
@@ -1475,13 +1490,13 @@ mod tests {
                     Some("duplicate delivery already persisted; skipped invalidation enqueue")
                 );
             }
-            other => panic!("unexpected duplicate outcome: {other:?}"),
+            other => unreachable!("unexpected duplicate outcome: {other:?}"),
         }
         assert!(
             store
                 .webhook()
                 .list_pending_invalidations()
-                .unwrap_or_else(|error| panic!("pending invalidations should load: {error}"))
+                .unwrap_or_else(|error| unreachable!("pending invalidations should load: {error}"))
                 .is_empty()
         );
     }
@@ -1498,7 +1513,7 @@ mod tests {
         };
 
         let request = fixture_into_request(fixture, None)
-            .unwrap_or_else(|error| panic!("fixture should convert: {error}"));
+            .unwrap_or_else(|error| unreachable!("fixture should convert: {error}"));
         assert_eq!(request.body, r#"{"hello":"world"}"#);
     }
 
@@ -1524,20 +1539,20 @@ mod tests {
             },
             None,
         )
-        .unwrap_or_else(|error| panic!("fixture should materialize: {error}"));
+        .unwrap_or_else(|error| unreachable!("fixture should materialize: {error}"));
 
         assert_ne!(
             request
                 .headers
                 .get("x-oura-timestamp")
-                .unwrap_or_else(|| panic!("timestamp header should exist")),
+                .unwrap_or_else(|| unreachable!("timestamp header should exist")),
             "{{now_rfc3339}}"
         );
         assert_ne!(
             request
                 .headers
                 .get("x-oura-signature")
-                .unwrap_or_else(|| panic!("signature header should exist")),
+                .unwrap_or_else(|| unreachable!("signature header should exist")),
             "{{computed_hmac_sha256}}"
         );
     }
@@ -1564,13 +1579,15 @@ mod tests {
             },
             Some("fixture-secret"),
         )
-        .unwrap_or_else(|error| panic!("fixture should materialize with config secret: {error}"));
+        .unwrap_or_else(|error| {
+            unreachable!("fixture should materialize with config secret: {error}")
+        });
 
         assert_ne!(
             request
                 .headers
                 .get("x-oura-signature")
-                .unwrap_or_else(|| panic!("signature header should exist")),
+                .unwrap_or_else(|| unreachable!("signature header should exist")),
             "{{computed_hmac_sha256}}"
         );
     }
@@ -1578,10 +1595,10 @@ mod tests {
     #[tokio::test]
     async fn replay_fixture_uses_embedded_signature_secret() {
         let fixture_dir =
-            tempdir().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+            tempdir().unwrap_or_else(|error| unreachable!("tempdir should succeed: {error}"));
         let timestamp = OffsetDateTime::now_utc()
             .format(&Rfc3339)
-            .unwrap_or_else(|error| panic!("timestamp should format: {error}"));
+            .unwrap_or_else(|error| unreachable!("timestamp should format: {error}"));
         let body = r#"{"data_type":"daily_sleep","event_type":"create","object_id":"sleep_123"}"#;
         std::fs::write(
             fixture_dir.path().join("sample.json"),
@@ -1600,11 +1617,12 @@ mod tests {
                 body = body.replace('"', "\\\""),
             ),
         )
-        .unwrap_or_else(|error| panic!("fixture write should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("fixture write should succeed: {error}"));
 
-        let config = Config::load().unwrap_or_else(|error| panic!("config should load: {error}"));
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let config =
+            Config::load().unwrap_or_else(|error| unreachable!("config should load: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let report = replay(
             &config,
             &store,
@@ -1614,7 +1632,7 @@ mod tests {
                 recent: None,
             },
         )
-        .unwrap_or_else(|error| panic!("fixture replay should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("fixture replay should succeed: {error}"));
 
         assert_eq!(report.entries.len(), 1);
         assert_eq!(report.entries[0].status, "accepted");
@@ -1623,7 +1641,7 @@ mod tests {
     #[tokio::test]
     async fn replay_fixture_uses_config_signature_secret_when_fixture_omits_it() {
         let fixture_dir =
-            tempdir().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+            tempdir().unwrap_or_else(|error| unreachable!("tempdir should succeed: {error}"));
         std::fs::write(
             fixture_dir.path().join("sample.json"),
             r#"{
@@ -1635,13 +1653,13 @@ mod tests {
   "body": "{\"data_type\":\"daily_sleep\",\"event_type\":\"create\",\"object_id\":\"sleep_123\"}"
 }"#,
         )
-        .unwrap_or_else(|error| panic!("fixture write should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("fixture write should succeed: {error}"));
 
         let mut config =
-            Config::load().unwrap_or_else(|error| panic!("config should load: {error}"));
+            Config::load().unwrap_or_else(|error| unreachable!("config should load: {error}"));
         config.oura.client_secret = Some("fixture-secret".to_owned());
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let report = replay(
             &config,
             &store,
@@ -1651,7 +1669,7 @@ mod tests {
                 recent: None,
             },
         )
-        .unwrap_or_else(|error| panic!("fixture replay should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("fixture replay should succeed: {error}"));
 
         assert_eq!(report.entries.len(), 1);
         assert_eq!(report.entries[0].status, "accepted");
@@ -1660,25 +1678,25 @@ mod tests {
     #[tokio::test]
     async fn serve_does_not_write_running_heartbeat_when_bind_fails() {
         let occupied = StdTcpListener::bind("127.0.0.1:0")
-            .unwrap_or_else(|error| panic!("listener should bind in test: {error}"));
+            .unwrap_or_else(|error| unreachable!("listener should bind in test: {error}"));
         let bind = occupied
             .local_addr()
-            .unwrap_or_else(|error| panic!("listener addr should load: {error}"));
+            .unwrap_or_else(|error| unreachable!("listener addr should load: {error}"));
         let (_tempdir, config) = test_config(bind);
 
         let error = serve(&config)
             .await
             .err()
-            .unwrap_or_else(|| panic!("serve should fail when bind address is occupied"));
+            .unwrap_or_else(|| unreachable!("serve should fail when bind address is occupied"));
         let message = error.to_string();
         assert!(message.contains("binding webhook receiver listener"));
 
         let store = Store::open(&config)
-            .unwrap_or_else(|open_error| panic!("store should open: {open_error}"));
+            .unwrap_or_else(|open_error| unreachable!("store should open: {open_error}"));
         let heartbeats = store
             .webhook()
             .list_runtime_heartbeats()
-            .unwrap_or_else(|load_error| panic!("heartbeats should load: {load_error}"));
+            .unwrap_or_else(|load_error| unreachable!("heartbeats should load: {load_error}"));
         assert!(
             heartbeats
                 .iter()
