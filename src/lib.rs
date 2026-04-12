@@ -3626,7 +3626,7 @@ mod tests {
             input_transport: "inline".to_owned(),
             run_mode: "real".to_owned(),
             prompt_version: "review_prompt_v3".to_owned(),
-            output_schema_version: "ringmaster.ai.review.v2".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v3".to_owned(),
             privacy_profile: "redacted".to_owned(),
             snapshot_scope: "today".to_owned(),
             snapshot_hash_a: snapshot_hash.to_owned(),

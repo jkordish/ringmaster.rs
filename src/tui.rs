@@ -3057,7 +3057,7 @@ mod tests {
             input_transport: "inline".to_owned(),
             prompt_cache: "auto".to_owned(),
             prompt_version: "review_prompt_v1".to_owned(),
-            output_schema_version: "ringmaster.ai.review.v2".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v3".to_owned(),
             snapshots: vec![AiRequestPreviewSnapshot {
                 label: "primary".to_owned(),
                 snapshot_hash: snapshot_hash.to_owned(),
@@ -3095,7 +3095,7 @@ mod tests {
             input_transport: "inline".to_owned(),
             run_mode: "real".to_owned(),
             prompt_version: "review_prompt_v1".to_owned(),
-            output_schema_version: "ringmaster.ai.review.v2".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v3".to_owned(),
             privacy_profile: PrivacyProfile::Redacted.as_str().to_owned(),
             snapshot_scope: "day:2026-04-08".to_owned(),
             snapshot_hash_a: "demo-snapshot-20260408".to_owned(),

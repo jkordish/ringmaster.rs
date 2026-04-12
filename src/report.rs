@@ -1495,7 +1495,7 @@ mod tests {
         AiArtifactRecord {
             artifact_id: "artifact-compare".to_owned(),
             artifact_kind: "compare".to_owned(),
-            output_schema_version: "ringmaster.ai.compare.v2".to_owned(),
+            output_schema_version: "ringmaster.ai.compare.v3".to_owned(),
             prompt_version: "compare_prompt_v2".to_owned(),
             provider: "dry_run".to_owned(),
             model: "deterministic".to_owned(),
@@ -1547,7 +1547,7 @@ mod tests {
         let document = build_ai_report_document(
             &sample_compare_record(),
             &StoredArtifact::Compare(CompareArtifactV1 {
-                schema_version: "ringmaster.ai.compare.v2".to_owned(),
+                schema_version: "ringmaster.ai.compare.v3".to_owned(),
                 prompt_version: "compare_prompt_v2".to_owned(),
                 status: ArtifactStatus::DryRun,
                 overview: "compare overview".to_owned(),
@@ -1595,7 +1595,7 @@ mod tests {
         let document = build_ai_report_document(
             &sample_compare_record(),
             &StoredArtifact::Compare(CompareArtifactV1 {
-                schema_version: "ringmaster.ai.compare.v2".to_owned(),
+                schema_version: "ringmaster.ai.compare.v3".to_owned(),
                 prompt_version: "compare_prompt_v2".to_owned(),
                 status: ArtifactStatus::DryRun,
                 overview: "compare overview".to_owned(),
@@ -1663,7 +1663,7 @@ mod tests {
         let document = build_ai_report_document(
             &sample_compare_record(),
             &StoredArtifact::Compare(CompareArtifactV1 {
-                schema_version: "ringmaster.ai.compare.v2".to_owned(),
+                schema_version: "ringmaster.ai.compare.v3".to_owned(),
                 prompt_version: "compare_prompt_v2".to_owned(),
                 status: ArtifactStatus::DryRun,
                 overview: "compare overview".to_owned(),
