@@ -2269,13 +2269,13 @@ fn build_signal_trend_from_review_signals(
 }
 
 fn aggregate_signal_window(aggregation: WeeklyAggregation, values: &[f64]) -> Option<f64> {
-    if values.is_empty() {
-        return None;
-    }
-
     match aggregation {
         WeeklyAggregation::Mean => {
-            Some(values.iter().sum::<f64>() / crate::numeric::usize_to_f64(values.len()))
+            if values.is_empty() {
+                None
+            } else {
+                Some(values.iter().sum::<f64>() / crate::numeric::usize_to_f64(values.len()))
+            }
         }
         WeeklyAggregation::Sum | WeeklyAggregation::Count => Some(values.iter().sum()),
         WeeklyAggregation::Latest => values.last().copied(),
@@ -2796,12 +2796,14 @@ mod tests {
         SnapshotBundleV1, SnapshotCapabilities, SnapshotDailyScore, SnapshotFollowUpTarget,
         SnapshotFreshness, SnapshotMetadata, SnapshotMetrics, SnapshotPatternSummary,
         SnapshotRecordCounts, SnapshotReviewSignal, SnapshotSourceMode, SnapshotTrendSummary,
-        build_follow_up_targets, canonicalize_snapshot_bundle, deserialize_snapshot_bundle,
-        legacy_snapshot_json_for_bundle, resolve_scope, snapshot_hash_for_bundle,
+        aggregate_signal_window, build_follow_up_targets, canonicalize_snapshot_bundle,
+        deserialize_snapshot_bundle, legacy_snapshot_json_for_bundle, resolve_scope,
+        snapshot_hash_for_bundle,
     };
     use crate::config::Config;
     use crate::evidence::registry::resolve_evidence_descriptor;
     use crate::oura::models::{AuthStatus, CapabilityReport};
+    use crate::review::registry::WeeklyAggregation;
     use crate::store::Store;
     use crate::store::queries::{
         DailyActivityRecord, DailyReadinessRecord, DailySleepRecord, WorkoutRecord,
@@ -3229,6 +3231,19 @@ mod tests {
                 .any(|signal| signal.day == "2026-01-01"),
             "wide-range export should include early review signals from the requested range"
         );
+    }
+
+    #[test]
+    fn empty_sum_and_count_signal_windows_resolve_to_zero_activity() {
+        assert_eq!(
+            aggregate_signal_window(WeeklyAggregation::Sum, &[]),
+            Some(0.0)
+        );
+        assert_eq!(
+            aggregate_signal_window(WeeklyAggregation::Count, &[]),
+            Some(0.0)
+        );
+        assert_eq!(aggregate_signal_window(WeeklyAggregation::Mean, &[]), None);
     }
 
     #[test]
