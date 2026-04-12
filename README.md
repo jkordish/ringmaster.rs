@@ -142,6 +142,8 @@ Ringmaster now uses a typed three-tier evidence model across Review, Explain, Pa
 - one active local population profile is configured explicitly, never inferred silently
 - registry-backed guidance now resolves as `population-specific`, `general-adult-only` fallback, or `unavailable`
 - sensitive metrics such as `SpO₂`, `HRV`, readiness/stress/resilience composites, and cardiovascular-age-style metrics do not silently inherit stronger language for unsupported populations
+- Review cards now prioritize sensitive caution badges, and Review detail panes surface population fallback or unavailable scope directly instead of hiding it in prose
+- Status and `cargo run -- doctor` both expose the evidence-registry version plus stale-review health so scientific maintenance shows up as an operational concern
 - the product remains non-diagnostic: no diagnosis, no treatment recommendations, and no disease-screening positioning
 
 The full contract lives in [docs/EVIDENCE_MODEL.md](docs/EVIDENCE_MODEL.md), and the maintenance workflow lives in [docs/EVIDENCE_MAINTENANCE.md](docs/EVIDENCE_MAINTENANCE.md).

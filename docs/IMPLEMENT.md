@@ -362,11 +362,13 @@ Key implementation points:
 - `src/evidence/policy.rs` defines allowed wording, prohibited phrase classes, guidance-anchor helpers, required caution rails, and the downgrade language for fallback or unavailable population states
 - `guidance.active_population_profile` is the single local switch for this phase and defaults to `general_adult`
 - snapshots persist the active population profile plus resolved evidence descriptors alongside surfaced trend/review/pattern material
+- live runtime snapshots now also carry the evidence-registry version plus stale-evidence status so Ops and `doctor` can expose scientific maintenance health directly
 - reports render evidence-strength, population scope, and limitation sections from the same metadata
 - AI prompts are constrained up front, and AI artifacts are sanitized again after generation so the model cannot upgrade weak claims into diagnosis-like language or hallucinate population support
 - guideline-backed interpretation is currently anchored for sleep duration and weekly physical activity guidance
 - weaker or more sensitive domains remain evidence-informed or exploratory and are labeled accordingly
 - unsupported sensitive combinations stay `unavailable` rather than silently inheriting stronger general-adult language
+- Review cards prioritize sensitive caution badges when space is tight, and Review detail panes show population-specific, fallback, or unavailable scope explicitly
 
 The high-level contract lives in `docs/EVIDENCE_MODEL.md`, with maintenance instructions in `docs/EVIDENCE_MAINTENANCE.md`.
 
