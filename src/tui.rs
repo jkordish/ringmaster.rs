@@ -3722,7 +3722,7 @@ mod tests {
         assert!(compact.contains("Launch points"));
         assert!(compact.contains("Preflight defaults"));
         assert!(medium.contains("Saved AI run"));
-        assert!(medium.contains("API key ready: yes"));
+        assert!(medium.contains("Provider: openai | API key ready:"));
         assert!(medium.contains("Artifact actions"));
         assert!(!medium.contains("Prepare a snapshot-scoped review"));
         assert!(wide.contains("AI workbench"));
