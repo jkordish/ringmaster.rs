@@ -1,6 +1,6 @@
 {
-  "schema_version": "ringmaster.ai.compare.v1",
-  "prompt_version": "compare_prompt_v1",
+  "schema_version": "ringmaster.ai.compare.v3",
+  "prompt_version": "compare_prompt_v2",
   "status": "fixture",
   "overview": "Candidate fixture comparison for regression testing.",
   "material_differences": [
@@ -21,7 +21,18 @@
           "export_ref": "daily:2026-04-03",
           "note": "Baseline snapshot row"
         }
-      ]
+      ],
+      "claim_key": "weekly_activity_minutes",
+      "evidence_tier": "guideline_backed",
+      "interpretation_scope": "cross_sectional",
+      "caution_labels": [
+        "General adult guidance",
+        "Not diagnostic",
+        "Use your baseline too"
+      ],
+      "active_population_profile": "general_adult",
+      "population_support_status": "population_specific",
+      "fallback_population_profile": null
     }
   ],
   "supporting_evidence": [

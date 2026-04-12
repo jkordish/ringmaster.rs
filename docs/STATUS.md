@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This file is the current truth for the repository after the navigation, focus, and keyboard-standardization pass landed on `2026-04-11`. It records what shipped, what was verified, and what remains intentionally deferred.
+This file is the current truth for the repository after the Phase 9 population-profile and sensitive-metric runtime pass landed on `2026-04-12`. It records what shipped, what was verified, and what remains intentionally deferred.
 
 ## Navigation and focus truth
 
@@ -202,6 +202,38 @@ Report exports now include:
 - in-app `Evals` browser/detail surface inside the AI workbench
 - Status/Ops latest-eval and eval-health diagnostics with warning-state escalation when the newest eval regresses or fails
 
+## Evidence model and safety rails that now work
+
+The product now has a shared scientific contract instead of ad hoc wording.
+
+Shipped in this pass:
+
+- a typed evidence registry in `src/evidence/registry.rs`
+- a shared claims policy in `src/evidence/policy.rs`
+- tier badges and limitation/caution callouts across Review, Explain, Patterns, reports, and AI-rendered findings
+- guideline-backed interpretation for sleep duration and weekly physical activity guidance
+- evidence-informed handling for bounded heart-rate/HRV/VO2-max style trend displays
+- caution-limited handling for `SpO₂` and consumer sleep-technology interpretation
+- explicit exploratory labeling for composites, pattern associations, and weaker context-derived claims
+- snapshot exports that persist evidence descriptors plus the evidence-registry version
+- AI artifacts that carry `claim_key`, `evidence_tier`, `interpretation_scope`, and caution labels when available
+- a post-provider sanitizer that blocks diagnosis/treatment/screening drift and prevents models from upgrading weak claims into stronger ones
+
+The product remains intentionally non-diagnostic. It does not diagnose, recommend treatment, or position consumer wearable metrics as disease-screening outputs.
+
+## Population scope truth
+
+Phase 9 adds one explicit active population profile across deterministic UI, snapshots, reports, and AI artifacts.
+
+Current behavior:
+
+- the active profile comes from `guidance.active_population_profile` and defaults to `general_adult`
+- supported profiles in this phase are `general_adult`, `older_adult`, `pregnancy_postpartum`, `shift_worker`, and `athlete_high_training_load`
+- registry-backed claims now resolve to one of `population-specific`, `general-adult-only` fallback, or `unavailable`
+- the resolver is authoritative for Review, Explain, Patterns, reports, snapshot exports, AI request previews, and saved AI artifacts
+- sensitive metrics such as `SpO₂`, `HRV`, readiness/resilience/stress composites, cardiovascular-age-style metrics, and related sleep-tech claims do not silently inherit stronger language for unsupported populations
+- when a claim falls back to general-adult guidance, the wording must stay explicitly weaker than a matched population-specific interpretation
+
 ## Privacy and provenance truth
 
 The current behavior remains intentionally conservative:
@@ -220,20 +252,21 @@ The current behavior remains intentionally conservative:
 
 The repository now has explicit version discipline for:
 
-- snapshot schema version: `ringmaster.snapshot.v1`
-- review output schema version: `ringmaster.ai.review.v1`
-- compare output schema version: `ringmaster.ai.compare.v1`
-- follow-up output schema version: `ringmaster.ai.follow_up.v1`
+- evidence registry version: `ringmaster.evidence.v2`
+- snapshot schema version: `ringmaster.snapshot.v3`
+- review output schema version: `ringmaster.ai.review.v3`
+- compare output schema version: `ringmaster.ai.compare.v3`
+- follow-up output schema version: `ringmaster.ai.follow_up.v3`
 - prompt templates:
-  - `review_prompt_v2`
-  - `compare_prompt_v1`
-  - `follow_up_prompt_v1`
-  - `review_task_frame_v2`
-  - `compare_task_frame_v1`
-  - `follow_up_task_frame_v1`
+  - `review_prompt_v3`
+  - `compare_prompt_v2`
+  - `follow_up_prompt_v2`
+  - `review_task_frame_v3`
+  - `compare_task_frame_v2`
+  - `follow_up_task_frame_v2`
 - report templates:
-  - `markdown_v1`
-  - `html_v1`
+  - `report_markdown_v2`
+  - `report_html_v2`
 
 ## Tests now in place
 
@@ -248,6 +281,10 @@ Coverage now includes:
 - Markdown and HTML renderer tests
 - eval harness tests
 - prompt-version regression fixtures
+- evidence-registry validation tests
+- claims-policy and prohibited-phrase tests
+- snapshot/report/AI evidence-metadata propagation tests
+- caution-rail regression coverage for sensitive or exploratory claim classes
 - redaction/privacy regression tests
 - lineage and provenance persistence tests
 - TestBackend / buffer-based AI workbench tests for:
@@ -280,15 +317,9 @@ Coverage now includes:
 Passed in this pass:
 
 - `cargo fmt --all --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test --all`
 - `cargo run -- doctor`
-- `cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-nav-ui`
-
-Still blocked after this pass:
-
-- `cargo clippy --all-targets --all-features -- -D warnings`
-
-The remaining clippy failures are not from the navigation architecture changes themselves. They are a broader pre-1.0 lint backlog spread across existing modules such as `src/ai.rs`, `src/lib.rs`, `src/config.rs`, `src/derive.rs`, store/webhook code, and other older surfaces that still trigger strict pedantic/nursery/cargo findings.
 
 ## Intentionally deferred
 

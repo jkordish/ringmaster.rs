@@ -1,6 +1,6 @@
 {
-  "schema_version": "ringmaster.ai.review.v1",
-  "prompt_version": "review_prompt_v1",
+  "schema_version": "ringmaster.ai.review.v3",
+  "prompt_version": "review_prompt_v3",
   "status": "fixture",
   "overview": "Baseline fixture review for regression testing.",
   "headline_findings": [
@@ -16,7 +16,20 @@
           "note": "Fixture daily score row"
         }
       ],
-      "counterevidence_refs": []
+      "counterevidence_refs": [],
+      "claim_key": "sleep_score",
+      "evidence_tier": "exploratory",
+      "interpretation_scope": "within_person_trend_only",
+      "caution_labels": [
+        "Sensitive metric",
+        "Consumer wearable limitation",
+        "Not diagnostic",
+        "Not for screening",
+        "Use your baseline too"
+      ],
+      "active_population_profile": "general_adult",
+      "population_support_status": "population_specific",
+      "fallback_population_profile": null
     }
   ],
   "positive_findings": [],

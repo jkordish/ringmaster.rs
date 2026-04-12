@@ -1,6 +1,6 @@
 {
   "schema_version": "ringmaster.ai.compare.v1",
-  "prompt_version": "compare_prompt_v1",
+  "prompt_version": "compare_prompt_v2",
   "status": "fixture",
   "overview": "Fixture-backed comparison for regression testing.",
   "material_differences": [

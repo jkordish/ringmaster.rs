@@ -146,6 +146,12 @@ fn draw_evidence_section(
     ui: &UiContext,
     theme: &Theme,
 ) {
+    let evidence_items = model
+        .evidence_badges
+        .iter()
+        .map(|badge| ListItem::new(format!("[evidence] {badge}")))
+        .chain(model.evidence_lines.iter().cloned().map(ListItem::new))
+        .collect::<Vec<_>>();
     let middle = Layout::default()
         .direction(if ui.viewport.is_compact() {
             Direction::Vertical
@@ -160,7 +166,7 @@ fn draw_evidence_section(
         .split(area);
 
     frame.render_widget(
-        List::new(model.evidence_lines.iter().cloned().map(ListItem::new)).block(chrome::panel(
+        List::new(evidence_items).block(chrome::panel(
             theme,
             chrome::title_with_badge(theme, "Supporting evidence", "why", Tone::Positive),
             PanelKind::Section,

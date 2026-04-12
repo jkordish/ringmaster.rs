@@ -10,13 +10,17 @@ use crate::ai::{self, StoredArtifact};
 use crate::cli::{ReportExportArgs, ReportFormatArg};
 use crate::config::Config;
 use crate::error::{Result, RingmasterError};
+use crate::evidence::policy::claim_language_spec;
+use crate::evidence::registry::{
+    EvidenceDescriptor, evidence_descriptor, resolve_evidence_descriptor,
+};
 use crate::resolved_demo_fixture_dir;
 use crate::snapshot::{self, LoadedSnapshotArtifact, SnapshotBundleV1};
 use crate::store::Store;
 use crate::store::queries::{AiArtifactRecord, ReportExportRecord, SnapshotProvenanceRefRecord};
 
-const MARKDOWN_TEMPLATE_VERSION: &str = "report_markdown_v1";
-const HTML_TEMPLATE_VERSION: &str = "report_html_v1";
+const MARKDOWN_TEMPLATE_VERSION: &str = "report_markdown_v2";
+const HTML_TEMPLATE_VERSION: &str = "report_html_v2";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReportDocument {
@@ -34,6 +38,7 @@ struct ReportDocument {
     trust_summary: String,
     key_findings: Vec<String>,
     supporting_evidence: Vec<String>,
+    evidence_and_rails: Vec<String>,
     uncertainty_notes: Vec<String>,
     provenance_refs: Vec<String>,
     artifact_refs: Vec<String>,
@@ -320,7 +325,7 @@ fn build_snapshot_report_document(
         .trend_summaries
         .iter()
         .take(3)
-        .map(|trend| format!("{}: {}", trend.label, trend.summary))
+        .map(format_snapshot_trend_finding)
         .collect::<Vec<_>>();
     if key_findings.is_empty() {
         key_findings.extend(
@@ -341,7 +346,9 @@ fn build_snapshot_report_document(
             )
         })
         .collect::<Vec<_>>();
+    let evidence_and_rails = snapshot_evidence_and_rails(bundle);
     let mut uncertainty_notes = bundle.freshness.warnings.clone();
+    uncertainty_notes.extend(snapshot_uncertainty_notes(bundle));
     if uncertainty_notes.is_empty() {
         uncertainty_notes.push("No freshness warnings were recorded in this snapshot.".to_owned());
     }
@@ -367,7 +374,8 @@ fn build_snapshot_report_document(
         trust_summary: summary.trust_summary,
         key_findings,
         supporting_evidence,
-        uncertainty_notes,
+        evidence_and_rails,
+        uncertainty_notes: unique_evidence_refs(uncertainty_notes),
         provenance_refs: provenance
             .iter()
             .map(|record| {
@@ -377,7 +385,13 @@ fn build_snapshot_report_document(
                 )
             })
             .collect(),
-        artifact_refs: vec![format!("snapshot_hash={}", bundle.metadata.snapshot_hash)],
+        artifact_refs: vec![
+            format!("snapshot_hash={}", bundle.metadata.snapshot_hash),
+            format!(
+                "evidence_registry_version={}",
+                bundle.metadata.evidence_registry_version
+            ),
+        ],
         source_snapshot_hash_a: Some(bundle.metadata.snapshot_hash.clone()),
         source_snapshot_hash_b: None,
         source_ai_artifact_id: None,
@@ -400,23 +414,34 @@ fn build_ai_report_document(
 
     match artifact {
         StoredArtifact::Review(review) => {
-            let (scope, freshness_summary, trust_summary) = snapshot_a.map_or_else(
-                || {
-                    (
-                        "unknown".to_owned(),
-                        "snapshot record unavailable".to_owned(),
-                        "lineage available from persisted AI run metadata".to_owned(),
-                    )
-                },
-                |snapshot_a| {
-                    let summary = snapshot::summarize_snapshot_bundle(snapshot_a, provenance_a);
-                    (
-                        snapshot_a.metadata.scope.clone(),
-                        summary.freshness_summary,
-                        summary.trust_summary,
-                    )
-                },
-            );
+            let (scope, freshness_summary, trust_summary, mut evidence_and_rails) = snapshot_a
+                .map_or_else(
+                    || {
+                        (
+                            "unknown".to_owned(),
+                            "snapshot record unavailable".to_owned(),
+                            "lineage available from persisted AI run metadata".to_owned(),
+                            Vec::new(),
+                        )
+                    },
+                    |snapshot_a| {
+                        let summary = snapshot::summarize_snapshot_bundle(snapshot_a, provenance_a);
+                        (
+                            snapshot_a.metadata.scope.clone(),
+                            summary.freshness_summary,
+                            summary.trust_summary,
+                            vec![format!(
+                                "Snapshot evidence registry version: {}",
+                                snapshot_a.metadata.evidence_registry_version
+                            )],
+                        )
+                    },
+                );
+            evidence_and_rails.extend(finding_evidence_and_rails([
+                &review.headline_findings,
+                &review.positive_findings,
+                &review.negative_findings,
+            ]));
 
             ReportDocument {
                 report_kind: "ai_review_report".to_owned(),
@@ -431,11 +456,7 @@ fn build_ai_report_document(
                 output_schema_version: Some(record.output_schema_version.clone()),
                 freshness_summary,
                 trust_summary,
-                key_findings: review
-                    .headline_findings
-                    .iter()
-                    .map(|finding| format!("{}: {}", finding.title, finding.summary))
-                    .collect(),
+                key_findings: report_lines_for_findings(&review.headline_findings),
                 supporting_evidence: unique_evidence_refs(
                     review
                         .headline_findings
@@ -453,17 +474,25 @@ fn build_ai_report_document(
                         )
                         .collect(),
                 ),
-                uncertainty_notes: review
-                    .unresolved_questions
-                    .iter()
-                    .cloned()
-                    .chain(
-                        review
-                            .limitations
-                            .iter()
-                            .map(|limitation| limitation.message.clone()),
-                    )
-                    .collect(),
+                evidence_and_rails: unique_evidence_refs(evidence_and_rails),
+                uncertainty_notes: unique_evidence_refs(
+                    review
+                        .unresolved_questions
+                        .iter()
+                        .cloned()
+                        .chain(
+                            review
+                                .limitations
+                                .iter()
+                                .map(|limitation| limitation.message.clone()),
+                        )
+                        .chain(finding_uncertainty_notes([
+                            &review.headline_findings,
+                            &review.positive_findings,
+                            &review.negative_findings,
+                        ]))
+                        .collect(),
+                ),
                 provenance_refs: provenance_a
                     .iter()
                     .map(|record| {
@@ -496,6 +525,21 @@ fn build_ai_report_document(
                 )
             }));
 
+            let mut evidence_and_rails = Vec::new();
+            if let Some(snapshot_a) = snapshot_a {
+                evidence_and_rails.push(format!(
+                    "Snapshot A evidence registry version: {}",
+                    snapshot_a.metadata.evidence_registry_version
+                ));
+            }
+            if let Some(snapshot_b) = snapshot_b {
+                evidence_and_rails.push(format!(
+                    "Snapshot B evidence registry version: {}",
+                    snapshot_b.metadata.evidence_registry_version
+                ));
+            }
+            evidence_and_rails.extend(finding_evidence_and_rails([&compare.material_differences]));
+
             ReportDocument {
                 report_kind: "ai_compare_report".to_owned(),
                 title: "AI compare report".to_owned(),
@@ -519,11 +563,7 @@ fn build_ai_report_document(
                     snapshot_b,
                     provenance_b,
                 ),
-                key_findings: compare
-                    .material_differences
-                    .iter()
-                    .map(|finding| format!("{}: {}", finding.title, finding.summary))
-                    .collect(),
+                key_findings: report_lines_for_findings(&compare.material_differences),
                 supporting_evidence: unique_evidence_refs(
                     compare
                         .supporting_evidence
@@ -543,7 +583,15 @@ fn build_ai_report_document(
                         .map(|evidence| format!("{}: {}", evidence.export_ref, evidence.note))
                         .collect(),
                 ),
-                uncertainty_notes: compare.uncertainty_warnings.clone(),
+                evidence_and_rails: unique_evidence_refs(evidence_and_rails),
+                uncertainty_notes: unique_evidence_refs(
+                    compare
+                        .uncertainty_warnings
+                        .iter()
+                        .cloned()
+                        .chain(finding_uncertainty_notes([&compare.material_differences]))
+                        .collect(),
+                ),
                 provenance_refs,
                 artifact_refs,
                 source_snapshot_hash_a: Some(record.snapshot_hash_a.clone()),
@@ -552,23 +600,30 @@ fn build_ai_report_document(
             }
         }
         StoredArtifact::FollowUp(follow_up) => {
-            let (scope, freshness_summary, trust_summary) = snapshot_a.map_or_else(
-                || {
-                    (
-                        "unknown".to_owned(),
-                        "snapshot record unavailable".to_owned(),
-                        "lineage available from persisted AI run metadata".to_owned(),
-                    )
-                },
-                |snapshot_a| {
-                    let summary = snapshot::summarize_snapshot_bundle(snapshot_a, provenance_a);
-                    (
-                        snapshot_a.metadata.scope.clone(),
-                        summary.freshness_summary,
-                        summary.trust_summary,
-                    )
-                },
-            );
+            let (scope, freshness_summary, trust_summary, mut evidence_and_rails) = snapshot_a
+                .map_or_else(
+                    || {
+                        (
+                            "unknown".to_owned(),
+                            "snapshot record unavailable".to_owned(),
+                            "lineage available from persisted AI run metadata".to_owned(),
+                            Vec::new(),
+                        )
+                    },
+                    |snapshot_a| {
+                        let summary = snapshot::summarize_snapshot_bundle(snapshot_a, provenance_a);
+                        (
+                            snapshot_a.metadata.scope.clone(),
+                            summary.freshness_summary,
+                            summary.trust_summary,
+                            vec![format!(
+                                "Snapshot evidence registry version: {}",
+                                snapshot_a.metadata.evidence_registry_version
+                            )],
+                        )
+                    },
+                );
+            evidence_and_rails.extend(finding_evidence_and_rails([&follow_up.focal_findings]));
 
             ReportDocument {
                 report_kind: "ai_follow_up_report".to_owned(),
@@ -583,11 +638,7 @@ fn build_ai_report_document(
                 output_schema_version: Some(record.output_schema_version.clone()),
                 freshness_summary,
                 trust_summary,
-                key_findings: follow_up
-                    .focal_findings
-                    .iter()
-                    .map(|finding| format!("{}: {}", finding.title, finding.summary))
-                    .collect(),
+                key_findings: report_lines_for_findings(&follow_up.focal_findings),
                 supporting_evidence: unique_evidence_refs(
                     follow_up
                         .focal_findings
@@ -602,7 +653,15 @@ fn build_ai_report_document(
                         .map(|evidence| format!("{}: {}", evidence.export_ref, evidence.note))
                         .collect(),
                 ),
-                uncertainty_notes: follow_up.unresolved_questions.clone(),
+                evidence_and_rails: unique_evidence_refs(evidence_and_rails),
+                uncertainty_notes: unique_evidence_refs(
+                    follow_up
+                        .unresolved_questions
+                        .iter()
+                        .cloned()
+                        .chain(finding_uncertainty_notes([&follow_up.focal_findings]))
+                        .collect(),
+                ),
                 provenance_refs: provenance_a
                     .iter()
                     .map(|record| {
@@ -619,6 +678,254 @@ fn build_ai_report_document(
             }
         }
     }
+}
+
+fn format_snapshot_trend_finding(trend: &snapshot::SnapshotTrendSummary) -> String {
+    format_summary_with_descriptor(&trend.label, &trend.summary, trend.evidence.as_ref())
+}
+
+fn report_lines_for_findings(findings: &[ai::ArtifactFinding]) -> Vec<String> {
+    findings.iter().map(format_artifact_finding).collect()
+}
+
+fn format_artifact_finding(finding: &ai::ArtifactFinding) -> String {
+    let descriptor = finding.claim_key.as_deref().and_then(|claim_key| {
+        finding
+            .active_population_profile
+            .and_then(|population| resolve_evidence_descriptor(claim_key, population))
+            .or_else(|| evidence_descriptor(claim_key))
+    });
+    format_summary_with_descriptor(&finding.title, &finding.summary, descriptor.as_ref())
+}
+
+fn format_summary_with_descriptor(
+    label: &str,
+    summary: &str,
+    descriptor: Option<&EvidenceDescriptor>,
+) -> String {
+    let badge_block = descriptor
+        .map(descriptor_badge_text)
+        .filter(|badges| !badges.is_empty())
+        .map(|badges| format!(" [{badges}]"));
+    badge_block.map_or_else(
+        || format!("{label}: {summary}"),
+        |badge_block| format!("{label}{badge_block}: {summary}"),
+    )
+}
+
+fn descriptor_badge_text(descriptor: &EvidenceDescriptor) -> String {
+    let mut badges = vec![
+        descriptor.evidence_tier.chip_label().to_owned(),
+        descriptor.interpretation_scope.label().to_owned(),
+        descriptor
+            .population_support_status
+            .badge_label()
+            .to_owned(),
+        format!("profile: {}", descriptor.active_population_profile.label()),
+    ];
+    if let Some(fallback) = descriptor.fallback_population_profile {
+        badges.push(format!("fallback: {}", fallback.label()));
+    }
+    if let Some(anchor) = &descriptor.guidance_anchor_label {
+        badges.push(anchor.clone());
+    }
+    for label in descriptor
+        .caution_flags
+        .iter()
+        .map(|flag| flag.label().to_owned())
+    {
+        if !badges.contains(&label) {
+            badges.push(label);
+        }
+    }
+    badges.join(" | ")
+}
+
+fn snapshot_evidence_and_rails(bundle: &SnapshotBundleV1) -> Vec<String> {
+    let mut lines = vec![
+        format!(
+            "Evidence registry version: {}",
+            bundle.metadata.evidence_registry_version
+        ),
+        format!(
+            "Active population profile: {}",
+            bundle.metadata.active_population_profile.label()
+        ),
+    ];
+    let mut seen_claim_keys = BTreeSet::new();
+    for descriptor in bundle
+        .trend_summaries
+        .iter()
+        .filter_map(|trend| trend.evidence.as_ref())
+        .chain(
+            bundle
+                .pattern_summaries
+                .iter()
+                .filter_map(|pattern| pattern.evidence.as_ref()),
+        )
+        .chain(
+            bundle
+                .review_signals
+                .iter()
+                .filter_map(|signal| signal.evidence.as_ref()),
+        )
+    {
+        if seen_claim_keys.insert(descriptor.claim_key.clone()) {
+            lines.push(descriptor_summary_line(descriptor));
+        }
+    }
+    lines
+}
+
+fn finding_evidence_and_rails<I, G>(groups: I) -> Vec<String>
+where
+    I: IntoIterator<Item = G>,
+    G: AsRef<[ai::ArtifactFinding]>,
+{
+    let mut lines = Vec::new();
+    let mut seen_claim_keys = BTreeSet::new();
+    let mut seen_fallbacks = BTreeSet::new();
+    for group in groups {
+        for finding in group.as_ref() {
+            if let Some(claim_key) = finding.claim_key.as_deref() {
+                if seen_claim_keys.insert(claim_key.to_owned()) {
+                    if let Some(descriptor) = finding
+                        .active_population_profile
+                        .and_then(|population| resolve_evidence_descriptor(claim_key, population))
+                        .or_else(|| evidence_descriptor(claim_key))
+                    {
+                        lines.push(descriptor_summary_line(&descriptor));
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            }
+            let fallback = fallback_finding_rails(finding);
+            if !fallback.is_empty() && seen_fallbacks.insert(fallback.clone()) {
+                lines.push(fallback);
+            }
+        }
+    }
+    if lines.is_empty() {
+        lines.push("No registry-backed claim metadata was attached to this artifact.".to_owned());
+    }
+    lines
+}
+
+fn descriptor_summary_line(descriptor: &EvidenceDescriptor) -> String {
+    let mut parts = vec![
+        descriptor.evidence_tier.chip_label().to_owned(),
+        descriptor.interpretation_scope.label().to_owned(),
+        format!(
+            "population: {} ({})",
+            descriptor.population_support_status.detail_label(),
+            descriptor.active_population_profile.label()
+        ),
+    ];
+    if let Some(fallback) = descriptor.fallback_population_profile {
+        parts.push(format!("fallback anchor: {}", fallback.label()));
+    }
+    if let Some(anchor) = &descriptor.guidance_anchor_label {
+        parts.push(anchor.clone());
+    }
+    if !descriptor.caution_flags.is_empty() {
+        parts.push(format!(
+            "rails: {}",
+            descriptor
+                .caution_flags
+                .iter()
+                .map(|flag| flag.label())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    format!("{} -> {}", descriptor.label, parts.join("; "))
+}
+
+fn fallback_finding_rails(finding: &ai::ArtifactFinding) -> String {
+    let mut parts = Vec::new();
+    if let Some(tier) = finding.evidence_tier {
+        parts.push(tier.chip_label().to_owned());
+    }
+    if let Some(scope) = finding.interpretation_scope {
+        parts.push(scope.label().to_owned());
+    }
+    let mut seen = BTreeSet::new();
+    let caution_labels = finding
+        .caution_labels
+        .iter()
+        .filter(|label| seen.insert((*label).clone()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !caution_labels.is_empty() {
+        parts.push(format!("rails: {}", caution_labels.join(", ")));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("{} -> {}", finding.title, parts.join("; "))
+    }
+}
+
+fn snapshot_uncertainty_notes(bundle: &SnapshotBundleV1) -> Vec<String> {
+    descriptor_uncertainty_notes(
+        bundle
+            .trend_summaries
+            .iter()
+            .filter_map(|trend| trend.evidence.as_ref())
+            .chain(
+                bundle
+                    .pattern_summaries
+                    .iter()
+                    .filter_map(|pattern| pattern.evidence.as_ref()),
+            )
+            .chain(
+                bundle
+                    .review_signals
+                    .iter()
+                    .filter_map(|signal| signal.evidence.as_ref()),
+            ),
+    )
+}
+
+fn finding_uncertainty_notes<I, G>(groups: I) -> impl Iterator<Item = String>
+where
+    I: IntoIterator<Item = G>,
+    G: AsRef<[ai::ArtifactFinding]>,
+{
+    let mut descriptors = Vec::new();
+    for group in groups {
+        for finding in group.as_ref() {
+            if let Some(claim_key) = finding.claim_key.as_deref()
+                && let Some(descriptor) = finding
+                    .active_population_profile
+                    .and_then(|population| resolve_evidence_descriptor(claim_key, population))
+                    .or_else(|| evidence_descriptor(claim_key))
+            {
+                descriptors.push(descriptor);
+            }
+        }
+    }
+    descriptor_uncertainty_notes(descriptors.iter()).into_iter()
+}
+
+fn descriptor_uncertainty_notes<'a>(
+    descriptors: impl IntoIterator<Item = &'a EvidenceDescriptor>,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    let mut seen_claim_keys = BTreeSet::new();
+    for descriptor in descriptors {
+        if !seen_claim_keys.insert(descriptor.claim_key.clone()) {
+            continue;
+        }
+        if let Some(spec) =
+            claim_language_spec(&descriptor.claim_key, descriptor.active_population_profile)
+        {
+            notes.extend(spec.disclaimer_lines);
+        }
+    }
+    unique_evidence_refs(notes)
 }
 
 fn compare_report_scope(
@@ -753,6 +1060,10 @@ fn render_markdown(document: &ReportDocument) -> String {
             &render_markdown_list(&document.supporting_evidence),
         )
         .replace(
+            "{{evidence_and_rails}}",
+            &render_markdown_list(&document.evidence_and_rails),
+        )
+        .replace(
             "{{uncertainty_notes}}",
             &render_markdown_list(&document.uncertainty_notes),
         )
@@ -806,6 +1117,10 @@ fn render_html(document: &ReportDocument) -> String {
         .replace(
             "{{supporting_evidence}}",
             &render_html_list(&document.supporting_evidence),
+        )
+        .replace(
+            "{{evidence_and_rails}}",
+            &render_html_list(&document.evidence_and_rails),
         )
         .replace(
             "{{uncertainty_notes}}",
@@ -937,6 +1252,9 @@ mod tests {
             trust_summary: "review_signals=2 strong=1 stale=0 follow_up_targets=1".to_owned(),
             key_findings: vec!["Readiness improved.".to_owned()],
             supporting_evidence: vec!["daily:2026-04-10 -> daily_overview:2026-04-10".to_owned()],
+            evidence_and_rails: vec![
+                "Evidence registry version: ringmaster.evidence.v1".to_owned(),
+            ],
             uncertainty_notes: vec![
                 "No freshness warnings were recorded in this snapshot.".to_owned(),
             ],
@@ -973,6 +1291,7 @@ mod tests {
                     "medium".to_owned()
                 },
                 stale_days: u32::from(index + 1 == review_signal_count),
+                evidence: None,
             })
             .collect::<Vec<_>>();
         let follow_up_targets = (0..follow_up_target_count)
@@ -994,8 +1313,11 @@ mod tests {
                 end_day: "2026-04-10".to_owned(),
                 anchor_day: "2026-04-10".to_owned(),
                 privacy_profile: PrivacyProfile::Redacted,
+                active_population_profile: crate::evidence::PopulationProfile::GeneralAdult,
                 source_mode: SnapshotSourceMode::Demo,
                 schema_version: 13,
+                evidence_registry_version: crate::evidence::registry::evidence_registry_version()
+                    .to_owned(),
             },
             freshness: SnapshotFreshness {
                 latest_source_day: Some(latest_source_day.to_owned()),
@@ -1058,8 +1380,8 @@ mod tests {
         AiArtifactRecord {
             artifact_id: "artifact-compare".to_owned(),
             artifact_kind: "compare".to_owned(),
-            output_schema_version: "ringmaster.ai.compare.v1".to_owned(),
-            prompt_version: "compare_prompt_v1".to_owned(),
+            output_schema_version: "ringmaster.ai.compare.v2".to_owned(),
+            prompt_version: "compare_prompt_v2".to_owned(),
             provider: "dry_run".to_owned(),
             model: "deterministic".to_owned(),
             reasoning_effort: None,
@@ -1110,8 +1432,8 @@ mod tests {
         let document = build_ai_report_document(
             &sample_compare_record(),
             &StoredArtifact::Compare(CompareArtifactV1 {
-                schema_version: "ringmaster.ai.compare.v1".to_owned(),
-                prompt_version: "compare_prompt_v1".to_owned(),
+                schema_version: "ringmaster.ai.compare.v2".to_owned(),
+                prompt_version: "compare_prompt_v2".to_owned(),
                 status: ArtifactStatus::DryRun,
                 overview: "compare overview".to_owned(),
                 material_differences: Vec::new(),
@@ -1158,14 +1480,27 @@ mod tests {
         let document = build_ai_report_document(
             &sample_compare_record(),
             &StoredArtifact::Compare(CompareArtifactV1 {
-                schema_version: "ringmaster.ai.compare.v1".to_owned(),
-                prompt_version: "compare_prompt_v1".to_owned(),
+                schema_version: "ringmaster.ai.compare.v2".to_owned(),
+                prompt_version: "compare_prompt_v2".to_owned(),
                 status: ArtifactStatus::DryRun,
                 overview: "compare overview".to_owned(),
                 material_differences: vec![ArtifactFinding {
                     finding_id: "diff-1".to_owned(),
                     title: "Training load changed".to_owned(),
                     summary: "Activity load differs between snapshots.".to_owned(),
+                    claim_key: Some("weekly_activity_minutes".to_owned()),
+                    evidence_tier: Some(crate::evidence::registry::EvidenceTier::GuidelineBacked),
+                    interpretation_scope: Some(
+                        crate::evidence::registry::InterpretationScope::CrossSectional,
+                    ),
+                    active_population_profile: Some(
+                        crate::evidence::PopulationProfile::GeneralAdult,
+                    ),
+                    population_support_status: Some(
+                        crate::evidence::registry::PopulationSupportStatus::PopulationSpecific,
+                    ),
+                    fallback_population_profile: None,
+                    caution_labels: Vec::new(),
                     confidence: ConfidenceLevel::Medium,
                     sufficiency: SufficiencyLevel::Medium,
                     evidence_refs: vec![ArtifactEvidenceRef {

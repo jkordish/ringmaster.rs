@@ -8623,7 +8623,7 @@ fn demo_snapshot_catalog() -> Vec<SnapshotCatalogEntry> {
     vec![
         SnapshotCatalogEntry {
             snapshot_hash: "demo-snapshot-20260408".to_owned(),
-            schema_version: "ringmaster.snapshot.v2".to_owned(),
+            schema_version: "ringmaster.snapshot.v3".to_owned(),
             generated_at: "2026-04-08T22:18:00Z".to_owned(),
             scope: "day:2026-04-08".to_owned(),
             start_day: "2026-04-08".to_owned(),
@@ -8643,7 +8643,7 @@ fn demo_snapshot_catalog() -> Vec<SnapshotCatalogEntry> {
         },
         SnapshotCatalogEntry {
             snapshot_hash: "demo-snapshot-20260401-20260408".to_owned(),
-            schema_version: "ringmaster.snapshot.v2".to_owned(),
+            schema_version: "ringmaster.snapshot.v3".to_owned(),
             generated_at: "2026-04-08T22:19:00Z".to_owned(),
             scope: "week".to_owned(),
             start_day: "2026-04-02".to_owned(),
@@ -9281,7 +9281,7 @@ mod tests {
     fn make_snapshot_catalog_entry(snapshot_hash: &str) -> SnapshotCatalogEntry {
         SnapshotCatalogEntry {
             snapshot_hash: snapshot_hash.to_owned(),
-            schema_version: "ringmaster.snapshot.v2".to_owned(),
+            schema_version: "ringmaster.snapshot.v3".to_owned(),
             generated_at: "2026-04-08T22:18:00Z".to_owned(),
             scope: "day:2026-04-08".to_owned(),
             start_day: "2026-04-08".to_owned(),

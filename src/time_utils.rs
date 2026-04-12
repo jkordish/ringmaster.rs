@@ -9,10 +9,7 @@ pub fn current_local_day_string() -> String {
     current_day_string_at(OffsetDateTime::now_utc(), resolve_local_offset())
 }
 
-pub fn current_day_string_at(
-    now_utc: OffsetDateTime,
-    local_offset: Option<UtcOffset>,
-) -> String {
+pub fn current_day_string_at(now_utc: OffsetDateTime, local_offset: Option<UtcOffset>) -> String {
     now_utc
         .to_offset(local_offset.unwrap_or(UtcOffset::UTC))
         .date()

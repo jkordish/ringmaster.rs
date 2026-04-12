@@ -7,6 +7,7 @@ use reqwest::Url;
 use serde::Deserialize;
 
 use crate::error::{Result, RingmasterError};
+use crate::evidence::registry::PopulationProfile;
 use crate::webhook::{
     DesiredWebhookSubscription, WebhookEventType, default_desired_subscriptions,
     is_supported_data_type,
@@ -25,6 +26,7 @@ pub struct Config {
     pub oura: OuraConfig,
     pub refresh: RefreshConfig,
     pub webhook: WebhookConfig,
+    pub guidance: GuidanceConfig,
     pub ai: AiConfig,
 }
 
@@ -106,6 +108,44 @@ pub struct WebhookConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuidanceProfileSource {
+    Default,
+    ConfigFile,
+    Environment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuidanceConfig {
+    pub active_population_profile: PopulationProfile,
+    pub profile_source: GuidanceProfileSource,
+}
+
+impl GuidanceConfig {
+    #[must_use]
+    pub const fn source_label(&self) -> &'static str {
+        match self.profile_source {
+            GuidanceProfileSource::Default => "default",
+            GuidanceProfileSource::ConfigFile => "config",
+            GuidanceProfileSource::Environment => "environment",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_explicit(&self) -> bool {
+        !matches!(self.profile_source, GuidanceProfileSource::Default)
+    }
+}
+
+impl Default for GuidanceConfig {
+    fn default() -> Self {
+        Self {
+            active_population_profile: PopulationProfile::GeneralAdult,
+            profile_source: GuidanceProfileSource::Default,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiProviderKind {
     OpenAi,
 }
@@ -150,6 +190,7 @@ struct FileConfig {
     oura: Option<FileOuraConfig>,
     refresh: Option<FileRefreshConfig>,
     webhook: Option<FileWebhookConfig>,
+    guidance: Option<FileGuidanceConfig>,
     ai: Option<FileAiConfig>,
 }
 
@@ -210,6 +251,11 @@ struct FileWebhookConfig {
     heartbeat_secs: Option<u64>,
     renewal_lead_secs: Option<u64>,
     subscriptions: Option<Vec<FileWebhookSubscription>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FileGuidanceConfig {
+    active_population_profile: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -313,6 +359,24 @@ impl Config {
                 parse_file_webhook_subscriptions(subscriptions)?
             } else {
                 default_desired_subscriptions()
+            };
+        let guidance =
+            if let Some(value) = env_string("RINGMASTER_GUIDANCE_ACTIVE_POPULATION_PROFILE") {
+                GuidanceConfig {
+                    active_population_profile: PopulationProfile::parse(&value)?,
+                    profile_source: GuidanceProfileSource::Environment,
+                }
+            } else if let Some(value) = file_config
+                .guidance
+                .as_ref()
+                .and_then(|guidance| guidance.active_population_profile.as_deref())
+            {
+                GuidanceConfig {
+                    active_population_profile: PopulationProfile::parse(value)?,
+                    profile_source: GuidanceProfileSource::ConfigFile,
+                }
+            } else {
+                GuidanceConfig::default()
             };
         let default_oura_secret_file = paths.state_dir.join("secrets").join("oura-tokens.json");
 
@@ -563,6 +627,7 @@ impl Config {
                     .unwrap_or(7 * 24 * 60 * 60),
                 subscriptions: webhook_subscriptions,
             },
+            guidance,
             ai: AiConfig {
                 enabled: env_bool("RINGMASTER_AI_ENABLED")
                     .or_else(|| file_config.ai.as_ref().and_then(|ai| ai.enabled))

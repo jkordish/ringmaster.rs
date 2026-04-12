@@ -313,6 +313,7 @@ fn derive_review_artifacts_with_bounds(
     let review_signal_days = build_review_signal_days(&FeatureInputs {
         daily_history: &daily_history,
         daily_activity: &daily_activity,
+        workouts: &workouts,
         daily_readiness: &daily_readiness,
         daily_stress: &daily_stress,
         daily_resilience: &daily_resilience,
@@ -1136,6 +1137,7 @@ mod tests {
                 oura_id: None,
                 day: day.to_owned(),
                 sleep_score: Some(sleep),
+                sleep_duration_seconds: Some(27_000),
                 raw_cache_key: None,
                 updated_at: updated_at.to_owned(),
             }),

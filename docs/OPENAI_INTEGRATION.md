@@ -17,6 +17,7 @@ The current design is built around these invariants:
 - no web search, file search, or remote retrieval are enabled in this pass
 - there is no freeform chat surface and no prompt textbox in the TUI
 - every in-app launch must show a preflight confirmation before any provider call
+- the active population profile is explicit and never inferred silently
 - guided follow-up actions remain schema-driven and snapshot-bounded
 
 ## Canonical commands
@@ -186,6 +187,7 @@ Before any in-app OpenAI request leaves the machine, the user sees a preflight s
 
 - snapshot scope
 - privacy profile
+- active population profile
 - provider and model
 - request mode
 - stateless status
@@ -218,27 +220,52 @@ If stateful mode is enabled later through config, that will be a deliberate opt-
 
 The workbench and CLI both present this mode explicitly so the privacy posture is visible rather than implied.
 
+## Evidence-model constraints
+
+The OpenAI layer does not get to invent its own medical or scientific posture.
+
+Every AI request is bounded by the same evidence contract used by the deterministic product:
+
+- snapshots carry `EvidenceDescriptor` metadata plus the evidence-registry version and active population profile
+- AI findings may carry `claim_key`, `evidence_tier`, `interpretation_scope`, `population_support_status`, `active_population_profile`, and fallback metadata when applicable
+- `guideline_backed` findings may only reference general public-health guidance when the snapshot provides the matching anchor
+- `evidence_informed` findings must remain contextual, cautious, and limitation-aware
+- `exploratory` findings must stay visibly exploratory, trend-based, or context-only
+- sensitive domains such as `SpO₂`, `HRV`, readiness/resilience/stress composites, cardiovascular-age-style outputs, and consumer sleep-technology outputs must preserve device-limit and non-diagnostic framing
+- unsupported population and metric combinations must stay fallback-limited or unavailable according to the resolved descriptor
+- the model is never allowed to upgrade a weak signal into diagnosis, treatment, or screening language
+
+This contract is enforced twice:
+
+1. Prompt framing constrains the model before generation.
+2. A local sanitizer validates and rewrites/drops prohibited outputs after generation.
+
+This is why the product can use optional external synthesis without abandoning the local-first safety posture.
+
 ## Prompt and schema versioning
 
 The app now keeps prompt and template assets in explicit files and persists version metadata with every AI artifact.
 
 Current versions:
 
-- snapshot schema: `ringmaster.snapshot.v1`
-- review output schema: `ringmaster.ai.review.v1`
-- compare output schema: `ringmaster.ai.compare.v1`
-- follow-up output schema: `ringmaster.ai.follow_up.v1`
-- review prompt: `review_prompt_v2`
-- compare prompt: `compare_prompt_v1`
-- follow-up prompt: `follow_up_prompt_v1`
-- review task frame: `review_task_frame_v2`
-- compare task frame: `compare_task_frame_v1`
-- follow-up task frame: `follow_up_task_frame_v1`
+- evidence registry: `ringmaster.evidence.v2`
+- snapshot schema: `ringmaster.snapshot.v3`
+- review output schema: `ringmaster.ai.review.v3`
+- compare output schema: `ringmaster.ai.compare.v3`
+- follow-up output schema: `ringmaster.ai.follow_up.v3`
+- review prompt: `review_prompt_v3`
+- compare prompt: `compare_prompt_v2`
+- follow-up prompt: `follow_up_prompt_v2`
+- review task frame: `review_task_frame_v3`
+- compare task frame: `compare_task_frame_v2`
+- follow-up task frame: `follow_up_task_frame_v2`
 
-The review pipeline also now applies a local post-provider sanitation pass before persistence and rendering:
+The review and follow-up pipelines now apply a local post-provider sanitation pass before persistence and rendering:
 
 - invalid or duplicate evidence references are removed
 - duplicate review themes across headline/positive/negative sections are collapsed
+- prohibited diagnosis/treatment/screening phrasing is rejected
+- required caution rails are restored from the registry when the snapshot supports them
 - review follow-up targets are replaced with the deterministic locally generated snapshot targets
 
 Each persisted AI artifact also records:

@@ -251,6 +251,7 @@ The preflight view shows:
 
 - snapshot scope
 - privacy profile
+- active population profile
 - provider and model
 - request mode
 - stateless status
@@ -351,19 +352,40 @@ Important rules:
 - historical eval browsing reads persisted detail payloads instead of rerunning fixtures from the TUI
 - fixture lineage metadata is optional and is only used when the manifest declares explicit local handles
 
+## Scientific evidence model runtime
+
+Ringmaster now routes deterministic UI language, snapshot metadata, reports, and AI artifacts through one shared scientific contract.
+
+Key implementation points:
+
+- `src/evidence/registry.rs` defines the canonical evidence registry, the five supported population profiles, and the versioned `EvidenceDescriptor` surface
+- `src/evidence/policy.rs` defines allowed wording, prohibited phrase classes, guidance-anchor helpers, required caution rails, and the downgrade language for fallback or unavailable population states
+- `guidance.active_population_profile` is the single local switch for this phase and defaults to `general_adult`
+- snapshots persist the active population profile plus resolved evidence descriptors alongside surfaced trend/review/pattern material
+- reports render evidence-strength, population scope, and limitation sections from the same metadata
+- AI prompts are constrained up front, and AI artifacts are sanitized again after generation so the model cannot upgrade weak claims into diagnosis-like language or hallucinate population support
+- guideline-backed interpretation is currently anchored for sleep duration and weekly physical activity guidance
+- weaker or more sensitive domains remain evidence-informed or exploratory and are labeled accordingly
+- unsupported sensitive combinations stay `unavailable` rather than silently inheriting stronger general-adult language
+
+The high-level contract lives in `docs/EVIDENCE_MODEL.md`, with maintenance instructions in `docs/EVIDENCE_MAINTENANCE.md`.
+
 ## Prompt, schema, and template versioning
 
 Prompt and rendering assets now live in explicit versioned files:
 
-- `src/ai_prompts/review_prompt_v2.md`
-- `src/ai_prompts/compare_prompt_v1.md`
-- `src/ai_prompts/review_task_frame_v2.md`
-- `src/ai_prompts/compare_task_frame_v1.md`
-- `src/report_templates/markdown_v1.md`
-- `src/report_templates/html_v1.html`
+- `src/ai_prompts/review_prompt_v3.md`
+- `src/ai_prompts/compare_prompt_v2.md`
+- `src/ai_prompts/follow_up_prompt_v2.md`
+- `src/ai_prompts/review_task_frame_v3.md`
+- `src/ai_prompts/compare_task_frame_v2.md`
+- `src/ai_prompts/follow_up_task_frame_v2.md`
+- `src/report_templates/markdown_v1.md` (template id `report_markdown_v2`)
+- `src/report_templates/html_v1.html` (template id `report_html_v2`)
 
 Persisted AI runs record:
 
+- evidence-registry-aware prompt versioning
 - prompt version
 - output schema version
 - provider/model

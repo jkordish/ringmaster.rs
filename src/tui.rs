@@ -3057,13 +3057,14 @@ mod tests {
             input_transport: "inline".to_owned(),
             prompt_cache: "auto".to_owned(),
             prompt_version: "review_prompt_v1".to_owned(),
-            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v2".to_owned(),
             snapshots: vec![AiRequestPreviewSnapshot {
                 label: "primary".to_owned(),
                 snapshot_hash: snapshot_hash.to_owned(),
                 scope: "day:2026-04-08".to_owned(),
                 anchor_day: "2026-04-08".to_owned(),
                 privacy_profile: PrivacyProfile::Redacted,
+                active_population_profile: crate::evidence::PopulationProfile::GeneralAdult,
                 day_count: 1,
             }],
             snapshot_bytes: 32_768,
@@ -3094,7 +3095,7 @@ mod tests {
             input_transport: "inline".to_owned(),
             run_mode: "real".to_owned(),
             prompt_version: "review_prompt_v1".to_owned(),
-            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v2".to_owned(),
             privacy_profile: PrivacyProfile::Redacted.as_str().to_owned(),
             snapshot_scope: "day:2026-04-08".to_owned(),
             snapshot_hash_a: "demo-snapshot-20260408".to_owned(),
@@ -3188,6 +3189,7 @@ mod tests {
                 renewal_lead_secs: 7 * 24 * 60 * 60,
                 subscriptions: default_desired_subscriptions(),
             },
+            guidance: crate::config::GuidanceConfig::default(),
             ai: crate::config::AiConfig::default(),
         }
     }
@@ -3236,7 +3238,7 @@ mod tests {
     fn persist_snapshot_for_run(store: &Store, snapshot_hash: &str) {
         let snapshot = SnapshotExportRecord {
             snapshot_hash: snapshot_hash.to_owned(),
-            schema_version: "ringmaster.snapshot.v1".to_owned(),
+            schema_version: "ringmaster.snapshot.v3".to_owned(),
             app_version: "0.1.0".to_owned(),
             generated_at: "2026-04-10T00:00:00Z".to_owned(),
             scope: "day:2026-04-08".to_owned(),
@@ -3312,6 +3314,7 @@ mod tests {
                 oura_id: None,
                 day: "2026-04-08".to_owned(),
                 sleep_score: Some(86),
+                sleep_duration_seconds: Some(27_300),
                 raw_cache_key: Some("daily_sleep|fixture".to_owned()),
                 updated_at: "2026-04-08T03:35:00Z".to_owned(),
             })

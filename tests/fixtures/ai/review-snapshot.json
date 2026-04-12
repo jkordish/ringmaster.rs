@@ -1,16 +1,18 @@
 {
-  "schema_version": "ringmaster.snapshot.v1",
+  "schema_version": "ringmaster.snapshot.v3",
   "metadata": {
     "app_version": "0.1.0",
     "generated_at": "2026-04-10T00:00:00Z",
-    "snapshot_hash": "f4be9e06cc255ab9b976880c464ac9a2d2656bbcc768425f82d2ef6db7baf6cb",
+    "snapshot_hash": "1b72d70794744739fa6481ed5fdb4cfec92e4c297a63c7cda4fe7f78dadbde9e",
     "scope": "day:2026-04-10",
     "start_day": "2026-04-10",
     "end_day": "2026-04-10",
     "anchor_day": "2026-04-10",
     "privacy_profile": "redacted",
+    "active_population_profile": "general_adult",
     "source_mode": "demo",
-    "schema_version": 14
+    "schema_version": 14,
+    "evidence_registry_version": "ringmaster.evidence.v2"
   },
   "freshness": {
     "latest_source_day": "2026-04-08",
@@ -76,6 +78,7 @@
         "export_ref": "daily:2026-04-10",
         "day": "2026-04-10",
         "sleep_score": 84,
+        "sleep_duration_seconds": null,
         "readiness_score": 80,
         "activity_score": 78
       }
@@ -97,7 +100,8 @@
       "direction": "higher",
       "summary": "Sleep score improved relative to the comparison baseline.",
       "current_average": 84.0,
-      "previous_average": 79.0
+      "previous_average": 79.0,
+      "evidence": null
     }
   ],
   "context_events": [
@@ -123,7 +127,8 @@
       "z_score": 1.4,
       "persistence_days": 2,
       "sufficiency": "medium",
-      "stale_days": 0
+      "stale_days": 0,
+      "evidence": null
     }
   ],
   "follow_up_targets": [

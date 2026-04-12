@@ -1246,6 +1246,7 @@ mod tests {
                 renewal_lead_secs: 7 * 24 * 60 * 60,
                 subscriptions: default_desired_subscriptions(),
             },
+            guidance: crate::config::GuidanceConfig::default(),
             ai: crate::config::AiConfig::default(),
         }
     }
@@ -1782,6 +1783,7 @@ mod tests {
                 oura_id: Some("sleep_document_2026-04-08".to_owned()),
                 day: "2026-04-08".to_owned(),
                 sleep_score: Some(88),
+                sleep_duration_seconds: Some(28_200),
                 raw_cache_key: Some("raw_daily_sleep".to_owned()),
                 updated_at: "2026-04-08T00:00:00Z".to_owned(),
             })

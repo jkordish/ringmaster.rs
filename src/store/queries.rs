@@ -4705,7 +4705,7 @@ mod tests {
     fn make_snapshot_export(snapshot_hash: &str, anchor_day: &str) -> SnapshotExportRecord {
         SnapshotExportRecord {
             snapshot_hash: snapshot_hash.to_owned(),
-            schema_version: "ringmaster.snapshot.v2".to_owned(),
+            schema_version: "ringmaster.snapshot.v3".to_owned(),
             app_version: "0.1.0".to_owned(),
             generated_at: format!("{anchor_day}T00:00:00Z"),
             scope: "today".to_owned(),
@@ -4724,7 +4724,7 @@ mod tests {
             trust_summary: "review_signals=1 strong=1 stale=0 follow_up_targets=1".to_owned(),
             capability_summary: "granted=1 missing=0 requested=1".to_owned(),
             provenance_summary: "refs=0 local_kinds=0".to_owned(),
-            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v2\"}".to_owned(),
+            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v3\"}".to_owned(),
             created_at: format!("{anchor_day}T00:00:01Z"),
         }
     }
@@ -5105,7 +5105,7 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let record = SnapshotExportRecord {
             snapshot_hash: "hash-123".to_owned(),
-            schema_version: "ringmaster.snapshot.v2".to_owned(),
+            schema_version: "ringmaster.snapshot.v3".to_owned(),
             app_version: "0.1.0".to_owned(),
             generated_at: "2026-04-10T00:00:00Z".to_owned(),
             scope: "today".to_owned(),
@@ -5123,7 +5123,7 @@ mod tests {
             trust_summary: "review_signals=1 strong=1 stale=0 follow_up_targets=1".to_owned(),
             capability_summary: "granted=3 missing=0 requested=3".to_owned(),
             provenance_summary: "refs=1 local_kinds=1".to_owned(),
-            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v2\"}".to_owned(),
+            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v3\"}".to_owned(),
             created_at: "2026-04-10T00:00:01Z".to_owned(),
         };
         let provenance = vec![SnapshotProvenanceRefRecord {
@@ -5161,7 +5161,7 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let record = SnapshotExportRecord {
             snapshot_hash: "hash-keep".to_owned(),
-            schema_version: "ringmaster.snapshot.v2".to_owned(),
+            schema_version: "ringmaster.snapshot.v3".to_owned(),
             app_version: "0.1.0".to_owned(),
             generated_at: "2026-04-10T00:00:00Z".to_owned(),
             scope: "today".to_owned(),
@@ -5179,7 +5179,7 @@ mod tests {
             trust_summary: "review_signals=1 strong=1 stale=0 follow_up_targets=1".to_owned(),
             capability_summary: "granted=3 missing=0 requested=3".to_owned(),
             provenance_summary: "refs=1 local_kinds=1".to_owned(),
-            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v2\"}".to_owned(),
+            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v3\"}".to_owned(),
             created_at: "2026-04-10T00:00:01Z".to_owned(),
         };
         let provenance = vec![SnapshotProvenanceRefRecord {
@@ -5234,7 +5234,7 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let original = SnapshotExportRecord {
             snapshot_hash: "hash-created-at".to_owned(),
-            schema_version: "ringmaster.snapshot.v2".to_owned(),
+            schema_version: "ringmaster.snapshot.v3".to_owned(),
             app_version: "0.1.0".to_owned(),
             generated_at: "2026-04-10T00:00:00Z".to_owned(),
             scope: "today".to_owned(),
@@ -5252,7 +5252,7 @@ mod tests {
             trust_summary: "review_signals=1 strong=1 stale=0 follow_up_targets=1".to_owned(),
             capability_summary: "granted=3 missing=0 requested=3".to_owned(),
             provenance_summary: "refs=0 local_kinds=0".to_owned(),
-            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v2\"}".to_owned(),
+            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v3\"}".to_owned(),
             created_at: "2026-04-10T00:00:01Z".to_owned(),
         };
 

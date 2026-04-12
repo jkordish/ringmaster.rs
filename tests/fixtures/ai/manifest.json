@@ -7,7 +7,7 @@
       "case_id": "review-stale-snapshot",
       "task_family": "review",
       "snapshot_a": "review-snapshot.json",
-      "snapshot_hash_a": "fixture-review-snapshot",
+      "snapshot_hash_a": "1b72d70794744739fa6481ed5fdb4cfec92e4c297a63c7cda4fe7f78dadbde9e",
       "artifacts": [
         {
           "label": "candidate",
@@ -43,8 +43,8 @@
       "task_family": "compare",
       "snapshot_a": "compare-snapshot-a.json",
       "snapshot_b": "compare-snapshot-b.json",
-      "snapshot_hash_a": "fixture-compare-snapshot-a",
-      "snapshot_hash_b": "fixture-compare-snapshot-b",
+      "snapshot_hash_a": "ffdadd2dc9723fe624cdf4768629a849eafa079802058a8cebe588c4339db835",
+      "snapshot_hash_b": "b5393ccb68553ce87304ab35e27bf766e1b196afa15a93d50c4a12c327446177",
       "artifacts": [
         {
           "label": "candidate",
@@ -77,7 +77,7 @@
       "case_id": "review-sparse-single-day",
       "task_family": "review",
       "snapshot_a": "review-sparse-snapshot.json",
-      "snapshot_hash_a": "fixture-review-sparse-single-day",
+      "snapshot_hash_a": "afe95008f08ad864539d16bb23a284ac636303d9beb6fcfde88e02a51844dfd8",
       "artifacts": [
         {
           "label": "candidate",

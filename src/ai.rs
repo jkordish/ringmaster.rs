@@ -18,15 +18,20 @@ use crate::ai_prompts::{
 };
 use crate::config::{AiConfig, AiInputTransport, AiRequestMode, Config, PromptCacheMode};
 use crate::error::{Result, RingmasterError};
+use crate::evidence::policy::{evidence_badges, validate_claim_text};
+use crate::evidence::registry::{
+    EvidenceTier, InterpretationScope, PopulationProfile, PopulationSupportStatus,
+    resolve_evidence_descriptor,
+};
 use crate::snapshot::{
     ArtifactRecordInput, LoadedSnapshotArtifact, PrivacyProfile, SnapshotBundleV1,
     SnapshotFollowUpTarget, SnapshotReviewSignal, artifact_record, rebuild_follow_up_targets,
 };
 use crate::store::queries::AiArtifactRecord;
 
-pub const REVIEW_OUTPUT_SCHEMA_VERSION: &str = "ringmaster.ai.review.v1";
-pub const COMPARE_OUTPUT_SCHEMA_VERSION: &str = "ringmaster.ai.compare.v1";
-pub const FOLLOW_UP_OUTPUT_SCHEMA_VERSION: &str = "ringmaster.ai.follow_up.v1";
+pub const REVIEW_OUTPUT_SCHEMA_VERSION: &str = "ringmaster.ai.review.v3";
+pub const COMPARE_OUTPUT_SCHEMA_VERSION: &str = "ringmaster.ai.compare.v3";
+pub const FOLLOW_UP_OUTPUT_SCHEMA_VERSION: &str = "ringmaster.ai.follow_up.v3";
 
 type ProviderFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
@@ -96,6 +101,20 @@ pub struct ArtifactFinding {
     pub finding_id: String,
     pub title: String,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_tier: Option<EvidenceTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interpretation_scope: Option<InterpretationScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_population_profile: Option<PopulationProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub population_support_status: Option<PopulationSupportStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_population_profile: Option<PopulationProfile>,
+    #[serde(default)]
+    pub caution_labels: Vec<String>,
     pub confidence: ConfidenceLevel,
     pub sufficiency: SufficiencyLevel,
     pub evidence_refs: Vec<ArtifactEvidenceRef>,
@@ -216,6 +235,7 @@ pub struct AiRequestPreviewSnapshot {
     pub scope: String,
     pub anchor_day: String,
     pub privacy_profile: PrivacyProfile,
+    pub active_population_profile: PopulationProfile,
     pub day_count: usize,
 }
 
@@ -788,18 +808,21 @@ fn sanitize_review_artifact(
     artifact.headline_findings = sanitize_review_findings(
         artifact.headline_findings,
         &valid_export_refs,
+        snapshot.metadata.active_population_profile,
         &mut seen_finding_ids,
         &mut seen_finding_themes,
     );
     artifact.positive_findings = sanitize_review_findings(
         artifact.positive_findings,
         &valid_export_refs,
+        snapshot.metadata.active_population_profile,
         &mut seen_finding_ids,
         &mut seen_finding_themes,
     );
     artifact.negative_findings = sanitize_review_findings(
         artifact.negative_findings,
         &valid_export_refs,
+        snapshot.metadata.active_population_profile,
         &mut seen_finding_ids,
         &mut seen_finding_themes,
     );
@@ -814,12 +837,15 @@ fn sanitize_review_artifact(
 fn sanitize_review_findings(
     findings: Vec<ArtifactFinding>,
     valid_export_refs: &BTreeSet<String>,
+    active_population: PopulationProfile,
     seen_finding_ids: &mut BTreeSet<String>,
     seen_finding_themes: &mut BTreeSet<String>,
 ) -> Vec<ArtifactFinding> {
     findings
         .into_iter()
-        .filter_map(|finding| sanitize_review_finding(finding, valid_export_refs))
+        .filter_map(|finding| {
+            sanitize_review_finding(finding, valid_export_refs, active_population)
+        })
         .filter(|finding| {
             let finding_id_key = normalize_dedupe_key(&finding.finding_id);
             if !finding_id_key.is_empty() && !seen_finding_ids.insert(finding_id_key) {
@@ -842,7 +868,19 @@ fn sanitize_review_findings(
 fn sanitize_review_finding(
     mut finding: ArtifactFinding,
     valid_export_refs: &BTreeSet<String>,
+    active_population: PopulationProfile,
 ) -> Option<ArtifactFinding> {
+    apply_evidence_metadata(&mut finding, active_population);
+    if let Some(claim_key) = finding.claim_key.as_deref() {
+        let joined = format!("{} {}", finding.title, finding.summary);
+        let population = finding
+            .active_population_profile
+            .unwrap_or(active_population);
+        if !validate_claim_text(claim_key, population, &joined).is_empty() {
+            return None;
+        }
+    }
+
     let evidence_refs = sanitize_evidence_refs(&finding.evidence_refs, valid_export_refs, None);
     let evidence_export_refs = evidence_refs
         .iter()
@@ -923,8 +961,20 @@ fn render_findings(findings: &[ArtifactFinding]) -> Vec<String> {
                     finding.confidence.as_str(),
                     finding.sufficiency.as_str()
                 ),
+                finding.evidence_tier.map_or_else(String::new, |tier| {
+                    format!("     evidence: {}", tier.chip_label())
+                }),
                 format!("     {}", finding.summary),
             ];
+            if lines[2].is_empty() {
+                lines.remove(2);
+            }
+            if !finding.caution_labels.is_empty() {
+                lines.push(format!(
+                    "     rails: {}",
+                    finding.caution_labels.join(" | ")
+                ));
+            }
             if !finding.evidence_refs.is_empty() {
                 lines.push("     evidence:".to_owned());
                 lines.extend(finding.evidence_refs.iter().map(|evidence| {
@@ -1459,12 +1509,13 @@ pub fn render_request_preview(preview: &AiRequestPreview) -> String {
         lines.push("snapshots:".to_owned());
         lines.extend(preview.snapshots.iter().map(|snapshot| {
             format!(
-                "  - {} | hash={} | scope={} | anchor_day={} | profile={} | days={}",
+                "  - {} | hash={} | scope={} | anchor_day={} | privacy={} | population={} | days={}",
                 snapshot.label,
                 snapshot.snapshot_hash,
                 snapshot.scope,
                 snapshot.anchor_day,
                 snapshot.privacy_profile.as_str(),
+                snapshot.active_population_profile.as_str(),
                 snapshot.day_count
             )
         }));
@@ -1479,6 +1530,7 @@ fn preview_snapshot(label: &str, snapshot: &SnapshotBundleV1) -> AiRequestPrevie
         scope: snapshot.metadata.scope.clone(),
         anchor_day: snapshot.metadata.anchor_day.clone(),
         privacy_profile: snapshot.metadata.privacy_profile,
+        active_population_profile: snapshot.metadata.active_population_profile,
         day_count: day_span_count(&snapshot.metadata.start_day, &snapshot.metadata.end_day),
     }
 }
@@ -1831,32 +1883,65 @@ fn review_findings_from_snapshot(snapshot: &SnapshotBundleV1) -> Vec<ArtifactFin
         .trend_summaries
         .iter()
         .take(3)
-        .map(|summary| ArtifactFinding {
-            finding_id: finding_id(&summary.metric_key, &summary.label),
-            title: summary.label.clone(),
-            summary: trend_summary_text(summary.label.as_str(), summary.direction.as_str()),
-            confidence: if summary.current_average.is_some() && summary.previous_average.is_some() {
-                ConfidenceLevel::Medium
-            } else {
-                ConfidenceLevel::Low
-            },
-            sufficiency: if summary.current_average.is_some() && summary.previous_average.is_some()
-            {
-                SufficiencyLevel::Medium
-            } else {
-                SufficiencyLevel::Thin
-            },
-            evidence_refs: snapshot
-                .metrics
-                .daily_scores
-                .iter()
-                .take(2)
-                .map(|row| ArtifactEvidenceRef {
-                    export_ref: row.export_ref.clone(),
-                    note: format!("Daily score row on {}", row.day),
-                })
-                .collect(),
-            counterevidence_refs: Vec::new(),
+        .map(|summary| {
+            let descriptor = summary.evidence.clone().or_else(|| {
+                resolve_evidence_descriptor(
+                    &summary.metric_key,
+                    snapshot.metadata.active_population_profile,
+                )
+            });
+            ArtifactFinding {
+                finding_id: finding_id(&summary.metric_key, &summary.label),
+                title: summary.label.clone(),
+                summary: trend_summary_text(summary.label.as_str(), summary.direction.as_str()),
+                claim_key: Some(summary.metric_key.clone()),
+                evidence_tier: descriptor.as_ref().map(|value| value.evidence_tier),
+                interpretation_scope: descriptor.as_ref().map(|value| value.interpretation_scope),
+                active_population_profile: descriptor
+                    .as_ref()
+                    .map(|value| value.active_population_profile),
+                population_support_status: descriptor
+                    .as_ref()
+                    .map(|value| value.population_support_status),
+                fallback_population_profile: descriptor
+                    .as_ref()
+                    .and_then(|value| value.fallback_population_profile),
+                caution_labels: descriptor
+                    .as_ref()
+                    .map(|value| {
+                        value
+                            .caution_flags
+                            .iter()
+                            .map(|flag| flag.label().to_owned())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+                confidence: if summary.current_average.is_some()
+                    && summary.previous_average.is_some()
+                {
+                    ConfidenceLevel::Medium
+                } else {
+                    ConfidenceLevel::Low
+                },
+                sufficiency: if summary.current_average.is_some()
+                    && summary.previous_average.is_some()
+                {
+                    SufficiencyLevel::Medium
+                } else {
+                    SufficiencyLevel::Thin
+                },
+                evidence_refs: snapshot
+                    .metrics
+                    .daily_scores
+                    .iter()
+                    .take(2)
+                    .map(|row| ArtifactEvidenceRef {
+                        export_ref: row.export_ref.clone(),
+                        note: format!("Daily score row on {}", row.day),
+                    })
+                    .collect(),
+                counterevidence_refs: Vec::new(),
+            }
         })
         .collect::<Vec<_>>();
 
@@ -1865,6 +1950,13 @@ fn review_findings_from_snapshot(snapshot: &SnapshotBundleV1) -> Vec<ArtifactFin
             finding_id: finding_id("insufficient", &snapshot.metadata.scope),
             title: "Insufficient direct trend evidence".to_owned(),
             summary: "The snapshot did not contain enough trend data to derive a stronger dry-run finding.".to_owned(),
+            claim_key: None,
+            evidence_tier: None,
+            interpretation_scope: None,
+            active_population_profile: None,
+            population_support_status: None,
+            fallback_population_profile: None,
+            caution_labels: Vec::new(),
             confidence: ConfidenceLevel::Low,
             sufficiency: SufficiencyLevel::Missing,
             evidence_refs: Vec::new(),
@@ -1873,6 +1965,38 @@ fn review_findings_from_snapshot(snapshot: &SnapshotBundleV1) -> Vec<ArtifactFin
     }
 
     findings
+}
+
+fn apply_evidence_metadata(finding: &mut ArtifactFinding, active_population: PopulationProfile) {
+    let claim_key = finding
+        .claim_key
+        .as_deref()
+        .filter(|claim_key| resolve_evidence_descriptor(claim_key, active_population).is_some())
+        .map(str::to_owned)
+        .or_else(|| {
+            let inferred = finding.finding_id.split(':').next().unwrap_or_default();
+            resolve_evidence_descriptor(inferred, active_population).map(|_| inferred.to_owned())
+        });
+
+    let Some(claim_key) = claim_key else {
+        return;
+    };
+    let Some(descriptor) = resolve_evidence_descriptor(&claim_key, active_population) else {
+        return;
+    };
+
+    finding.claim_key = Some(claim_key.clone());
+    finding.evidence_tier = Some(descriptor.evidence_tier);
+    finding.interpretation_scope = Some(descriptor.interpretation_scope);
+    finding.active_population_profile = Some(descriptor.active_population_profile);
+    finding.population_support_status = Some(descriptor.population_support_status);
+    finding.fallback_population_profile = descriptor.fallback_population_profile;
+    if finding.caution_labels.is_empty() {
+        finding.caution_labels = evidence_badges(&claim_key, active_population)
+            .into_iter()
+            .skip(2)
+            .collect();
+    }
 }
 
 fn compare_daily_score_change(
@@ -1889,6 +2013,13 @@ fn compare_daily_score_change(
             summary: format!(
                 "The average combined daily score shifted from {left:.1} to {right:.1}."
             ),
+            claim_key: None,
+            evidence_tier: None,
+            interpretation_scope: None,
+            active_population_profile: None,
+            population_support_status: None,
+            fallback_population_profile: None,
+            caution_labels: Vec::new(),
             confidence: ConfidenceLevel::Medium,
             sufficiency: SufficiencyLevel::Medium,
             evidence_refs: snapshot_b
@@ -1930,6 +2061,13 @@ fn compare_signal_count_change(
         summary: format!(
             "Review signal coverage changed from {count_a} signal rows to {count_b} signal rows."
         ),
+        claim_key: None,
+        evidence_tier: None,
+        interpretation_scope: None,
+        active_population_profile: None,
+        population_support_status: None,
+        fallback_population_profile: None,
+        caution_labels: Vec::new(),
         confidence: ConfidenceLevel::Low,
         sufficiency: SufficiencyLevel::Thin,
         evidence_refs: snapshot_b
@@ -2332,6 +2470,7 @@ mod tests {
         OuraConfig, OuraSecretBackend, RefreshConfig, WebhookConfig,
     };
     use crate::error::RingmasterError;
+    use crate::evidence::{PopulationProfile, PopulationSupportStatus};
     use crate::snapshot::{
         PrivacyProfile, SnapshotBundleV1, SnapshotCapabilities, SnapshotCapabilityEntry,
         SnapshotContextEvent, SnapshotFreshness, SnapshotMetadata, SnapshotMetrics,
@@ -2352,8 +2491,11 @@ mod tests {
                 end_day: "2026-04-10".to_owned(),
                 anchor_day: "2026-04-10".to_owned(),
                 privacy_profile: PrivacyProfile::Redacted,
+                active_population_profile: PopulationProfile::GeneralAdult,
                 source_mode: SnapshotSourceMode::Demo,
                 schema_version: 13,
+                evidence_registry_version: crate::evidence::registry::evidence_registry_version()
+                    .to_owned(),
             },
             freshness: SnapshotFreshness {
                 latest_source_day: Some("2026-04-10".to_owned()),
@@ -2393,6 +2535,7 @@ mod tests {
                 daily_scores: vec![crate::snapshot::SnapshotDailyScore {
                     export_ref: "daily:2026-04-10".to_owned(),
                     day: "2026-04-10".to_owned(),
+                    sleep_duration_seconds: Some(28_800),
                     sleep_score: Some(84),
                     readiness_score: Some(80),
                     activity_score: Some(78),
@@ -2418,6 +2561,7 @@ mod tests {
                 summary: "Sleep score improved.".to_owned(),
                 current_average: Some(84.0),
                 previous_average: Some(79.0),
+                evidence: crate::evidence::registry::evidence_descriptor("sleep_score"),
             }],
             context_events: vec![SnapshotContextEvent {
                 export_ref: "context:1".to_owned(),
@@ -2440,6 +2584,7 @@ mod tests {
                 persistence_days: 2,
                 sufficiency: "medium".to_owned(),
                 stale_days: 0,
+                evidence: crate::evidence::registry::evidence_descriptor("sleep_time_status"),
             }],
             follow_up_targets: vec![crate::snapshot::SnapshotFollowUpTarget {
                 label: "Review today".to_owned(),
@@ -2530,6 +2675,7 @@ mod tests {
                 renewal_lead_secs: 86_400,
                 subscriptions: Vec::new(),
             },
+            guidance: crate::config::GuidanceConfig::default(),
             ai: AiConfig {
                 enabled: false,
                 provider: AiProviderKind::OpenAi,
@@ -2666,7 +2812,16 @@ mod tests {
             headline_findings: vec![ArtifactFinding {
                 finding_id: "sleep-dup".to_owned(),
                 title: "Elevated sleep score".to_owned(),
-                summary: "Sleep score is above baseline.".to_owned(),
+                summary: "Sleep score is above baseline in this exploratory trend view.".to_owned(),
+                claim_key: Some("sleep_score".to_owned()),
+                evidence_tier: Some(crate::evidence::registry::EvidenceTier::Exploratory),
+                interpretation_scope: Some(
+                    crate::evidence::registry::InterpretationScope::WithinPersonTrendOnly,
+                ),
+                active_population_profile: Some(PopulationProfile::GeneralAdult),
+                population_support_status: Some(PopulationSupportStatus::PopulationSpecific),
+                fallback_population_profile: None,
+                caution_labels: Vec::new(),
                 confidence: super::ConfidenceLevel::Medium,
                 sufficiency: SufficiencyLevel::Medium,
                 evidence_refs: vec![
@@ -2691,7 +2846,16 @@ mod tests {
             positive_findings: vec![ArtifactFinding {
                 finding_id: "sleep-dup".to_owned(),
                 title: "Elevated sleep score".to_owned(),
-                summary: "Sleep score is above baseline.".to_owned(),
+                summary: "Sleep score is above baseline in this exploratory trend view.".to_owned(),
+                claim_key: Some("sleep_score".to_owned()),
+                evidence_tier: Some(crate::evidence::registry::EvidenceTier::Exploratory),
+                interpretation_scope: Some(
+                    crate::evidence::registry::InterpretationScope::WithinPersonTrendOnly,
+                ),
+                active_population_profile: Some(PopulationProfile::GeneralAdult),
+                population_support_status: Some(PopulationSupportStatus::PopulationSpecific),
+                fallback_population_profile: None,
+                caution_labels: Vec::new(),
                 confidence: super::ConfidenceLevel::Medium,
                 sufficiency: SufficiencyLevel::Medium,
                 evidence_refs: vec![ArtifactEvidenceRef {
@@ -2704,6 +2868,15 @@ mod tests {
                 finding_id: "workout-context".to_owned(),
                 title: "Workout context present".to_owned(),
                 summary: "A workout context event exists on the anchor day.".to_owned(),
+                claim_key: Some("session_context".to_owned()),
+                evidence_tier: Some(crate::evidence::registry::EvidenceTier::Exploratory),
+                interpretation_scope: Some(
+                    crate::evidence::registry::InterpretationScope::ContextualOnly,
+                ),
+                active_population_profile: Some(PopulationProfile::GeneralAdult),
+                population_support_status: Some(PopulationSupportStatus::PopulationSpecific),
+                fallback_population_profile: None,
+                caution_labels: Vec::new(),
                 confidence: super::ConfidenceLevel::High,
                 sufficiency: SufficiencyLevel::Medium,
                 evidence_refs: vec![ArtifactEvidenceRef {

@@ -74,7 +74,20 @@ const SURFACES_CONTEXT: &[ReviewSurface] = &[
     ReviewSurface::Investigate,
 ];
 
-const SIGNALS: [SignalDefinition; 16] = [
+const SIGNALS: [SignalDefinition; 19] = [
+    SignalDefinition {
+        key: "sleep_duration",
+        label: "Sleep duration",
+        family: "daily_sleep",
+        granularity: SignalGranularity::Day,
+        baseline_window_days: 30,
+        directionality: SignalDirectionality::HigherBetter,
+        required_capability: CapabilityKind::Daily,
+        wording_constraint: "Use public-health sleep guidance plus baseline context without diagnosis language.",
+        suitable_surfaces: SURFACES_ALL,
+        evidence_kind: EvidenceKind::Direct,
+        weekly_aggregation: WeeklyAggregation::Mean,
+    },
     SignalDefinition {
         key: "sleep_score",
         label: "Sleep score",
@@ -139,6 +152,32 @@ const SIGNALS: [SignalDefinition; 16] = [
         suitable_surfaces: SURFACES_ALL,
         evidence_kind: EvidenceKind::Direct,
         weekly_aggregation: WeeklyAggregation::Sum,
+    },
+    SignalDefinition {
+        key: "weekly_activity_minutes",
+        label: "Weekly activity totals",
+        family: "workout",
+        granularity: SignalGranularity::Day,
+        baseline_window_days: 28,
+        directionality: SignalDirectionality::HigherBetter,
+        required_capability: CapabilityKind::Workout,
+        wording_constraint: "Describe workout minutes against general adult guidance and recent baseline without treatment language.",
+        suitable_surfaces: SURFACES_WEEKLY,
+        evidence_kind: EvidenceKind::Direct,
+        weekly_aggregation: WeeklyAggregation::Sum,
+    },
+    SignalDefinition {
+        key: "weekly_activity_distribution",
+        label: "Weekly activity distribution",
+        family: "workout",
+        granularity: SignalGranularity::Day,
+        baseline_window_days: 28,
+        directionality: SignalDirectionality::HigherBetter,
+        required_capability: CapabilityKind::Workout,
+        wording_constraint: "Describe how activity is spread across the week without prescribing a plan.",
+        suitable_surfaces: SURFACES_WEEKLY,
+        evidence_kind: EvidenceKind::Direct,
+        weekly_aggregation: WeeklyAggregation::Count,
     },
     SignalDefinition {
         key: "temperature_deviation",
@@ -338,6 +377,7 @@ impl ReviewFocus {
                 "rest_mode_active",
             ],
             Self::Sleep => &[
+                "sleep_duration",
                 "sleep_score",
                 "sleep_time_status",
                 "readiness_score",
@@ -357,6 +397,8 @@ impl ReviewFocus {
                 "rest_mode_active",
             ],
             Self::Activity => &[
+                "weekly_activity_minutes",
+                "weekly_activity_distribution",
                 "activity_score",
                 "steps",
                 "active_calories",
@@ -389,12 +431,15 @@ mod tests {
             .collect::<Vec<_>>();
 
         for key in [
+            "sleep_duration",
             "sleep_score",
             "readiness_score",
             "stress_high",
             "resilience_level",
             "cardiovascular_age",
             "vo2_max",
+            "weekly_activity_minutes",
+            "weekly_activity_distribution",
             "sleep_time_status",
             "rest_mode_active",
         ] {
@@ -413,6 +458,16 @@ mod tests {
                 "stress_high",
                 "rest_mode_active",
             ]
+        );
+        assert!(
+            ReviewFocus::Sleep
+                .primary_signal_keys()
+                .contains(&"sleep_duration")
+        );
+        assert!(
+            ReviewFocus::Activity
+                .primary_signal_keys()
+                .contains(&"weekly_activity_minutes")
         );
     }
 

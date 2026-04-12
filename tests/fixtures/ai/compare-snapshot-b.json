@@ -1,16 +1,18 @@
 {
-  "schema_version": "ringmaster.snapshot.v1",
+  "schema_version": "ringmaster.snapshot.v3",
   "metadata": {
     "app_version": "0.1.0",
     "generated_at": "2026-04-10T00:00:00Z",
-    "snapshot_hash": "468c3f02fff5405fdb4f51a97cd51e0331cc1de4811b877f5ef6c326afbb715a",
+    "snapshot_hash": "b5393ccb68553ce87304ab35e27bf766e1b196afa15a93d50c4a12c327446177",
     "scope": "day:2026-04-10",
     "start_day": "2026-04-10",
     "end_day": "2026-04-10",
     "anchor_day": "2026-04-10",
     "privacy_profile": "redacted",
+    "active_population_profile": "general_adult",
     "source_mode": "demo",
-    "schema_version": 14
+    "schema_version": 14,
+    "evidence_registry_version": "ringmaster.evidence.v2"
   },
   "freshness": {
     "latest_source_day": "2026-04-10",
@@ -64,6 +66,7 @@
         "export_ref": "daily:2026-04-10",
         "day": "2026-04-10",
         "sleep_score": 82,
+        "sleep_duration_seconds": null,
         "readiness_score": 80,
         "activity_score": 76
       }
@@ -102,7 +105,8 @@
       "z_score": 1.1,
       "persistence_days": 2,
       "sufficiency": "medium",
-      "stale_days": 0
+      "stale_days": 0,
+      "evidence": null
     }
   ],
   "follow_up_targets": []

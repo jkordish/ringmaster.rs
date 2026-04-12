@@ -1,6 +1,6 @@
 {
-  "schema_version": "ringmaster.ai.review.v1",
-  "prompt_version": "review_prompt_v2",
+  "schema_version": "ringmaster.ai.review.v3",
+  "prompt_version": "review_prompt_v3",
   "status": "insufficient",
   "overview": "Single-day review for 2026-04-10: sleep score is above baseline, readiness is below baseline, and the rest of the snapshot stays sparse enough that conclusions remain limited.",
   "headline_findings": [
@@ -16,7 +16,20 @@
           "note": "Single-day daily score row"
         }
       ],
-      "counterevidence_refs": []
+      "counterevidence_refs": [],
+      "claim_key": "sleep_score",
+      "evidence_tier": "exploratory",
+      "interpretation_scope": "within_person_trend_only",
+      "caution_labels": [
+        "Sensitive metric",
+        "Consumer wearable limitation",
+        "Not diagnostic",
+        "Not for screening",
+        "Use your baseline too"
+      ],
+      "active_population_profile": "general_adult",
+      "population_support_status": "population_specific",
+      "fallback_population_profile": null
     },
     {
       "finding_id": "readiness-score-lower",
@@ -30,7 +43,10 @@
           "note": "Single-day daily score row"
         }
       ],
-      "counterevidence_refs": []
+      "counterevidence_refs": [],
+      "active_population_profile": "general_adult",
+      "population_support_status": "population_specific",
+      "fallback_population_profile": null
     }
   ],
   "positive_findings": [
@@ -46,7 +62,10 @@
           "note": "Workout context event"
         }
       ],
-      "counterevidence_refs": []
+      "counterevidence_refs": [],
+      "active_population_profile": "general_adult",
+      "population_support_status": "population_specific",
+      "fallback_population_profile": null
     }
   ],
   "negative_findings": [
@@ -62,7 +81,10 @@
           "note": "Single-day heartrate average"
         }
       ],
-      "counterevidence_refs": []
+      "counterevidence_refs": [],
+      "active_population_profile": "general_adult",
+      "population_support_status": "population_specific",
+      "fallback_population_profile": null
     }
   ],
   "unresolved_questions": [
