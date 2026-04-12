@@ -141,12 +141,6 @@ pub fn bindings() -> &'static [Keybinding] {
 }
 
 fn resolve_scopes(context: BindingContext) -> Vec<BindingScope> {
-    if context.ai_preflight_open {
-        return vec![
-            BindingScope::Transient(TransientLayer::AiPreflight),
-            BindingScope::Global,
-        ];
-    }
     if context.search_open {
         return vec![
             BindingScope::Transient(TransientLayer::Search),
@@ -156,6 +150,12 @@ fn resolve_scopes(context: BindingContext) -> Vec<BindingScope> {
     if context.help_open {
         return vec![
             BindingScope::Transient(TransientLayer::Help),
+            BindingScope::Global,
+        ];
+    }
+    if context.ai_preflight_open {
+        return vec![
+            BindingScope::Transient(TransientLayer::AiPreflight),
             BindingScope::Global,
         ];
     }
@@ -1044,7 +1044,7 @@ fn list_region_bindings(screen: Screen, region: FocusRegion) -> Vec<Keybinding> 
     use BindingScope::ScreenRegion;
     use ChordKey::{Char, Down, End, Home, PageDown, PageUp, Up};
 
-    vec![
+    let mut bindings = vec![
         key(
             ScreenRegion(screen, region),
             Standard,
@@ -1112,20 +1112,23 @@ fn list_region_bindings(screen: Screen, region: FocusRegion) -> Vec<Keybinding> 
         key(
             ScreenRegion(screen, region),
             Expert,
-            KeyChord::plain(Char('g')),
-            MoveFocusedRegion(crate::navigation::NavMove::First),
-            "`g` first item",
-            false,
-        ),
-        key(
-            ScreenRegion(screen, region),
-            Expert,
             KeyChord::shift(Char('g')),
             MoveFocusedRegion(crate::navigation::NavMove::Last),
             "`G` last item",
             false,
         ),
-    ]
+    ];
+    if screen != Screen::Ai {
+        bindings.push(key(
+            ScreenRegion(screen, region),
+            Expert,
+            KeyChord::plain(Char('g')),
+            MoveFocusedRegion(crate::navigation::NavMove::First),
+            "`g` first item",
+            false,
+        ));
+    }
+    bindings
 }
 
 const fn key(
@@ -1362,6 +1365,49 @@ mod tests {
         );
 
         assert_eq!(action, Some(Action::Quit));
+    }
+
+    #[test]
+    fn visible_transient_overrides_preflight_scope_resolution() {
+        let help_action = super::resolve(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            BindingContext {
+                active_screen: Screen::Ai,
+                focused_region: FocusRegion::Secondary,
+                search_open: false,
+                help_open: true,
+                ai_preflight_open: true,
+            },
+        );
+        assert_eq!(help_action, Some(Action::ToggleHelp));
+
+        let search_action = super::resolve(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            BindingContext {
+                active_screen: Screen::Ai,
+                focused_region: FocusRegion::Secondary,
+                search_open: true,
+                help_open: false,
+                ai_preflight_open: true,
+            },
+        );
+        assert_eq!(search_action, Some(Action::SearchNextResult));
+    }
+
+    #[test]
+    fn ai_screen_report_shortcut_is_not_shadowed_by_list_aliases() {
+        let action = super::resolve(
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+            BindingContext {
+                active_screen: Screen::Ai,
+                focused_region: FocusRegion::Secondary,
+                search_open: false,
+                help_open: false,
+                ai_preflight_open: false,
+            },
+        );
+
+        assert_eq!(action, Some(Action::RequestAiGenerateReport));
     }
 
     #[test]

@@ -1251,12 +1251,12 @@ impl AppState {
 
     #[must_use]
     pub const fn current_transient(&self) -> Option<TransientLayer> {
-        if self.ai_preflight.is_some() {
-            Some(TransientLayer::AiPreflight)
-        } else if self.search.is_some() {
+        if self.search.is_some() {
             Some(TransientLayer::Search)
         } else if self.help_open {
             Some(TransientLayer::Help)
+        } else if self.ai_preflight.is_some() {
+            Some(TransientLayer::AiPreflight)
         } else {
             None
         }
@@ -1630,6 +1630,18 @@ impl AppState {
     }
 
     fn move_focused_region(&mut self, movement: NavMove) {
+        if self.search.is_some() {
+            match movement {
+                NavMove::Previous | NavMove::PageBackward => self.advance_search(false),
+                NavMove::Next | NavMove::PageForward => self.advance_search(true),
+                NavMove::First => self.advance_search_to_edge(true),
+                NavMove::Last => self.advance_search_to_edge(false),
+            }
+            return;
+        }
+        if self.help_open {
+            return;
+        }
         if self.ai_preflight.is_some() {
             self.ai_preflight_control = match movement {
                 NavMove::Previous => self.ai_preflight_control.previous(),
@@ -1641,19 +1653,6 @@ impl AppState {
                 "Focused {}.",
                 self.ai_preflight_control.label().to_ascii_lowercase()
             );
-            return;
-        }
-        if self.help_open {
-            return;
-        }
-
-        if self.search.is_some() {
-            match movement {
-                NavMove::Previous | NavMove::PageBackward => self.advance_search(false),
-                NavMove::Next | NavMove::PageForward => self.advance_search(true),
-                NavMove::First => self.advance_search_to_edge(true),
-                NavMove::Last => self.advance_search_to_edge(false),
-            }
             return;
         }
 
@@ -1720,20 +1719,20 @@ impl AppState {
     }
 
     fn activate_focused_region(&mut self) {
-        if self.ai_preflight.is_some() {
-            match self.ai_preflight_control {
-                PreflightControl::Confirm => self.handle(Action::ConfirmAiPreflight),
-                PreflightControl::Privacy => self.handle(Action::CycleAiPreflightPrivacyProfile),
-                PreflightControl::Cancel => self.handle(Action::DismissAiPreflight),
-            }
+        if self.search.is_some() {
+            self.advance_search(true);
             return;
         }
         if self.help_open {
             self.toggle_help();
             return;
         }
-        if self.search.is_some() {
-            self.advance_search(true);
+        if self.ai_preflight.is_some() {
+            match self.ai_preflight_control {
+                PreflightControl::Confirm => self.handle(Action::ConfirmAiPreflight),
+                PreflightControl::Privacy => self.handle(Action::CycleAiPreflightPrivacyProfile),
+                PreflightControl::Cancel => self.handle(Action::DismissAiPreflight),
+            }
             return;
         }
 
@@ -1786,18 +1785,18 @@ impl AppState {
     }
 
     fn back_out(&mut self) {
-        if self.ai_preflight.take().is_some() {
-            self.ai_preflight_control = PreflightControl::Confirm;
-            "AI preflight dismissed.".clone_into(&mut self.status_line);
-            self.rebuild_live_model();
-            return;
-        }
         if self.search.is_some() {
             self.close_search();
             return;
         }
         if self.help_open {
             self.toggle_help();
+            return;
+        }
+        if self.ai_preflight.take().is_some() {
+            self.ai_preflight_control = PreflightControl::Confirm;
+            "AI preflight dismissed.".clone_into(&mut self.status_line);
+            self.rebuild_live_model();
             return;
         }
 
@@ -8784,12 +8783,12 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        AiBrowserTab, AiOpsSnapshot, AiPreflightState, AppState, COMPARE_PROMPT_VERSION,
-        DataFamily, HeartRateDay, LiveModelOptions, LiveSnapshot, OverlayFilterState,
-        PatternMetricFilter, REVIEW_PROMPT_VERSION, RefreshPolicySnapshot, ReviewScreenMode,
-        RunMode, Screen, TrendWindowKind, WebhookOpsSnapshot, build_ai_artifact_summary_view,
-        build_live_model, build_ops_model, build_state_from_snapshot, demo_eval_run_details,
-        newest_day_index, serialize_json,
+        AiBrowserTab, AiLaunchIntent, AiOpsSnapshot, AiPreflightState, AppState,
+        COMPARE_PROMPT_VERSION, DataFamily, HeartRateDay, LiveModelOptions, LiveSnapshot,
+        OverlayFilterState, PatternMetricFilter, REVIEW_PROMPT_VERSION, RefreshPolicySnapshot,
+        ReviewScreenMode, RunMode, Screen, TrendWindowKind, WebhookOpsSnapshot,
+        build_ai_artifact_summary_view, build_live_model, build_ops_model,
+        build_state_from_snapshot, demo_eval_run_details, newest_day_index, serialize_json,
     };
     use crate::action::Action;
     use crate::ai::{
@@ -8797,7 +8796,7 @@ mod tests {
         ArtifactStatus, ConfidenceLevel, GuidedFollowUpKind, ReviewArtifactV1, SufficiencyLevel,
     };
     use crate::insights::MetricPoint;
-    use crate::navigation::{self, FocusRegion, PreflightControl, SearchScope};
+    use crate::navigation::{self, FocusRegion, PreflightControl, SearchScope, TransientLayer};
     use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
     use crate::review::{
         InvestigationReport, ReviewCard, ReviewConfidence, ReviewDeck, ReviewFocus, ReviewMode,
@@ -10222,6 +10221,74 @@ mod tests {
         app.handle(Action::CloseSearch);
         assert!(app.search_state().is_none());
         assert_eq!(app.focused_region(), FocusRegion::Primary);
+    }
+
+    #[test]
+    fn visible_transient_takes_priority_over_underlying_preflight() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Ai;
+        app.handle(Action::AiPreflightPrepared {
+            preflight: Box::new(AiPreflightState {
+                intent: AiLaunchIntent::ReviewSelectedDay,
+                source_screen: Screen::Review,
+                snapshot_scope: "day:2026-04-08".to_owned(),
+                snapshot_paths: vec!["/tmp/preflight-snapshot.json".to_owned()],
+                request_preview: make_ai_preview("demo-snapshot-20260408"),
+                privacy_profile: PrivacyProfile::Redacted,
+                model_override: Some("gpt-5-mini".to_owned()),
+                source_ai_artifact_id: Some("run-demo-review-20260408".to_owned()),
+                follow_up_kind: None,
+                warning_lines: Vec::new(),
+                confirm_enabled: true,
+            }),
+            status_line: "Prepared review preflight.".to_owned(),
+        });
+        app.handle(Action::ToggleHelp);
+        assert_eq!(app.current_transient(), Some(TransientLayer::Help));
+
+        app.handle(Action::OpenSearch);
+        assert_eq!(app.current_transient(), Some(TransientLayer::Search));
+    }
+
+    #[test]
+    fn back_closes_topmost_overlay_before_preflight() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Ai;
+        app.handle(Action::AiPreflightPrepared {
+            preflight: Box::new(AiPreflightState {
+                intent: AiLaunchIntent::ReviewSelectedDay,
+                source_screen: Screen::Review,
+                snapshot_scope: "day:2026-04-08".to_owned(),
+                snapshot_paths: vec!["/tmp/preflight-snapshot.json".to_owned()],
+                request_preview: make_ai_preview("demo-snapshot-20260408"),
+                privacy_profile: PrivacyProfile::Redacted,
+                model_override: Some("gpt-5-mini".to_owned()),
+                source_ai_artifact_id: Some("run-demo-review-20260408".to_owned()),
+                follow_up_kind: None,
+                warning_lines: Vec::new(),
+                confirm_enabled: true,
+            }),
+            status_line: "Prepared review preflight.".to_owned(),
+        });
+
+        app.handle(Action::ToggleHelp);
+        app.handle(Action::Back);
+        assert_eq!(app.current_transient(), Some(TransientLayer::AiPreflight));
+
+        app.handle(Action::OpenSearch);
+        app.handle(Action::Back);
+        assert_eq!(app.current_transient(), Some(TransientLayer::AiPreflight));
+
+        app.handle(Action::Back);
+        assert_eq!(app.current_transient(), None);
     }
 
     #[test]
