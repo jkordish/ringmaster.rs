@@ -44,7 +44,7 @@ use std::io::{IsTerminal, stdin, stdout};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::evidence::stale_evidence_warnings;
+use crate::evidence::{evidence_registry_version, stale_evidence_warnings};
 use crate::time_utils::current_local_day_string;
 use app::{build_demo_state, build_live_state, build_read_only_live_state, load_live_snapshot};
 use cli::{
@@ -240,46 +240,50 @@ fn render_doctor_report(
 
 fn doctor_runtime_section(config: &Config, store: &Store) -> Result<String> {
     let stale_evidence = stale_evidence_warnings(OffsetDateTime::now_utc().date());
-    Ok(format!(
-        "\
-app_name: {}
-config_dir: {}
-config_file: {} ({})
-state_dir: {}
-cache_dir: {}
-database_path: {} ({})
-log_dir: {}
-schema_version: {}
-migrations_applied_this_run: {}
-active_population_profile: {} ({})
-stale_evidence_entries: {}",
-        config.app_name,
-        config.paths.config_dir.display(),
-        config.paths.config_file.display(),
-        if config.paths.config_file_present() {
-            "present"
-        } else {
-            "missing"
-        },
-        config.paths.state_dir.display(),
-        config.paths.cache_dir.display(),
-        config.paths.database_file.display(),
-        if config.paths.database_present() {
-            "present"
-        } else {
-            "created if needed"
-        },
-        config.paths.log_dir.display(),
-        store.metadata().schema_version()?,
-        store.migration_report().applied_versions.len(),
-        config.guidance.active_population_profile.as_str(),
-        config.guidance.source_label(),
-        if stale_evidence.is_empty() {
-            "none".to_owned()
-        } else {
-            stale_evidence.join(" | ")
-        },
-    ))
+    let stale_entries = if stale_evidence.is_empty() {
+        "none".to_owned()
+    } else {
+        stale_evidence.join(" | ")
+    };
+
+    Ok([
+        format!("app_name: {}", config.app_name),
+        format!("config_dir: {}", config.paths.config_dir.display()),
+        format!(
+            "config_file: {} ({})",
+            config.paths.config_file.display(),
+            if config.paths.config_file_present() {
+                "present"
+            } else {
+                "missing"
+            }
+        ),
+        format!("state_dir: {}", config.paths.state_dir.display()),
+        format!("cache_dir: {}", config.paths.cache_dir.display()),
+        format!(
+            "database_path: {} ({})",
+            config.paths.database_file.display(),
+            if config.paths.database_present() {
+                "present"
+            } else {
+                "created if needed"
+            }
+        ),
+        format!("log_dir: {}", config.paths.log_dir.display()),
+        format!("schema_version: {}", store.metadata().schema_version()?),
+        format!("evidence_registry_version: {}", evidence_registry_version()),
+        format!(
+            "migrations_applied_this_run: {}",
+            store.migration_report().applied_versions.len()
+        ),
+        format!(
+            "active_population_profile: {} ({})",
+            config.guidance.active_population_profile.as_str(),
+            config.guidance.source_label()
+        ),
+        format!("stale_evidence_entries: {stale_entries}"),
+    ]
+    .join("\n"))
 }
 
 fn doctor_auth_section(auth_status: &oura::models::AuthStatus) -> String {
@@ -3439,6 +3443,7 @@ mod tests {
     use crate::config::{
         AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
     };
+    use crate::evidence::evidence_registry_version;
     use crate::store::Store;
     use crate::store::queries::{
         AiRunRecord, DailyActivityRecord, DailyReadinessRecord, DailySleepRecord,
@@ -3741,6 +3746,10 @@ mod tests {
             .unwrap_or_else(|error| panic!("doctor should run: {error}"))
             .unwrap_or_else(|| panic!("doctor should return output"));
 
+        assert!(report.contains(&format!(
+            "evidence_registry_version: {}",
+            evidence_registry_version()
+        )));
         assert!(report.contains("webhook_receiver_configured: false"));
         assert!(report.contains("webhook_receiver_status: config incomplete"));
         assert!(report.contains("webhook_missing_public_prereq: true"));

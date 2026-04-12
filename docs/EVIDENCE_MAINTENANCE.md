@@ -85,6 +85,7 @@ Current guardrails include:
 - registry validation tests for completeness and provenance
 - full five-profile coverage checks for every registry entry
 - stale-evidence checks based on `last_reviewed` and `update_cadence`
+- Ops and `cargo run -- doctor` visibility for evidence-registry version and stale-review health
 - policy tests for prohibited phrasing and required caution language
 - runtime tests that sensitive metrics do not silently upgrade unsupported population combinations
 - snapshot/report/AI tests that verify population metadata and evidence descriptors flow through the pipeline

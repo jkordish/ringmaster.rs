@@ -157,6 +157,8 @@ Every registry entry includes typed metadata for:
 
 The registry exposes compact `EvidenceDescriptor` values that are stored in snapshots and reused by reports and AI artifacts. The current serialized contract version is `ringmaster.evidence.v2`.
 
+The product also surfaces this contract at runtime: Review detail panes show the resolved population scope for a claim, Review cards prioritize sensitive caution badges when space is limited, and Ops/`cargo run -- doctor` expose the evidence-registry version plus stale-review status.
+
 ## Interpretation scopes
 
 Each claim class declares how the product is allowed to interpret it.

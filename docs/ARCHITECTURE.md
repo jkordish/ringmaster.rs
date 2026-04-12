@@ -228,7 +228,7 @@ Important implemented state concepts:
   - `StaleSubscriptionMissing`
   - `StaleCapabilityMissing`
   - `StaleUpstreamPending`
-- `LiveSnapshot`: the immutable persisted-data snapshot sent into the reducer after each background refresh
+- `LiveSnapshot`: the immutable persisted-data snapshot sent into the reducer after each background refresh, including evidence-registry version and stale-evidence runtime state for Ops/doctor visibility
 - `WebhookOpsSnapshot`: persisted receiver/subscription/delivery/queue/runtime view data shaped for the Status screen and `doctor`
 - `selected_day_index`: shared by Dashboard, Timeline, Explain, and Review
 - selected-day continuity preserves the exact selected day when possible, then the nearest earlier available day, then the next later day, before falling back to the newest day
@@ -724,7 +724,7 @@ The product now has explicit operational modes:
 - receiver-only: receiver is healthy but watch is not actively processing queued invalidations
 - hybrid: receiver and watch are both healthy, subscriptions are present, and the app can report webhook-first freshness where supported
 
-Status and `doctor` derive this mode from persisted runtime heartbeats and subscription state rather than from process assumptions.
+Status and `doctor` derive this mode from persisted runtime heartbeats and subscription state rather than from process assumptions. The same runtime view now also surfaces evidence-registry versioning and stale-review health so scientific maintenance is visible alongside sync/auth/webhook health.
 
 ## Freshness semantics
 

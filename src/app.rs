@@ -12,8 +12,10 @@ use crate::eval::{
     PersistedEvalCaseDetail, PersistedEvalGraderResult, PersistedEvalRunDetails,
     parse_persisted_eval_details,
 };
-use crate::evidence::PopulationProfile;
 use crate::evidence::policy::{claim_language_spec, evidence_badges, guidance_comparison_text};
+use crate::evidence::{
+    PopulationProfile, PopulationSupportStatus, evidence_registry_version, stale_evidence_warnings,
+};
 use crate::insights::{InsightConfidence, MetricInsight, MetricPoint, build_metric_insight};
 use crate::keybindings::BindingContext;
 use crate::navigation::{
@@ -88,6 +90,8 @@ pub struct LiveSnapshot {
     pub auth_status: AuthStatus,
     pub active_population_profile: PopulationProfile,
     pub guidance_profile_source: String,
+    pub evidence_registry_version: String,
+    pub stale_evidence_entries: Vec<String>,
     pub ai_ops: AiOpsSnapshot,
     pub webhook: WebhookOpsSnapshot,
     pub personal_info: Option<PersonalInfoRecord>,
@@ -2911,12 +2915,17 @@ pub fn load_live_snapshot(
         &ai_eval_runs,
     );
 
+    let captured_at = now_rfc3339();
+    let stale_evidence_entries = stale_evidence_warnings(OffsetDateTime::now_utc().date());
+
     Ok(LiveSnapshot {
-        captured_at: now_rfc3339(),
+        captured_at,
         refresh_policy: RefreshPolicySnapshot::from_config(config),
         auth_status: auth_status.clone(),
         active_population_profile: config.guidance.active_population_profile,
         guidance_profile_source: config.guidance.source_label().to_owned(),
+        evidence_registry_version: evidence_registry_version().to_owned(),
+        stale_evidence_entries,
         ai_ops,
         webhook: WebhookOpsSnapshot {
             bind_address: config.webhook.bind.to_string(),
@@ -3932,6 +3941,11 @@ fn build_ops_summary_lines(
             yes_no(snapshot.ai_ops.api_key_ready),
             snapshot.ai_ops.default_model
         ),
+        format!(
+            "Evidence: registry={} status={}",
+            snapshot.evidence_registry_version,
+            evidence_review_status_line(snapshot)
+        ),
     ];
     if let Some(summary) = latest_eval_health_summary(&snapshot.ai_eval_runs) {
         summary_lines.push(format!(
@@ -3987,6 +4001,13 @@ fn build_ops_warning_lines(
             "Latest eval needs attention: {} failed case(s) and {} regression(s).",
             eval_summary.failed_cases, eval_summary.regression_count
         ));
+    }
+    if !snapshot.stale_evidence_entries.is_empty() {
+        warnings.push(format!(
+            "Evidence registry review needs attention: {}.",
+            evidence_review_status_line(snapshot)
+        ));
+        warnings.extend(snapshot.stale_evidence_entries.iter().cloned());
     }
     warnings.extend(recent_health_incidents(snapshot));
     warnings
@@ -4070,6 +4091,14 @@ fn build_ops_core_items(snapshot: &LiveSnapshot) -> Vec<OpsItem> {
         ops_item(
             "Secret backend",
             snapshot.auth_status.secret_backend.clone(),
+        ),
+        ops_item(
+            "Evidence registry",
+            snapshot.evidence_registry_version.clone(),
+        ),
+        ops_item(
+            "Evidence review status",
+            evidence_review_status_line(snapshot),
         ),
     ]
 }
@@ -5686,6 +5715,10 @@ fn review_detail_lines(
         if let Some(spec) = claim_language_spec(&card.signal_key, active_population) {
             lines.push(format!("Evidence tier: {}", spec.tier_label));
             lines.push(format!("Interpretation: {}", spec.interpretation_label));
+            lines.push(format!(
+                "Population scope: {}",
+                review_population_scope_line(&spec)
+            ));
             if let Some(guidance_label) = spec.guidance_label {
                 lines.push(format!("Guidance anchor: {guidance_label}"));
             }
@@ -5774,10 +5807,110 @@ fn review_section_label(card: &ReviewCard) -> String {
 
 fn review_card_badges(card: &ReviewCard, active_population: PopulationProfile) -> Vec<String> {
     let badges = evidence_badges(&card.signal_key, active_population);
+    let Some(spec) = claim_language_spec(&card.signal_key, active_population) else {
+        return badges.into_iter().take(3).collect();
+    };
+
     if badges.is_empty() {
-        Vec::new()
+        return Vec::new();
+    }
+
+    let has_primary_caution = spec
+        .caution_labels
+        .iter()
+        .any(|label| is_primary_review_caution_badge(label));
+    let max_badges = if has_primary_caution {
+        5
+    } else if spec.population_support_status != PopulationSupportStatus::PopulationSpecific {
+        4
     } else {
-        badges.into_iter().take(3).collect()
+        3
+    };
+
+    let mut prioritized = Vec::new();
+    push_review_badge(&mut prioritized, spec.tier_label);
+    if let Some(guidance_label) = spec.guidance_label.clone() {
+        push_review_badge(&mut prioritized, guidance_label);
+    }
+    if let Some(interpretation_badge) = badges
+        .iter()
+        .find(|badge| is_interpretation_badge(badge))
+        .cloned()
+    {
+        push_review_badge(&mut prioritized, interpretation_badge);
+    }
+    if spec.population_support_status != PopulationSupportStatus::PopulationSpecific {
+        push_review_badge(
+            &mut prioritized,
+            spec.population_support_status.badge_label().to_owned(),
+        );
+    }
+    for badge in [
+        "Sensitive metric",
+        "Not for screening",
+        "Not diagnostic",
+        "Consumer wearable limitation",
+    ] {
+        if spec.caution_labels.iter().any(|label| label == badge) {
+            push_review_badge(&mut prioritized, badge.to_owned());
+        }
+    }
+    for badge in badges {
+        push_review_badge(&mut prioritized, badge);
+    }
+    prioritized.truncate(max_badges);
+    prioritized
+}
+
+fn evidence_review_status_line(snapshot: &LiveSnapshot) -> String {
+    match snapshot.stale_evidence_entries.as_slice() {
+        [] => "current".to_owned(),
+        [entry] => format!("1 stale entry | {entry}"),
+        entries => format!("{} stale entries | {}", entries.len(), entries[0]),
+    }
+}
+
+fn review_population_scope_line(spec: &crate::evidence::policy::ClaimLanguageSpec) -> String {
+    match spec.population_support_status {
+        PopulationSupportStatus::PopulationSpecific => {
+            format!(
+                "{} guidance/profile support available",
+                spec.active_population_profile.label()
+            )
+        }
+        PopulationSupportStatus::GeneralAdultOnlyFallback => {
+            let fallback_label = spec
+                .fallback_population_profile
+                .map_or("General adult", PopulationProfile::label);
+            format!(
+                "{} profile uses {fallback_label} guidance as a fallback",
+                spec.active_population_profile.label()
+            )
+        }
+        PopulationSupportStatus::Unavailable => format!(
+            "{} profile has no supported interpretation; keep this context-only",
+            spec.active_population_profile.label()
+        ),
+    }
+}
+
+fn is_interpretation_badge(badge: &str) -> bool {
+    matches!(badge, "Guidance-backed" | "Trend-only" | "Context-only")
+}
+
+fn is_primary_review_caution_badge(badge: &str) -> bool {
+    matches!(
+        badge,
+        "Sensitive metric"
+            | "Not for screening"
+            | "Not diagnostic"
+            | "Consumer wearable limitation"
+    )
+}
+
+fn push_review_badge(badges: &mut Vec<String>, badge: String) {
+    if !badges.iter().any(|existing| existing == &badge) {
+        badges.push(badge);
     }
 }
 
@@ -7963,6 +8096,8 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
         auth_status: demo_auth_status(),
         active_population_profile: config.guidance.active_population_profile,
         guidance_profile_source: config.guidance.source_label().to_owned(),
+        evidence_registry_version: evidence_registry_version().to_owned(),
+        stale_evidence_entries: stale_evidence_warnings(OffsetDateTime::now_utc().date()),
         ai_ops,
         webhook: demo_webhook_snapshot(),
         personal_info: Some(demo_personal_info()),
@@ -8996,15 +9131,16 @@ mod tests {
         OverlayFilterState, PatternMetricFilter, REVIEW_PROMPT_VERSION, RefreshPolicySnapshot,
         ReviewScreenMode, RunMode, Screen, TrendWindowKind, WebhookOpsSnapshot,
         build_ai_artifact_summary_view, build_live_model, build_ops_model,
-        build_state_from_snapshot, demo_eval_run_details, newest_day_index, serialize_json,
+        build_state_from_snapshot, demo_eval_run_details, empty_investigation_report,
+        newest_day_index, review_card_badges, review_detail_lines, serialize_json,
     };
     use crate::action::Action;
     use crate::ai::{
         AiRequestPreview, AiRequestPreviewSnapshot, ArtifactFinding, ArtifactFollowUpTarget,
         ArtifactStatus, ConfidenceLevel, GuidedFollowUpKind, ReviewArtifactV1, SufficiencyLevel,
     };
-    use crate::evidence::PopulationProfile;
     use crate::evidence::policy::evidence_badges;
+    use crate::evidence::{PopulationProfile, evidence_registry_version};
     use crate::insights::MetricPoint;
     use crate::navigation::{self, FocusRegion, PreflightControl, SearchScope, TransientLayer};
     use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
@@ -9154,6 +9290,8 @@ mod tests {
             auth_status: test_auth_status(),
             active_population_profile: PopulationProfile::GeneralAdult,
             guidance_profile_source: "default".to_owned(),
+            evidence_registry_version: evidence_registry_version().to_owned(),
+            stale_evidence_entries: Vec::new(),
             ai_ops: test_ai_ops_snapshot(),
             webhook: WebhookOpsSnapshot::default(),
             personal_info: None,
@@ -9792,6 +9930,90 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|line| line.contains("Latest eval needs attention"))
+        );
+    }
+
+    #[test]
+    fn review_card_badges_keep_sensitive_cautions_visible() {
+        let card = make_review_card("spo2-card", "spo2", 80);
+
+        let badges = review_card_badges(&card, PopulationProfile::OlderAdult);
+
+        assert!(badges.iter().any(|badge| badge == "Evidence-informed"));
+        assert!(badges.iter().any(|badge| badge == "Context-only"));
+        assert!(badges.iter().any(|badge| badge == "Unavailable"));
+        assert!(badges.iter().any(|badge| badge == "Sensitive metric"));
+        assert!(badges.iter().any(|badge| badge == "Not for screening"));
+        assert!(badges.len() <= 5);
+    }
+
+    #[test]
+    fn review_detail_lines_surface_population_fallback_scope() {
+        let card = make_review_card("sleep-duration", "sleep_duration", 70);
+        let investigation =
+            empty_investigation_report(ReviewFocus::Readiness, "2026-04-08", &"test");
+
+        let lines = review_detail_lines(
+            ReviewScreenMode::Today,
+            Some(&card),
+            &investigation,
+            PopulationProfile::ShiftWorker,
+        );
+
+        assert!(lines.iter().any(|line| {
+            line == "Population scope: Shift worker profile uses General adult guidance as a fallback"
+        }));
+    }
+
+    #[test]
+    fn review_detail_lines_surface_unavailable_population_scope() {
+        let card = make_review_card("spo2-detail", "spo2", 65);
+        let investigation =
+            empty_investigation_report(ReviewFocus::Readiness, "2026-04-08", &"test");
+
+        let lines = review_detail_lines(
+            ReviewScreenMode::Today,
+            Some(&card),
+            &investigation,
+            PopulationProfile::OlderAdult,
+        );
+
+        assert!(lines.iter().any(|line| {
+            line == "Population scope: Older adult profile has no supported interpretation; keep this context-only"
+        }));
+    }
+
+    #[test]
+    fn ops_model_surfaces_evidence_runtime_health() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.stale_evidence_entries = vec![
+            "`spo2` last reviewed on 2025-12-01 and is stale for Quarterly cadence (133 days old)"
+                .to_owned(),
+        ];
+
+        let model = build_ops_model(&snapshot, false);
+
+        assert!(model.summary_lines.iter().any(|line| {
+            line.contains("Evidence: registry=ringmaster.evidence.v2")
+                && line.contains("1 stale entry")
+        }));
+        assert!(model.items.iter().any(|item| {
+            item.label == "Evidence registry" && item.value == evidence_registry_version()
+        }));
+        assert!(model.items.iter().any(|item| {
+            item.label == "Evidence review status" && item.value.contains("1 stale entry")
+        }));
+        assert!(
+            model
+                .warnings
+                .iter()
+                .any(|line| { line.contains("Evidence registry review needs attention") })
+        );
+        assert!(
+            model
+                .warnings
+                .iter()
+                .any(|line| { line.contains("`spo2` last reviewed on 2025-12-01") })
         );
     }
 

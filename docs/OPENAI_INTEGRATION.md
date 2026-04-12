@@ -292,7 +292,7 @@ Browse commands:
 
 The registry exists so prompt/model/version drift can be inspected over time instead of disappearing into stdout.
 
-The TUI workbench browser and Ops/doctor surfaces also expose this registry. Runs keep lifecycle state, request previews, snapshot linkage, prompt/schema versions, provider/model metadata, and any error or cancellation details.
+The TUI workbench browser and Ops/doctor surfaces also expose this registry. Runs keep lifecycle state, request previews, snapshot linkage, prompt/schema versions, provider/model metadata, and any error or cancellation details, while Ops/doctor also surface the evidence-registry version and stale-review health so the scientific contract can be audited operationally.
 
 Run lifecycle states:
 

@@ -110,7 +110,7 @@ The repository now includes:
   - exported reports
   - persisted eval runs
 - local jump-back routing from saved AI evidence refs to Review / Explain / Patterns / Timeline when the export ref is resolvable
-- richer Ops / doctor summaries for provider readiness, last successful/failed runs, local artifact counts, and eval health
+- richer Ops / doctor summaries for provider readiness, last successful/failed runs, local artifact counts, eval health, evidence-registry versioning, and stale scientific-review status
 
 ## Snapshot library capabilities that now work
 
@@ -211,6 +211,7 @@ Shipped in this pass:
 - a typed evidence registry in `src/evidence/registry.rs`
 - a shared claims policy in `src/evidence/policy.rs`
 - tier badges and limitation/caution callouts across Review, Explain, Patterns, reports, and AI-rendered findings
+- prioritized Review-card caution badges for sensitive metrics plus explicit population fallback/unavailable scope in Review detail panes
 - guideline-backed interpretation for sleep duration and weekly physical activity guidance
 - evidence-informed handling for bounded heart-rate/HRV/VO2-max style trend displays
 - caution-limited handling for `SpO₂` and consumer sleep-technology interpretation
