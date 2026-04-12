@@ -64,11 +64,11 @@ async fn demo_output_mentions_dashboard() {
     assert!(output.contains("ringmaster"));
     assert!(output.contains("Connection: Connected"));
     assert!(output.contains("Latest sync:"));
-    assert!(output.contains("What matters now | 2026-04-08"));
-    assert!(output.contains("Capabilities"));
-    assert!(output.contains("Dashboard body"));
+    assert!(output.contains("READINESS [FRESH]"));
+    assert!(output.contains("READINESS BREAKDOWN [FRESH]"));
+    assert!(output.contains("WEEKLY TRENDS [FRESH]"));
+    assert!(output.contains("Readiness tile: score 74"));
     assert!(output.contains("Review"));
-    assert!(output.contains("Stress high time is higher than usual."));
 }
 
 #[tokio::test]

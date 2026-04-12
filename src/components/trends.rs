@@ -2,193 +2,233 @@ use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
     prelude::Rect,
-    text::Line,
-    widgets::{List, ListItem, Paragraph, Sparkline, Tabs},
+    widgets::{List, ListItem, Paragraph, Tabs},
 };
 
-use crate::app::TrendsModel;
+use crate::app::{TrendMatrixCell, TrendMatrixRow, TrendsModel};
+use crate::navigation::FocusRegion;
 use crate::ui::{
-    chrome::{self, PanelKind},
-    layout::UiContext,
+    layout::{UiContext, ViewportClass},
+    telemetry::{panel_block, segmented_bar, spark_strip},
     theme::{Theme, Tone},
 };
 
-pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &TrendsModel, ui: &UiContext, theme: &Theme) {
-    if ui.viewport.is_compact() {
-        draw_compact(frame, area, model, theme);
-    } else {
-        draw_wide(frame, area, model, theme);
+pub fn draw(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &TrendsModel,
+    ui: &UiContext,
+    theme: &Theme,
+    focused_region: FocusRegion,
+    expanded_region: Option<FocusRegion>,
+) {
+    match ui.viewport {
+        ViewportClass::Compact => {
+            draw_compact(frame, area, model, theme, focused_region, expanded_region);
+        }
+        ViewportClass::Medium | ViewportClass::Wide => {
+            draw_wide(frame, area, model, theme, focused_region, expanded_region);
+        }
     }
 }
 
-fn draw_wide(frame: &mut Frame<'_>, area: Rect, model: &TrendsModel, theme: &Theme) {
+fn draw_wide(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &TrendsModel,
+    theme: &Theme,
+    focused_region: FocusRegion,
+    expanded_region: Option<FocusRegion>,
+) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Length(2),
-            Constraint::Min(18),
-            Constraint::Length(6),
-        ])
-        .split(area);
-
-    draw_window_tabs(frame, layout[0], model, theme);
-    frame.render_widget(
-        Paragraph::new(model.windows[model.selected_window_index].summary.clone())
-            .style(theme.annotation()),
-        layout[1],
-    );
-
-    let metric_areas = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(vec![Constraint::Length(4); model.metrics.len()])
-        .split(layout[2]);
-
-    for (index, metric) in model.metrics.iter().enumerate() {
-        let row = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(18),
-                Constraint::Length(18),
-                Constraint::Min(20),
-                Constraint::Length(20),
-            ])
-            .split(metric_areas[index]);
-
-        frame.render_widget(
-            Paragraph::new(format!(
-                "{}\ncurrent {}",
-                metric.label, metric.current_value
-            ))
-            .style(theme.hero())
-            .block(chrome::panel(
-                theme,
-                Line::from(metric.label),
-                PanelKind::Subtle,
-            )),
-            row[0],
-        );
-        frame.render_widget(
-            Paragraph::new(metric.confidence.clone())
-                .style(theme.badge(chrome::tone_for_text(&metric.confidence)))
-                .block(chrome::panel(
-                    theme,
-                    Line::from("Signal"),
-                    PanelKind::Subtle,
-                )),
-            row[1],
-        );
-        frame.render_widget(
-            Sparkline::default()
-                .block(chrome::panel(
-                    theme,
-                    Line::from("Direction"),
-                    PanelKind::Section,
-                ))
-                .data(&metric.sparkline),
-            row[2],
-        );
-        frame.render_widget(
-            Paragraph::new(metric.summary.clone())
-                .style(theme.body())
-                .block(chrome::panel(
-                    theme,
-                    Line::from("Baseline read"),
-                    PanelKind::Subtle,
-                )),
-            row[3],
-        );
-    }
-
-    draw_notes(frame, layout[3], model, theme);
-}
-
-fn draw_compact(frame: &mut Frame<'_>, area: Rect, model: &TrendsModel, theme: &Theme) {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(1),
             Constraint::Min(10),
-            Constraint::Length(4),
+            Constraint::Length(5),
         ])
         .split(area);
 
-    draw_window_tabs(frame, layout[0], model, theme);
+    draw_sort_tabs(
+        frame,
+        layout[0],
+        model,
+        theme,
+        focused_region == FocusRegion::TrendsMatrix,
+        expanded_region == Some(FocusRegion::TrendsMatrix),
+    );
+
+    let body = model
+        .rows
+        .iter()
+        .map(render_matrix_row)
+        .collect::<Vec<_>>()
+        .join("\n");
     frame.render_widget(
-        Paragraph::new(model.windows[model.selected_window_index].summary.clone())
-            .style(theme.annotation()),
+        Paragraph::new(format!(
+            "metric          current   concern     7d               30d              90d              spark\n{body}"
+        ))
+        .block(panel_block(
+            theme,
+            "Trend Matrix",
+            "SORTED",
+            Tone::Info,
+            focused_region == FocusRegion::TrendsMatrix,
+            expanded_region == Some(FocusRegion::TrendsMatrix),
+        )),
         layout[1],
     );
 
-    let metrics = model
-        .metrics
+    draw_notes(
+        frame,
+        layout[2],
+        model,
+        theme,
+        focused_region == FocusRegion::TrendsInspector,
+        expanded_region == Some(FocusRegion::TrendsInspector),
+    );
+}
+
+fn draw_compact(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &TrendsModel,
+    theme: &Theme,
+    focused_region: FocusRegion,
+    expanded_region: Option<FocusRegion>,
+) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(5),
+        ])
+        .split(area);
+
+    draw_sort_tabs(
+        frame,
+        layout[0],
+        model,
+        theme,
+        focused_region == FocusRegion::TrendsMatrix,
+        expanded_region == Some(FocusRegion::TrendsMatrix),
+    );
+    let rows = model
+        .rows
         .iter()
-        .map(|metric| {
+        .map(|row| {
+            let cells = row
+                .cells
+                .iter()
+                .map(|cell| format!("{} {}", cell.label, cell.delta_label))
+                .collect::<Vec<_>>()
+                .join(" | ");
             ListItem::new(format!(
-                "[metric] {} | {} | {} | {}",
-                metric.label, metric.current_value, metric.confidence, metric.summary
+                "{} {} | {} | {}",
+                if row.selected { ">" } else { " " },
+                row.label,
+                row.current_value,
+                cells
             ))
         })
         .collect::<Vec<_>>();
     frame.render_widget(
-        List::new(metrics).block(chrome::panel(
+        List::new(rows).block(panel_block(
             theme,
-            Line::from("Comparison scan"),
-            PanelKind::Section,
+            "Trend Matrix",
+            "COMPACT",
+            Tone::Info,
+            focused_region == FocusRegion::TrendsMatrix,
+            expanded_region == Some(FocusRegion::TrendsMatrix),
         )),
-        layout[2],
+        layout[1],
     );
-
-    let notes = model
-        .notes
-        .iter()
-        .take(2)
-        .map(|note| ListItem::new(format!("[note] {note}")))
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        List::new(notes).block(chrome::panel(
-            theme,
-            Line::from("Analyst notes"),
-            PanelKind::Subtle,
-        )),
-        layout[3],
+    draw_notes(
+        frame,
+        layout[2],
+        model,
+        theme,
+        focused_region == FocusRegion::TrendsInspector,
+        expanded_region == Some(FocusRegion::TrendsInspector),
     );
 }
 
-fn draw_window_tabs(frame: &mut Frame<'_>, area: Rect, model: &TrendsModel, theme: &Theme) {
+fn draw_sort_tabs(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &TrendsModel,
+    theme: &Theme,
+    focused: bool,
+    expanded: bool,
+) {
     frame.render_widget(
-        Tabs::new(model.windows.iter().map(|window| window.label))
-            .block(chrome::panel(
+        Tabs::new(model.sort_tabs.iter().map(|tab| tab.label))
+            .block(panel_block(
                 theme,
-                chrome::title_with_badge(
-                    theme,
-                    "Trend windows",
-                    model.windows[model.selected_window_index].label,
-                    Tone::Accent,
-                ),
-                PanelKind::Hero,
+                "Trend Sort",
+                model
+                    .sort_tabs
+                    .get(model.selected_sort_index)
+                    .map_or("Concern", |tab| tab.label),
+                Tone::Accent,
+                focused,
+                expanded,
             ))
             .style(theme.annotation())
             .highlight_style(theme.emphasis(Tone::Focus))
             .divider(" ")
-            .select(model.selected_window_index),
+            .select(model.selected_sort_index),
         area,
     );
 }
 
-fn draw_notes(frame: &mut Frame<'_>, area: Rect, model: &TrendsModel, theme: &Theme) {
+fn draw_notes(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &TrendsModel,
+    theme: &Theme,
+    focused: bool,
+    expanded: bool,
+) {
     let notes = model
         .notes
         .iter()
-        .map(|note| ListItem::new(format!("[note] {note}")))
+        .map(|note| ListItem::new(note.clone()))
         .collect::<Vec<_>>();
     frame.render_widget(
-        List::new(notes).block(chrome::panel(
+        List::new(notes).block(panel_block(
             theme,
-            Line::from("Analyst notes"),
-            PanelKind::Section,
+            "Inspector",
+            "DETAIL",
+            Tone::Muted,
+            focused,
+            expanded,
         )),
         area,
     );
+}
+
+fn render_matrix_row(row: &TrendMatrixRow) -> String {
+    let cells = row.cells.iter().map(render_matrix_cell).collect::<Vec<_>>();
+    format!(
+        "{} {:<14} {:>7} {:<11} {:<16} {:<16} {:<16} {}",
+        if row.selected { ">" } else { " " },
+        row.label,
+        row.current_value,
+        row.concern_label,
+        cells.first().cloned().unwrap_or_default(),
+        cells.get(1).cloned().unwrap_or_default(),
+        cells.get(2).cloned().unwrap_or_default(),
+        spark_strip(&row.sparkline, 10),
+    )
+}
+
+fn render_matrix_cell(cell: &TrendMatrixCell) -> String {
+    format!(
+        "{} {} {}",
+        cell.label,
+        cell.delta_label,
+        segmented_bar(cell.fill_percent, 5)
+    )
 }

@@ -12,15 +12,19 @@ pub enum SnapshotScenario {
     Empty,
     Stale,
     Error,
+    MissingScope,
+    RateLimited,
 }
 
 impl SnapshotScenario {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::Strong,
         Self::Weak,
         Self::Empty,
         Self::Stale,
         Self::Error,
+        Self::MissingScope,
+        Self::RateLimited,
     ];
 
     pub const FIXTURE_BACKED: [Self; 3] = [Self::Strong, Self::Weak, Self::Empty];
@@ -33,6 +37,8 @@ impl SnapshotScenario {
             Self::Empty => "empty",
             Self::Stale => "stale",
             Self::Error => "error",
+            Self::MissingScope => "missing-scope",
+            Self::RateLimited => "rate-limited",
         }
     }
 }
@@ -308,6 +314,8 @@ mod tests {
                 "dashboard-empty-compact.txt",
                 "dashboard-stale-compact.txt",
                 "dashboard-error-compact.txt",
+                "dashboard-missing-scope-compact.txt",
+                "dashboard-rate-limited-compact.txt",
             ]
         );
     }

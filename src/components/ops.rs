@@ -7,21 +7,38 @@ use ratatui::{
 };
 
 use crate::app::{OpsItem, OpsModel};
+use crate::navigation::FocusRegion;
 use crate::ui::{
     chrome::{self, PanelKind},
     layout::UiContext,
+    telemetry::{coverage_rows, panel_block},
     theme::{Theme, Tone},
 };
 
-pub fn draw(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, ui: &UiContext, theme: &Theme) {
+pub fn draw(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &OpsModel,
+    ui: &UiContext,
+    theme: &Theme,
+    focused_region: FocusRegion,
+    expanded_region: Option<FocusRegion>,
+) {
     if ui.viewport.is_compact() {
-        draw_compact(frame, area, model, theme);
+        draw_compact(frame, area, model, theme, focused_region, expanded_region);
     } else {
-        draw_wide(frame, area, model, theme);
+        draw_wide(frame, area, model, theme, focused_region, expanded_region);
     }
 }
 
-fn draw_wide(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &Theme) {
+fn draw_wide(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &OpsModel,
+    theme: &Theme,
+    focused_region: FocusRegion,
+    expanded_region: Option<FocusRegion>,
+) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -31,35 +48,94 @@ fn draw_wide(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &Theme)
         ])
         .split(area);
 
-    draw_summary(frame, layout[0], model, theme, false);
+    draw_summary(
+        frame,
+        layout[0],
+        model,
+        theme,
+        false,
+        focused_region == FocusRegion::OpsSummary,
+        expanded_region == Some(FocusRegion::OpsSummary),
+    );
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+        .constraints([
+            Constraint::Percentage(26),
+            Constraint::Percentage(32),
+            Constraint::Percentage(42),
+        ])
         .split(layout[1]);
 
-    draw_family_table(frame, body[0], model, theme);
+    draw_coverage_panel(
+        frame,
+        body[0],
+        model,
+        theme,
+        focused_region == FocusRegion::OpsCoverage,
+        expanded_region == Some(FocusRegion::OpsCoverage),
+    );
+    draw_family_table(frame, body[1], model, theme);
     let diagnostics = prioritized_diagnostic_items(model);
-    draw_diagnostics_list(frame, body[1], &diagnostics, theme, None);
-    draw_warnings(frame, layout[2], model, theme);
+    draw_diagnostics_list(
+        frame,
+        body[2],
+        &diagnostics,
+        theme,
+        None,
+        focused_region == FocusRegion::OpsDiagnostics,
+        expanded_region == Some(FocusRegion::OpsDiagnostics),
+    );
+    draw_warnings(
+        frame,
+        layout[2],
+        model,
+        theme,
+        focused_region == FocusRegion::OpsWarnings,
+        expanded_region == Some(FocusRegion::OpsWarnings),
+    );
 }
 
-fn draw_compact(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &Theme) {
+fn draw_compact(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &OpsModel,
+    theme: &Theme,
+    focused_region: FocusRegion,
+    expanded_region: Option<FocusRegion>,
+) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(4),
+            Constraint::Length(5),
             Constraint::Min(12),
             Constraint::Length(3),
         ])
         .split(area);
 
-    draw_summary(frame, layout[0], model, theme, true);
+    draw_summary(
+        frame,
+        layout[0],
+        model,
+        theme,
+        true,
+        focused_region == FocusRegion::OpsSummary,
+        expanded_region == Some(FocusRegion::OpsSummary),
+    );
+    draw_coverage_panel(
+        frame,
+        layout[1],
+        model,
+        theme,
+        focused_region == FocusRegion::OpsCoverage,
+        expanded_region == Some(FocusRegion::OpsCoverage),
+    );
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
-        .split(layout[1]);
+        .split(layout[2]);
 
     let family_items = model
         .family_statuses
@@ -76,11 +152,34 @@ fn draw_compact(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &The
     );
 
     let diagnostics = prioritized_diagnostic_items(model);
-    draw_diagnostics_list(frame, body[1], &diagnostics, theme, None);
-    draw_warnings(frame, layout[2], model, theme);
+    draw_diagnostics_list(
+        frame,
+        body[1],
+        &diagnostics,
+        theme,
+        None,
+        focused_region == FocusRegion::OpsDiagnostics,
+        expanded_region == Some(FocusRegion::OpsDiagnostics),
+    );
+    draw_warnings(
+        frame,
+        layout[3],
+        model,
+        theme,
+        focused_region == FocusRegion::OpsWarnings,
+        expanded_region == Some(FocusRegion::OpsWarnings),
+    );
 }
 
-fn draw_summary(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &Theme, compact: bool) {
+fn draw_summary(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &OpsModel,
+    theme: &Theme,
+    compact: bool,
+    focused: bool,
+    expanded: bool,
+) {
     let summary = if compact {
         model
             .summary_lines
@@ -97,11 +196,44 @@ fn draw_summary(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &The
     frame.render_widget(
         Paragraph::new(summary)
             .style(theme.hero())
-            .block(chrome::panel(
+            .block(panel_block(
                 theme,
-                chrome::title_with_badge(theme, "Status console", &model.mode_label, Tone::Info),
-                PanelKind::Diagnostic,
+                "Status",
+                &model.mode_label,
+                Tone::Info,
+                focused,
+                expanded,
             )),
+        area,
+    );
+}
+
+fn draw_coverage_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &OpsModel,
+    theme: &Theme,
+    focused: bool,
+    expanded: bool,
+) {
+    let coverage = model
+        .coverage
+        .iter()
+        .map(|cell| (cell.label, cell.availability))
+        .collect::<Vec<_>>();
+    let body = coverage_rows(&coverage)
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join("\n");
+    frame.render_widget(
+        Paragraph::new(body).block(panel_block(
+            theme,
+            "Coverage",
+            "MATRIX",
+            Tone::Info,
+            focused,
+            expanded,
+        )),
         area,
     );
 }
@@ -129,10 +261,13 @@ fn draw_family_table(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme:
             Row::new(vec!["Family", "State", "Scope", "Last sync"])
                 .style(theme.section_title(Tone::Info)),
         )
-        .block(chrome::panel(
+        .block(panel_block(
             theme,
-            Line::from("Family status"),
-            PanelKind::Diagnostic,
+            "Family status",
+            "SYNC",
+            Tone::Info,
+            false,
+            false,
         )),
         area,
     );
@@ -144,6 +279,8 @@ fn draw_diagnostics_list(
     items: &[OpsItem],
     theme: &Theme,
     max_items: Option<usize>,
+    focused: bool,
+    expanded: bool,
 ) {
     let diagnostics = items
         .iter()
@@ -151,10 +288,13 @@ fn draw_diagnostics_list(
         .map(|item| ListItem::new(format!("{}: {}", item.label, item.value)))
         .collect::<Vec<_>>();
     frame.render_widget(
-        List::new(diagnostics).block(chrome::panel(
+        List::new(diagnostics).block(panel_block(
             theme,
-            chrome::title_with_badge(theme, "Diagnostics", "dense operator read", Tone::Muted),
-            PanelKind::Subtle,
+            "Diagnostics",
+            "DETAIL",
+            Tone::Muted,
+            focused,
+            expanded,
         )),
         area,
     );
@@ -192,7 +332,14 @@ fn prioritized_diagnostic_items(model: &OpsModel) -> Vec<OpsItem> {
     diagnostics
 }
 
-fn draw_warnings(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &Theme) {
+fn draw_warnings(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &OpsModel,
+    theme: &Theme,
+    focused: bool,
+    expanded: bool,
+) {
     let warnings = if model.warnings.is_empty() {
         vec![ListItem::new("[quiet] No warnings.")]
     } else {
@@ -203,10 +350,17 @@ fn draw_warnings(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &Th
             .collect::<Vec<_>>()
     };
     frame.render_widget(
-        List::new(warnings).block(chrome::panel(
+        List::new(warnings).block(panel_block(
             theme,
-            chrome::title_with_badge(theme, "Warnings", "operator attention", Tone::Warning),
-            PanelKind::Section,
+            "Warnings",
+            if model.warnings.is_empty() {
+                "CLEAR"
+            } else {
+                "ATTN"
+            },
+            Tone::Warning,
+            focused,
+            expanded,
         )),
         area,
     );

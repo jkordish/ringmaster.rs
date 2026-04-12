@@ -1082,7 +1082,10 @@ fn scenario_fixture_seed_dir(
         ui::snapshot::SnapshotScenario::Strong
         | ui::snapshot::SnapshotScenario::Weak
         | ui::snapshot::SnapshotScenario::Empty => scenario.label(),
-        ui::snapshot::SnapshotScenario::Stale | ui::snapshot::SnapshotScenario::Error => "strong",
+        ui::snapshot::SnapshotScenario::Stale
+        | ui::snapshot::SnapshotScenario::Error
+        | ui::snapshot::SnapshotScenario::MissingScope
+        | ui::snapshot::SnapshotScenario::RateLimited => "strong",
     };
     fixture_root.join(fixture_label)
 }
@@ -1223,6 +1226,12 @@ fn apply_scenario_fixture_snapshot_overlay(
         ui::snapshot::SnapshotScenario::Empty => apply_empty_scenario_overlay(snapshot),
         ui::snapshot::SnapshotScenario::Stale => apply_stale_scenario_overlay(snapshot),
         ui::snapshot::SnapshotScenario::Error => apply_error_scenario_overlay(snapshot),
+        ui::snapshot::SnapshotScenario::MissingScope => {
+            apply_missing_scope_scenario_overlay(snapshot);
+        }
+        ui::snapshot::SnapshotScenario::RateLimited => {
+            apply_rate_limited_scenario_overlay(snapshot);
+        }
     }
 }
 
@@ -1500,6 +1509,95 @@ fn apply_error_scenario_overlay(snapshot: &mut app::LiveSnapshot) {
         &mut snapshot.sync_states,
         FIXTURE_SNAPSHOT_ERROR_SYNC_ATTEMPTED_AT,
         FIXTURE_SNAPSHOT_ERROR_SYNC_COMPLETED_AT,
+    );
+}
+
+fn apply_missing_scope_scenario_overlay(snapshot: &mut app::LiveSnapshot) {
+    apply_strong_scenario_overlay(snapshot);
+    let granted_scopes = vec!["personal".to_owned(), "daily".to_owned()];
+    snapshot
+        .auth_status
+        .granted_scopes
+        .clone_from(&granted_scopes);
+    snapshot.auth_status.capability_report = crate::oura::models::CapabilityReport::from_scopes(
+        &snapshot.auth_status.requested_scopes,
+        &granted_scopes,
+    );
+    snapshot.heartrate_days.clear();
+    snapshot.heartrate_daily_averages.clear();
+    snapshot.context_events.clear();
+    snapshot.pattern_summaries.clear();
+    snapshot.review_signal_days.clear();
+    snapshot.record_counts.heartrate_samples = 0;
+    snapshot.record_counts.workouts = 0;
+    snapshot.record_counts.enhanced_tags = 0;
+    snapshot.record_counts.sessions = 0;
+    snapshot.record_counts.derived_context_events = 0;
+    snapshot.record_counts.derived_pattern_summaries = 0;
+    snapshot.record_counts.derived_review_signal_days = 0;
+    for state in &mut snapshot.sync_states {
+        match state.sync_key.as_str() {
+            "oura.heartrate" => {
+                state.status = crate::store::queries::SyncRunStatus::Blocked;
+                state.message = Some(
+                    "Missing `heartrate` scope; heart-rate panels stay unavailable.".to_owned(),
+                );
+                state.last_error = None;
+                state.failure_count = 0;
+                state.next_attempt_after = None;
+            }
+            "oura.workouts" => {
+                state.status = crate::store::queries::SyncRunStatus::Blocked;
+                state.message =
+                    Some("Missing `workout` scope; activity context stays partial.".to_owned());
+                state.last_error = None;
+                state.failure_count = 0;
+                state.next_attempt_after = None;
+            }
+            "oura.enhanced_tags" => {
+                state.status = crate::store::queries::SyncRunStatus::Blocked;
+                state.message =
+                    Some("Missing `tag` scope; tagged context stays unavailable.".to_owned());
+                state.last_error = None;
+                state.failure_count = 0;
+                state.next_attempt_after = None;
+            }
+            "oura.sessions" => {
+                state.status = crate::store::queries::SyncRunStatus::Blocked;
+                state.message = Some(
+                    "Missing `session` scope; guided-session context stays unavailable.".to_owned(),
+                );
+                state.last_error = None;
+                state.failure_count = 0;
+                state.next_attempt_after = None;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn apply_rate_limited_scenario_overlay(snapshot: &mut app::LiveSnapshot) {
+    apply_strong_scenario_overlay(snapshot);
+    for state in &mut snapshot.sync_states {
+        if state.sync_key == "oura.heartrate" {
+            state.status = crate::store::queries::SyncRunStatus::Failed;
+            state.message = Some(
+                "Heartrate backfill is rate limited; retry after the minute window resets."
+                    .to_owned(),
+            );
+            state.last_error = Some(crate::error::OuraProblem::new(
+                Some(429),
+                "rate limit reached",
+                Some("retry after the minute window resets".to_owned()),
+            ));
+            state.failure_count = 1;
+            state.next_attempt_after = Some("2026-04-09T12:05:00Z".to_owned());
+        }
+    }
+    normalize_fixture_snapshot_sync_state_timestamps(
+        &mut snapshot.sync_states,
+        FIXTURE_SNAPSHOT_ERROR_SYNC_ATTEMPTED_AT,
+        FIXTURE_SNAPSHOT_BASE_SYNC_COMPLETED_AT,
     );
 }
 
@@ -4879,7 +4977,7 @@ mod tests {
             "scenario fixture Status snapshots should not vary with host webhook config or temp paths"
         );
         assert!(first_snapshot.contains(super::FIXTURE_SNAPSHOT_WEBHOOK_CALLBACK_URL));
-        assert!(first_snapshot.contains(super::FIXTURE_SNAPSHOT_STALE_SYNC_COMPLETED_AT));
+        assert!(first_snapshot.contains("Latest sync: oura.workouts at 2026-04-09 05:01"));
         assert!(first_snapshot.contains("tests/fixtures/phase7/stale/ringmaster.db"));
     }
 
@@ -4906,11 +5004,49 @@ mod tests {
 
         let snapshot = crate::tui::render_snapshot(&stale_app, 160, 44)
             .unwrap_or_else(|error| panic!("status snapshot should render: {error}"));
-        let copied_root_display = copied_root.display().to_string();
 
-        assert!(snapshot.contains(&format!("{copied_root_display}/stale/config.toml")));
-        assert!(snapshot.contains(&format!("{copied_root_display}/stale/ringmaster.db")));
+        assert!(snapshot.contains("scenario-fixtures/stale/config.t"));
+        assert!(snapshot.contains("scenario-fixtures/stale/ringma"));
         assert!(!snapshot.contains("tests/fixtures/phase7/stale/ringmaster.db"));
+    }
+
+    #[tokio::test]
+    async fn scenario_fixture_overlays_cover_missing_scope_and_rate_limited_states() {
+        let (_tempdir, config) = test_config(Some("https://example.test"), Some("verify-token"));
+        let states = super::build_scenario_fixture_snapshot_apps_for_tests(
+            &config,
+            std::path::Path::new("tests/fixtures/phase7"),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("scenario fixture apps should build: {error}"));
+
+        let mut missing_scope_app = states
+            .iter()
+            .find_map(|(scenario, app)| {
+                (scenario == &crate::ui::snapshot::SnapshotScenario::MissingScope)
+                    .then_some(app.clone())
+            })
+            .unwrap_or_else(|| panic!("missing-scope scenario should exist"));
+        missing_scope_app.active_screen = crate::app::Screen::Ops;
+
+        let missing_scope_snapshot = crate::tui::render_snapshot(&missing_scope_app, 120, 36)
+            .unwrap_or_else(|error| panic!("missing-scope snapshot should render: {error}"));
+        assert!(missing_scope_snapshot.contains("heartrate  [SCOPE]"));
+        assert!(missing_scope_snapshot.contains("heartrate scope was not granted"));
+
+        let mut rate_limited_app = states
+            .iter()
+            .find_map(|(scenario, app)| {
+                (scenario == &crate::ui::snapshot::SnapshotScenario::RateLimited)
+                    .then_some(app.clone())
+            })
+            .unwrap_or_else(|| panic!("rate-limited scenario should exist"));
+        rate_limited_app.active_screen = crate::app::Screen::Ops;
+
+        let rate_limited_snapshot = crate::tui::render_snapshot(&rate_limited_app, 120, 36)
+            .unwrap_or_else(|error| panic!("rate-limited snapshot should render: {error}"));
+        assert!(rate_limited_snapshot.contains("heartrate  [429]"));
+        assert!(rate_limited_snapshot.contains("rate limited"));
     }
 
     #[tokio::test]
@@ -4970,7 +5106,7 @@ mod tests {
             "single-fixture Status snapshots should not vary with host webhook config or temp paths"
         );
         assert!(first_snapshot.contains(super::FIXTURE_SNAPSHOT_WEBHOOK_CALLBACK_URL));
-        assert!(first_snapshot.contains(super::FIXTURE_SNAPSHOT_BASE_SYNC_COMPLETED_AT));
+        assert!(first_snapshot.contains("Latest sync: oura.workouts at 2026-04-09 11:59"));
         assert!(first_snapshot.contains("Auth state: authenticated"));
         assert!(
             first_snapshot

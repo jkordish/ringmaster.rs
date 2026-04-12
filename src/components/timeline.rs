@@ -3,15 +3,16 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     prelude::Rect,
     symbols,
-    text::{Line, Span},
+    text::Span,
     widgets::{Axis, Chart, Dataset, GraphType, List, ListItem, Paragraph, Tabs},
 };
 
 use crate::app::{OverlayFamilyGroup, OverlayToggleView, TimelineModel};
+use crate::navigation::FocusRegion;
 use crate::ui::{
-    charts,
-    chrome::{self, PanelKind},
+    charts, chrome,
     layout::UiContext,
+    telemetry::{TelemetryAvailability, panel_block},
     theme::{Theme, Tone},
 };
 
@@ -21,6 +22,8 @@ pub fn draw(
     model: &TimelineModel,
     ui: &UiContext,
     theme: &Theme,
+    focused_region: FocusRegion,
+    expanded_region: Option<FocusRegion>,
 ) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -44,22 +47,41 @@ pub fn draw(
     frame.render_widget(
         Paragraph::new(summary)
             .style(theme.body())
-            .block(chrome::panel(
+            .block(panel_block(
                 theme,
-                chrome::title_with_badge(
-                    theme,
-                    "Timeline instrument",
-                    &model.selected_day_label,
-                    Tone::Accent,
-                ),
-                PanelKind::Hero,
+                "Timeline",
+                &model.selected_day_label,
+                Tone::Accent,
+                false,
+                false,
             )),
         layout[0],
     );
 
-    draw_controls(frame, layout[1], model, theme);
-    draw_chart(frame, layout[2], model, theme);
-    draw_overlay_lane(frame, layout[3], model, theme);
+    draw_controls(
+        frame,
+        layout[1],
+        model,
+        theme,
+        focused_region == FocusRegion::TimelineControls,
+        expanded_region == Some(FocusRegion::TimelineControls),
+    );
+    draw_chart(
+        frame,
+        layout[2],
+        model,
+        theme,
+        focused_region == FocusRegion::TimelineChart,
+        expanded_region == Some(FocusRegion::TimelineChart),
+    );
+    draw_overlay_lane(
+        frame,
+        layout[3],
+        model,
+        theme,
+        focused_region == FocusRegion::TimelineLanes,
+        expanded_region == Some(FocusRegion::TimelineLanes),
+    );
 
     let bottom = if ui.viewport.is_compact() {
         Layout::default()
@@ -79,19 +101,17 @@ pub fn draw(
                 .chain(model.event_detail_lines.iter().cloned())
                 .map(ListItem::new),
         )
-        .block(chrome::panel(
+        .block(panel_block(
             theme,
-            chrome::title_with_badge(
-                theme,
-                "Selected detail",
-                if model.selected_event_index.is_some() {
-                    "linked"
-                } else {
-                    "cursor"
-                },
-                Tone::Focus,
-            ),
-            PanelKind::Section,
+            "Inspector",
+            if model.selected_event_index.is_some() {
+                "LINKED"
+            } else {
+                "CURSOR"
+            },
+            Tone::Focus,
+            focused_region == FocusRegion::TimelineInspector,
+            expanded_region == Some(FocusRegion::TimelineInspector),
         )),
         bottom[0],
     );
@@ -119,16 +139,30 @@ pub fn draw(
             .collect::<Vec<_>>()
     };
     frame.render_widget(
-        List::new(events).block(chrome::panel(
+        List::new(events).block(panel_block(
             theme,
-            Line::from("Day events"),
-            PanelKind::Section,
+            "Event feed",
+            if model.events.is_empty() {
+                "EMPTY"
+            } else {
+                "LIVE"
+            },
+            Tone::Info,
+            focused_region == FocusRegion::TimelineEvents,
+            expanded_region == Some(FocusRegion::TimelineEvents),
         )),
         bottom[1],
     );
 }
 
-fn draw_controls(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel, theme: &Theme) {
+fn draw_controls(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &TimelineModel,
+    theme: &Theme,
+    focused: bool,
+    expanded: bool,
+) {
     let controls = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
@@ -136,18 +170,16 @@ fn draw_controls(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel, theme
 
     frame.render_widget(
         Tabs::new(model.window_presets.iter().map(|preset| preset.label))
-            .block(chrome::panel(
+            .block(panel_block(
                 theme,
-                chrome::title_with_badge(
-                    theme,
-                    "Window presets",
-                    model
-                        .window_presets
-                        .get(model.selected_window_preset_index)
-                        .map_or("24h", |preset| preset.label),
-                    Tone::Focus,
-                ),
-                PanelKind::Section,
+                "Window",
+                model
+                    .window_presets
+                    .get(model.selected_window_preset_index)
+                    .map_or("24H", |preset| preset.label),
+                Tone::Focus,
+                focused,
+                expanded,
             ))
             .style(theme.annotation())
             .highlight_style(theme.emphasis(Tone::Focus))
@@ -156,16 +188,33 @@ fn draw_controls(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel, theme
         controls[0],
     );
 
-    draw_overlay_tabs(frame, controls[1], &model.overlay_toggles, theme);
+    draw_overlay_tabs(
+        frame,
+        controls[1],
+        &model.overlay_toggles,
+        theme,
+        focused,
+        expanded,
+    );
 }
 
-fn draw_chart(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel, theme: &Theme) {
+fn draw_chart(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &TimelineModel,
+    theme: &Theme,
+    focused: bool,
+    expanded: bool,
+) {
     if model.heart_rate.is_empty() {
         frame.render_widget(
-            Paragraph::new(model.selected_detail.clone()).block(chrome::panel(
+            Paragraph::new(model.selected_detail.clone()).block(panel_block(
                 theme,
-                chrome::title_with_badge(theme, "Heartrate", "no data", Tone::Warning),
-                PanelKind::Hero,
+                "Heart rate",
+                TelemetryAvailability::NoData.label(),
+                Tone::Warning,
+                focused,
+                expanded,
             )),
             area,
         );
@@ -231,15 +280,13 @@ fn draw_chart(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel, theme: &
 
     frame.render_widget(
         Chart::new(datasets)
-            .block(chrome::panel(
+            .block(panel_block(
                 theme,
-                chrome::title_with_badge(
-                    theme,
-                    "Heartrate",
-                    &format!("{}h window", model.window_hours),
-                    Tone::Accent,
-                ),
-                PanelKind::Hero,
+                "Heart rate",
+                &format!("{}H", model.window_hours),
+                Tone::Accent,
+                focused,
+                expanded,
             ))
             .x_axis(
                 Axis::default()
@@ -270,7 +317,14 @@ fn draw_chart(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel, theme: &
     );
 }
 
-fn draw_overlay_lane(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel, theme: &Theme) {
+fn draw_overlay_lane(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &TimelineModel,
+    theme: &Theme,
+    focused: bool,
+    expanded: bool,
+) {
     let overlay_lines = if model.overlay_groups.is_empty() {
         vec![ListItem::new(
             "[quiet] No workouts, tags, or sessions overlap the selected window.",
@@ -287,10 +341,17 @@ fn draw_overlay_lane(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel, t
         .collect()
     };
     frame.render_widget(
-        List::new(overlay_lines).block(chrome::panel(
+        List::new(overlay_lines).block(panel_block(
             theme,
-            chrome::title_with_badge(theme, "Overlay lanes", "temporal context", Tone::Info),
-            PanelKind::Subtle,
+            "Overlay lanes",
+            if model.overlay_groups.is_empty() {
+                TelemetryAvailability::NoData.label()
+            } else {
+                "ACTIVE"
+            },
+            Tone::Info,
+            focused,
+            expanded,
         )),
         area,
     );
@@ -301,6 +362,8 @@ fn draw_overlay_tabs(
     area: Rect,
     toggles: &[OverlayToggleView],
     theme: &Theme,
+    focused: bool,
+    expanded: bool,
 ) {
     let selected_index = toggles
         .iter()
@@ -308,17 +371,15 @@ fn draw_overlay_tabs(
         .unwrap_or(0);
     frame.render_widget(
         Tabs::new(toggles.iter().map(overlay_tab_label))
-            .block(chrome::panel(
+            .block(panel_block(
                 theme,
-                chrome::title_with_badge(
-                    theme,
-                    "Overlay filters",
-                    toggles
-                        .get(selected_index)
-                        .map_or("Workouts", |toggle| toggle.label),
-                    Tone::Info,
-                ),
-                PanelKind::Subtle,
+                "Overlay filters",
+                toggles
+                    .get(selected_index)
+                    .map_or("WORKOUTS", |toggle| toggle.label),
+                Tone::Info,
+                focused,
+                expanded,
             ))
             .style(theme.annotation())
             .highlight_style(theme.emphasis(Tone::Focus))

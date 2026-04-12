@@ -47,9 +47,49 @@ pub fn rounded_nonnegative_f64_to_u64(value: f64) -> u64 {
     }
 }
 
+#[must_use]
+pub fn rounded_clamped_f64_to_u16(value: f64, min: f64, max: f64) -> u16 {
+    if !value.is_finite() {
+        return 0;
+    }
+    value.round().clamp(min, max).to_u16().unwrap_or_else(|| {
+        if value.is_sign_negative() {
+            u16::MIN
+        } else {
+            u16::MAX
+        }
+    })
+}
+
+#[must_use]
+pub fn rounded_clamped_f64_to_i16(value: f64, min: f64, max: f64) -> i16 {
+    if !value.is_finite() {
+        return 0;
+    }
+    value.round().clamp(min, max).to_i16().unwrap_or_else(|| {
+        if value.is_sign_negative() {
+            i16::MIN
+        } else {
+            i16::MAX
+        }
+    })
+}
+
+#[must_use]
+pub fn usize_ratio(value: usize, divisor: usize) -> f64 {
+    if divisor == 0 {
+        0.0
+    } else {
+        usize_to_f64(value) / usize_to_f64(divisor)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{i64_to_f64, i64_to_usize, rounded_nonnegative_f64_to_u64, usize_to_f64};
+    use super::{
+        i64_to_f64, i64_to_usize, rounded_clamped_f64_to_i16, rounded_clamped_f64_to_u16,
+        rounded_nonnegative_f64_to_u64, usize_ratio, usize_to_f64,
+    };
 
     #[test]
     fn characterizes_basic_integer_to_float_conversions() {
@@ -66,5 +106,18 @@ mod tests {
     fn rounds_and_saturates_nonnegative_float_to_u64() {
         assert_eq!(rounded_nonnegative_f64_to_u64(12.6), 13);
         assert_eq!(rounded_nonnegative_f64_to_u64(f64::INFINITY), 0);
+    }
+
+    #[test]
+    fn rounds_and_clamps_float_ranges_for_small_integer_widgets() {
+        assert_eq!(rounded_clamped_f64_to_u16(101.4, 0.0, 100.0), 100);
+        assert_eq!(rounded_clamped_f64_to_u16(-8.0, 0.0, 100.0), 0);
+        assert_eq!(rounded_clamped_f64_to_i16(12.6, -100.0, 100.0), 13);
+    }
+
+    #[test]
+    fn computes_ratios_without_manual_casts() {
+        assert!((usize_ratio(3, 2) - 1.5).abs() < f64::EPSILON);
+        assert!(usize_ratio(1, 0).abs() < f64::EPSILON);
     }
 }

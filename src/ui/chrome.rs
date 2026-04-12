@@ -49,28 +49,6 @@ pub fn badge_label(prefix: &str, text: &str) -> String {
 }
 
 #[must_use]
-pub fn tone_for_text(text: &str) -> Tone {
-    let lower = text.to_ascii_lowercase();
-    if lower.contains("error") || lower.contains("failed") || lower.contains("missing heartbeat") {
-        Tone::Danger
-    } else if lower.contains("stale")
-        || lower.contains("warning")
-        || lower.contains("thin")
-        || lower.contains("waiting")
-    {
-        Tone::Warning
-    } else if lower.contains("focus") || lower.contains("selected") {
-        Tone::Focus
-    } else if lower.contains("fresh") || lower.contains("ready") || lower.contains("success") {
-        Tone::Positive
-    } else if lower.contains("mode") || lower.contains("receiver") || lower.contains("queue") {
-        Tone::Info
-    } else {
-        Tone::Muted
-    }
-}
-
-#[must_use]
 pub const fn focus_prefix(selected: bool) -> &'static str {
     if selected { ">" } else { " " }
 }

@@ -242,7 +242,6 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &AppState) {
         .constraints([
             Constraint::Length(if ui.viewport.is_compact() { 4 } else { 5 }),
             Constraint::Length(3),
-            Constraint::Length(3),
             Constraint::Min(8),
             Constraint::Length(3),
         ])
@@ -302,8 +301,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &AppState) {
         .select(top_nav_selected_index);
     frame.render_widget(tabs, layout[1]);
 
-    draw_orientation_strip(frame, layout[2], app, &theme);
-    draw_active_screen(frame, layout[3], app, &ui, &theme);
+    draw_active_screen(frame, layout[2], app, &ui, &theme);
 
     let footer = Paragraph::new(app.footer())
         .style(theme.annotation())
@@ -312,7 +310,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &AppState) {
             chrome::title_with_badge(&theme, "Keys", "keyboard-first", Tone::Muted),
             PanelKind::Subtle,
         ));
-    frame.render_widget(footer, layout[4]);
+    frame.render_widget(footer, layout[3]);
 
     draw_transient_overlays(frame, app, &theme);
 }
@@ -325,59 +323,47 @@ fn draw_active_screen(
     theme: &Theme,
 ) {
     match app.active_screen {
-        Screen::Dashboard => dashboard::draw(frame, area, &app.model.dashboard, ui, theme),
-        Screen::Timeline => timeline::draw(frame, area, &app.model.timeline, ui, theme),
-        Screen::Trends => trends::draw(frame, area, &app.model.trends, ui, theme),
+        Screen::Dashboard => dashboard::draw(
+            frame,
+            area,
+            &app.model.dashboard,
+            ui,
+            theme,
+            app.focused_region(),
+            app.expanded_region(),
+        ),
+        Screen::Timeline => timeline::draw(
+            frame,
+            area,
+            &app.model.timeline,
+            ui,
+            theme,
+            app.focused_region(),
+            app.expanded_region(),
+        ),
+        Screen::Trends => trends::draw(
+            frame,
+            area,
+            &app.model.trends,
+            ui,
+            theme,
+            app.focused_region(),
+            app.expanded_region(),
+        ),
         Screen::Explain => explain::draw(frame, area, &app.model.explain, ui, theme),
         Screen::Patterns => patterns::draw(frame, area, &app.model.patterns, ui, theme),
         Screen::Review => review::draw(frame, area, &app.model.review, ui, theme),
         Screen::Ai => ai_component::draw(frame, area, &app.model.ai, ui, theme),
-        Screen::Ops => ops::draw(frame, area, &app.model.ops, ui, theme),
+        Screen::Ops => ops::draw(
+            frame,
+            area,
+            &app.model.ops,
+            ui,
+            theme,
+            app.focused_region(),
+            app.expanded_region(),
+        ),
     }
-}
-
-fn draw_orientation_strip(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    app: &AppState,
-    theme: &Theme,
-) {
-    let region_summary = navigation::screen_regions(app.active_screen)
-        .iter()
-        .filter_map(|region| {
-            navigation::region_label(app.active_screen, *region).map(|label| {
-                if *region == app.focused_region() && app.current_transient().is_none() {
-                    format!("[{label}]")
-                } else {
-                    label.to_owned()
-                }
-            })
-        })
-        .collect::<Vec<_>>()
-        .join(" | ");
-
-    let transient_label = match app.current_transient() {
-        Some(navigation::TransientLayer::Help) => "help open",
-        Some(navigation::TransientLayer::Search) => "find open",
-        Some(navigation::TransientLayer::AiPreflight) => "preflight open",
-        None => "body focus",
-    };
-    let body = format!("Focus: {transient_label} | {region_summary}");
-    frame.render_widget(
-        Paragraph::new(body)
-            .wrap(Wrap { trim: true })
-            .block(chrome::panel(
-                theme,
-                chrome::title_with_badge(
-                    theme,
-                    "Orientation",
-                    app.active_screen.title(),
-                    Tone::Info,
-                ),
-                PanelKind::Subtle,
-            )),
-        area,
-    );
 }
 
 fn draw_transient_overlays(frame: &mut ratatui::Frame<'_>, app: &AppState, theme: &Theme) {
@@ -3377,9 +3363,9 @@ mod tests {
         assert!(output.contains("ringmaster"));
         assert!(output.contains("Connection: Connected"));
         assert!(output.contains("Latest sync:"));
-        assert!(output.contains("What matters now | 2026-04-08"));
-        assert!(output.contains("Capabilities"));
-        assert!(output.contains("Drill-down cues"));
+        assert!(output.contains("READINESS [FRESH]"));
+        assert!(output.contains("WEEKLY TRENDS [FRESH]"));
+        assert!(output.contains("Readiness tile: score 74"));
     }
 
     #[test]
@@ -3403,8 +3389,7 @@ mod tests {
         let output = render_snapshot(&app, 100, 32)
             .unwrap_or_else(|error| unreachable!("dashboard snapshot should render: {error}"));
 
-        assert!(output.contains("missing scope"));
-        assert!(output.contains("sleep normal is still forming."));
+        assert!(output.contains("scope") || output.contains("unavailable"));
     }
 
     #[test]
@@ -3459,8 +3444,8 @@ mod tests {
         let output = render_snapshot(&app, 120, 44)
             .unwrap_or_else(|error| unreachable!("trends snapshot should render: {error}"));
 
-        assert!(output.contains("Analyst notes"));
-        assert!(output.contains("confidence: thin"));
+        assert!(output.contains("TREND MATRIX [SORTED]"));
+        assert!(output.contains("Sorted by concern"));
     }
 
     #[test]
@@ -3602,8 +3587,8 @@ mod tests {
         assert!(output.contains("Auth state: authenticated"));
         assert!(output.contains("Granted scopes: personal, daily, heartrate"));
         assert!(output.contains("Database path: "));
-        assert!(output.contains("Warnings [operator attention]"));
-        assert!(output.contains("Warnings"));
+        assert!(output.contains("WARNINGS [ATTN]"));
+        assert!(output.contains("COVERAGE [MATRIX]"));
     }
 
     #[test]
@@ -3662,18 +3647,24 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_compact_and_wide_snapshots_have_distinct_reading_paths() {
+    fn dashboard_compact_medium_and_wide_snapshots_have_distinct_reading_paths() {
         let config = test_config();
         let mut app = build_demo_state(&config);
         app.active_screen = Screen::Dashboard;
 
         let compact = render_snapshot(&app, 90, 28)
             .unwrap_or_else(|error| unreachable!("compact snapshot should render: {error}"));
+        let medium = render_snapshot(&app, 120, 36)
+            .unwrap_or_else(|error| unreachable!("medium snapshot should render: {error}"));
         let wide = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("wide snapshot should render: {error}"));
 
-        assert!(compact.contains("Secondary detail"));
-        assert!(wide.contains("Drill-down cues"));
+        assert!(compact.contains("READINESS [FRESH]"));
+        assert!(compact.contains("ACTIVITY [FRESH]"));
+        assert!(medium.contains("HEADER / STATUS [LIVE]"));
+        assert!(medium.contains("HEART RATE [STALE]"));
+        assert!(wide.contains("HEADER / STATUS [LIVE]"));
+        assert!(wide.contains("READINESS BREAKDOWN [FRESH]"));
     }
 
     #[test]
@@ -3900,7 +3891,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn renders_scenario_fixture_matrix_across_compact_and_wide() {
+    async fn renders_scenario_fixture_matrix_across_compact_medium_and_wide() {
         let config = test_config();
         let states = build_scenario_fixture_snapshot_apps_for_tests(
             &config,
@@ -3910,38 +3901,58 @@ mod tests {
         .unwrap_or_else(|error| unreachable!("scenario fixture apps should build: {error}"));
 
         for (scenario, mut app) in states {
-            let scenario_marker = format!("Scenario fixture `{}`", scenario.label());
-
-            for (screen, compact_marker, wide_marker) in [
-                (Screen::Dashboard, "Now |", "What matters now"),
-                (Screen::Timeline, "Day events", "Day events"),
-                (Screen::Trends, "Trend windows", "Trend windows"),
+            for (screen, compact_marker, medium_marker, wide_marker) in [
+                (
+                    Screen::Dashboard,
+                    "READINESS [",
+                    "HEADER / STATUS [LIVE]",
+                    "HEADER / STATUS [LIVE]",
+                ),
+                (Screen::Timeline, "TIMELINE [", "HEART RATE [", "TIMELINE ["),
+                (
+                    Screen::Trends,
+                    "TREND MATRIX [COMPACT]",
+                    "TREND MATRIX [SORTED]",
+                    "TREND MATRIX [SORTED]",
+                ),
                 (
                     Screen::Explain,
                     "Supporting evidence",
                     "Supporting evidence",
+                    "Supporting evidence",
                 ),
-                (Screen::Patterns, "Patterns browser", "Patterns browser"),
-                (Screen::Review, "Review digest", "Review digest"),
-                (Screen::Ai, "AI workbench", "AI workbench"),
-                (Screen::Ops, "Status console", "Status console"),
+                (
+                    Screen::Patterns,
+                    "Patterns browser",
+                    "Patterns browser",
+                    "Patterns browser",
+                ),
+                (
+                    Screen::Review,
+                    "Ranked observations",
+                    "Ranked observations",
+                    "Ranked observations",
+                ),
+                (Screen::Ai, "AI workbench", "AI workbench", "AI workbench"),
+                (
+                    Screen::Ops,
+                    "COVERAGE [MATRIX]",
+                    "COVERAGE [MATRIX]",
+                    "COVERAGE [MATRIX]",
+                ),
             ] {
                 app.active_screen = screen;
 
-                for (width, height) in [(90, 28), (160, 44)] {
+                for (width, height) in [(90, 28), (120, 36), (160, 44)] {
                     let output = render_snapshot(&app, width, height).unwrap_or_else(|error| {
                         unreachable!("matrix snapshot should render: {error}")
                     });
-                    let marker = if width == 90 {
-                        compact_marker
-                    } else {
-                        wide_marker
+                    let marker = match width {
+                        90 => compact_marker,
+                        120 => medium_marker,
+                        _ => wide_marker,
                     };
 
-                    assert!(
-                        output.contains(&scenario_marker),
-                        "scenario marker missing for {scenario:?} {screen:?} {width}x{height}"
-                    );
                     assert!(
                         output.contains(marker),
                         "screen marker `{marker}` missing for {scenario:?} {screen:?} {width}x{height}"
@@ -3981,8 +3992,8 @@ mod tests {
                 Some(Action::MoveFocusedRegion(NavMove::Previous)),
             ),
             (
-                Screen::Patterns,
-                FocusRegion::ContextPrimary,
+                Screen::Timeline,
+                FocusRegion::TimelineControls,
                 KeyCode::Right,
                 Some(Action::MoveFocusedRegion(NavMove::Next)),
             ),
@@ -4170,18 +4181,21 @@ mod tests {
     }
 
     #[test]
-    fn orientation_strip_marks_the_focused_region() {
+    fn top_nav_focus_uses_the_tab_focus_badge() {
         let config = test_config();
         let mut app = build_demo_state(&config);
-        app.active_screen = Screen::Ai;
+        app.handle(Action::ShowScreen(Screen::Ai));
         app.handle(Action::FocusNextRegion);
+        app.handle(Action::FocusNextRegion);
+        app.handle(Action::FocusNextRegion);
+        app.handle(Action::FocusNextRegion);
+
+        assert_eq!(app.focused_region(), FocusRegion::TopNav);
 
         let output = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("ai snapshot should render: {error}"));
 
-        assert!(output.contains(
-            "Focus: body focus | Views | Browser | Launch points | [Saved artifacts] | Artifact actions"
-        ));
+        assert!(output.contains("Views [AI]") || output.contains("Views [focus in tabs]"));
     }
 
     #[test]

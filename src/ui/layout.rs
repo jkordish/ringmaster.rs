@@ -1,4 +1,4 @@
-use ratatui::{layout::Rect, prelude::Constraint};
+use ratatui::layout::Rect;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewportClass {
@@ -46,54 +46,14 @@ impl UiContext {
     }
 }
 
-#[must_use]
-pub fn equal_columns(count: usize) -> Vec<Constraint> {
-    if count == 0 {
-        return Vec::new();
-    }
-
-    let Ok(base) = u16::try_from(100 / count) else {
-        return vec![Constraint::Percentage(1); count];
-    };
-    let remainder = 100 % count;
-
-    (0..count)
-        .map(|index| Constraint::Percentage(base + u16::from(index < remainder)))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use ratatui::prelude::Constraint;
-
-    use super::{ViewportClass, equal_columns};
+    use super::ViewportClass;
 
     #[test]
     fn viewport_breakpoints_are_stable() {
         assert_eq!(ViewportClass::from_width(90), ViewportClass::Compact);
         assert_eq!(ViewportClass::from_width(120), ViewportClass::Medium);
         assert_eq!(ViewportClass::from_width(160), ViewportClass::Wide);
-    }
-
-    #[test]
-    fn equal_columns_distributes_remainder() {
-        assert_eq!(
-            equal_columns(3),
-            vec![
-                Constraint::Percentage(34),
-                Constraint::Percentage(33),
-                Constraint::Percentage(33),
-            ]
-        );
-        assert_eq!(
-            equal_columns(6)
-                .into_iter()
-                .map(|constraint| match constraint {
-                    Constraint::Percentage(value) => u32::from(value),
-                    _ => 0,
-                })
-                .sum::<u32>(),
-            100
-        );
     }
 }
