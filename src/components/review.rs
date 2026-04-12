@@ -186,9 +186,14 @@ fn draw_cards(frame: &mut Frame<'_>, area: Rect, model: &ReviewModel, theme: &Th
             .map(|(index, card)| {
                 let prefix = chrome::focus_prefix(card.selected);
                 let rank = index + 1;
+                let badge_suffix = if card.badges.is_empty() {
+                    String::new()
+                } else {
+                    format!(" | {}", card.badges.join(" / "))
+                };
                 ListItem::new(format!(
-                    "{prefix} #{rank} {} | {} | {}",
-                    card.headline, card.section_label, card.confidence_label
+                    "{prefix} #{rank} {} | {} | {}{}",
+                    card.headline, card.section_label, card.confidence_label, badge_suffix
                 ))
             })
             .collect::<Vec<_>>()

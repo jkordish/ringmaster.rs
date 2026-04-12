@@ -2,6 +2,7 @@ use rusqlite::params;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::error::Result;
+use crate::oura::models::{DailySleepDocument, PagedCollection};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Migration {
@@ -49,6 +50,7 @@ pub const MIGRATIONS: &[Migration] = &[
         CREATE TABLE IF NOT EXISTS daily_sleep (
             day TEXT PRIMARY KEY,
             sleep_score INTEGER,
+            sleep_duration_seconds INTEGER,
             raw_cache_key TEXT,
             updated_at TEXT NOT NULL
         );
@@ -802,6 +804,13 @@ pub const MIGRATIONS: &[Migration] = &[
         ALTER TABLE ai_eval_runs ADD COLUMN details_json TEXT NOT NULL DEFAULT '';
         ",
     },
+    Migration {
+        version: 17,
+        name: "phase8_sleep_duration_seconds",
+        sql: r"
+        ALTER TABLE daily_sleep ADD COLUMN sleep_duration_seconds INTEGER;
+        ",
+    },
 ];
 
 pub fn run_migrations(connection: &mut rusqlite::Connection) -> Result<MigrationReport> {
@@ -822,9 +831,16 @@ pub fn run_migrations(connection: &mut rusqlite::Connection) -> Result<Migration
             continue;
         }
 
+        let should_skip_sql = migration.version == 17
+            && table_has_column(connection, "daily_sleep", "sleep_duration_seconds")?;
         let applied_at = now_rfc3339()?;
         let transaction = connection.transaction()?;
-        transaction.execute_batch(migration.sql)?;
+        if !should_skip_sql {
+            transaction.execute_batch(migration.sql)?;
+        }
+        if migration.version == 17 {
+            backfill_sleep_duration_seconds(&transaction)?;
+        }
         transaction.execute(
             "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
             params![migration.version, migration.name, applied_at],
@@ -847,6 +863,53 @@ pub fn current_version() -> u32 {
         .unwrap_or_default()
 }
 
+fn backfill_sleep_duration_seconds(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
+    let rows = {
+        let mut statement = transaction.prepare(
+            "SELECT daily_sleep.day, raw_payload_cache.payload
+             FROM daily_sleep
+             JOIN raw_payload_cache ON raw_payload_cache.cache_key = daily_sleep.raw_cache_key
+             WHERE daily_sleep.sleep_duration_seconds IS NULL
+               AND daily_sleep.raw_cache_key IS NOT NULL",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut collected = Vec::new();
+        for row in rows {
+            collected.push(row?);
+        }
+        collected
+    };
+
+    let mut backfilled = Vec::new();
+    for (day, payload) in rows {
+        let Ok(page) = serde_json::from_str::<PagedCollection<DailySleepDocument>>(&payload) else {
+            continue;
+        };
+        let Some(duration) = page
+            .data
+            .into_iter()
+            .find(|document| document.day == day)
+            .and_then(|document| document.sleep_duration_seconds)
+        else {
+            continue;
+        };
+        backfilled.push((day, duration));
+    }
+
+    for (day, duration) in backfilled {
+        transaction.execute(
+            "UPDATE daily_sleep
+             SET sleep_duration_seconds = ?1
+             WHERE day = ?2 AND sleep_duration_seconds IS NULL",
+            params![duration, day],
+        )?;
+    }
+
+    Ok(())
+}
+
 fn read_applied_versions(connection: &rusqlite::Connection) -> Result<Vec<u32>> {
     let mut statement =
         connection.prepare("SELECT version FROM schema_migrations ORDER BY version ASC")?;
@@ -866,6 +929,22 @@ fn now_rfc3339() -> Result<String> {
     })
 }
 
+fn table_has_column(
+    connection: &rusqlite::Connection,
+    table_name: &str,
+    column_name: &str,
+) -> Result<bool> {
+    let pragma = format!("PRAGMA table_info({table_name})");
+    let mut statement = connection.prepare(&pragma)?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for row in rows {
+        if row? == column_name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::{Connection, params};
@@ -881,7 +960,7 @@ mod tests {
         assert_eq!(report.current_version, current_version());
         assert_eq!(
             report.applied_versions,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
         );
     }
 
@@ -962,7 +1041,7 @@ mod tests {
         );
         assert_eq!(
             report.applied_versions,
-            vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+            vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
         );
 
         let (workout_day, workout_title): (String, String) = connection
@@ -1039,7 +1118,7 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("phase4 migrations should succeed: {error}"));
         assert_eq!(
             report.applied_versions,
-            vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+            vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
         );
 
         let row: (String, String, String) = connection
@@ -1086,7 +1165,10 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| unreachable!("phase4 migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![9, 10, 11, 12, 13, 14, 15, 16]);
+        assert_eq!(
+            report.applied_versions,
+            vec![9, 10, 11, 12, 13, 14, 15, 16, 17]
+        );
 
         let daily_sleep_columns: Vec<String> = {
             let mut statement = connection
@@ -1099,6 +1181,11 @@ mod tests {
                 .unwrap_or_else(|error| unreachable!("daily_sleep columns should load: {error}"))
         };
         assert!(daily_sleep_columns.iter().any(|column| column == "oura_id"));
+        assert!(
+            daily_sleep_columns
+                .iter()
+                .any(|column| column == "sleep_duration_seconds")
+        );
     }
 
     #[test]
@@ -1129,7 +1216,10 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| unreachable!("phase5 migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![10, 11, 12, 13, 14, 15, 16]);
+        assert_eq!(
+            report.applied_versions,
+            vec![10, 11, 12, 13, 14, 15, 16, 17]
+        );
 
         let table_names: Vec<String> = {
             let mut statement = connection
@@ -1169,6 +1259,88 @@ mod tests {
     }
 
     #[test]
+    fn phase8_sleep_duration_migration_backfills_existing_rows_from_raw_payloads() {
+        let mut connection = Connection::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("in-memory db should open: {error}"));
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );
+
+                CREATE TABLE raw_payload_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    endpoint TEXT NOT NULL,
+                    requested_at TEXT NOT NULL,
+                    scope TEXT,
+                    etag TEXT,
+                    payload TEXT NOT NULL
+                );
+
+                CREATE TABLE daily_sleep (
+                    oura_id TEXT,
+                    day TEXT PRIMARY KEY,
+                    sleep_score INTEGER,
+                    raw_cache_key TEXT,
+                    updated_at TEXT NOT NULL
+                );",
+            )
+            .unwrap_or_else(|error| unreachable!("legacy schema should create: {error}"));
+
+        for version in 1..=16 {
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+                    params![version, format!("phase-{version}"), "2026-04-12T00:00:00Z"],
+                )
+                .unwrap_or_else(|error| unreachable!("migration marker should insert: {error}"));
+        }
+
+        connection
+            .execute(
+                "INSERT INTO raw_payload_cache (cache_key, endpoint, requested_at, scope, etag, payload)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    "daily_sleep|2026-04-01..2026-04-02",
+                    "daily_sleep",
+                    "2026-04-12T00:00:00Z",
+                    "daily",
+                    Option::<String>::None,
+                    r#"{"data":[{"id":"sleep-1","day":"2026-04-01","score":85,"total_sleep_duration":27000,"timestamp":"2026-04-01T06:00:00Z"}],"next_token":null}"#,
+                ],
+            )
+            .unwrap_or_else(|error| unreachable!("raw payload should seed: {error}"));
+        connection
+            .execute(
+                "INSERT INTO daily_sleep (oura_id, day, sleep_score, raw_cache_key, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    "sleep-1",
+                    "2026-04-01",
+                    85,
+                    "daily_sleep|2026-04-01..2026-04-02",
+                    "2026-04-12T00:00:00Z",
+                ],
+            )
+            .unwrap_or_else(|error| unreachable!("legacy sleep row should seed: {error}"));
+
+        let report = run_migrations(&mut connection)
+            .unwrap_or_else(|error| unreachable!("phase8 sleep migration should succeed: {error}"));
+        assert_eq!(report.applied_versions, vec![17]);
+
+        let duration = connection
+            .query_row(
+                "SELECT sleep_duration_seconds FROM daily_sleep WHERE day = '2026-04-01'",
+                [],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .unwrap_or_else(|error| unreachable!("backfilled duration should load: {error}"));
+        assert_eq!(duration, Some(27_000));
+    }
+
+    #[test]
     fn phase5_review_signal_migration_creates_snapshot_table() {
         let mut connection = Connection::open_in_memory()
             .unwrap_or_else(|error| unreachable!("in-memory db should open: {error}"));
@@ -1199,7 +1371,7 @@ mod tests {
         let report = run_migrations(&mut connection).unwrap_or_else(|error| {
             unreachable!("review signal migration should succeed: {error}")
         });
-        assert_eq!(report.applied_versions, vec![11, 12, 13, 14, 15, 16]);
+        assert_eq!(report.applied_versions, vec![11, 12, 13, 14, 15, 16, 17]);
 
         let table_names: Vec<String> = {
             let mut statement = connection
@@ -1271,7 +1443,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| unreachable!("vo2 history migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![12, 13, 14, 15, 16]);
+        assert_eq!(report.applied_versions, vec![12, 13, 14, 15, 16, 17]);
 
         let primary_key_columns: Vec<String> = {
             let mut statement = connection

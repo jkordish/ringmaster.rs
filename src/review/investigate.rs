@@ -136,6 +136,7 @@ fn look_at_lines(focus: ReviewFocus) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::evidence::PopulationProfile;
     use crate::oura::models::CapabilityReport;
     use crate::review::engine::ReviewInputs;
     use crate::review::engine::{
@@ -205,6 +206,7 @@ mod tests {
             "2026-04-08",
             &ReviewInputs {
                 auth_status: &auth_status,
+                active_population_profile: PopulationProfile::GeneralAdult,
                 signal_days: &signal_days,
                 context_events: &[],
                 pattern_summaries: &[],

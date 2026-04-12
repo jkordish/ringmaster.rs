@@ -1221,7 +1221,7 @@ mod tests {
       "case_id": "review",
       "task_family": "review",
       "snapshot_a": "snapshot.json",
-      "snapshot_hash_a": "fixture-review-snapshot",
+      "snapshot_hash_a": "32bebf1f9c33fabb49b5e11ffe4a2ba0f454d0341dac33894a6428366fe0ea79",
       "artifacts": [
         {
           "label": "candidate",
@@ -1307,7 +1307,7 @@ mod tests {
         assert_eq!(details.cases.len(), 1);
         assert_eq!(
             details.cases[0].snapshot_hash_a.as_deref(),
-            Some("fixture-review-snapshot")
+            Some("32bebf1f9c33fabb49b5e11ffe4a2ba0f454d0341dac33894a6428366fe0ea79")
         );
         assert_eq!(
             details.cases[0].candidate.lineage.ai_run_id.as_deref(),

@@ -24,6 +24,10 @@ Trust summary: {{trust_summary}}
 
 {{supporting_evidence}}
 
+## Evidence And Safety Rails
+
+{{evidence_and_rails}}
+
 ## Uncertainty And Sufficiency
 
 {{uncertainty_notes}}

@@ -12,6 +12,8 @@ use crate::eval::{
     PersistedEvalCaseDetail, PersistedEvalGraderResult, PersistedEvalRunDetails,
     parse_persisted_eval_details,
 };
+use crate::evidence::PopulationProfile;
+use crate::evidence::policy::{claim_language_spec, evidence_badges, guidance_comparison_text};
 use crate::insights::{InsightConfidence, MetricInsight, MetricPoint, build_metric_insight};
 use crate::keybindings::BindingContext;
 use crate::navigation::{
@@ -37,8 +39,9 @@ use crate::store::webhook_store::{
     ProcessingAttemptRecord, RejectedWebhookDeliveryRecord, RemoteWebhookSubscriptionRecord,
     RuntimeHeartbeatRecord,
 };
+use crate::time_utils::current_local_day_string;
 use serde::Serialize;
-use time::{Date, OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
+use time::{Date, OffsetDateTime, format_description::well_known::Rfc3339};
 
 const LIVE_REVIEW_SIGNAL_LOOKBACK_DAYS: i64 = 60;
 const LIVE_REVIEW_SLEEP_LOOKBACK_DAYS: i64 = 60;
@@ -83,6 +86,8 @@ pub struct LiveSnapshot {
     pub captured_at: String,
     pub refresh_policy: RefreshPolicySnapshot,
     pub auth_status: AuthStatus,
+    pub active_population_profile: PopulationProfile,
+    pub guidance_profile_source: String,
     pub ai_ops: AiOpsSnapshot,
     pub webhook: WebhookOpsSnapshot,
     pub personal_info: Option<PersonalInfoRecord>,
@@ -346,6 +351,7 @@ pub struct ExplainModel {
     pub overlay_toggles: Vec<OverlayToggleView>,
     pub selected_overlay_toggle_index: usize,
     pub summary_lines: Vec<String>,
+    pub evidence_badges: Vec<String>,
     pub measurement_lines: Vec<String>,
     pub evidence_lines: Vec<String>,
     pub caveat_lines: Vec<String>,
@@ -485,6 +491,7 @@ pub struct ReviewCardView {
     pub headline: String,
     pub confidence_label: String,
     pub section_label: String,
+    pub badges: Vec<String>,
     pub selected: bool,
 }
 
@@ -596,6 +603,7 @@ pub struct PatternFilterTab {
 pub struct PatternRowView {
     pub headline: String,
     pub detail: String,
+    pub badges: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2800,6 +2808,14 @@ pub fn build_live_state(
     auth_status: &AuthStatus,
 ) -> crate::error::Result<AppState> {
     interrupt_stale_ai_runs(store)?;
+    build_read_only_live_state(config, store, auth_status)
+}
+
+pub(crate) fn build_read_only_live_state(
+    config: &Config,
+    store: &Store,
+    auth_status: &AuthStatus,
+) -> crate::error::Result<AppState> {
     let snapshot = load_live_snapshot(config, store, auth_status)?;
     Ok(build_state_from_snapshot(
         RunMode::Live,
@@ -2899,6 +2915,8 @@ pub fn load_live_snapshot(
         captured_at: now_rfc3339(),
         refresh_policy: RefreshPolicySnapshot::from_config(config),
         auth_status: auth_status.clone(),
+        active_population_profile: config.guidance.active_population_profile,
+        guidance_profile_source: config.guidance.source_label().to_owned(),
         ai_ops,
         webhook: WebhookOpsSnapshot {
             bind_address: config.webhook.bind.to_string(),
@@ -3020,6 +3038,7 @@ fn build_live_model(snapshot: &LiveSnapshot, options: &LiveModelOptions) -> AppM
     );
     let review_inputs = ReviewInputs {
         auth_status: &snapshot.auth_status,
+        active_population_profile: snapshot.active_population_profile,
         signal_days: &snapshot.review_signal_days,
         context_events: &snapshot.context_events,
         pattern_summaries: &snapshot.pattern_summaries,
@@ -3075,7 +3094,13 @@ fn build_live_model(snapshot: &LiveSnapshot, options: &LiveModelOptions) -> AppM
             options.selected_overlay_toggle_index,
             options.pattern_metric_filter,
         ),
-        review: build_review_model(&today_review, &week_review, &investigation, &review_context),
+        review: build_review_model(
+            snapshot,
+            &today_review,
+            &week_review,
+            &investigation,
+            &review_context,
+        ),
         ai: build_ai_workbench_model(snapshot, options),
         ops: build_ops_model(snapshot, options.refresh_in_flight),
     }
@@ -3521,11 +3546,13 @@ fn build_explain_model(
         headline: format!("Day story for {selected_day}"),
         overlay_toggles: overlay_toggle_views(overlay_filters, selected_overlay_toggle_index),
         selected_overlay_toggle_index,
-        summary_lines: vec![
-            selected_day_baseline_sentence("Sleep", &selected_day, &sleep_insight),
-            selected_day_baseline_sentence("Readiness", &selected_day, &readiness_insight),
-            selected_day_baseline_sentence("Activity", &selected_day, &activity_insight),
-        ],
+        summary_lines: explain_summary_lines(
+            snapshot,
+            &selected_day,
+            selected_daily,
+            [&sleep_insight, &readiness_insight, &activity_insight],
+        ),
+        evidence_badges: explain_evidence_badges(snapshot, selected_daily),
         measurement_lines: measurement_lines_for_day(selected_daily, heartrate),
         evidence_lines: explain_evidence_lines(&supporting_events),
         caveat_lines: explain_caveat_lines(
@@ -3557,6 +3584,82 @@ fn explain_metric_insights(snapshot: &LiveSnapshot, selected_day: &str) -> [Metr
             row.activity_score.map(f64::from)
         }),
     ]
+}
+
+fn explain_summary_lines(
+    snapshot: &LiveSnapshot,
+    selected_day: &str,
+    selected_daily: Option<&DailyOverviewRow>,
+    insights: [&MetricInsight; 3],
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(guidance_line) = selected_daily
+        .and_then(|row| row.sleep_duration_seconds.map(crate::numeric::i64_to_f64))
+        .map(|seconds| seconds / 3600.0)
+        .and_then(|hours| {
+            guidance_comparison_text(
+                "sleep_duration",
+                snapshot.active_population_profile,
+                Some(hours),
+            )
+        })
+        .map(|guidance| guidance.summary)
+    {
+        lines.push(guidance_line);
+    }
+    lines.push(selected_day_baseline_sentence(
+        "Sleep",
+        selected_day,
+        insights[0],
+    ));
+    lines.push(selected_day_baseline_sentence(
+        "Readiness",
+        selected_day,
+        insights[1],
+    ));
+    lines.push(selected_day_baseline_sentence(
+        "Activity",
+        selected_day,
+        insights[2],
+    ));
+    lines
+}
+
+fn explain_evidence_badges(
+    snapshot: &LiveSnapshot,
+    selected_daily: Option<&DailyOverviewRow>,
+) -> Vec<String> {
+    let mut badges = Vec::new();
+    if selected_daily.is_some_and(|row| row.sleep_duration_seconds.is_some()) {
+        badges.extend(evidence_badges(
+            "sleep_duration",
+            snapshot.active_population_profile,
+        ));
+    }
+    badges.extend(evidence_badges(
+        "sleep_score",
+        snapshot.active_population_profile,
+    ));
+    badges.extend(evidence_badges(
+        "readiness_score",
+        snapshot.active_population_profile,
+    ));
+    badges.extend(evidence_badges(
+        "activity_score",
+        snapshot.active_population_profile,
+    ));
+    dedupe_preserving_order(badges)
+}
+
+fn dedupe_preserving_order(lines: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut deduped = Vec::new();
+    for line in lines {
+        if seen.insert(line.clone()) {
+            deduped.push(line);
+        }
+    }
+    deduped
 }
 
 fn explain_caveat_lines(
@@ -3598,7 +3701,17 @@ fn explain_caveat_lines(
     {
         caveat_lines.push(format!("Today's review also flagged: {}", card.headline));
     }
-    caveat_lines
+    for claim_key in [
+        "sleep_duration",
+        "sleep_score",
+        "readiness_score",
+        "activity_score",
+    ] {
+        if let Some(spec) = claim_language_spec(claim_key, snapshot.active_population_profile) {
+            caveat_lines.extend(spec.disclaimer_lines);
+        }
+    }
+    dedupe_preserving_order(caveat_lines)
 }
 
 fn explain_evidence_lines(supporting_events: &[ExplainSupportingEvent]) -> Vec<String> {
@@ -3685,6 +3798,7 @@ fn build_patterns_model(
         rows,
         notes: vec![
             "Patterns are descriptive associations, not causal claims.".to_owned(),
+            "Every row on this screen is exploratory and trend-only by design.".to_owned(),
             "Rows appear after at least 3 comparable days; same-night sleep refers to the following closeout day.".to_owned(),
         ],
         empty_message:
@@ -3982,6 +4096,14 @@ fn build_ops_ai_items(snapshot: &LiveSnapshot) -> Vec<OpsItem> {
             ),
         ),
         ops_item(
+            "Guidance profile",
+            format!(
+                "{} | source={}",
+                snapshot.active_population_profile.label(),
+                snapshot.guidance_profile_source,
+            ),
+        ),
+        ops_item(
             "AI prompt/schema",
             format!(
                 "review={} | compare={}",
@@ -4114,6 +4236,7 @@ fn build_ops_refresh_items(snapshot: &LiveSnapshot) -> Vec<OpsItem> {
 }
 
 fn build_review_model(
+    snapshot: &LiveSnapshot,
     today_review: &ReviewDeck,
     week_review: &ReviewDeck,
     investigation: &InvestigationReport,
@@ -4141,6 +4264,7 @@ fn build_review_model(
             headline: card.headline.clone(),
             confidence_label: card.confidence_label.clone(),
             section_label: review_section_label(card),
+            badges: review_card_badges(card, snapshot.active_population_profile),
             selected: selected_card_index == Some(index),
         })
         .collect::<Vec<_>>();
@@ -4183,6 +4307,7 @@ fn build_review_model(
             context.review_mode,
             selected_card_index.and_then(|index| cards.get(index).copied()),
             investigation,
+            snapshot.active_population_profile,
         ),
         warning_lines: review_warning_lines(
             context.review_mode,
@@ -5520,6 +5645,7 @@ fn review_detail_lines(
     review_mode: ReviewScreenMode,
     selected_card: Option<&ReviewCard>,
     investigation: &InvestigationReport,
+    active_population: PopulationProfile,
 ) -> Vec<String> {
     let mut lines = Vec::new();
 
@@ -5557,6 +5683,19 @@ fn review_detail_lines(
         }
         lines.push(card.headline.clone());
         lines.push(card.confidence_label.clone());
+        if let Some(spec) = claim_language_spec(&card.signal_key, active_population) {
+            lines.push(format!("Evidence tier: {}", spec.tier_label));
+            lines.push(format!("Interpretation: {}", spec.interpretation_label));
+            if let Some(guidance_label) = spec.guidance_label {
+                lines.push(format!("Guidance anchor: {guidance_label}"));
+            }
+            if !spec.caution_labels.is_empty() {
+                lines.push(format!(
+                    "Caution rails: {}",
+                    spec.caution_labels.join(" | ")
+                ));
+            }
+        }
         lines.push(card.summary.clone());
         lines.push(card.why_this_is_shown.clone());
         if !card.evidence.is_empty() {
@@ -5630,6 +5769,15 @@ fn review_section_label(card: &ReviewCard) -> String {
         crate::review::engine::ReviewSection::PositiveChange => "Positive".to_owned(),
         crate::review::engine::ReviewSection::NegativeDrift => "Drift".to_owned(),
         crate::review::engine::ReviewSection::UnresolvedAnomaly => "Anomaly".to_owned(),
+    }
+}
+
+fn review_card_badges(card: &ReviewCard, active_population: PopulationProfile) -> Vec<String> {
+    let badges = evidence_badges(&card.signal_key, active_population);
+    if badges.is_empty() {
+        Vec::new()
+    } else {
+        badges.into_iter().take(3).collect()
     }
 }
 
@@ -6806,14 +6954,6 @@ fn latest_day_is_before_reference_day(snapshot: &LiveSnapshot, reference_day: &s
         .is_some_and(|row| row.day.as_str() < reference_day)
 }
 
-fn current_local_day_string() -> String {
-    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-    OffsetDateTime::now_utc()
-        .to_offset(local_offset)
-        .date()
-        .to_string()
-}
-
 fn capability_views(report: &CapabilityReport) -> Vec<CapabilityView> {
     report
         .entries
@@ -7155,6 +7295,7 @@ fn pattern_row_view(summary: &PatternSummaryRecord) -> PatternRowView {
             summary.sample_count,
             data_sufficiency_label(summary.confidence),
         ),
+        badges: vec!["Exploratory".to_owned(), "Trend-only".to_owned()],
     }
 }
 
@@ -7734,6 +7875,7 @@ const fn empty_explain_model() -> ExplainModel {
         overlay_toggles: Vec::new(),
         selected_overlay_toggle_index: 0,
         summary_lines: Vec::new(),
+        evidence_badges: Vec::new(),
         measurement_lines: Vec::new(),
         evidence_lines: Vec::new(),
         caveat_lines: Vec::new(),
@@ -7819,6 +7961,8 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
         captured_at: "2026-04-08T22:30:00Z".to_owned(),
         refresh_policy: demo_refresh_policy_snapshot(),
         auth_status: demo_auth_status(),
+        active_population_profile: config.guidance.active_population_profile,
+        guidance_profile_source: config.guidance.source_label().to_owned(),
         ai_ops,
         webhook: demo_webhook_snapshot(),
         personal_info: Some(demo_personal_info()),
@@ -7879,6 +8023,7 @@ fn demo_daily_history() -> Vec<DailyOverviewRow> {
         DailyOverviewRow {
             day: "2026-04-05".to_owned(),
             sleep_score: Some(82),
+            sleep_duration_seconds: Some(27_000),
             readiness_score: Some(80),
             activity_score: Some(72),
             updated_at: "2026-04-05T10:00:00Z".to_owned(),
@@ -7886,6 +8031,7 @@ fn demo_daily_history() -> Vec<DailyOverviewRow> {
         DailyOverviewRow {
             day: "2026-04-06".to_owned(),
             sleep_score: Some(84),
+            sleep_duration_seconds: Some(27_600),
             readiness_score: Some(81),
             activity_score: Some(74),
             updated_at: "2026-04-06T10:00:00Z".to_owned(),
@@ -7893,6 +8039,7 @@ fn demo_daily_history() -> Vec<DailyOverviewRow> {
         DailyOverviewRow {
             day: "2026-04-07".to_owned(),
             sleep_score: Some(80),
+            sleep_duration_seconds: Some(26_400),
             readiness_score: Some(78),
             activity_score: Some(75),
             updated_at: "2026-04-07T10:00:00Z".to_owned(),
@@ -7900,6 +8047,7 @@ fn demo_daily_history() -> Vec<DailyOverviewRow> {
         DailyOverviewRow {
             day: "2026-04-08".to_owned(),
             sleep_score: Some(76),
+            sleep_duration_seconds: Some(24_900),
             readiness_score: Some(74),
             activity_score: Some(88),
             updated_at: "2026-04-08T10:00:00Z".to_owned(),
@@ -8204,7 +8352,7 @@ fn demo_ai_artifacts_by_day() -> BTreeMap<String, AiArtifactDaySummaryRecord> {
             provider: "openai".to_owned(),
             model: "gpt-4o-2024-08-06".to_owned(),
             prompt_version: "review_prompt_v1".to_owned(),
-            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v3".to_owned(),
             privacy_profile: "redacted".to_owned(),
             summary_cache:
                 "Sleep debt and elevated stress likely drove the readiness dip.".to_owned(),
@@ -8296,13 +8444,14 @@ fn demo_review_preview() -> AiRequestPreview {
         input_transport: "inline".to_owned(),
         prompt_cache: "auto".to_owned(),
         prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
-        output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+        output_schema_version: "ringmaster.ai.review.v3".to_owned(),
         snapshots: vec![AiRequestPreviewSnapshot {
             label: "primary".to_owned(),
             snapshot_hash: "demo-snapshot-20260408".to_owned(),
             scope: "day:2026-04-08".to_owned(),
             anchor_day: "2026-04-08".to_owned(),
             privacy_profile: PrivacyProfile::Redacted,
+            active_population_profile: PopulationProfile::GeneralAdult,
             day_count: 1,
         }],
         snapshot_bytes: 52_000,
@@ -8333,7 +8482,7 @@ fn demo_review_artifact() -> AiArtifactRecord {
         input_transport: "inline".to_owned(),
         run_mode: "dry_run".to_owned(),
         prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
-        output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+        output_schema_version: "ringmaster.ai.review.v3".to_owned(),
         created_at: "2026-04-08T22:20:00Z".to_owned(),
         snapshot_hash_a: "demo-snapshot-20260408".to_owned(),
         snapshot_hash_b: None,
@@ -8344,7 +8493,7 @@ fn demo_review_artifact() -> AiArtifactRecord {
                 .to_owned(),
         request_fingerprint: Some("demo-review-request".to_owned()),
         payload_json: serialize_pretty_json(&ai::ReviewArtifactV1 {
-            schema_version: "ringmaster.ai.review.v1".to_owned(),
+            schema_version: "ringmaster.ai.review.v3".to_owned(),
             prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
             status: ai::ArtifactStatus::DryRun,
             overview: "Sleep debt and elevated stress likely drove the readiness dip.".to_owned(),
@@ -8354,6 +8503,17 @@ fn demo_review_artifact() -> AiArtifactRecord {
                 summary:
                     "The selected day closed later than the surrounding baseline and the saved review linked that drift to weaker next-morning readiness."
                         .to_owned(),
+                claim_key: Some("sleep_time_status".to_owned()),
+                evidence_tier: Some(crate::evidence::registry::EvidenceTier::EvidenceInformed),
+                interpretation_scope: Some(
+                    crate::evidence::registry::InterpretationScope::WithinPersonTrendOnly,
+                ),
+                active_population_profile: Some(PopulationProfile::GeneralAdult),
+                population_support_status: Some(
+                    crate::evidence::registry::PopulationSupportStatus::PopulationSpecific,
+                ),
+                fallback_population_profile: None,
+                caution_labels: evidence_badges("sleep_time_status", PopulationProfile::GeneralAdult),
                 confidence: ai::ConfidenceLevel::Medium,
                 sufficiency: ai::SufficiencyLevel::Medium,
                 evidence_refs: vec![ai::ArtifactEvidenceRef {
@@ -8372,6 +8532,17 @@ fn demo_review_artifact() -> AiArtifactRecord {
                 title: "Stress remained elevated".to_owned(),
                 summary: "The saved run still flags stress carryover as a compounding factor."
                     .to_owned(),
+                claim_key: Some("stress_high".to_owned()),
+                evidence_tier: Some(crate::evidence::registry::EvidenceTier::Exploratory),
+                interpretation_scope: Some(
+                    crate::evidence::registry::InterpretationScope::WithinPersonTrendOnly,
+                ),
+                active_population_profile: Some(PopulationProfile::GeneralAdult),
+                population_support_status: Some(
+                    crate::evidence::registry::PopulationSupportStatus::PopulationSpecific,
+                ),
+                fallback_population_profile: None,
+                caution_labels: evidence_badges("stress_high", PopulationProfile::GeneralAdult),
                 confidence: ai::ConfidenceLevel::Medium,
                 sufficiency: ai::SufficiencyLevel::Thin,
                 evidence_refs: vec![ai::ArtifactEvidenceRef {
@@ -8411,7 +8582,7 @@ fn demo_compare_preview() -> AiRequestPreview {
         input_transport: "inline".to_owned(),
         prompt_cache: "auto".to_owned(),
         prompt_version: COMPARE_PROMPT_VERSION.to_owned(),
-        output_schema_version: "ringmaster.ai.compare.v1".to_owned(),
+        output_schema_version: "ringmaster.ai.compare.v3".to_owned(),
         snapshots: vec![
             AiRequestPreviewSnapshot {
                 label: "snapshot_a".to_owned(),
@@ -8419,6 +8590,7 @@ fn demo_compare_preview() -> AiRequestPreview {
                 scope: "day:2026-04-08".to_owned(),
                 anchor_day: "2026-04-08".to_owned(),
                 privacy_profile: PrivacyProfile::Redacted,
+                active_population_profile: PopulationProfile::GeneralAdult,
                 day_count: 1,
             },
             AiRequestPreviewSnapshot {
@@ -8427,6 +8599,7 @@ fn demo_compare_preview() -> AiRequestPreview {
                 scope: "week".to_owned(),
                 anchor_day: "2026-04-08".to_owned(),
                 privacy_profile: PrivacyProfile::Redacted,
+                active_population_profile: PopulationProfile::GeneralAdult,
                 day_count: 7,
             },
         ],
@@ -8450,7 +8623,7 @@ fn demo_snapshot_catalog() -> Vec<SnapshotCatalogEntry> {
     vec![
         SnapshotCatalogEntry {
             snapshot_hash: "demo-snapshot-20260408".to_owned(),
-            schema_version: "ringmaster.snapshot.v1".to_owned(),
+            schema_version: "ringmaster.snapshot.v3".to_owned(),
             generated_at: "2026-04-08T22:18:00Z".to_owned(),
             scope: "day:2026-04-08".to_owned(),
             start_day: "2026-04-08".to_owned(),
@@ -8470,7 +8643,7 @@ fn demo_snapshot_catalog() -> Vec<SnapshotCatalogEntry> {
         },
         SnapshotCatalogEntry {
             snapshot_hash: "demo-snapshot-20260401-20260408".to_owned(),
-            schema_version: "ringmaster.snapshot.v1".to_owned(),
+            schema_version: "ringmaster.snapshot.v3".to_owned(),
             generated_at: "2026-04-08T22:19:00Z".to_owned(),
             scope: "week".to_owned(),
             start_day: "2026-04-02".to_owned(),
@@ -8507,7 +8680,7 @@ fn demo_ai_runs(
             input_transport: "inline".to_owned(),
             run_mode: "dry_run".to_owned(),
             prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
-            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v3".to_owned(),
             privacy_profile: "redacted".to_owned(),
             snapshot_scope: "day:2026-04-08".to_owned(),
             snapshot_hash_a: "demo-snapshot-20260408".to_owned(),
@@ -8534,7 +8707,7 @@ fn demo_ai_runs(
             input_transport: "inline".to_owned(),
             run_mode: "dry_run".to_owned(),
             prompt_version: COMPARE_PROMPT_VERSION.to_owned(),
-            output_schema_version: "ringmaster.ai.compare.v1".to_owned(),
+            output_schema_version: "ringmaster.ai.compare.v3".to_owned(),
             privacy_profile: "redacted".to_owned(),
             snapshot_scope: "week".to_owned(),
             snapshot_hash_a: "demo-snapshot-20260408".to_owned(),
@@ -8569,7 +8742,7 @@ fn demo_report_exports() -> Vec<ReportExportRecord> {
         provider: Some("openai".to_owned()),
         model: Some("gpt-5-mini".to_owned()),
         prompt_version: Some(REVIEW_PROMPT_VERSION.to_owned()),
-        output_schema_version: Some("ringmaster.ai.review.v1".to_owned()),
+        output_schema_version: Some("ringmaster.ai.review.v2".to_owned()),
         export_status: "written".to_owned(),
         last_verified_exists: true,
         last_verified_at: "2026-04-08T22:26:00Z".to_owned(),
@@ -8659,7 +8832,7 @@ fn demo_eval_review_case() -> PersistedEvalCaseDetail {
             provider: "openai".to_owned(),
             model: "gpt-5-mini".to_owned(),
             prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
-            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v3".to_owned(),
             lineage: EvalArtifactLineage {
                 ai_run_id: Some("airun-demo-review-20260408".to_owned()),
                 ai_artifact_id: Some("run-demo-review-20260408".to_owned()),
@@ -8672,16 +8845,16 @@ fn demo_eval_review_case() -> PersistedEvalCaseDetail {
             provider: "fixture".to_owned(),
             model: "fixture".to_owned(),
             prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
-            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v3".to_owned(),
             lineage: EvalArtifactLineage::default(),
         }),
         graders: vec![
             PersistedEvalGraderResult {
                 grader: "schema_validity".to_owned(),
                 candidate_passed: true,
-                candidate_note: "matched schema `ringmaster.ai.review.v1`".to_owned(),
+                candidate_note: "matched schema `ringmaster.ai.review.v2`".to_owned(),
                 baseline_passed: Some(true),
-                baseline_note: Some("matched schema `ringmaster.ai.review.v1`".to_owned()),
+                baseline_note: Some("matched schema `ringmaster.ai.review.v2`".to_owned()),
                 comparison: "matched".to_owned(),
             },
             PersistedEvalGraderResult {
@@ -8726,7 +8899,7 @@ fn demo_eval_compare_case() -> PersistedEvalCaseDetail {
             provider: "openai".to_owned(),
             model: "gpt-5-mini".to_owned(),
             prompt_version: COMPARE_PROMPT_VERSION.to_owned(),
-            output_schema_version: "ringmaster.ai.compare.v1".to_owned(),
+            output_schema_version: "ringmaster.ai.compare.v3".to_owned(),
             lineage: EvalArtifactLineage {
                 ai_run_id: Some("airun-demo-compare-20260408".to_owned()),
                 ai_artifact_id: None,
@@ -8739,16 +8912,16 @@ fn demo_eval_compare_case() -> PersistedEvalCaseDetail {
             provider: "fixture".to_owned(),
             model: "fixture".to_owned(),
             prompt_version: COMPARE_PROMPT_VERSION.to_owned(),
-            output_schema_version: "ringmaster.ai.compare.v1".to_owned(),
+            output_schema_version: "ringmaster.ai.compare.v3".to_owned(),
             lineage: EvalArtifactLineage::default(),
         }),
         graders: vec![
             PersistedEvalGraderResult {
                 grader: "schema_validity".to_owned(),
                 candidate_passed: true,
-                candidate_note: "matched schema `ringmaster.ai.compare.v1`".to_owned(),
+                candidate_note: "matched schema `ringmaster.ai.compare.v2`".to_owned(),
                 baseline_passed: Some(true),
-                baseline_note: Some("matched schema `ringmaster.ai.compare.v1`".to_owned()),
+                baseline_note: Some("matched schema `ringmaster.ai.compare.v2`".to_owned()),
                 comparison: "matched".to_owned(),
             },
             PersistedEvalGraderResult {
@@ -8830,6 +9003,8 @@ mod tests {
         AiRequestPreview, AiRequestPreviewSnapshot, ArtifactFinding, ArtifactFollowUpTarget,
         ArtifactStatus, ConfidenceLevel, GuidedFollowUpKind, ReviewArtifactV1, SufficiencyLevel,
     };
+    use crate::evidence::PopulationProfile;
+    use crate::evidence::policy::evidence_badges;
     use crate::insights::MetricPoint;
     use crate::navigation::{self, FocusRegion, PreflightControl, SearchScope, TransientLayer};
     use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
@@ -8977,6 +9152,8 @@ mod tests {
             captured_at: "2026-04-08T12:00:00Z".to_owned(),
             refresh_policy: test_refresh_policy(),
             auth_status: test_auth_status(),
+            active_population_profile: PopulationProfile::GeneralAdult,
+            guidance_profile_source: "default".to_owned(),
             ai_ops: test_ai_ops_snapshot(),
             webhook: WebhookOpsSnapshot::default(),
             personal_info: None,
@@ -8985,6 +9162,7 @@ mod tests {
                 .map(|day| crate::store::queries::DailyOverviewRow {
                     day: (*day).to_owned(),
                     sleep_score: Some(80),
+                    sleep_duration_seconds: Some(27_000),
                     readiness_score: Some(80),
                     activity_score: Some(70),
                     updated_at: "2026-04-08T12:00:00Z".to_owned(),
@@ -9074,13 +9252,14 @@ mod tests {
             input_transport: "inline".to_owned(),
             prompt_cache: "auto".to_owned(),
             prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
-            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v3".to_owned(),
             snapshots: vec![AiRequestPreviewSnapshot {
                 label: "primary".to_owned(),
                 snapshot_hash: snapshot_hash.to_owned(),
                 scope: "day:2026-04-08".to_owned(),
                 anchor_day: "2026-04-08".to_owned(),
                 privacy_profile: PrivacyProfile::Redacted,
+                active_population_profile: PopulationProfile::GeneralAdult,
                 day_count: 1,
             }],
             snapshot_bytes: 48_000,
@@ -9102,7 +9281,7 @@ mod tests {
     fn make_snapshot_catalog_entry(snapshot_hash: &str) -> SnapshotCatalogEntry {
         SnapshotCatalogEntry {
             snapshot_hash: snapshot_hash.to_owned(),
-            schema_version: "ringmaster.snapshot.v1".to_owned(),
+            schema_version: "ringmaster.snapshot.v3".to_owned(),
             generated_at: "2026-04-08T22:18:00Z".to_owned(),
             scope: "day:2026-04-08".to_owned(),
             start_day: "2026-04-08".to_owned(),
@@ -9124,7 +9303,7 @@ mod tests {
 
     fn make_ai_artifact_record(artifact_id: &str, snapshot_hash: &str) -> AiArtifactRecord {
         let payload = ReviewArtifactV1 {
-            schema_version: "ringmaster.ai.review.v1".to_owned(),
+            schema_version: "ringmaster.ai.review.v3".to_owned(),
             prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
             status: ArtifactStatus::Success,
             overview: "Stress softened after an earlier wind-down.".to_owned(),
@@ -9133,6 +9312,20 @@ mod tests {
                 title: "Earlier bedtime improved readiness".to_owned(),
                 summary: "The saved artifact links a steadier wind-down to stronger readiness."
                     .to_owned(),
+                claim_key: Some("sleep_time_status".to_owned()),
+                evidence_tier: Some(crate::evidence::registry::EvidenceTier::EvidenceInformed),
+                interpretation_scope: Some(
+                    crate::evidence::registry::InterpretationScope::WithinPersonTrendOnly,
+                ),
+                active_population_profile: Some(PopulationProfile::GeneralAdult),
+                population_support_status: Some(
+                    crate::evidence::registry::PopulationSupportStatus::PopulationSpecific,
+                ),
+                fallback_population_profile: None,
+                caution_labels: evidence_badges(
+                    "sleep_time_status",
+                    PopulationProfile::GeneralAdult,
+                ),
                 confidence: ConfidenceLevel::Medium,
                 sufficiency: SufficiencyLevel::Medium,
                 evidence_refs: vec![crate::ai::ArtifactEvidenceRef {
@@ -9155,7 +9348,7 @@ mod tests {
         AiArtifactRecord {
             artifact_id: artifact_id.to_owned(),
             artifact_kind: "review".to_owned(),
-            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v3".to_owned(),
             prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
             provider: "openai".to_owned(),
             model: "gpt-5-mini".to_owned(),
@@ -9216,7 +9409,7 @@ mod tests {
             input_transport: "inline".to_owned(),
             run_mode: "real".to_owned(),
             prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
-            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v3".to_owned(),
             privacy_profile: "redacted".to_owned(),
             snapshot_scope: "day:2026-04-08".to_owned(),
             snapshot_hash_a: "snapshot-ai-20260408".to_owned(),
@@ -9257,7 +9450,7 @@ mod tests {
             provider: Some("openai".to_owned()),
             model: Some("gpt-5-mini".to_owned()),
             prompt_version: Some(REVIEW_PROMPT_VERSION.to_owned()),
-            output_schema_version: Some("ringmaster.ai.review.v1".to_owned()),
+            output_schema_version: Some("ringmaster.ai.review.v2".to_owned()),
             export_status: "written".to_owned(),
             last_verified_exists: true,
             last_verified_at: "2026-04-08T22:35:00Z".to_owned(),
@@ -9615,7 +9808,7 @@ mod tests {
                     provider: "openai".to_owned(),
                     model: "gpt-4o-mini".to_owned(),
                     prompt_version: "review_prompt_v1".to_owned(),
-                    output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+                    output_schema_version: "ringmaster.ai.review.v3".to_owned(),
                     privacy_profile: "redacted".to_owned(),
                     summary_cache: "Readiness recovered after a quieter evening.".to_owned(),
                     overview: "The saved review still notes a mild activity dip.".to_owned(),
@@ -9631,8 +9824,8 @@ mod tests {
                     created_at: "2026-04-08T12:00:00Z".to_owned(),
                     provider: "openai".to_owned(),
                     model: "gpt-4o-mini".to_owned(),
-                    prompt_version: "compare_prompt_v1".to_owned(),
-                    output_schema_version: "ringmaster.ai.compare.v1".to_owned(),
+                    prompt_version: "compare_prompt_v2".to_owned(),
+                    output_schema_version: "ringmaster.ai.compare.v3".to_owned(),
                     privacy_profile: "redacted".to_owned(),
                     summary_cache: "Stress softened versus the previous snapshot.".to_owned(),
                     overview: "Sleep remains the main explanation for the day-to-day drift."
@@ -9679,7 +9872,7 @@ mod tests {
             provider: "openai".to_owned(),
             model: "gpt-4o-mini".to_owned(),
             prompt_version: "review_prompt_v1".to_owned(),
-            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v3".to_owned(),
             privacy_profile: "redacted".to_owned(),
             summary_cache: "Primary saved summary.".to_owned(),
             overview: "Secondary overview.".to_owned(),
@@ -9783,7 +9976,7 @@ mod tests {
 
         assert_eq!(
             super::latest_review_anchor_day(&snapshot),
-            super::current_local_day_string()
+            crate::time_utils::current_local_day_string()
         );
     }
 
@@ -10193,6 +10386,7 @@ mod tests {
         let daily_history = vec![crate::store::queries::DailyOverviewRow {
             day: "2026-04-08".to_owned(),
             sleep_score: Some(80),
+            sleep_duration_seconds: Some(27_000),
             readiness_score: Some(81),
             activity_score: Some(79),
             updated_at: "2026-04-08T12:00:00Z".to_owned(),

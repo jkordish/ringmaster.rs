@@ -4,6 +4,8 @@ use serde::Serialize;
 use time::Date;
 
 use crate::error::{Result, RingmasterError};
+use crate::evidence::PopulationProfile;
+use crate::evidence::policy::{append_required_disclaimers, guidance_comparison_text};
 use crate::oura::models::{AuthStatus, CapabilityKind};
 use crate::review::features::ReviewSufficiency;
 use crate::review::registry::{
@@ -74,6 +76,7 @@ pub struct ReviewDeck {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReviewInputs<'a> {
     pub auth_status: &'a AuthStatus,
+    pub active_population_profile: PopulationProfile,
     pub signal_days: &'a [ReviewSignalDayRecord],
     pub context_events: &'a [ContextEventRecord],
     pub pattern_summaries: &'a [PatternSummaryRecord],
@@ -405,6 +408,11 @@ fn build_card(
             measurement.stale_days
         ));
     }
+    append_required_disclaimers(
+        measurement.definition.key,
+        inputs.active_population_profile,
+        &mut warnings,
+    );
 
     let section = classify_section(
         measurement.definition.directionality,
@@ -461,6 +469,13 @@ fn evidence_lines(
     inputs: &ReviewInputs<'_>,
 ) -> Vec<String> {
     let mut lines = Vec::new();
+    if let Some(guidance) = guidance_comparison_text(
+        measurement.definition.key,
+        inputs.active_population_profile,
+        measurement.numeric_value,
+    ) {
+        lines.push(guidance.summary);
+    }
     if let (Some(numeric_value), Some(baseline_mean)) =
         (measurement.numeric_value, measurement.baseline_mean)
     {
@@ -970,6 +985,7 @@ impl ReviewConfidence {
 mod tests {
     use time::Month;
 
+    use crate::evidence::PopulationProfile;
     use crate::oura::models::CapabilityReport;
     use crate::review::engine::{
         ReviewInputs, ReviewMode, build_review_deck, build_week_measurements,
@@ -1043,6 +1059,7 @@ mod tests {
             "2026-04-08",
             &ReviewInputs {
                 auth_status: &auth_status,
+                active_population_profile: PopulationProfile::GeneralAdult,
                 signal_days: &signal_days,
                 context_events: &[ContextEventRecord {
                     context_event_id: "workout:1".to_owned(),
@@ -1127,6 +1144,7 @@ mod tests {
             "2026-04-08",
             &ReviewInputs {
                 auth_status: &auth_status,
+                active_population_profile: PopulationProfile::GeneralAdult,
                 signal_days: &signal_days,
                 context_events: &[],
                 pattern_summaries: &[],
@@ -1186,6 +1204,7 @@ mod tests {
             "2026-04-08",
             &ReviewInputs {
                 auth_status: &auth_status,
+                active_population_profile: PopulationProfile::GeneralAdult,
                 signal_days: &signal_days,
                 context_events: &[],
                 pattern_summaries: &[],
@@ -1251,6 +1270,7 @@ mod tests {
 
         let inputs = ReviewInputs {
             auth_status: &auth_status,
+            active_population_profile: PopulationProfile::GeneralAdult,
             signal_days: &signal_days,
             context_events: &[],
             pattern_summaries: &[],
@@ -1307,6 +1327,7 @@ mod tests {
             "2026-04-08",
             &ReviewInputs {
                 auth_status: &auth_status,
+                active_population_profile: PopulationProfile::GeneralAdult,
                 signal_days: &signal_days,
                 context_events: &[],
                 pattern_summaries: &[],
@@ -1361,6 +1382,7 @@ mod tests {
             "2026-04-08",
             &ReviewInputs {
                 auth_status: &auth_status,
+                active_population_profile: PopulationProfile::GeneralAdult,
                 signal_days: &signal_days,
                 context_events: &[ContextEventRecord {
                     context_event_id: "workout:week-window".to_owned(),
@@ -1531,6 +1553,7 @@ mod tests {
             "2026-04-08",
             &ReviewInputs {
                 auth_status: &auth_status,
+                active_population_profile: PopulationProfile::GeneralAdult,
                 signal_days: &signal_days,
                 context_events: &[],
                 pattern_summaries: &[],
@@ -1595,6 +1618,7 @@ mod tests {
             "2026-04-08",
             &ReviewInputs {
                 auth_status: &auth_status,
+                active_population_profile: PopulationProfile::GeneralAdult,
                 signal_days: &signal_days,
                 context_events: &[],
                 pattern_summaries: &[],

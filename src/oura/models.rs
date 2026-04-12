@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use time::{OffsetDateTime, UtcOffset};
 
 use crate::error::OuraProblem;
+use crate::time_utils::current_local_day_string;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CapabilityKind {
@@ -112,6 +112,8 @@ pub struct DailySleepDocument {
     pub id: String,
     pub day: String,
     pub score: Option<u8>,
+    #[serde(default, alias = "total_sleep_duration", alias = "duration")]
+    pub sleep_duration_seconds: Option<i64>,
     pub timestamp: String,
 }
 
@@ -643,20 +645,13 @@ impl RestModePeriodDocument {
     }
 }
 
-fn current_local_day_string() -> String {
-    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-    OffsetDateTime::now_utc()
-        .to_offset(local_offset)
-        .date()
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         CapabilityKind, CapabilityReport, EnhancedTagDocument, RestModeEpisodeDocument,
-        RestModePeriodDocument, current_local_day_string, normalize_scopes,
+        RestModePeriodDocument, normalize_scopes,
     };
+    use crate::time_utils::current_local_day_string;
 
     #[test]
     fn open_rest_mode_period_overlaps_windows_after_start_day() {

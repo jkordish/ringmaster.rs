@@ -1,6 +1,6 @@
 {
-  "schema_version": "ringmaster.ai.compare.v1",
-  "prompt_version": "compare_prompt_v1",
+  "schema_version": "ringmaster.ai.compare.v3",
+  "prompt_version": "compare_prompt_v2",
   "status": "fixture",
   "overview": "Baseline fixture comparison for regression testing.",
   "material_differences": [
@@ -21,7 +21,19 @@
           "export_ref": "daily:2026-04-03",
           "note": "Baseline snapshot row"
         }
-      ]
+      ],
+      "claim_key": "activity_score",
+      "evidence_tier": "exploratory",
+      "interpretation_scope": "within_person_trend_only",
+      "caution_labels": [
+        "Trend only",
+        "Consumer wearable limitation",
+        "Not diagnostic",
+        "Use your baseline too"
+      ],
+      "active_population_profile": "general_adult",
+      "population_support_status": "population_specific",
+      "fallback_population_profile": null
     }
   ],
   "supporting_evidence": [

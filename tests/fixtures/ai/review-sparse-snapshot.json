@@ -1,16 +1,18 @@
 {
-  "schema_version": "ringmaster.snapshot.v1",
+  "schema_version": "ringmaster.snapshot.v3",
   "metadata": {
     "app_version": "0.1.0",
     "generated_at": "2026-04-11T01:15:34Z",
-    "snapshot_hash": "28327d8811300028843c5f7dbf1084304332d41e908db5f61352589ad6b5b779",
+    "snapshot_hash": "383ca890742a2e38ef8bee55690b72aee0a715867dd769165c7eb42531326504",
     "scope": "day:2026-04-10",
     "start_day": "2026-04-10",
     "end_day": "2026-04-10",
     "anchor_day": "2026-04-10",
     "privacy_profile": "redacted",
+    "active_population_profile": "general_adult",
     "source_mode": "demo",
-    "schema_version": 14
+    "schema_version": 14,
+    "evidence_registry_version": "ringmaster.evidence.v2"
   },
   "freshness": {
     "latest_source_day": "2026-04-10",
@@ -86,6 +88,7 @@
         "export_ref": "daily:2026-04-10",
         "day": "2026-04-10",
         "sleep_score": 86,
+        "sleep_duration_seconds": null,
         "readiness_score": 70,
         "activity_score": 75
       }
@@ -163,7 +166,8 @@
       "direction": "higher",
       "summary": "Sleep score is higher than the recent comparison window.",
       "current_average": 86.0,
-      "previous_average": 63.0
+      "previous_average": 63.0,
+      "evidence": null
     },
     {
       "metric_key": "readiness_score",
@@ -171,7 +175,8 @@
       "direction": "lower",
       "summary": "Readiness score is below the recent comparison window.",
       "current_average": 70.0,
-      "previous_average": 76.0
+      "previous_average": 76.0,
+      "evidence": null
     },
     {
       "metric_key": "activity_score",
@@ -179,7 +184,8 @@
       "direction": "lower",
       "summary": "Activity score is slightly below the recent comparison window.",
       "current_average": 75.0,
-      "previous_average": 77.0
+      "previous_average": 77.0,
+      "evidence": null
     }
   ],
   "context_events": [
@@ -205,7 +211,8 @@
       "z_score": -0.4,
       "persistence_days": 1,
       "sufficiency": "missing",
-      "stale_days": 0
+      "stale_days": 0,
+      "evidence": null
     },
     {
       "export_ref": "signal:activity_score:2026-04-10",
@@ -217,7 +224,8 @@
       "z_score": -0.3,
       "persistence_days": 1,
       "sufficiency": "missing",
-      "stale_days": 0
+      "stale_days": 0,
+      "evidence": null
     },
     {
       "export_ref": "signal:cardiovascular_age:2026-04-10",
@@ -229,7 +237,8 @@
       "z_score": 0.2,
       "persistence_days": 1,
       "sufficiency": "missing",
-      "stale_days": 0
+      "stale_days": 0,
+      "evidence": null
     },
     {
       "export_ref": "signal:stress_high:2026-04-10",
@@ -241,7 +250,8 @@
       "z_score": 0.4,
       "persistence_days": 1,
       "sufficiency": "missing",
-      "stale_days": 0
+      "stale_days": 0,
+      "evidence": null
     }
   ],
   "follow_up_targets": [

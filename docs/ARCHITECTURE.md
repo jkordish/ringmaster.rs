@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document describes the implemented architecture for `ringmaster.rs` as of `2026-04-11`. It reflects the code that exists in the repository today, including the snapshot library, AI run registry, report export workflow, the in-app eval lab/regression console, and the navigation/focus/keybinding standardization that now anchors the TUI shell.
+This document describes the implemented architecture for `ringmaster.rs` as of `2026-04-12`. It reflects the code that exists in the repository today, including the typed evidence registry and claims policy, the population-aware guidance resolver and sensitive-metric runtime guards, the snapshot library, AI run registry, report export workflow, the in-app eval lab/regression console, and the navigation/focus/keybinding standardization that now anchors the TUI shell.
 
 ## Design goals
 
@@ -19,6 +19,7 @@ This document describes the implemented architecture for `ringmaster.rs` as of `
 - optional external synthesis only through explicit exported snapshots
 - structured machine-safe AI outputs instead of prose parsing
 - durable local artifact workflows instead of transient AI stdout
+- a shared scientific evidence contract that governs deterministic copy, reports, and AI outputs
 
 ## Runtime shape
 
@@ -39,6 +40,7 @@ doctor / auth / sync once / sync watch / derive rebuild / review today / review 
 snapshot export
   -> store + auth/session seams
   -> derived read models + bounded view queries
+  -> evidence-registry descriptors + guidance metadata
   -> privacy-profile redaction layer
   -> deterministic versioned JSON bundle
   -> snapshot manifest + provenance persistence
@@ -53,7 +55,9 @@ ai review / ai compare
   -> local snapshot file loading only
   -> provider boundary (`dry_run`, `fixture`, `openai`)
   -> canonical request builders with versioned prompt/task/schema framing
+  -> evidence-registry-aware prompt constraints
   -> OpenAI Responses API with strict JSON schema output when enabled
+  -> local post-provider sanitation against the claims policy
   -> local artifact persistence + summary cache + request fingerprint
   -> local human-readable briefing rendering
 
@@ -64,6 +68,7 @@ ai runs list / ai runs show
 report export
   -> source resolution from snapshot or AI run
   -> shared report document model
+  -> evidence-strength and safety-rail sections
   -> Markdown / HTML renderers
   -> report manifest persistence
 
@@ -128,6 +133,25 @@ Non-responsibilities:
 
 The CLI now exposes a distinct `webhook` command family instead of collapsing receiver, replay, and watch behavior into one giant process. It also exposes `ui snapshot` as a dedicated non-interactive design-QA path instead of relying on ad hoc `tui --demo` capture.
 
+### `src/evidence/*`
+
+Responsibilities:
+
+- define the canonical evidence registry for surfaced metrics and claim classes
+- define the supported population profiles plus per-claim support and fallback behavior
+- classify claims by evidence tier, evidence type, interpretation scope, and numeric-threshold policy
+- define allowed wording templates, prohibited wording categories, and required caution rails
+- provide compact `EvidenceDescriptor` values for snapshots, reports, and AI artifacts
+- validate registry completeness and provenance expectations
+
+Non-responsibilities:
+
+- database I/O
+- HTTP or model calls
+- direct widget rendering
+
+This module is the scientific contract for the product. Deterministic UI, reports, and AI outputs may consume it, but they must not fork their own parallel evidence rules.
+
 ### `src/config.rs`
 
 Responsibilities:
@@ -137,6 +161,7 @@ Responsibilities:
 - environment overrides
 - runtime directory creation
 - Oura/logging defaults
+- guidance profile defaults and environment/file overrides
 - refresh policy defaults
 - env-only client secret handling
 - webhook receiver and subscription defaults
@@ -182,6 +207,7 @@ Responsibilities:
 - shared selected-day and selected-event state
 - shared selected-review state
 - user-facing status/footer text
+- active population profile and support-state shaping for screen models
 - shaping store/auth/derived/webhook data into screen-specific models
 - deterministic selected-day summaries and pattern rows
 - deterministic review decks and bounded investigations
@@ -367,6 +393,7 @@ Implemented concepts:
 
 - `SnapshotBundleV1`
 - `PrivacyProfile::{Redacted,Balanced,Full}`
+- `SnapshotMetadata.active_population_profile`
 - `ResolvedSnapshotScope`
 - manifest persistence in `snapshot_exports`
 - local export-reference mapping in `snapshot_provenance_refs`
@@ -381,6 +408,7 @@ Responsibilities:
 - canonical request construction
 - Structured Outputs schema generation
 - local briefing rendering
+- population-aware artifact metadata and post-provider sanitization
 - persisted AI artifact record construction
 
 Boundary rules:

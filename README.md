@@ -7,7 +7,7 @@ It gives you:
 - a Ratatui interface for browsing recent signals, trends, context, patterns, reviews, and system status
 - a SQLite-backed local cache with deterministic demo and fixture flows
 - real Oura login and sync for supported families
-- an optional snapshot-based OpenAI layer for bounded review, compare, follow-up, report, and eval workflows
+- an optional snapshot-based OpenAI layer for bounded review, compare, follow-up, report, and eval workflows that inherits the same evidence and safety rules as the deterministic product
 - a first-class in-app AI workbench with explicit preflight, saved-run and eval browsing, and local evidence jump-backs
 
 The design goal is simple: useful local insight first, optional external analysis second, and no surprise data sharing.
@@ -131,6 +131,21 @@ AI is now a top-level product workflow, not a CLI-only add-on.
 
 The workbench is intentionally guided and snapshot-first. There is still no arbitrary chat prompt, no direct database-to-model path, and no hidden uploads.
 
+## Scientific guardrails
+
+Ringmaster now uses a typed three-tier evidence model across Review, Explain, Patterns, reports, snapshots, and AI outputs.
+
+- `guideline_backed` claims can use stable general-adult public-health anchors where the registry explicitly allows them
+- `evidence_informed` claims stay cautious, contextual, and limitation-aware
+- `exploratory` claims are visibly marked as exploratory, trend-only, or context-only
+- sensitive domains such as `SpO₂` and consumer sleep-tech outputs carry explicit caution rails and are not rendered as diagnostic or screening tools
+- one active local population profile is configured explicitly, never inferred silently
+- registry-backed guidance now resolves as `population-specific`, `general-adult-only` fallback, or `unavailable`
+- sensitive metrics such as `SpO₂`, `HRV`, readiness/stress/resilience composites, and cardiovascular-age-style metrics do not silently inherit stronger language for unsupported populations
+- the product remains non-diagnostic: no diagnosis, no treatment recommendations, and no disease-screening positioning
+
+The full contract lives in [docs/EVIDENCE_MODEL.md](docs/EVIDENCE_MODEL.md), and the maintenance workflow lives in [docs/EVIDENCE_MAINTENANCE.md](docs/EVIDENCE_MAINTENANCE.md).
+
 ## Privacy defaults
 
 The optional OpenAI integration is intentionally narrow.
@@ -172,6 +187,15 @@ export RINGMASTER_OURA_CLIENT_SECRET="your-oura-client-secret"
 export RINGMASTER_WEBHOOK_VERIFICATION_TOKEN="your-webhook-verification-token"
 ```
 
+Population-aware guidance now has an explicit local config surface:
+
+```toml
+[guidance]
+active_population_profile = "general_adult"
+```
+
+Supported values in this phase are `general_adult`, `older_adult`, `pregnancy_postpartum`, `shift_worker`, and `athlete_high_training_load`. The app will show when a claim is population-specific, when it is falling back to general-adult guidance, and when no interpretation is available for the active profile.
+
 For the complete config and runtime behavior, use the docs below instead of the README.
 
 ## Docs map
@@ -183,6 +207,8 @@ For the complete config and runtime behavior, use the docs below instead of the 
 - HCI research and audit for this pass:
   - [docs/HCI_NAVIGATION_RESEARCH.md](docs/HCI_NAVIGATION_RESEARCH.md)
   - [docs/NAVIGATION_AUDIT.md](docs/NAVIGATION_AUDIT.md)
+- Evidence model and scientific claims policy: [docs/EVIDENCE_MODEL.md](docs/EVIDENCE_MODEL.md)
+- Evidence maintenance workflow: [docs/EVIDENCE_MAINTENANCE.md](docs/EVIDENCE_MAINTENANCE.md)
 - OpenAI snapshot flow and privacy model: [docs/OPENAI_INTEGRATION.md](docs/OPENAI_INTEGRATION.md)
 - Eval workflow and grading rules: [docs/EVALS.md](docs/EVALS.md)
 - Visual system references:

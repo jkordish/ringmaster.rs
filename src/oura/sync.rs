@@ -783,6 +783,7 @@ fn persist_daily_sleep_pages(
                     oura_id: Some(document.id.clone()),
                     day: document.day.clone(),
                     sleep_score: document.score,
+                    sleep_duration_seconds: document.sleep_duration_seconds,
                     raw_cache_key: Some(page.raw_payload.cache_key.clone()),
                     updated_at: imported_at.to_owned(),
                 })?;
@@ -1826,6 +1827,7 @@ mod tests {
                 renewal_lead_secs: 7 * 24 * 60 * 60,
                 subscriptions: default_desired_subscriptions(),
             },
+            guidance: crate::config::GuidanceConfig::default(),
             ai: crate::config::AiConfig::default(),
         }
     }

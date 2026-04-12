@@ -18,6 +18,7 @@ pub mod config;
 pub mod derive;
 pub mod error;
 pub mod eval;
+pub mod evidence;
 pub mod insights;
 pub mod keybindings;
 pub mod navigation;
@@ -30,6 +31,7 @@ pub mod snapshot;
 mod store;
 #[cfg(test)]
 pub(crate) mod test_support;
+mod time_utils;
 pub mod tui;
 mod ui;
 pub mod webhook;
@@ -42,7 +44,9 @@ use std::io::{IsTerminal, stdin, stdout};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use app::{build_demo_state, build_live_state, load_live_snapshot};
+use crate::evidence::stale_evidence_warnings;
+use crate::time_utils::current_local_day_string;
+use app::{build_demo_state, build_live_state, build_read_only_live_state, load_live_snapshot};
 use cli::{
     AiCommand, AiCompareArgs, AiEvalArgs, AiReviewArgs, AiRunsCommand, AiRunsListArgs,
     AiRunsShowArgs, AuthCommand, Cli, Command, DeriveCommand, DeriveRebuildArgs, ReportCommand,
@@ -59,7 +63,7 @@ use review::{
     InvestigationReport, ReviewCard, ReviewDeck, ReviewFocus, ReviewInputs, ReviewMode,
     build_investigation_report, build_review_deck,
 };
-use time::{Date, Duration, OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
+use time::{Date, Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -235,6 +239,7 @@ fn render_doctor_report(
 }
 
 fn doctor_runtime_section(config: &Config, store: &Store) -> Result<String> {
+    let stale_evidence = stale_evidence_warnings(OffsetDateTime::now_utc().date());
     Ok(format!(
         "\
 app_name: {}
@@ -245,7 +250,9 @@ cache_dir: {}
 database_path: {} ({})
 log_dir: {}
 schema_version: {}
-migrations_applied_this_run: {}",
+migrations_applied_this_run: {}
+active_population_profile: {} ({})
+stale_evidence_entries: {}",
         config.app_name,
         config.paths.config_dir.display(),
         config.paths.config_file.display(),
@@ -265,6 +272,13 @@ migrations_applied_this_run: {}",
         config.paths.log_dir.display(),
         store.metadata().schema_version()?,
         store.migration_report().applied_versions.len(),
+        config.guidance.active_population_profile.as_str(),
+        config.guidance.source_label(),
+        if stale_evidence.is_empty() {
+            "none".to_owned()
+        } else {
+            stale_evidence.join(" | ")
+        },
     ))
 }
 
@@ -746,15 +760,20 @@ fn run_demo(config: &Config) -> Result<Option<String>> {
 }
 
 fn run_tui(config: &Config, args: &TuiArgs) -> Result<Option<String>> {
+    let interactive = interactive_terminal_available();
     let mut app = if args.demo {
         build_demo_state(config)
     } else {
         let store = Store::open(config)?;
         let auth_status = oura::auth::inspect_auth(config, &store)?;
-        build_live_state(config, &store, &auth_status)?
+        if interactive {
+            build_live_state(config, &store, &auth_status)?
+        } else {
+            build_read_only_live_state(config, &store, &auth_status)?
+        }
     };
 
-    if interactive_terminal_available() {
+    if interactive {
         if args.demo {
             info!("running demo TUI");
         } else {
@@ -958,7 +977,7 @@ async fn build_snapshot_render_source(
     let auth_status = oura::auth::inspect_auth(config, &store)?;
     Ok(SnapshotRenderSource::Single {
         label: "live store".to_owned(),
-        app: Box::new(build_live_state(config, &store, &auth_status)?),
+        app: Box::new(build_read_only_live_state(config, &store, &auth_status)?),
     })
 }
 
@@ -2493,6 +2512,7 @@ fn run_ai_eval(config: &Config, args: &AiEvalArgs) -> Result<Option<String>> {
 #[derive(Debug, Clone)]
 struct ReviewStoreSnapshot {
     auth_status: oura::models::AuthStatus,
+    active_population_profile: evidence::PopulationProfile,
     signal_days: Vec<store::queries::ReviewSignalDayRecord>,
     context_events: Vec<store::queries::ContextEventRecord>,
     pattern_summaries: Vec<store::queries::PatternSummaryRecord>,
@@ -2625,8 +2645,13 @@ async fn load_review_store_snapshot(
         .await?;
         derive::rebuild_store(&store)?;
         let auth_status = oura::auth::inspect_auth(&temp_config, &store)?;
-        let snapshot =
-            load_review_snapshot_from_artifacts(&store, &auth_status, requested_anchor_day, None)?;
+        let snapshot = load_review_snapshot_from_artifacts(
+            &store,
+            &auth_status,
+            config.guidance.active_population_profile,
+            requested_anchor_day,
+            None,
+        )?;
         return Ok((Some(temp_root), snapshot));
     }
 
@@ -2637,6 +2662,7 @@ async fn load_review_store_snapshot(
     let snapshot = load_review_snapshot_from_artifacts(
         &store,
         &auth_status,
+        config.guidance.active_population_profile,
         requested_anchor_day,
         derived.as_ref(),
     )?;
@@ -2857,6 +2883,7 @@ pub(crate) async fn seed_demo_library_artifacts(
 fn load_review_snapshot_from_artifacts(
     store: &Store,
     auth_status: &oura::models::AuthStatus,
+    active_population_profile: evidence::PopulationProfile,
     requested_anchor_day: Option<&str>,
     derived: Option<&derive::DerivedReviewArtifacts>,
 ) -> Result<ReviewStoreSnapshot> {
@@ -2864,6 +2891,7 @@ fn load_review_snapshot_from_artifacts(
     let Some(anchor_day) = resolve_review_anchor_day(store, requested_anchor_day, derived)? else {
         return Ok(ReviewStoreSnapshot {
             auth_status: auth_status.clone(),
+            active_population_profile,
             signal_days: Vec::new(),
             context_events: Vec::new(),
             pattern_summaries: derived.map_or(materialized_pattern_summaries, |artifacts| {
@@ -2915,6 +2943,7 @@ fn load_review_snapshot_from_artifacts(
 
     Ok(ReviewStoreSnapshot {
         auth_status: auth_status.clone(),
+        active_population_profile,
         signal_days,
         context_events,
         pattern_summaries: derived
@@ -2944,14 +2973,6 @@ fn latest_review_day(snapshot: &ReviewStoreSnapshot) -> Option<String> {
                 .map(|row| row.end_day.clone().unwrap_or_else(|| current_day.clone()))
                 .max()
         })
-}
-
-fn current_local_day_string() -> String {
-    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-    OffsetDateTime::now_utc()
-        .to_offset(local_offset)
-        .date()
-        .to_string()
 }
 
 fn resolve_review_anchor_day(
@@ -3042,6 +3063,7 @@ fn empty_investigation_report(focus: ReviewFocus, warning: &str) -> Investigatio
 fn review_inputs(snapshot: &ReviewStoreSnapshot) -> ReviewInputs<'_> {
     ReviewInputs {
         auth_status: &snapshot.auth_status,
+        active_population_profile: snapshot.active_population_profile,
         signal_days: &snapshot.signal_days,
         context_events: &snapshot.context_events,
         pattern_summaries: &snapshot.pattern_summaries,
@@ -3419,7 +3441,8 @@ mod tests {
     };
     use crate::store::Store;
     use crate::store::queries::{
-        DailyActivityRecord, DailyReadinessRecord, DailySleepRecord, RestModePeriodRecord,
+        AiRunRecord, DailyActivityRecord, DailyReadinessRecord, DailySleepRecord,
+        RestModePeriodRecord, SnapshotExportRecord,
     };
     use crate::store::webhook_store::{
         AcceptedWebhookDeliveryInput, DesiredWebhookSubscriptionRecord, InvalidationInput,
@@ -3541,6 +3564,7 @@ mod tests {
                     renewal_lead_secs: 7 * 24 * 60 * 60,
                     subscriptions: default_desired_subscriptions(),
                 },
+                guidance: crate::config::GuidanceConfig::default(),
                 ai: crate::config::AiConfig::default(),
             },
         )
@@ -3550,6 +3574,79 @@ mod tests {
         (OffsetDateTime::now_utc() + Duration::days(days))
             .format(&Rfc3339)
             .unwrap_or_else(|error| panic!("future timestamp should format in test: {error}"))
+    }
+
+    fn seed_snapshot_export(store: &Store, snapshot_hash: &str, anchor_day: &str) {
+        let record = SnapshotExportRecord {
+            snapshot_hash: snapshot_hash.to_owned(),
+            schema_version: crate::snapshot::SNAPSHOT_SCHEMA_VERSION.to_owned(),
+            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            generated_at: format!("{anchor_day}T08:00:00Z"),
+            scope: "today".to_owned(),
+            start_day: anchor_day.to_owned(),
+            end_day: anchor_day.to_owned(),
+            anchor_day: anchor_day.to_owned(),
+            day_count: 1,
+            privacy_profile: "redacted".to_owned(),
+            source_mode: "live".to_owned(),
+            fixture_dir: None,
+            latest_source_day: Some(anchor_day.to_owned()),
+            latest_review_day: Some(anchor_day.to_owned()),
+            freshness_summary: format!(
+                "latest_source_day={anchor_day} latest_review_day={anchor_day} warnings=0"
+            ),
+            trust_summary: "explicit snapshot export, redacted profile".to_owned(),
+            capability_summary: "granted=0 missing=0 requested=0".to_owned(),
+            provenance_summary: "refs=0 local_kinds=0".to_owned(),
+            snapshot_json: format!(
+                "{{\"schema_version\":\"{}\",\"metadata\":{{\"snapshot_hash\":\"{snapshot_hash}\"}}}}",
+                crate::snapshot::SNAPSHOT_SCHEMA_VERSION,
+            ),
+            created_at: format!("{anchor_day}T08:00:01Z"),
+        };
+
+        store
+            .analysis()
+            .upsert_snapshot_export(&record, &[])
+            .unwrap_or_else(|error| panic!("snapshot export should seed: {error}"));
+    }
+
+    fn seed_active_ai_run(store: &Store, run_id: &str, run_status: &str) {
+        let snapshot_hash = "snapshot-hash-active";
+        seed_snapshot_export(store, snapshot_hash, "2026-04-10");
+
+        let record = AiRunRecord {
+            run_id: run_id.to_owned(),
+            run_kind: "review".to_owned(),
+            run_status: run_status.to_owned(),
+            provider: "openai".to_owned(),
+            model: "gpt-5.1".to_owned(),
+            reasoning_effort: Some("medium".to_owned()),
+            request_mode: "stateless".to_owned(),
+            input_transport: "inline".to_owned(),
+            run_mode: "real".to_owned(),
+            prompt_version: "review_prompt_v3".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v3".to_owned(),
+            privacy_profile: "redacted".to_owned(),
+            snapshot_scope: "today".to_owned(),
+            snapshot_hash_a: snapshot_hash.to_owned(),
+            snapshot_hash_b: None,
+            source_ai_artifact_id: None,
+            follow_up_kind: None,
+            request_fingerprint: Some(format!("fingerprint-{run_id}")),
+            request_preview_json: format!("{{\"run_id\":\"{run_id}\"}}"),
+            artifact_id: None,
+            error_message: None,
+            created_at: "2026-04-10T09:00:00Z".to_owned(),
+            started_at: Some("2026-04-10T09:00:05Z".to_owned()),
+            ended_at: None,
+            updated_at: "2026-04-10T09:00:05Z".to_owned(),
+        };
+
+        store
+            .analysis()
+            .upsert_ai_run(&record)
+            .unwrap_or_else(|error| panic!("active ai run should seed: {error}"));
     }
 
     fn seed_historical_review_days(store: &Store) {
@@ -3571,6 +3668,7 @@ mod tests {
                     oura_id: None,
                     day: day.clone(),
                     sleep_score: Some(if is_anchor_day { 60 } else { 82 }),
+                    sleep_duration_seconds: Some(if is_anchor_day { 22_500 } else { 27_000 }),
                     raw_cache_key: None,
                     updated_at: updated_at.to_owned(),
                 })
@@ -3605,6 +3703,7 @@ mod tests {
                 oura_id: None,
                 day: "2026-04-08".to_owned(),
                 sleep_score: Some(83),
+                sleep_duration_seconds: Some(27_600),
                 raw_cache_key: None,
                 updated_at: updated_at.to_owned(),
             })
@@ -3964,7 +4063,7 @@ mod tests {
 
     #[test]
     fn latest_review_day_treats_open_rest_mode_as_current() {
-        let current_day = super::current_local_day_string();
+        let current_day = crate::time_utils::current_local_day_string();
         let snapshot = super::ReviewStoreSnapshot {
             auth_status: crate::oura::models::AuthStatus {
                 configured: false,
@@ -3984,6 +4083,7 @@ mod tests {
                 account_email: None,
                 last_error: None,
             },
+            active_population_profile: crate::evidence::PopulationProfile::GeneralAdult,
             signal_days: Vec::new(),
             context_events: Vec::new(),
             pattern_summaries: Vec::new(),
@@ -4005,6 +4105,71 @@ mod tests {
             super::latest_review_day(&snapshot).as_deref(),
             Some(current_day.as_str())
         );
+    }
+
+    #[test]
+    fn build_read_only_live_state_preserves_active_ai_runs() {
+        let (_tempdir, config) = test_config(None, None);
+        let store = Store::open(&config)
+            .unwrap_or_else(|error| panic!("store should open for read-only state test: {error}"));
+        seed_active_ai_run(&store, "queued-read-only", "queued");
+        let auth_status = crate::oura::auth::inspect_auth(&config, &store)
+            .unwrap_or_else(|error| panic!("auth status should resolve: {error}"));
+
+        crate::app::build_read_only_live_state(&config, &store, &auth_status)
+            .unwrap_or_else(|error| panic!("read-only live state should build: {error}"));
+
+        let record = store
+            .analysis()
+            .ai_run("queued-read-only")
+            .unwrap_or_else(|error| panic!("seeded ai run should load: {error}"))
+            .unwrap_or_else(|| panic!("seeded ai run should exist after read-only build"));
+        assert_eq!(record.run_status, "queued");
+        assert_eq!(record.error_message, None);
+        assert_eq!(record.ended_at, None);
+    }
+
+    #[test]
+    fn build_live_state_interrupts_active_ai_runs() {
+        let (_tempdir, config) = test_config(None, None);
+        let store = Store::open(&config)
+            .unwrap_or_else(|error| panic!("store should open for live state test: {error}"));
+        seed_active_ai_run(&store, "queued-live", "queued");
+        let auth_status = crate::oura::auth::inspect_auth(&config, &store)
+            .unwrap_or_else(|error| panic!("auth status should resolve: {error}"));
+
+        crate::app::build_live_state(&config, &store, &auth_status)
+            .unwrap_or_else(|error| panic!("interactive live state should build: {error}"));
+
+        let record = store
+            .analysis()
+            .ai_run("queued-live")
+            .unwrap_or_else(|error| panic!("seeded ai run should load: {error}"))
+            .unwrap_or_else(|| panic!("seeded ai run should exist after live build"));
+        assert_eq!(record.run_status, "interrupted");
+        assert!(record.error_message.is_some());
+        assert!(record.ended_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn build_snapshot_render_source_live_store_preserves_active_ai_runs() {
+        let (_tempdir, config) = test_config(None, None);
+        let store = Store::open(&config)
+            .unwrap_or_else(|error| panic!("store should open for snapshot render test: {error}"));
+        seed_active_ai_run(&store, "running-snapshot", "running");
+
+        super::build_snapshot_render_source(&config, false, None)
+            .await
+            .unwrap_or_else(|error| panic!("live snapshot render source should build: {error}"));
+
+        let record = store
+            .analysis()
+            .ai_run("running-snapshot")
+            .unwrap_or_else(|error| panic!("seeded ai run should load: {error}"))
+            .unwrap_or_else(|| panic!("seeded ai run should exist after snapshot builder"));
+        assert_eq!(record.run_status, "running");
+        assert_eq!(record.error_message, None);
+        assert_eq!(record.ended_at, None);
     }
 
     #[tokio::test]

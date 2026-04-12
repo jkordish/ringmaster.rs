@@ -80,7 +80,15 @@ pub fn draw(
             .enumerate()
             .map(|(index, row)| {
                 let prefix = if index == 0 { "[lead]" } else { "[scan]" };
-                ListItem::new(format!("{prefix} {}\n      {}", row.headline, row.detail))
+                let badge_line = if row.badges.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n      {}", row.badges.join(" / "))
+                };
+                ListItem::new(format!(
+                    "{prefix} {}\n      {}{}",
+                    row.headline, row.detail, badge_line
+                ))
             })
             .collect::<Vec<_>>()
     };
