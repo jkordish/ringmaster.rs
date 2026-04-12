@@ -141,23 +141,8 @@ pub fn bindings() -> &'static [Keybinding] {
 }
 
 fn resolve_scopes(context: BindingContext) -> Vec<BindingScope> {
-    if context.search_open {
-        return vec![
-            BindingScope::Transient(TransientLayer::Search),
-            BindingScope::Global,
-        ];
-    }
-    if context.help_open {
-        return vec![
-            BindingScope::Transient(TransientLayer::Help),
-            BindingScope::Global,
-        ];
-    }
-    if context.ai_preflight_open {
-        return vec![
-            BindingScope::Transient(TransientLayer::AiPreflight),
-            BindingScope::Global,
-        ];
+    if let Some(transient) = active_transient_scope(context) {
+        return vec![BindingScope::Transient(transient), BindingScope::Global];
     }
 
     vec![
@@ -170,12 +155,8 @@ fn resolve_scopes(context: BindingContext) -> Vec<BindingScope> {
 
 fn help_scopes(context: BindingContext) -> Vec<BindingScope> {
     let mut scopes = Vec::new();
-    if context.ai_preflight_open {
-        scopes.push(BindingScope::Transient(TransientLayer::AiPreflight));
-    } else if context.search_open {
-        scopes.push(BindingScope::Transient(TransientLayer::Search));
-    } else if context.help_open {
-        scopes.push(BindingScope::Transient(TransientLayer::Help));
+    if let Some(transient) = active_transient_scope(context) {
+        scopes.push(BindingScope::Transient(transient));
     }
     scopes.extend([
         BindingScope::ScreenRegion(context.active_screen, context.focused_region),
@@ -184,6 +165,18 @@ fn help_scopes(context: BindingContext) -> Vec<BindingScope> {
         BindingScope::Global,
     ]);
     scopes
+}
+
+const fn active_transient_scope(context: BindingContext) -> Option<TransientLayer> {
+    if context.search_open {
+        Some(TransientLayer::Search)
+    } else if context.help_open {
+        Some(TransientLayer::Help)
+    } else if context.ai_preflight_open {
+        Some(TransientLayer::AiPreflight)
+    } else {
+        None
+    }
 }
 
 fn build_bindings() -> Vec<Keybinding> {
@@ -1392,6 +1385,25 @@ mod tests {
             },
         );
         assert_eq!(search_action, Some(Action::SearchNextResult));
+    }
+
+    #[test]
+    fn help_groups_follow_the_visible_transient_scope() {
+        let groups = help_groups(BindingContext {
+            active_screen: Screen::Ai,
+            focused_region: FocusRegion::Secondary,
+            search_open: false,
+            help_open: true,
+            ai_preflight_open: true,
+        });
+
+        let standard = groups
+            .get("Standard")
+            .unwrap_or_else(|| panic!("standard help group should exist"));
+
+        assert!(standard.iter().any(|label| label.contains("close help")));
+        assert!(!standard.iter().any(|label| label.contains("cancel")));
+        assert!(!standard.iter().any(|label| label.contains("activate")));
     }
 
     #[test]
