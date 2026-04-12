@@ -6,7 +6,7 @@ Resolve the material findings from the workspace review without widening scope b
 
 ## Why
 
-The current tree has two runtime correctness bugs, one cross-cutting date/window reliability issue, a release-hygiene gap in dependency/policy checks, and a second review round that surfaced snapshot compatibility plus data-quality regressions in the new guidance features.
+The current tree had two runtime correctness bugs, one cross-cutting date/window reliability issue, a release-hygiene gap in dependency/policy checks, a second review round that surfaced snapshot compatibility plus data-quality regressions in the new guidance features, and a third review round that caught legacy-hash validation, weekly-aggregation, dry-run sanitization, and persisted-report metadata regressions.
 
 ## Current state
 
@@ -21,6 +21,9 @@ The current tree has two runtime correctness bugs, one cross-cutting date/window
 - Observational UI/snapshot entrypoints do not mutate persisted state.
 - Local-day resolution comes from one internal helper with one documented fallback policy.
 - Dependency/policy checks are green or explicitly configured and justified.
+- Dry-run AI review sanitization keeps claim-backed findings when the structured metadata carries the required safety markers.
+- Legacy v1/v2 snapshot artifacts validate and can be canonicalized without breaking their stored hash contract.
+- Weekly activity snapshot trends aggregate over the whole comparison window, and report rendering prefers persisted finding metadata over live registry lookups.
 
 ## Constraints
 
@@ -59,6 +62,7 @@ The current tree has two runtime correctness bugs, one cross-cutting date/window
 - [x] Restore backward compatibility for previously exported snapshot artifacts
 - [x] Load enough comparison-window signal history for weekly activity snapshot trends
 - [x] Backfill `daily_sleep.sleep_duration_seconds` during version 17 migration and tighten workout guidance handling
+- [x] Preserve dry-run claim-backed findings, legacy snapshot hash validation, aggregated weekly activity trends, and persisted report metadata through the latest review round
 
 ## Verification
 

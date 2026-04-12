@@ -689,13 +689,52 @@ fn report_lines_for_findings(findings: &[ai::ArtifactFinding]) -> Vec<String> {
 }
 
 fn format_artifact_finding(finding: &ai::ArtifactFinding) -> String {
-    let descriptor = finding.claim_key.as_deref().and_then(|claim_key| {
+    let badge_block = finding_badge_text(finding).map(|badges| format!(" [{badges}]"));
+    badge_block.map_or_else(
+        || format!("{}: {}", finding.title, finding.summary),
+        |badge_block| format!("{}{}: {}", finding.title, badge_block, finding.summary),
+    )
+}
+
+fn finding_badge_text(finding: &ai::ArtifactFinding) -> Option<String> {
+    persisted_finding_badges(finding).or_else(|| {
+        finding.claim_key.as_deref().and_then(|claim_key| {
+            finding
+                .active_population_profile
+                .and_then(|population| resolve_evidence_descriptor(claim_key, population))
+                .or_else(|| evidence_descriptor(claim_key))
+                .map(|descriptor| descriptor_badge_text(&descriptor))
+                .filter(|badges| !badges.is_empty())
+        })
+    })
+}
+
+fn persisted_finding_badges(finding: &ai::ArtifactFinding) -> Option<String> {
+    let mut badges = Vec::new();
+    if let Some(tier) = finding.evidence_tier {
+        badges.push(tier.chip_label().to_owned());
+    }
+    if let Some(scope) = finding.interpretation_scope {
+        badges.push(scope.label().to_owned());
+    }
+    if let Some(status) = finding.population_support_status {
+        badges.push(status.badge_label().to_owned());
+    }
+    if let Some(profile) = finding.active_population_profile {
+        badges.push(format!("profile: {}", profile.label()));
+    }
+    if let Some(fallback) = finding.fallback_population_profile {
+        badges.push(format!("fallback: {}", fallback.label()));
+    }
+    let mut seen = BTreeSet::new();
+    badges.extend(
         finding
-            .active_population_profile
-            .and_then(|population| resolve_evidence_descriptor(claim_key, population))
-            .or_else(|| evidence_descriptor(claim_key))
-    });
-    format_summary_with_descriptor(&finding.title, &finding.summary, descriptor.as_ref())
+            .caution_labels
+            .iter()
+            .filter(|label| seen.insert((*label).clone()))
+            .cloned(),
+    );
+    (!badges.is_empty()).then(|| badges.join(" | "))
 }
 
 fn format_summary_with_descriptor(
@@ -788,16 +827,19 @@ where
     for group in groups {
         for finding in group.as_ref() {
             if let Some(claim_key) = finding.claim_key.as_deref() {
-                if seen_claim_keys.insert(claim_key.to_owned()) {
-                    if let Some(descriptor) = finding
-                        .active_population_profile
-                        .and_then(|population| resolve_evidence_descriptor(claim_key, population))
-                        .or_else(|| evidence_descriptor(claim_key))
-                    {
-                        lines.push(descriptor_summary_line(&descriptor));
-                        continue;
-                    }
-                } else {
+                if !seen_claim_keys.insert(claim_key.to_owned()) {
+                    continue;
+                }
+                if let Some(line) = persisted_finding_summary_line(finding) {
+                    lines.push(line);
+                    continue;
+                }
+                if let Some(descriptor) = finding
+                    .active_population_profile
+                    .and_then(|population| resolve_evidence_descriptor(claim_key, population))
+                    .or_else(|| evidence_descriptor(claim_key))
+                {
+                    lines.push(descriptor_summary_line(&descriptor));
                     continue;
                 }
             }
@@ -811,6 +853,45 @@ where
         lines.push("No registry-backed claim metadata was attached to this artifact.".to_owned());
     }
     lines
+}
+
+fn persisted_finding_summary_line(finding: &ai::ArtifactFinding) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(tier) = finding.evidence_tier {
+        parts.push(tier.chip_label().to_owned());
+    }
+    if let Some(scope) = finding.interpretation_scope {
+        parts.push(scope.label().to_owned());
+    }
+    match (
+        finding.population_support_status,
+        finding.active_population_profile,
+    ) {
+        (Some(status), Some(profile)) => parts.push(format!(
+            "population: {} ({})",
+            status.detail_label(),
+            profile.label()
+        )),
+        (Some(status), None) => parts.push(status.detail_label().to_owned()),
+        (None, Some(profile)) => parts.push(format!("profile: {}", profile.label())),
+        (None, None) => {}
+    }
+    if let Some(fallback) = finding.fallback_population_profile {
+        parts.push(format!("fallback anchor: {}", fallback.label()));
+    }
+
+    let mut seen = BTreeSet::new();
+    let caution_labels = finding
+        .caution_labels
+        .iter()
+        .filter(|label| seen.insert((*label).clone()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !caution_labels.is_empty() {
+        parts.push(format!("rails: {}", caution_labels.join(", ")));
+    }
+
+    (!parts.is_empty()).then(|| format!("{} -> {}", finding.title, parts.join("; ")))
 }
 
 fn descriptor_summary_line(descriptor: &EvidenceDescriptor) -> String {
@@ -894,9 +975,15 @@ where
     I: IntoIterator<Item = G>,
     G: AsRef<[ai::ArtifactFinding]>,
 {
+    let mut notes = Vec::new();
     let mut descriptors = Vec::new();
     for group in groups {
         for finding in group.as_ref() {
+            let persisted_notes = persisted_finding_uncertainty_notes(finding);
+            if !persisted_notes.is_empty() {
+                notes.extend(persisted_notes);
+                continue;
+            }
             if let Some(claim_key) = finding.claim_key.as_deref()
                 && let Some(descriptor) = finding
                     .active_population_profile
@@ -907,7 +994,35 @@ where
             }
         }
     }
-    descriptor_uncertainty_notes(descriptors.iter()).into_iter()
+    notes.extend(descriptor_uncertainty_notes(descriptors.iter()));
+    unique_evidence_refs(notes).into_iter()
+}
+
+fn persisted_finding_uncertainty_notes(finding: &ai::ArtifactFinding) -> Vec<String> {
+    match (
+        finding.population_support_status,
+        finding.active_population_profile,
+        finding.fallback_population_profile,
+    ) {
+        (
+            Some(crate::evidence::registry::PopulationSupportStatus::GeneralAdultOnlyFallback),
+            Some(profile),
+            Some(fallback),
+        ) => vec![format!(
+            "This finding uses {} fallback guidance rather than profile-specific guidance for {}.",
+            fallback.label(),
+            profile.label()
+        )],
+        (
+            Some(crate::evidence::registry::PopulationSupportStatus::Unavailable),
+            Some(profile),
+            _,
+        ) => vec![format!(
+            "This finding does not have profile-specific guidance for {} and should be read as context only.",
+            profile.label()
+        )],
+        _ => Vec::new(),
+    }
 }
 
 fn descriptor_uncertainty_notes<'a>(
@@ -1473,6 +1588,74 @@ mod tests {
         assert!(document.trust_summary.contains("snapshot_b:"));
         assert!(document.trust_summary.contains("review_signals=3"));
         assert!(document.trust_summary.contains("follow_up_targets=2"));
+    }
+
+    #[test]
+    fn compare_reports_prefer_persisted_claim_metadata_over_live_registry_lookups() {
+        let document = build_ai_report_document(
+            &sample_compare_record(),
+            &StoredArtifact::Compare(CompareArtifactV1 {
+                schema_version: "ringmaster.ai.compare.v2".to_owned(),
+                prompt_version: "compare_prompt_v2".to_owned(),
+                status: ArtifactStatus::DryRun,
+                overview: "compare overview".to_owned(),
+                material_differences: vec![ArtifactFinding {
+                    finding_id: "diff-persisted".to_owned(),
+                    title: "Training load changed".to_owned(),
+                    summary: "Activity load differs between snapshots.".to_owned(),
+                    claim_key: Some("weekly_activity_minutes".to_owned()),
+                    evidence_tier: Some(crate::evidence::registry::EvidenceTier::Exploratory),
+                    interpretation_scope: Some(
+                        crate::evidence::registry::InterpretationScope::WithinPersonTrendOnly,
+                    ),
+                    active_population_profile: Some(
+                        crate::evidence::PopulationProfile::PregnancyPostpartum,
+                    ),
+                    population_support_status: Some(
+                        crate::evidence::registry::PopulationSupportStatus::GeneralAdultOnlyFallback,
+                    ),
+                    fallback_population_profile: Some(
+                        crate::evidence::PopulationProfile::GeneralAdult,
+                    ),
+                    caution_labels: vec!["Trend-only".to_owned()],
+                    confidence: ConfidenceLevel::Medium,
+                    sufficiency: SufficiencyLevel::Medium,
+                    evidence_refs: Vec::new(),
+                    counterevidence_refs: Vec::new(),
+                }],
+                supporting_evidence: Vec::new(),
+                uncertainty_warnings: Vec::new(),
+                investigation_targets: Vec::new(),
+                only_in_a: Vec::new(),
+                only_in_b: Vec::new(),
+            }),
+            None,
+            &[],
+            None,
+            &[],
+        );
+
+        assert!(document.key_findings[0].contains("Exploratory"));
+        assert!(document.key_findings[0].contains("Trend only"));
+        assert!(document.key_findings[0].contains("General-adult-only"));
+        assert!(!document.key_findings[0].contains("Guideline-backed"));
+        assert!(
+            document
+                .evidence_and_rails
+                .iter()
+                .any(|line| line.contains("General-adult-only fallback (Pregnancy/postpartum)"))
+        );
+        assert!(
+            document
+                .evidence_and_rails
+                .iter()
+                .any(|line| line.contains("fallback anchor: General adult"))
+        );
+        assert!(
+            document
+                .uncertainty_notes
+                .contains(&"This finding uses General adult fallback guidance rather than profile-specific guidance for Pregnancy/postpartum.".to_owned())
+        );
     }
 
     #[test]

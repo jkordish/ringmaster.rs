@@ -18,7 +18,7 @@ use crate::ai_prompts::{
 };
 use crate::config::{AiConfig, AiInputTransport, AiRequestMode, Config, PromptCacheMode};
 use crate::error::{Result, RingmasterError};
-use crate::evidence::policy::{evidence_badges, validate_claim_text};
+use crate::evidence::policy::{claim_language_spec, evidence_badges, validate_claim_text};
 use crate::evidence::registry::{
     EvidenceTier, InterpretationScope, PopulationProfile, PopulationSupportStatus,
     resolve_evidence_descriptor,
@@ -872,7 +872,7 @@ fn sanitize_review_finding(
 ) -> Option<ArtifactFinding> {
     apply_evidence_metadata(&mut finding, active_population);
     if let Some(claim_key) = finding.claim_key.as_deref() {
-        let joined = format!("{} {}", finding.title, finding.summary);
+        let joined = claim_validation_text(&finding, active_population);
         let population = finding
             .active_population_profile
             .unwrap_or(active_population);
@@ -896,6 +896,55 @@ fn sanitize_review_finding(
     finding.counterevidence_refs = counterevidence_refs;
 
     (!finding.title.trim().is_empty() || !finding.summary.trim().is_empty()).then_some(finding)
+}
+
+fn claim_validation_text(
+    finding: &ArtifactFinding,
+    active_population: PopulationProfile,
+) -> String {
+    let mut parts = Vec::new();
+    if !finding.title.trim().is_empty() {
+        parts.push(finding.title.trim().to_owned());
+    }
+    if !finding.summary.trim().is_empty() {
+        parts.push(finding.summary.trim().to_owned());
+    }
+    if let Some(tier) = finding.evidence_tier {
+        parts.push(tier.chip_label().to_owned());
+    }
+    if let Some(scope) = finding.interpretation_scope {
+        parts.push(scope.label().to_owned());
+        parts.push(scope.marker().to_owned());
+    }
+    if let Some(status) = finding.population_support_status {
+        parts.push(status.badge_label().to_owned());
+        parts.push(status.detail_label().to_owned());
+    }
+    if let Some(profile) = finding.active_population_profile {
+        parts.push(profile.label().to_owned());
+    }
+    if let Some(fallback) = finding.fallback_population_profile {
+        parts.push(format!("fallback: {}", fallback.label()));
+    }
+    if let Some(claim_key) = finding.claim_key.as_deref() {
+        let population = finding
+            .active_population_profile
+            .unwrap_or(active_population);
+        if let Some(spec) = claim_language_spec(claim_key, population) {
+            parts.push(spec.tier_label);
+            if let Some(guidance_label) = spec.guidance_label {
+                parts.push(guidance_label);
+            }
+            parts.push(spec.interpretation_label);
+            parts.push(spec.population_support_status.badge_label().to_owned());
+            parts.push(spec.population_support_status.detail_label().to_owned());
+            parts.push(spec.active_population_profile.label().to_owned());
+            if let Some(fallback) = spec.fallback_population_profile {
+                parts.push(format!("fallback: {}", fallback.label()));
+            }
+        }
+    }
+    parts.join(" ")
 }
 
 fn sanitize_evidence_refs(
@@ -2718,6 +2767,51 @@ mod tests {
                 .headline_findings
                 .iter()
                 .any(|finding| finding.claim_key.as_deref() == Some("sleep_score"))
+        );
+    }
+
+    #[test]
+    fn sanitize_review_finding_keeps_claims_when_structured_metadata_carries_trend_markers() {
+        let mut finding = ArtifactFinding {
+            finding_id: "finding-structured-metadata".to_owned(),
+            title: "Sleep score improved".to_owned(),
+            summary: "Current window is higher.".to_owned(),
+            claim_key: Some("sleep_score".to_owned()),
+            evidence_tier: Some(crate::evidence::registry::EvidenceTier::Exploratory),
+            interpretation_scope: Some(
+                crate::evidence::registry::InterpretationScope::WithinPersonTrendOnly,
+            ),
+            active_population_profile: Some(PopulationProfile::GeneralAdult),
+            population_support_status: Some(PopulationSupportStatus::PopulationSpecific),
+            fallback_population_profile: None,
+            caution_labels: Vec::new(),
+            confidence: super::ConfidenceLevel::Medium,
+            sufficiency: SufficiencyLevel::Medium,
+            evidence_refs: Vec::new(),
+            counterevidence_refs: Vec::new(),
+        };
+        super::apply_evidence_metadata(&mut finding, PopulationProfile::GeneralAdult);
+        let validation_text =
+            super::claim_validation_text(&finding, PopulationProfile::GeneralAdult);
+        let violations = crate::evidence::policy::validate_claim_text(
+            finding.claim_key.as_deref().unwrap_or_default(),
+            PopulationProfile::GeneralAdult,
+            &validation_text,
+        );
+        assert!(
+            violations.is_empty(),
+            "unexpected claim validation failures for `{validation_text}`: {violations:?}"
+        );
+
+        let sanitized = super::sanitize_review_finding(
+            finding,
+            &std::collections::BTreeSet::new(),
+            PopulationProfile::GeneralAdult,
+        );
+
+        assert!(
+            sanitized.is_some(),
+            "sanitized finding should survive metadata-backed validation"
         );
     }
 

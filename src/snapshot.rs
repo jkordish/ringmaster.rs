@@ -15,6 +15,7 @@ use crate::evidence::registry::{
 };
 use crate::oura::models::{AuthStatus, CapabilityReport};
 use crate::review::features::ReviewSufficiency;
+use crate::review::registry::{WeeklyAggregation, signal_definition};
 use crate::store::Store;
 use crate::store::queries::{
     AiArtifactRecord, ContextEventFamily, ContextEventRecord, DailyActivityRecord,
@@ -1272,6 +1273,15 @@ fn build_snapshot_raw_tables(record_counts: &RecordCounts) -> BTreeMap<String, u
 }
 
 fn snapshot_hash_for_bundle(bundle: &SnapshotBundleV1) -> Result<String> {
+    match bundle.schema_version.as_str() {
+        "ringmaster.snapshot.v1" | "ringmaster.snapshot.v2" => {
+            legacy_snapshot_hash_for_bundle(bundle)
+        }
+        _ => current_snapshot_hash_for_bundle(bundle),
+    }
+}
+
+fn current_snapshot_hash_for_bundle(bundle: &SnapshotBundleV1) -> Result<String> {
     let mut without_hash = bundle.clone();
     without_hash.metadata.snapshot_hash.clear();
     let serialized_without_hash = serde_json::to_string(&without_hash)?;
@@ -1281,6 +1291,116 @@ fn snapshot_hash_for_bundle(bundle: &SnapshotBundleV1) -> Result<String> {
     Ok(hex::encode(Sha256::digest(
         canonical_without_hash.as_bytes(),
     )))
+}
+
+fn legacy_snapshot_hash_for_bundle(bundle: &SnapshotBundleV1) -> Result<String> {
+    let mut without_hash = bundle.clone();
+    without_hash.metadata.snapshot_hash.clear();
+    let legacy_json = legacy_snapshot_json_for_bundle(&without_hash)?;
+    Ok(hex::encode(Sha256::digest(legacy_json.as_bytes())))
+}
+
+fn legacy_snapshot_json_for_bundle(bundle: &SnapshotBundleV1) -> Result<String> {
+    let metrics = LegacySnapshotMetricsHashView {
+        daily_scores: bundle
+            .metrics
+            .daily_scores
+            .iter()
+            .map(|score| LegacySnapshotDailyScoreHashView {
+                export_ref: &score.export_ref,
+                day: &score.day,
+                sleep_score: score.sleep_score,
+                readiness_score: score.readiness_score,
+                activity_score: score.activity_score,
+            })
+            .collect(),
+        activity: &bundle.metrics.activity,
+        heartrate_daily_averages: &bundle.metrics.heartrate_daily_averages,
+        sleep_windows: &bundle.metrics.sleep_windows,
+        stress: &bundle.metrics.stress,
+        resilience: &bundle.metrics.resilience,
+        cardiovascular_age: &bundle.metrics.cardiovascular_age,
+        vo2_max: &bundle.metrics.vo2_max,
+        rest_mode_periods: &bundle.metrics.rest_mode_periods,
+    };
+    let view = LegacySnapshotBundleHashView {
+        schema_version: &bundle.schema_version,
+        metadata: LegacySnapshotMetadataHashView {
+            app_version: &bundle.metadata.app_version,
+            generated_at: &bundle.metadata.generated_at,
+            snapshot_hash: &bundle.metadata.snapshot_hash,
+            scope: &bundle.metadata.scope,
+            start_day: &bundle.metadata.start_day,
+            end_day: &bundle.metadata.end_day,
+            anchor_day: &bundle.metadata.anchor_day,
+            privacy_profile: bundle.metadata.privacy_profile,
+            source_mode: bundle.metadata.source_mode,
+            schema_version: bundle.metadata.schema_version,
+        },
+        freshness: &bundle.freshness,
+        capabilities: &bundle.capabilities,
+        record_counts: &bundle.record_counts,
+        metrics,
+        baselines: &bundle.baselines,
+        trend_summaries: &bundle.trend_summaries,
+        context_events: &bundle.context_events,
+        pattern_summaries: &bundle.pattern_summaries,
+        review_signals: &bundle.review_signals,
+        follow_up_targets: &bundle.follow_up_targets,
+    };
+    serde_json::to_string(&view).map_err(Into::into)
+}
+
+#[derive(Serialize)]
+struct LegacySnapshotBundleHashView<'a> {
+    schema_version: &'a str,
+    metadata: LegacySnapshotMetadataHashView<'a>,
+    freshness: &'a SnapshotFreshness,
+    capabilities: &'a SnapshotCapabilities,
+    record_counts: &'a SnapshotRecordCounts,
+    metrics: LegacySnapshotMetricsHashView<'a>,
+    baselines: &'a [SnapshotBaseline],
+    trend_summaries: &'a [SnapshotTrendSummary],
+    context_events: &'a [SnapshotContextEvent],
+    pattern_summaries: &'a [SnapshotPatternSummary],
+    review_signals: &'a [SnapshotReviewSignal],
+    follow_up_targets: &'a [SnapshotFollowUpTarget],
+}
+
+#[derive(Serialize)]
+struct LegacySnapshotMetadataHashView<'a> {
+    app_version: &'a str,
+    generated_at: &'a str,
+    snapshot_hash: &'a str,
+    scope: &'a str,
+    start_day: &'a str,
+    end_day: &'a str,
+    anchor_day: &'a str,
+    privacy_profile: PrivacyProfile,
+    source_mode: SnapshotSourceMode,
+    schema_version: u32,
+}
+
+#[derive(Serialize)]
+struct LegacySnapshotMetricsHashView<'a> {
+    daily_scores: Vec<LegacySnapshotDailyScoreHashView<'a>>,
+    activity: &'a [SnapshotActivityDay],
+    heartrate_daily_averages: &'a [SnapshotMetricPoint],
+    sleep_windows: &'a [SnapshotSleepWindow],
+    stress: &'a [SnapshotStressDay],
+    resilience: &'a [SnapshotResilienceDay],
+    cardiovascular_age: &'a [SnapshotMetricPoint],
+    vo2_max: &'a [SnapshotMetricPoint],
+    rest_mode_periods: &'a [SnapshotRestModePeriod],
+}
+
+#[derive(Serialize)]
+struct LegacySnapshotDailyScoreHashView<'a> {
+    export_ref: &'a str,
+    day: &'a str,
+    sleep_score: Option<u8>,
+    readiness_score: Option<u8>,
+    activity_score: Option<u8>,
 }
 
 fn canonicalize_snapshot_hash_value(value: &mut serde_json::Value, schema_version: &str) {
@@ -1448,6 +1568,25 @@ pub fn catalog_record_from_loaded_artifact(
     }
 }
 
+fn validate_snapshot_schema_version(schema_version: &str) -> Result<()> {
+    if !SUPPORTED_SNAPSHOT_SCHEMA_VERSIONS.contains(&schema_version) {
+        return Err(RingmasterError::Config(format!(
+            "unsupported snapshot schema version `{schema_version}`"
+        )));
+    }
+    Ok(())
+}
+
+fn validated_snapshot_hash(bundle: &SnapshotBundleV1) -> Result<&str> {
+    let observed_hash = bundle.metadata.snapshot_hash.trim();
+    if observed_hash.is_empty() {
+        return Err(RingmasterError::Config(
+            "snapshot artifact is missing metadata.snapshot_hash".to_owned(),
+        ));
+    }
+    Ok(observed_hash)
+}
+
 /// # Errors
 ///
 /// Returns an error if the JSON cannot be decoded or the decoded bundle fails validation.
@@ -1482,21 +1621,10 @@ pub fn write_snapshot_artifact(path: &Path, compact_json: &str) -> Result<()> {
 ///
 /// Returns an error if the bundle schema version or content hash is invalid.
 pub fn validate_snapshot_bundle(bundle: &SnapshotBundleV1) -> Result<()> {
-    if !SUPPORTED_SNAPSHOT_SCHEMA_VERSIONS.contains(&bundle.schema_version.as_str()) {
-        return Err(RingmasterError::Config(format!(
-            "unsupported snapshot schema version `{}`",
-            bundle.schema_version
-        )));
-    }
+    validate_snapshot_schema_version(&bundle.schema_version)?;
 
-    let without_hash = bundle.clone();
-    let observed_hash = without_hash.metadata.snapshot_hash.clone();
-    if observed_hash.trim().is_empty() {
-        return Err(RingmasterError::Config(
-            "snapshot artifact is missing metadata.snapshot_hash".to_owned(),
-        ));
-    }
-    let expected_hash = snapshot_hash_for_bundle(&without_hash)?;
+    let observed_hash = validated_snapshot_hash(bundle)?;
+    let expected_hash = snapshot_hash_for_bundle(bundle)?;
     if observed_hash != expected_hash {
         return Err(RingmasterError::Config(format!(
             "snapshot hash mismatch: expected `{expected_hash}` but found `{observed_hash}`"
@@ -2039,17 +2167,89 @@ fn build_signal_trend_from_review_signals(
         return Ok(None);
     }
 
+    let definition = signal_definition(signal_key).ok_or_else(|| {
+        RingmasterError::Config(format!(
+            "snapshot trend summary is missing a review signal definition for `{signal_key}`"
+        ))
+    })?;
+    let current_aggregate = aggregate_signal_window(definition.weekly_aggregation, &current_values);
+    let previous_aggregate =
+        aggregate_signal_window(definition.weekly_aggregation, &previous_values);
     let label = resolve_evidence_descriptor(signal_key, active_population).map_or_else(
         || prettify_metric_key(signal_key),
         |descriptor| descriptor.label,
     );
-    Ok(Some(build_metric_trend(
+    Ok(Some(build_aggregated_signal_trend(
         signal_key,
         &label,
-        &current_values,
-        &previous_values,
+        current_aggregate,
+        previous_aggregate,
+        definition.weekly_aggregation,
         active_population,
     )))
+}
+
+fn aggregate_signal_window(aggregation: WeeklyAggregation, values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+
+    match aggregation {
+        WeeklyAggregation::Mean => {
+            Some(values.iter().sum::<f64>() / crate::numeric::usize_to_f64(values.len()))
+        }
+        WeeklyAggregation::Sum | WeeklyAggregation::Count => Some(values.iter().sum()),
+        WeeklyAggregation::Latest => values.last().copied(),
+    }
+}
+
+fn build_aggregated_signal_trend(
+    metric_key: &str,
+    label: &str,
+    current_value: Option<f64>,
+    previous_value: Option<f64>,
+    aggregation: WeeklyAggregation,
+    active_population: PopulationProfile,
+) -> SnapshotTrendSummary {
+    let direction = current_value.zip(previous_value).map_or_else(
+        || "insufficient".to_owned(),
+        |(current, previous)| {
+            if (current - previous).abs() < 0.5 {
+                "flat".to_owned()
+            } else if current > previous {
+                "higher".to_owned()
+            } else {
+                "lower".to_owned()
+            }
+        },
+    );
+    let summary = match current_value.zip(previous_value) {
+        Some((current, previous)) => match aggregation {
+            WeeklyAggregation::Mean => format!(
+                "{label} averaged {current:.1} in-scope versus {previous:.1} in the comparison window."
+            ),
+            WeeklyAggregation::Sum => format!(
+                "{label} totaled {current:.1} in-scope versus {previous:.1} in the comparison window."
+            ),
+            WeeklyAggregation::Count => format!(
+                "{label} covered {current:.0} days in-scope versus {previous:.0} in the comparison window."
+            ),
+            WeeklyAggregation::Latest => format!(
+                "{label} ended at {current:.1} in-scope versus {previous:.1} in the comparison window."
+            ),
+        },
+        None => format!("Not enough {label} samples were available to compare windows."),
+    };
+
+    SnapshotTrendSummary {
+        metric_key: metric_key.to_owned(),
+        label: label.to_owned(),
+        direction,
+        summary,
+        current_average: current_value,
+        previous_average: previous_value,
+        evidence: resolve_evidence_descriptor(metric_key, active_population),
+    }
 }
 
 fn prettify_metric_key(metric_key: &str) -> String {
@@ -2517,7 +2717,8 @@ mod tests {
         SnapshotBundleV1, SnapshotCapabilities, SnapshotDailyScore, SnapshotFollowUpTarget,
         SnapshotFreshness, SnapshotMetadata, SnapshotMetrics, SnapshotRecordCounts,
         SnapshotReviewSignal, SnapshotSourceMode, SnapshotTrendSummary, build_follow_up_targets,
-        deserialize_snapshot_bundle, resolve_scope, snapshot_hash_for_bundle,
+        canonicalize_snapshot_bundle, deserialize_snapshot_bundle, legacy_snapshot_json_for_bundle,
+        resolve_scope, snapshot_hash_for_bundle,
     };
     use crate::config::Config;
     use crate::oura::models::{AuthStatus, CapabilityReport};
@@ -2526,7 +2727,6 @@ mod tests {
         DailyActivityRecord, DailyReadinessRecord, DailySleepRecord, WorkoutRecord,
     };
     use crate::test_support::{ok, some};
-    use sha2::{Digest, Sha256};
 
     fn seed_history(store: &Store) {
         for (day, sleep, readiness, activity) in [
@@ -2830,35 +3030,12 @@ mod tests {
             "legacy snapshot hash should compute",
         );
 
-        let mut legacy_json = ok(
-            serde_json::to_value(&bundle),
-            "legacy snapshot bundle should serialize to value",
+        let legacy_json = ok(
+            legacy_snapshot_json_for_bundle(&bundle),
+            "legacy snapshot json should serialize",
         );
-        let metadata = legacy_json["metadata"]
-            .as_object_mut()
-            .unwrap_or_else(|| panic!("metadata object should exist"));
-        metadata.remove("evidence_registry_version");
-        metadata.remove("active_population_profile");
-        legacy_json["metrics"]["daily_scores"][0]
-            .as_object_mut()
-            .unwrap_or_else(|| panic!("daily score object should exist"))
-            .remove("sleep_duration_seconds");
-        let mut hashed_legacy_json = legacy_json.clone();
-        hashed_legacy_json["metadata"]["snapshot_hash"] = serde_json::Value::String(String::new());
-        let legacy_hash = hex::encode(Sha256::digest(
-            ok(
-                serde_json::to_string(&hashed_legacy_json),
-                "legacy snapshot json should serialize for hashing",
-            )
-            .as_bytes(),
-        ));
-        legacy_json["metadata"]["snapshot_hash"] = serde_json::Value::String(legacy_hash);
-
         let loaded = ok(
-            deserialize_snapshot_bundle(&ok(
-                serde_json::to_string(&legacy_json),
-                "legacy snapshot json should serialize",
-            )),
+            deserialize_snapshot_bundle(&legacy_json),
             "legacy v2 snapshot should deserialize",
         );
 
@@ -2872,6 +3049,20 @@ mod tests {
             crate::evidence::registry::PopulationProfile::GeneralAdult
         );
         assert_eq!(loaded.metrics.daily_scores[0].sleep_duration_seconds, None);
+
+        let canonical = ok(
+            canonicalize_snapshot_bundle(&loaded),
+            "legacy snapshot should canonicalize",
+        );
+        assert!(canonical.contains("\"evidence_registry_version\""));
+        let reparsed = ok(
+            deserialize_snapshot_bundle(&canonical),
+            "canonicalized legacy snapshot should still deserialize",
+        );
+        assert_eq!(
+            reparsed.metadata.snapshot_hash,
+            loaded.metadata.snapshot_hash
+        );
     }
 
     #[test]
@@ -3031,9 +3222,18 @@ mod tests {
             .iter()
             .find(|summary| summary.metric_key == "weekly_activity_minutes")
             .unwrap_or_else(|| panic!("weekly activity minutes trend should exist"));
+        let distribution_trend = export
+            .bundle
+            .trend_summaries
+            .iter()
+            .find(|summary| summary.metric_key == "weekly_activity_distribution")
+            .unwrap_or_else(|| panic!("weekly activity distribution trend should exist"));
 
-        assert_eq!(minutes_trend.previous_average, Some(30.0));
-        assert_eq!(minutes_trend.current_average, Some(45.0));
+        assert_eq!(minutes_trend.previous_average, Some(60.0));
+        assert_eq!(minutes_trend.current_average, Some(90.0));
+        assert_eq!(distribution_trend.previous_average, Some(2.0));
+        assert_eq!(distribution_trend.current_average, Some(2.0));
+        assert_eq!(distribution_trend.direction, "flat");
         assert!(
             export
                 .bundle
