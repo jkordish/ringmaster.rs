@@ -793,11 +793,20 @@ async fn wait_for_callback(
             "loopback callback server join failed: {error}"
         ))),
     };
-    if let Err(error) = server_result {
-        return Err(error.into());
-    }
 
-    callback_result.map_err(Into::into)
+    finalize_callback_wait(callback_result, server_result)
+}
+
+fn finalize_callback_wait(
+    callback_result: std::result::Result<OAuthCallbackQuery, AuthError>,
+    server_result: std::result::Result<(), AuthError>,
+) -> Result<OAuthCallbackQuery> {
+    match (callback_result, server_result) {
+        (Ok(callback), Ok(())) => Ok(callback),
+        (Ok(_), Err(error)) => Err(error.into()),
+        // Preserve the primary callback failure even if graceful shutdown also fails.
+        (Err(callback_error), _) => Err(callback_error.into()),
+    }
 }
 
 async fn callback_handler(
@@ -1266,6 +1275,21 @@ mod tests {
             TcpListener::bind(bound_address).await,
             "callback listener should be released after timeout cleanup",
         );
+    }
+
+    #[test]
+    fn callback_errors_take_precedence_over_shutdown_failures() {
+        let error = finalize_callback_wait(
+            Err(AuthError::CallbackTimeout(5)),
+            Err(AuthError::CallbackListener(
+                "loopback callback server join failed".to_owned(),
+            )),
+        )
+        .expect_err("callback timeout should be preserved");
+        assert!(matches!(
+            error,
+            crate::error::RingmasterError::Auth(AuthError::CallbackTimeout(5))
+        ));
     }
 
     #[tokio::test]

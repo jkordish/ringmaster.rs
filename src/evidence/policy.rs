@@ -238,10 +238,14 @@ pub fn validate_claim_text(
     match descriptor.population_support_status {
         PopulationSupportStatus::PopulationSpecific => {}
         PopulationSupportStatus::GeneralAdultOnlyFallback => {
-            let required_markers = ["general adult", "fallback", "population-specific"];
-            if !required_markers
+            let required_marker_groups = [
+                &["general adult"][..],
+                &["fallback", "falls back"][..],
+                &["population-specific", "profile-specific"][..],
+            ];
+            if !required_marker_groups
                 .iter()
-                .any(|marker| normalized.contains(marker))
+                .all(|markers| contains_any_marker(&normalized, markers))
             {
                 violations.push(PolicyViolation {
                     claim_key: claim_key.to_owned(),
@@ -253,10 +257,13 @@ pub fn validate_claim_text(
             }
         }
         PopulationSupportStatus::Unavailable => {
-            let required_markers = ["context", "unavailable", "not supported"];
-            if !required_markers
+            let required_marker_groups = [
+                &["context", "context-only", "context only"][..],
+                &["unavailable", "not supported"][..],
+            ];
+            if !required_marker_groups
                 .iter()
-                .any(|marker| normalized.contains(marker))
+                .all(|markers| contains_any_marker(&normalized, markers))
             {
                 violations.push(PolicyViolation {
                     claim_key: claim_key.to_owned(),
@@ -436,6 +443,10 @@ fn normalize(value: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn contains_any_marker(normalized: &str, markers: &[&str]) -> bool {
+    markers.iter().any(|marker| normalized.contains(marker))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -464,6 +475,26 @@ mod tests {
             "spo2",
             PopulationProfile::OlderAdult,
             "SpO2 looked fine today.",
+        );
+        assert!(!violations.is_empty());
+    }
+
+    #[test]
+    fn fallback_claim_requires_general_adult_and_fallback_language() {
+        let violations = validate_claim_text(
+            "sleep_duration",
+            PopulationProfile::ShiftWorker,
+            "Population-specific guidance is unavailable here, but this still matches the target.",
+        );
+        assert!(!violations.is_empty());
+    }
+
+    #[test]
+    fn unavailable_claim_requires_explicit_unavailable_language() {
+        let violations = validate_claim_text(
+            "spo2",
+            PopulationProfile::OlderAdult,
+            "This metric should stay in context only for today.",
         );
         assert!(!violations.is_empty());
     }
