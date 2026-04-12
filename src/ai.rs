@@ -2709,6 +2709,19 @@ mod tests {
     }
 
     #[test]
+    fn dry_run_review_preserves_claim_backed_findings_after_sanitization() {
+        let artifact = dry_run_review_artifact(&snapshot_bundle("today"));
+
+        assert!(!artifact.headline_findings.is_empty());
+        assert!(
+            artifact
+                .headline_findings
+                .iter()
+                .any(|finding| finding.claim_key.as_deref() == Some("sleep_score"))
+        );
+    }
+
+    #[test]
     fn dry_run_compare_is_versioned_and_renderable() {
         let artifact = dry_run_compare_artifact(
             &snapshot_bundle("week"),
