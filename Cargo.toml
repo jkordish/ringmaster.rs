@@ -23,15 +23,16 @@ axum = "0.8.8"
 clap = { version = "4.6.0", features = ["derive"] }
 crossterm = "0.29.0"
 hex = "0.4.3"
-hmac = "0.13.0"
+hmac = "0.12.1"
+num-traits = "0.2.19"
 oauth2 = { version = "5.0.0", default-features = false, features = ["reqwest", "rustls-tls"] }
 ratatui = "0.30.0"
-reqwest = { version = "0.13.2", default-features = false, features = ["json", "query", "rustls"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 schemars = { version = "1.2.1", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-sha2 = "0.11.0"
+sha2 = "0.10.9"
 thiserror = "2.0.18"
 time = { version = "0.3.47", features = ["formatting", "local-offset", "macros", "parsing", "serde"] }
 tokio = { version = "1.51.1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
@@ -44,7 +45,9 @@ tempfile = "3.27.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["async-secret-service", "async-io", "crypto-rust"] }
-# Pinned to v4 until keyring moves its Secret Service backend to the newer major.
+# Pinned to v4 while the Linux keyring path is still on stable `keyring 3.x`;
+# the newer `keyring 4.x` line is pre-release-only today, so taking
+# `secret-service 5` would create a duplicate runtime stack with little value.
 secret-service = { version = "4", features = ["rt-async-io-crypto-rust"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

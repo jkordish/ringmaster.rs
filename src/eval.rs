@@ -205,7 +205,14 @@ struct RegressionDeltaSummary {
     regressions: Vec<String>,
 }
 
-pub async fn run_eval(config: &Config, args: AiEvalArgs) -> Result<Option<String>> {
+/// Runs the fixture-backed AI evaluation workflow and optionally exports the report.
+///
+/// # Errors
+///
+/// Returns an error when fixture inputs cannot be loaded, an artifact cannot be
+/// decoded or graded, the export cannot be written, or persisted eval details
+/// cannot be stored.
+pub fn run_eval(config: &Config, args: &AiEvalArgs) -> Result<Option<String>> {
     let manifest = load_manifest(&args.fixture_dir)?;
     let candidate_label = args
         .candidate
@@ -847,8 +854,10 @@ fn evidence_integrity(
             .evidence_refs
             .iter()
             .find(|evidence| !valid_export_refs.contains(&evidence.export_ref))
-            .map(|evidence| evidence.export_ref.clone())
-            .unwrap_or_else(|| "unknown".to_owned());
+            .map_or_else(
+                || "unknown".to_owned(),
+                |evidence| evidence.export_ref.clone(),
+            );
         GraderResult {
             grader: "evidence".to_owned(),
             passed: false,
@@ -949,7 +958,7 @@ fn score_summary(outcomes: &[EvalCaseOutcome]) -> EvalScoreSummary {
                         .is_some_and(|grader| grader.passed)
                 })
                 .count();
-            passed as f64 / outcomes.len() as f64
+            crate::numeric::usize_to_f64(passed) / crate::numeric::usize_to_f64(outcomes.len())
         }
     };
 
@@ -1166,7 +1175,7 @@ where
     }
 }
 
-fn task_family_label(task_family: &EvalTaskFamily) -> &'static str {
+const fn task_family_label(task_family: &EvalTaskFamily) -> &'static str {
     match task_family {
         EvalTaskFamily::Review => "review",
         EvalTaskFamily::Compare => "compare",
@@ -1188,36 +1197,22 @@ struct LoadedSnapshotFixture {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use super::{parse_persisted_eval_details, run_eval};
     use crate::cli::AiEvalArgs;
     use crate::config::Config;
+    use crate::test_support::{ok, some};
     use tempfile::tempdir;
 
-    #[tokio::test]
-    async fn ai_eval_runs_fixture_manifest_and_exports_json() {
-        let fixture_dir =
-            tempdir().unwrap_or_else(|error| panic!("temp dir should exist: {error}"));
-        let fixture_root = fixture_dir.path();
-        std::fs::write(
-            fixture_root.join("snapshot.json"),
-            include_str!("../tests/fixtures/ai/review-snapshot.json"),
-        )
-        .unwrap_or_else(|error| panic!("snapshot fixture should write: {error}"));
-        std::fs::write(
-            fixture_root.join("review-candidate.json"),
-            include_str!("../tests/fixtures/ai/review-candidate.json"),
-        )
-        .unwrap_or_else(|error| panic!("candidate fixture should write: {error}"));
-        std::fs::write(
-            fixture_root.join("review-baseline.json"),
-            include_str!("../tests/fixtures/ai/review-baseline.json"),
-        )
-        .unwrap_or_else(|error| panic!("baseline fixture should write: {error}"));
-        std::fs::write(
-            fixture_root.join("manifest.json"),
-            r#"{
+    fn write_fixture(root: &std::path::Path, name: &str, contents: &str) {
+        ok(
+            std::fs::write(root.join(name), contents),
+            "fixture should write",
+        );
+    }
+
+    fn sample_manifest() -> &'static str {
+        r#"{
   "schema_version": "ringmaster.ai.eval.fixtures.v1",
   "default_candidate_label": "candidate",
   "default_baseline_label": "baseline",
@@ -1254,33 +1249,61 @@ mod tests {
     }
   ]
 }
-"#,
-        )
-        .unwrap_or_else(|error| panic!("manifest fixture should write: {error}"));
+"#
+    }
+
+    #[tokio::test]
+    async fn ai_eval_runs_fixture_manifest_and_exports_json() {
+        let fixture_dir = ok(tempdir(), "temp dir should exist");
+        let fixture_root = fixture_dir.path();
+        write_fixture(
+            fixture_root,
+            "snapshot.json",
+            include_str!("../tests/fixtures/ai/review-snapshot.json"),
+        );
+        write_fixture(
+            fixture_root,
+            "review-candidate.json",
+            include_str!("../tests/fixtures/ai/review-candidate.json"),
+        );
+        write_fixture(
+            fixture_root,
+            "review-baseline.json",
+            include_str!("../tests/fixtures/ai/review-baseline.json"),
+        );
+        write_fixture(fixture_root, "manifest.json", sample_manifest());
 
         let export_path = fixture_root.join("eval.json");
-        let output = run_eval(
-            &Config::load().unwrap_or_else(|error| panic!("config should load: {error}")),
-            AiEvalArgs {
-                fixture_dir: fixture_root.to_path_buf(),
-                candidate: None,
-                baseline: None,
-                export: Some(export_path.clone()),
-            },
-        )
-        .await
-        .unwrap_or_else(|error| panic!("eval should succeed: {error}"))
-        .unwrap_or_else(|| panic!("eval should render output"));
+        let config = ok(Config::load(), "config should load");
+        let output = some(
+            ok(
+                run_eval(
+                    &config,
+                    &AiEvalArgs {
+                        fixture_dir: fixture_root.to_path_buf(),
+                        candidate: None,
+                        baseline: None,
+                        export: Some(export_path.clone()),
+                    },
+                ),
+                "eval should succeed",
+            ),
+            "eval should render output",
+        );
 
         assert!(output.contains("ringmaster ai eval"));
         assert!(output.contains("candidate_label: candidate"));
         assert!(output.contains("baseline_label: baseline"));
         assert!(output.contains("export_path:"));
         assert!(export_path.exists());
-        let exported = std::fs::read_to_string(&export_path)
-            .unwrap_or_else(|error| panic!("eval export should read: {error}"));
-        let details = parse_persisted_eval_details(&exported)
-            .unwrap_or_else(|| panic!("eval export should parse into persisted details"));
+        let exported = ok(
+            std::fs::read_to_string(&export_path),
+            "eval export should read",
+        );
+        let details = some(
+            parse_persisted_eval_details(&exported),
+            "eval export should parse into persisted details",
+        );
         assert_eq!(details.cases.len(), 1);
         assert_eq!(
             details.cases[0].snapshot_hash_a.as_deref(),

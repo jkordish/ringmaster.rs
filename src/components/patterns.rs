@@ -3,10 +3,10 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     prelude::Rect,
     text::Line,
-    widgets::{List, ListItem, Paragraph},
+    widgets::{List, ListItem, Paragraph, Tabs},
 };
 
-use crate::app::PatternsModel;
+use crate::app::{OverlayToggleView, PatternsModel};
 use crate::ui::{
     chrome::{self, PanelKind},
     layout::UiContext,
@@ -24,6 +24,8 @@ pub fn draw(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(if ui.viewport.is_compact() { 3 } else { 4 }),
+            Constraint::Length(3),
+            Constraint::Length(3),
             Constraint::Min(if ui.viewport.is_compact() { 10 } else { 14 }),
             Constraint::Length(if ui.viewport.is_compact() { 4 } else { 6 }),
         ])
@@ -50,6 +52,9 @@ pub fn draw(
         layout[0],
     );
 
+    draw_metric_tabs(frame, layout[1], model, theme);
+    draw_overlay_tabs(frame, layout[2], &model.overlay_toggles, theme);
+
     let body = Layout::default()
         .direction(if ui.viewport.is_compact() {
             Direction::Vertical
@@ -61,7 +66,7 @@ pub fn draw(
         } else {
             vec![Constraint::Percentage(64), Constraint::Percentage(36)]
         })
-        .split(layout[1]);
+        .split(layout[3]);
 
     let associations = if model.rows.is_empty() {
         vec![ListItem::new(chrome::badge_label(
@@ -93,7 +98,7 @@ pub fn draw(
         .iter()
         .map(|note| ListItem::new(format!("[note] {note}")))
         .chain(std::iter::once(ListItem::new(
-            "[keys] m metric | w/t/s families | 4 Explain for selected day context",
+            "[guide] Use the filter strip to narrow families, then switch views to validate a finding.",
         )))
         .chain(model.ai_actions.iter().cloned().map(ListItem::new))
         .collect::<Vec<_>>();
@@ -117,6 +122,70 @@ pub fn draw(
             Line::from("Interpretation"),
             PanelKind::Subtle,
         )),
-        layout[2],
+        layout[4],
     );
+}
+
+fn draw_metric_tabs(frame: &mut Frame<'_>, area: Rect, model: &PatternsModel, theme: &Theme) {
+    frame.render_widget(
+        Tabs::new(model.metric_filters.iter().map(|tab| tab.label))
+            .block(chrome::panel(
+                theme,
+                chrome::title_with_badge(
+                    theme,
+                    "Metric filter",
+                    model
+                        .metric_filters
+                        .get(model.selected_filter_index)
+                        .map_or("All", |tab| tab.label),
+                    Tone::Focus,
+                ),
+                PanelKind::Section,
+            ))
+            .style(theme.annotation())
+            .highlight_style(theme.emphasis(Tone::Focus))
+            .divider(" ")
+            .select(model.selected_filter_index),
+        area,
+    );
+}
+
+fn draw_overlay_tabs(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    toggles: &[OverlayToggleView],
+    theme: &Theme,
+) {
+    let selected_index = toggles
+        .iter()
+        .position(|toggle| toggle.selected)
+        .unwrap_or(0);
+    frame.render_widget(
+        Tabs::new(toggles.iter().map(overlay_tab_label))
+            .block(chrome::panel(
+                theme,
+                chrome::title_with_badge(
+                    theme,
+                    "Family filter",
+                    toggles
+                        .get(selected_index)
+                        .map_or("Workouts", |toggle| toggle.label),
+                    Tone::Info,
+                ),
+                PanelKind::Subtle,
+            ))
+            .style(theme.annotation())
+            .highlight_style(theme.emphasis(Tone::Focus))
+            .divider(" ")
+            .select(selected_index),
+        area,
+    );
+}
+
+fn overlay_tab_label(toggle: &OverlayToggleView) -> String {
+    format!(
+        "{} {}",
+        toggle.label,
+        if toggle.enabled { "on" } else { "off" }
+    )
 }

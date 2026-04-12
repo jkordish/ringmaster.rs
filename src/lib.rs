@@ -6,25 +6,7 @@
     clippy::cargo,
     clippy::perf
 )]
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::future_not_send,
-    clippy::map_unwrap_or,
-    clippy::missing_const_for_fn,
-    clippy::missing_errors_doc,
-    clippy::module_name_repetitions,
-    clippy::multiple_crate_versions,
-    clippy::must_use_candidate,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::ref_option,
-    clippy::too_many_lines,
-    clippy::uninlined_format_args,
-    clippy::unused_async
-)]
+#![allow(clippy::multiple_crate_versions, clippy::too_many_lines)]
 
 pub mod action;
 pub mod ai;
@@ -37,15 +19,22 @@ pub mod derive;
 pub mod error;
 pub mod eval;
 pub mod insights;
+pub mod keybindings;
+pub mod navigation;
+pub mod numeric;
 pub mod oura;
 pub mod refresh;
 pub mod report;
 pub mod review;
 pub mod snapshot;
-pub mod store;
+mod store;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod tui;
-pub mod ui;
+mod ui;
 pub mod webhook;
+
+pub use store::{Store, StorePlan};
 
 use std::collections::HashMap;
 use std::fs;
@@ -70,7 +59,6 @@ use review::{
     InvestigationReport, ReviewCard, ReviewDeck, ReviewFocus, ReviewInputs, ReviewMode,
     build_investigation_report, build_review_deck,
 };
-use store::Store;
 use time::{Date, Duration, OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -112,19 +100,34 @@ const FIXTURE_SNAPSHOT_STALE_SYNC_COMPLETED_AT: &str = "2026-04-09T05:01:00Z";
 const FIXTURE_SNAPSHOT_ERROR_SYNC_ATTEMPTED_AT: &str = "2026-04-09T11:45:00Z";
 const FIXTURE_SNAPSHOT_ERROR_SYNC_COMPLETED_AT: &str = "2026-04-09T11:46:00Z";
 
-pub async fn run_from<I, T>(args: I) -> Result<Option<String>>
+/// Parses CLI arguments and runs the requested command.
+///
+/// # Errors
+///
+/// Returns an error when argument parsing fails, configuration or runtime
+/// dependencies cannot be initialized, or the selected command fails.
+pub fn run_from<I, T>(args: I) -> impl std::future::Future<Output = Result<Option<String>>> + Send
 where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let cli = Cli::parse_from(args)?;
-    if cli.command.is_none() {
-        return Ok(Some(Cli::help_text()));
-    }
+    let cli = Cli::parse_from(args);
+    async move {
+        let cli = cli?;
+        if cli.command.is_none() {
+            return Ok(Some(Cli::help_text()));
+        }
 
-    run_cli(cli).await
+        run_cli(cli).await
+    }
 }
 
+/// Executes a parsed CLI command.
+///
+/// # Errors
+///
+/// Returns an error when configuration cannot be loaded, logging or runtime
+/// directories cannot be initialized, or the chosen command fails.
 pub async fn run_cli(cli: Cli) -> Result<Option<String>> {
     let config = Config::load()?;
     init_logging(&config.logging.filter)?;
@@ -137,8 +140,8 @@ pub async fn run_cli(cli: Cli) -> Result<Option<String>> {
 
     match command {
         Command::Doctor => run_doctor(&config),
-        Command::Demo => run_demo(&config).await,
-        Command::Tui(args) => run_tui(&config, args).await,
+        Command::Demo => run_demo(&config),
+        Command::Tui(args) => run_tui(&config, &args),
         Command::Snapshot { command } => match command {
             SnapshotCommand::Export(args) => run_snapshot_export(&config, args).await,
             SnapshotCommand::List(args) => run_snapshot_list(&config, args).await,
@@ -181,7 +184,7 @@ pub async fn run_cli(cli: Cli) -> Result<Option<String>> {
                 AiRunsCommand::List(args) => run_ai_runs_list(&config, args).await,
                 AiRunsCommand::Show(args) => run_ai_runs_show(&config, args).await,
             },
-            AiCommand::Eval(args) => run_ai_eval(&config, args).await,
+            AiCommand::Eval(args) => run_ai_eval(&config, &args),
         },
         Command::Report { command } => match command {
             ReportCommand::Export(args) => run_report_export(&config, args).await,
@@ -193,138 +196,47 @@ fn run_doctor(config: &Config) -> Result<Option<String>> {
     let store = Store::open(config)?;
     let auth_status = oura::auth::inspect_auth(config, &store)?;
     let snapshot = load_live_snapshot(config, &store, &auth_status)?;
-    let capability_lines = auth_status
-        .capability_report
-        .entries
-        .iter()
-        .map(|entry| {
-            format!(
-                "  - {}: {} ({})",
-                entry.kind.label(),
-                if entry.granted {
-                    "granted"
-                } else if entry.requested {
-                    "missing"
-                } else {
-                    "not-requested"
-                },
-                entry.note
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let sync_lines = if snapshot.sync_states.is_empty() {
-        "  - none".to_owned()
-    } else {
-        snapshot
-            .sync_states
-            .iter()
-            .map(|sync| {
-                let error = sync
-                    .last_error
-                    .as_ref()
-                    .map(|problem| format!(" | error={problem}"))
-                    .unwrap_or_default();
-                let backoff = sync
-                    .next_attempt_after
-                    .as_deref()
-                    .map(|value| format!(" | next_attempt_after={value}"))
-                    .unwrap_or_default();
-                format!(
-                    "  - {}: {} at {} | failures={}{}{}",
-                    sync.sync_key,
-                    sync.status,
-                    sync.last_attempted_at,
-                    sync.failure_count,
-                    backoff,
-                    error
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let refresh_lines = SyncFamily::ALL
-        .into_iter()
-        .map(|family| {
-            format!(
-                "  - {}: interval={}s stale_after={}s scope={}",
-                family.label(),
-                family.interval_secs(&config.refresh),
-                family.stale_after_secs(&config.refresh),
-                family.capability_kind().scope_name()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let demo_fixture_dir = config
-        .refresh
-        .demo_fixture_dir
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "tests/fixtures/phase5".to_owned());
-    let record_counts = &snapshot.record_counts;
-    let webhook_desired_enabled = snapshot
-        .webhook
-        .desired_subscriptions
-        .iter()
-        .filter(|record| record.enabled)
-        .count();
-    let webhook_remote_healthy = snapshot
-        .webhook
-        .remote_subscriptions
-        .iter()
-        .filter(|record| doctor_remote_subscription_healthy(&snapshot, record))
-        .count();
-    let webhook_renewals_due = snapshot
-        .webhook
-        .remote_subscriptions
-        .iter()
-        .filter(|record| doctor_remote_subscription_renewal_due(&snapshot, &record.expiration_time))
-        .count();
-    let webhook_last_delivery = snapshot.webhook.recent_deliveries.first().map_or_else(
-        || "none".to_owned(),
-        |record| {
-            format!(
-                "{} {} {}",
-                record.data_type.as_deref().unwrap_or("unknown"),
-                record
-                    .event_type
-                    .map_or("unknown", |event_type| event_type.as_str()),
-                record.received_at
-            )
-        },
-    );
-    let webhook_last_rejection = snapshot
-        .webhook
-        .latest_rejected_delivery
-        .as_ref()
-        .map_or_else(
-            || "none".to_owned(),
-            |record| {
-                format!(
-                    "{} {} ({})",
-                    record.reason_code, record.received_at, record.detail
-                )
-            },
-        );
-    let webhook_queue_oldest = snapshot
-        .webhook
-        .pending_invalidations
-        .iter()
-        .map(|record| record.first_queued_at.as_str())
-        .min()
-        .unwrap_or("none");
-    let webhook_failed_attempts = snapshot
-        .webhook
-        .recent_processing_attempts
-        .iter()
-        .filter(|attempt| attempt.outcome == "failed")
-        .count();
+    Ok(Some(render_doctor_report(
+        config,
+        &store,
+        &auth_status,
+        &snapshot,
+    )?))
+}
 
-    let report = format!(
+struct DoctorWebhookStats {
+    desired_enabled: usize,
+    remote_healthy: usize,
+    renewals_due: usize,
+    last_delivery: String,
+    last_rejection: String,
+    queue_oldest: String,
+    failed_attempts: usize,
+}
+
+fn render_doctor_report(
+    config: &Config,
+    store: &Store,
+    auth_status: &oura::models::AuthStatus,
+    snapshot: &app::LiveSnapshot,
+) -> Result<String> {
+    let webhook_stats = doctor_webhook_stats(snapshot);
+    Ok([
+        "ringmaster doctor".to_owned(),
+        String::new(),
+        doctor_runtime_section(config, store)?,
+        doctor_auth_section(auth_status),
+        doctor_sync_section(config, snapshot),
+        doctor_webhook_section(config, snapshot, &webhook_stats),
+        doctor_ai_section(snapshot),
+        doctor_record_counts_section(snapshot),
+    ]
+    .join("\n"))
+}
+
+fn doctor_runtime_section(config: &Config, store: &Store) -> Result<String> {
+    Ok(format!(
         "\
-ringmaster doctor
-
 app_name: {}
 config_dir: {}
 config_file: {} ({})
@@ -333,72 +245,7 @@ cache_dir: {}
 database_path: {} ({})
 log_dir: {}
 schema_version: {}
-migrations_applied_this_run: {}
-oauth_callback: {}
-auth_configured: {}
-auth_state: {}
-secret_backend: {}
-access_token_stored: {}
-refresh_token_stored: {}
-access_token_expires_at: {}
-last_authenticated_at: {}
-last_refresh_at: {}
-account_id: {}
-account_email: {}
-missing_auth_fields: {}
-capabilities:
-{}
-refresh_policy:
-{}
-demo_fixture_dir: {}
-sync_slices:
-{}
-webhook_receiver_configured: {}
-webhook_callback_url: {}
-webhook_verification_token_configured: {}
-webhook_receiver_status: {}
-webhook_receiver_heartbeat: {}
-webhook_watch_heartbeat: {}
-webhook_runtime_mode: {}
-webhook_missing_public_prereq: {}
-ai_provider_enabled: {}
-ai_provider: {}
-ai_api_key_env: {}
-ai_api_key_ready: {}
-ai_default_model: {}
-ai_request_mode: {}
-ai_input_transport: {}
-ai_prompt_cache: {}
-ai_stateless_default: {}
-ai_tools_disabled_by_default: {}
-ai_prompt_versions: review={} compare={}
-ai_last_successful_run: {}
-ai_last_failed_run: {}
-ai_artifact_registry: snapshots={} runs={} artifacts={} reports={} evals={}
-webhook_desired_subscriptions: {}
-webhook_remote_subscriptions: {}
-webhook_remote_healthy: {}
-webhook_remote_renewals_due: {}
-webhook_last_delivery: {}
-webhook_last_rejection: {}
-webhook_queue_depth: {}
-webhook_queue_oldest: {}
-webhook_failed_attempts: {}
-record_counts:
-  personal_info: {}
-  daily_sleep: {}
-  daily_readiness: {}
-  daily_activity: {}
-  heartrate_samples: {}
-  workouts: {}
-  tags: {}
-  enhanced_tags: {}
-  sessions: {}
-  derived_context_events: {}
-  derived_pattern_summaries: {}
-  derived_review_signal_days: {}
-  raw_payloads: {}
-",
+migrations_applied_this_run: {}",
         config.app_name,
         config.paths.config_dir.display(),
         config.paths.config_file.display(),
@@ -418,15 +265,29 @@ record_counts:
         config.paths.log_dir.display(),
         store.metadata().schema_version()?,
         store.migration_report().applied_versions.len(),
+    ))
+}
+
+fn doctor_auth_section(auth_status: &oura::models::AuthStatus) -> String {
+    format!(
+        "\
+oauth_callback: {}
+auth_configured: {}
+auth_state: {}
+secret_backend: {}
+access_token_stored: {}
+refresh_token_stored: {}
+access_token_expires_at: {}
+last_authenticated_at: {}
+last_refresh_at: {}
+account_id: {}
+account_email: {}
+missing_auth_fields: {}
+capabilities:
+{}",
         auth_status.callback_url,
         auth_status.configured,
-        if auth_status.access_token_stored || auth_status.refresh_token_stored {
-            "authenticated"
-        } else if auth_status.configured {
-            "configured_without_session"
-        } else {
-            "unconfigured"
-        },
+        doctor_auth_state(auth_status),
         auth_status.secret_backend,
         auth_status.access_token_stored,
         auth_status.refresh_token_stored,
@@ -455,10 +316,51 @@ record_counts:
         } else {
             auth_status.missing_fields.join(", ")
         },
-        capability_lines,
-        refresh_lines,
-        demo_fixture_dir,
-        sync_lines,
+        doctor_capability_lines(auth_status),
+    )
+}
+
+fn doctor_sync_section(config: &Config, snapshot: &app::LiveSnapshot) -> String {
+    format!(
+        "\
+refresh_policy:
+{}
+demo_fixture_dir: {}
+sync_slices:
+{}",
+        doctor_refresh_lines(config),
+        config.refresh.demo_fixture_dir.as_ref().map_or_else(
+            || "tests/fixtures/phase5".to_owned(),
+            |path| path.display().to_string()
+        ),
+        doctor_sync_lines(snapshot),
+    )
+}
+
+fn doctor_webhook_section(
+    config: &Config,
+    snapshot: &app::LiveSnapshot,
+    stats: &DoctorWebhookStats,
+) -> String {
+    format!(
+        "\
+webhook_receiver_configured: {}
+webhook_callback_url: {}
+webhook_verification_token_configured: {}
+webhook_receiver_status: {}
+webhook_receiver_heartbeat: {}
+webhook_watch_heartbeat: {}
+webhook_runtime_mode: {}
+webhook_missing_public_prereq: {}
+webhook_desired_subscriptions: {}
+webhook_remote_subscriptions: {}
+webhook_remote_healthy: {}
+webhook_remote_renewals_due: {}
+webhook_last_delivery: {}
+webhook_last_rejection: {}
+webhook_queue_depth: {}
+webhook_queue_oldest: {}
+webhook_failed_attempts: {}",
         config.webhook_receiver_configured(),
         snapshot
             .webhook
@@ -466,11 +368,40 @@ record_counts:
             .clone()
             .unwrap_or_else(|| "unconfigured".to_owned()),
         snapshot.webhook.verification_token_configured,
-        doctor_receiver_status(&snapshot),
-        doctor_heartbeat_status(&snapshot, "webhook.receiver"),
-        doctor_heartbeat_status(&snapshot, "sync.watch"),
-        doctor_runtime_mode(&snapshot),
+        doctor_receiver_status(snapshot),
+        doctor_heartbeat_status(snapshot, "webhook.receiver"),
+        doctor_heartbeat_status(snapshot, "sync.watch"),
+        doctor_runtime_mode(snapshot),
         snapshot.webhook.callback_url.is_none(),
+        stats.desired_enabled,
+        snapshot.webhook.remote_subscriptions.len(),
+        stats.remote_healthy,
+        stats.renewals_due,
+        stats.last_delivery,
+        stats.last_rejection,
+        snapshot.webhook.pending_invalidations.len(),
+        stats.queue_oldest,
+        stats.failed_attempts,
+    )
+}
+
+fn doctor_ai_section(snapshot: &app::LiveSnapshot) -> String {
+    format!(
+        "\
+ai_provider_enabled: {}
+ai_provider: {}
+ai_api_key_env: {}
+ai_api_key_ready: {}
+ai_default_model: {}
+ai_request_mode: {}
+ai_input_transport: {}
+ai_prompt_cache: {}
+ai_stateless_default: {}
+ai_tools_disabled_by_default: {}
+ai_prompt_versions: review={} compare={}
+ai_last_successful_run: {}
+ai_last_failed_run: {}
+ai_artifact_registry: snapshots={} runs={} artifacts={} reports={} evals={}",
         snapshot.ai_ops.enabled,
         snapshot.ai_ops.provider,
         snapshot.ai_ops.api_key_env,
@@ -479,7 +410,7 @@ record_counts:
         snapshot.ai_ops.request_mode,
         snapshot.ai_ops.input_transport,
         snapshot.ai_ops.prompt_cache,
-        snapshot.ai_ops.stateless_default,
+        snapshot.ai_ops.request_mode == crate::config::AiRequestMode::Stateless.as_str(),
         snapshot.ai_ops.tools_disabled,
         snapshot.ai_ops.review_prompt_version,
         snapshot.ai_ops.compare_prompt_version,
@@ -498,31 +429,188 @@ record_counts:
         snapshot.ai_ops.ai_artifact_count,
         snapshot.ai_ops.report_export_count,
         snapshot.ai_ops.ai_eval_run_count,
-        webhook_desired_enabled,
-        snapshot.webhook.remote_subscriptions.len(),
-        webhook_remote_healthy,
-        webhook_renewals_due,
-        webhook_last_delivery,
-        webhook_last_rejection,
-        snapshot.webhook.pending_invalidations.len(),
-        webhook_queue_oldest,
-        webhook_failed_attempts,
-        record_counts.personal_info,
-        record_counts.daily_sleep,
-        record_counts.daily_readiness,
-        record_counts.daily_activity,
-        record_counts.heartrate_samples,
-        record_counts.workouts,
-        record_counts.tags,
-        record_counts.enhanced_tags,
-        record_counts.sessions,
-        record_counts.derived_context_events,
-        record_counts.derived_pattern_summaries,
-        record_counts.derived_review_signal_days,
-        record_counts.raw_payloads,
-    );
+    )
+}
 
-    Ok(Some(report))
+fn doctor_record_counts_section(snapshot: &app::LiveSnapshot) -> String {
+    let counts = &snapshot.record_counts;
+    format!(
+        "\
+record_counts:
+  personal_info: {}
+  daily_sleep: {}
+  daily_readiness: {}
+  daily_activity: {}
+  heartrate_samples: {}
+  workouts: {}
+  tags: {}
+  enhanced_tags: {}
+  sessions: {}
+  derived_context_events: {}
+  derived_pattern_summaries: {}
+  derived_review_signal_days: {}
+  raw_payloads: {}",
+        counts.personal_info,
+        counts.daily_sleep,
+        counts.daily_readiness,
+        counts.daily_activity,
+        counts.heartrate_samples,
+        counts.workouts,
+        counts.tags,
+        counts.enhanced_tags,
+        counts.sessions,
+        counts.derived_context_events,
+        counts.derived_pattern_summaries,
+        counts.derived_review_signal_days,
+        counts.raw_payloads,
+    )
+}
+
+const fn doctor_auth_state(auth_status: &oura::models::AuthStatus) -> &'static str {
+    if auth_status.access_token_stored || auth_status.refresh_token_stored {
+        "authenticated"
+    } else if auth_status.configured {
+        "configured_without_session"
+    } else {
+        "unconfigured"
+    }
+}
+
+fn doctor_capability_lines(auth_status: &oura::models::AuthStatus) -> String {
+    auth_status
+        .capability_report
+        .entries
+        .iter()
+        .map(|entry| {
+            format!(
+                "  - {}: {} ({})",
+                entry.kind.label(),
+                if entry.granted {
+                    "granted"
+                } else if entry.requested {
+                    "missing"
+                } else {
+                    "not-requested"
+                },
+                entry.note
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn doctor_refresh_lines(config: &Config) -> String {
+    SyncFamily::ALL
+        .into_iter()
+        .map(|family| {
+            format!(
+                "  - {}: interval={}s stale_after={}s scope={}",
+                family.label(),
+                family.interval_secs(&config.refresh),
+                family.stale_after_secs(&config.refresh),
+                family.capability_kind().scope_name()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn doctor_sync_lines(snapshot: &app::LiveSnapshot) -> String {
+    if snapshot.sync_states.is_empty() {
+        return "  - none".to_owned();
+    }
+
+    snapshot
+        .sync_states
+        .iter()
+        .map(|sync| {
+            let error = sync
+                .last_error
+                .as_ref()
+                .map(|problem| format!(" | error={problem}"))
+                .unwrap_or_default();
+            let backoff = sync
+                .next_attempt_after
+                .as_deref()
+                .map(|value| format!(" | next_attempt_after={value}"))
+                .unwrap_or_default();
+            format!(
+                "  - {}: {} at {} | failures={}{}{}",
+                sync.sync_key,
+                sync.status,
+                sync.last_attempted_at,
+                sync.failure_count,
+                backoff,
+                error
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn doctor_webhook_stats(snapshot: &app::LiveSnapshot) -> DoctorWebhookStats {
+    DoctorWebhookStats {
+        desired_enabled: snapshot
+            .webhook
+            .desired_subscriptions
+            .iter()
+            .filter(|record| record.enabled)
+            .count(),
+        remote_healthy: snapshot
+            .webhook
+            .remote_subscriptions
+            .iter()
+            .filter(|record| doctor_remote_subscription_healthy(snapshot, record))
+            .count(),
+        renewals_due: snapshot
+            .webhook
+            .remote_subscriptions
+            .iter()
+            .filter(|record| {
+                doctor_remote_subscription_renewal_due(snapshot, &record.expiration_time)
+            })
+            .count(),
+        last_delivery: snapshot.webhook.recent_deliveries.first().map_or_else(
+            || "none".to_owned(),
+            |record| {
+                format!(
+                    "{} {} {}",
+                    record.data_type.as_deref().unwrap_or("unknown"),
+                    record
+                        .event_type
+                        .map_or("unknown", |event_type| event_type.as_str()),
+                    record.received_at
+                )
+            },
+        ),
+        last_rejection: snapshot
+            .webhook
+            .latest_rejected_delivery
+            .as_ref()
+            .map_or_else(
+                || "none".to_owned(),
+                |record| {
+                    format!(
+                        "{} {} ({})",
+                        record.reason_code, record.received_at, record.detail
+                    )
+                },
+            ),
+        queue_oldest: snapshot
+            .webhook
+            .pending_invalidations
+            .iter()
+            .map(|record| record.first_queued_at.as_str())
+            .min()
+            .unwrap_or("none")
+            .to_owned(),
+        failed_attempts: snapshot
+            .webhook
+            .recent_processing_attempts
+            .iter()
+            .filter(|attempt| attempt.outcome == "failed")
+            .count(),
+    }
 }
 
 fn doctor_receiver_status(snapshot: &app::LiveSnapshot) -> String {
@@ -652,11 +740,12 @@ fn doctor_parse_timestamp(value: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(value, &Rfc3339).ok()
 }
 
-async fn run_demo(config: &Config) -> Result<Option<String>> {
-    run_tui(config, TuiArgs { demo: true }).await
+fn run_demo(config: &Config) -> Result<Option<String>> {
+    let args = TuiArgs { demo: true };
+    run_tui(config, &args)
 }
 
-async fn run_tui(config: &Config, args: TuiArgs) -> Result<Option<String>> {
+fn run_tui(config: &Config, args: &TuiArgs) -> Result<Option<String>> {
     let mut app = if args.demo {
         build_demo_state(config)
     } else {
@@ -671,7 +760,7 @@ async fn run_tui(config: &Config, args: TuiArgs) -> Result<Option<String>> {
         } else {
             info!("running live TUI");
         }
-        tui::run(config, &mut app).await?;
+        tui::run(config, &mut app)?;
         Ok(None)
     } else {
         if args.demo {
@@ -708,7 +797,7 @@ async fn run_ui_snapshot(config: &Config, args: UiSnapshotArgs) -> Result<Option
         .collect::<Vec<_>>()
         .join("\n");
     let scenarios = if scenario_list.is_empty() {
-        "legacy single source".to_owned()
+        "single source".to_owned()
     } else {
         scenario_list
             .iter()
@@ -1004,7 +1093,7 @@ fn apply_fixture_snapshot_overlay(snapshot: &mut app::LiveSnapshot, fixture_dir:
     );
 }
 
-fn normalize_fixture_snapshot_refresh_policy(
+const fn normalize_fixture_snapshot_refresh_policy(
     refresh_policy: &mut crate::app::RefreshPolicySnapshot,
 ) {
     *refresh_policy = crate::app::RefreshPolicySnapshot {
@@ -1103,6 +1192,22 @@ fn apply_scenario_fixture_snapshot_overlay(
     fixture_root: &std::path::Path,
     scenario: ui::snapshot::SnapshotScenario,
 ) {
+    apply_fixture_snapshot_baseline(snapshot, fixture_root, scenario);
+
+    match scenario {
+        ui::snapshot::SnapshotScenario::Strong => apply_strong_scenario_overlay(snapshot),
+        ui::snapshot::SnapshotScenario::Weak => apply_weak_scenario_overlay(snapshot),
+        ui::snapshot::SnapshotScenario::Empty => apply_empty_scenario_overlay(snapshot),
+        ui::snapshot::SnapshotScenario::Stale => apply_stale_scenario_overlay(snapshot),
+        ui::snapshot::SnapshotScenario::Error => apply_error_scenario_overlay(snapshot),
+    }
+}
+
+fn apply_fixture_snapshot_baseline(
+    snapshot: &mut app::LiveSnapshot,
+    fixture_root: &std::path::Path,
+    scenario: ui::snapshot::SnapshotScenario,
+) {
     snapshot.config_path = scenario_fixture_config_path(fixture_root, scenario);
     snapshot.database_path = scenario_fixture_database_path(fixture_root, scenario);
     FIXTURE_SNAPSHOT_WEBHOOK_BIND_ADDRESS.clone_into(&mut snapshot.webhook.bind_address);
@@ -1153,239 +1258,226 @@ fn apply_scenario_fixture_snapshot_overlay(
             last_seen_at: "2026-04-09T11:59:30Z".to_owned(),
         },
     ];
+}
 
-    match scenario {
-        ui::snapshot::SnapshotScenario::Strong => {
-            "2026-04-09T12:00:00Z".clone_into(&mut snapshot.captured_at);
-            normalize_fixture_snapshot_sync_state_timestamps(
-                &mut snapshot.sync_states,
-                FIXTURE_SNAPSHOT_BASE_SYNC_ATTEMPTED_AT,
-                FIXTURE_SNAPSHOT_BASE_SYNC_COMPLETED_AT,
-            );
-        }
-        ui::snapshot::SnapshotScenario::Weak => {
-            "2026-04-09T12:00:00Z".clone_into(&mut snapshot.captured_at);
-            normalize_fixture_snapshot_sync_state_timestamps(
-                &mut snapshot.sync_states,
-                FIXTURE_SNAPSHOT_BASE_SYNC_ATTEMPTED_AT,
-                FIXTURE_SNAPSHOT_BASE_SYNC_COMPLETED_AT,
-            );
-            for state in &mut snapshot.sync_states {
-                if state.message.is_none() {
-                    state.message =
-                        Some("Thin local history keeps comparisons tentative.".to_owned());
-                }
-            }
-        }
-        ui::snapshot::SnapshotScenario::Empty => {
-            "2026-04-09T12:00:00Z".clone_into(&mut snapshot.captured_at);
-            snapshot.personal_info = None;
-            snapshot.daily_history.clear();
-            snapshot.heartrate_days.clear();
-            snapshot.heartrate_daily_averages.clear();
-            snapshot.context_events.clear();
-            snapshot.pattern_summaries.clear();
-            snapshot.review_signal_days.clear();
-            snapshot.sleep_time.clear();
-            snapshot.rest_mode_periods.clear();
-            snapshot.record_counts = crate::store::queries::RecordCounts::default();
-            for state in &mut snapshot.sync_states {
-                state.status = crate::store::queries::SyncRunStatus::Success;
-                state.message =
-                    Some("Scope granted, but the local cache is still empty.".to_owned());
-                state.last_error = None;
-                state.failure_count = 0;
-                state.next_attempt_after = None;
-            }
-            normalize_fixture_snapshot_sync_state_timestamps(
-                &mut snapshot.sync_states,
-                FIXTURE_SNAPSHOT_BASE_SYNC_ATTEMPTED_AT,
-                FIXTURE_SNAPSHOT_BASE_SYNC_COMPLETED_AT,
-            );
-        }
-        ui::snapshot::SnapshotScenario::Stale => {
-            "2026-04-11T12:00:00Z".clone_into(&mut snapshot.captured_at);
-            snapshot.webhook.remote_subscriptions = fixture_snapshot_remote_subscription_records(
-                &snapshot.webhook.desired_subscriptions,
-                "drifted",
-                "2026-04-10T08:00:00Z",
-                "2026-04-09T08:00:00Z",
-            );
-            snapshot.webhook.runtime_heartbeats = vec![
-                crate::store::webhook_store::RuntimeHeartbeatRecord {
-                    component: "webhook.receiver".to_owned(),
-                    mode: "running".to_owned(),
-                    bind_address: Some(snapshot.webhook.bind_address.clone()),
-                    public_base_url: snapshot.webhook.callback_url.clone(),
-                    detail: Some("stale heartbeat".to_owned()),
-                    last_seen_at: "2026-04-09T07:30:00Z".to_owned(),
-                },
-                crate::store::webhook_store::RuntimeHeartbeatRecord {
-                    component: "sync.watch".to_owned(),
-                    mode: "running".to_owned(),
-                    bind_address: None,
-                    public_base_url: None,
-                    detail: Some("lagging".to_owned()),
-                    last_seen_at: "2026-04-09T07:35:00Z".to_owned(),
-                },
-            ];
-            snapshot.webhook.latest_rejected_delivery =
-                Some(crate::store::webhook_store::RejectedWebhookDeliveryRecord {
-                    rejection_id: 7,
-                    received_at: "2026-04-10T05:00:00Z".to_owned(),
-                    reason_code: "signature_stale".to_owned(),
-                    detail: "delivery arrived outside the tolerance window".to_owned(),
-                    signature_timestamp: Some("2026-04-10T04:40:00Z".to_owned()),
-                    payload_json: "{}".to_owned(),
-                    headers_json: "{}".to_owned(),
-                    query_json: "{}".to_owned(),
-                });
-            snapshot.webhook.pending_invalidations =
-                vec![crate::store::webhook_store::InvalidationRecord {
-                    invalidation_id: 14,
-                    queue_key: "daily_sleep:update:2026-04-08".to_owned(),
-                    data_type: "daily_sleep".to_owned(),
-                    event_type: crate::webhook::WebhookEventType::Update,
-                    object_id: Some("daily_sleep_2026-04-08".to_owned()),
-                    delivery_id: 101,
-                    first_queued_at: "2026-04-10T05:10:00Z".to_owned(),
-                    last_queued_at: "2026-04-10T05:10:00Z".to_owned(),
-                    available_at: "2026-04-10T05:10:00Z".to_owned(),
-                    leased_at: None,
-                    lease_owner: None,
-                    attempt_count: 2,
-                    last_error: Some("receiver heartbeat went stale before processing".to_owned()),
-                    completed_at: None,
-                }];
-            snapshot.webhook.recent_processing_attempts =
-                vec![crate::store::webhook_store::ProcessingAttemptRecord {
-                    attempt_id: 3,
-                    invalidation_id: 14,
-                    started_at: "2026-04-10T05:11:00Z".to_owned(),
-                    finished_at: Some("2026-04-10T05:12:00Z".to_owned()),
-                    outcome: "failed".to_owned(),
-                    detail: Some("watch loop was offline".to_owned()),
-                }];
-            for state in &mut snapshot.sync_states {
-                state.failure_count = 2;
-                state.next_attempt_after = Some("2026-04-11T12:05:00Z".to_owned());
-                state.message = Some(
-                    "Persisted data is present, but freshness is now outside the expected window."
-                        .to_owned(),
-                );
-            }
-            normalize_fixture_snapshot_sync_state_timestamps(
-                &mut snapshot.sync_states,
-                FIXTURE_SNAPSHOT_STALE_SYNC_ATTEMPTED_AT,
-                FIXTURE_SNAPSHOT_STALE_SYNC_COMPLETED_AT,
-            );
-        }
-        ui::snapshot::SnapshotScenario::Error => {
-            "2026-04-09T12:00:00Z".clone_into(&mut snapshot.captured_at);
-            let granted_scopes = vec!["personal".to_owned(), "daily".to_owned()];
-            snapshot
-                .auth_status
-                .granted_scopes
-                .clone_from(&granted_scopes);
-            snapshot.auth_status.capability_report =
-                crate::oura::models::CapabilityReport::from_scopes(
-                    &snapshot.auth_status.requested_scopes,
-                    &granted_scopes,
-                );
-            snapshot.auth_status.access_token_stored = false;
-            snapshot.auth_status.refresh_token_stored = false;
-            snapshot.auth_status.last_error = Some(crate::error::OuraProblem::new(
-                Some(401),
-                "session missing",
-                Some("run `ringmaster auth login` to restore the local session".to_owned()),
-            ));
-            snapshot.heartrate_days.clear();
-            snapshot.heartrate_daily_averages.clear();
-            snapshot.context_events.clear();
-            snapshot.pattern_summaries.clear();
-            snapshot.review_signal_days.clear();
-            snapshot.sleep_time.clear();
-            snapshot.rest_mode_periods.clear();
-            snapshot.record_counts.heartrate_samples = 0;
-            snapshot.record_counts.workouts = 0;
-            snapshot.record_counts.enhanced_tags = 0;
-            snapshot.record_counts.sessions = 0;
-            snapshot.record_counts.derived_context_events = 0;
-            snapshot.record_counts.derived_pattern_summaries = 0;
-            snapshot.record_counts.derived_review_signal_days = 0;
-            snapshot.webhook.callback_url = None;
-            snapshot.webhook.verification_token_configured = false;
-            snapshot.webhook.remote_subscriptions.clear();
-            snapshot.webhook.runtime_heartbeats.clear();
-            snapshot.webhook.latest_rejected_delivery =
-                Some(crate::store::webhook_store::RejectedWebhookDeliveryRecord {
-                    rejection_id: 9,
-                    received_at: "2026-04-09T11:40:00Z".to_owned(),
-                    reason_code: "verification_failed".to_owned(),
-                    detail: "receiver is missing the verification token".to_owned(),
-                    signature_timestamp: Some("2026-04-09T11:39:00Z".to_owned()),
-                    payload_json: "{}".to_owned(),
-                    headers_json: "{}".to_owned(),
-                    query_json: "{}".to_owned(),
-                });
-            for state in &mut snapshot.sync_states {
-                state.failure_count = 3;
-                state.next_attempt_after = Some("2026-04-09T12:05:00Z".to_owned());
-                match state.sync_key.as_str() {
-                    "oura.daily" => {
-                        state.status = crate::store::queries::SyncRunStatus::Failed;
-                        state.message = Some(
-                            "The last daily sync failed because the local auth session is missing."
-                                .to_owned(),
-                        );
-                        state.last_error = Some(crate::error::OuraProblem::new(
-                            Some(401),
-                            "auth required",
-                            Some(
-                                "run `ringmaster auth login` before trying another sync".to_owned(),
-                            ),
-                        ));
-                    }
-                    "oura.heartrate" => {
-                        state.status = crate::store::queries::SyncRunStatus::Blocked;
-                        state.message = Some(
-                            "Missing `heartrate` scope; timeline and trends cannot refresh."
-                                .to_owned(),
-                        );
-                        state.last_error = None;
-                    }
-                    "oura.workouts" => {
-                        state.status = crate::store::queries::SyncRunStatus::Blocked;
-                        state.message = Some(
-                            "Missing `workout` scope; workout context stays unavailable."
-                                .to_owned(),
-                        );
-                        state.last_error = None;
-                    }
-                    "oura.enhanced_tags" => {
-                        state.status = crate::store::queries::SyncRunStatus::Blocked;
-                        state.message =
-                            Some("Missing `tag` scope; tag context stays unavailable.".to_owned());
-                        state.last_error = None;
-                    }
-                    "oura.sessions" => {
-                        state.status = crate::store::queries::SyncRunStatus::Blocked;
-                        state.message = Some(
-                            "Missing `session` scope; session context stays unavailable."
-                                .to_owned(),
-                        );
-                        state.last_error = None;
-                    }
-                    _ => {}
-                }
-            }
-            normalize_fixture_snapshot_sync_state_timestamps(
-                &mut snapshot.sync_states,
-                FIXTURE_SNAPSHOT_ERROR_SYNC_ATTEMPTED_AT,
-                FIXTURE_SNAPSHOT_ERROR_SYNC_COMPLETED_AT,
-            );
+fn apply_strong_scenario_overlay(snapshot: &mut app::LiveSnapshot) {
+    "2026-04-09T12:00:00Z".clone_into(&mut snapshot.captured_at);
+    normalize_fixture_snapshot_sync_state_timestamps(
+        &mut snapshot.sync_states,
+        FIXTURE_SNAPSHOT_BASE_SYNC_ATTEMPTED_AT,
+        FIXTURE_SNAPSHOT_BASE_SYNC_COMPLETED_AT,
+    );
+}
+
+fn apply_weak_scenario_overlay(snapshot: &mut app::LiveSnapshot) {
+    apply_strong_scenario_overlay(snapshot);
+    for state in &mut snapshot.sync_states {
+        if state.message.is_none() {
+            state.message = Some("Thin local history keeps comparisons tentative.".to_owned());
         }
     }
+}
+
+fn apply_empty_scenario_overlay(snapshot: &mut app::LiveSnapshot) {
+    "2026-04-09T12:00:00Z".clone_into(&mut snapshot.captured_at);
+    snapshot.personal_info = None;
+    snapshot.daily_history.clear();
+    snapshot.heartrate_days.clear();
+    snapshot.heartrate_daily_averages.clear();
+    snapshot.context_events.clear();
+    snapshot.pattern_summaries.clear();
+    snapshot.review_signal_days.clear();
+    snapshot.sleep_time.clear();
+    snapshot.rest_mode_periods.clear();
+    snapshot.record_counts = crate::store::queries::RecordCounts::default();
+    for state in &mut snapshot.sync_states {
+        state.status = crate::store::queries::SyncRunStatus::Success;
+        state.message = Some("Scope granted, but the local cache is still empty.".to_owned());
+        state.last_error = None;
+        state.failure_count = 0;
+        state.next_attempt_after = None;
+    }
+    normalize_fixture_snapshot_sync_state_timestamps(
+        &mut snapshot.sync_states,
+        FIXTURE_SNAPSHOT_BASE_SYNC_ATTEMPTED_AT,
+        FIXTURE_SNAPSHOT_BASE_SYNC_COMPLETED_AT,
+    );
+}
+
+fn apply_stale_scenario_overlay(snapshot: &mut app::LiveSnapshot) {
+    "2026-04-11T12:00:00Z".clone_into(&mut snapshot.captured_at);
+    snapshot.webhook.remote_subscriptions = fixture_snapshot_remote_subscription_records(
+        &snapshot.webhook.desired_subscriptions,
+        "drifted",
+        "2026-04-10T08:00:00Z",
+        "2026-04-09T08:00:00Z",
+    );
+    snapshot.webhook.runtime_heartbeats = vec![
+        crate::store::webhook_store::RuntimeHeartbeatRecord {
+            component: "webhook.receiver".to_owned(),
+            mode: "running".to_owned(),
+            bind_address: Some(snapshot.webhook.bind_address.clone()),
+            public_base_url: snapshot.webhook.callback_url.clone(),
+            detail: Some("stale heartbeat".to_owned()),
+            last_seen_at: "2026-04-09T07:30:00Z".to_owned(),
+        },
+        crate::store::webhook_store::RuntimeHeartbeatRecord {
+            component: "sync.watch".to_owned(),
+            mode: "running".to_owned(),
+            bind_address: None,
+            public_base_url: None,
+            detail: Some("lagging".to_owned()),
+            last_seen_at: "2026-04-09T07:35:00Z".to_owned(),
+        },
+    ];
+    snapshot.webhook.latest_rejected_delivery =
+        Some(crate::store::webhook_store::RejectedWebhookDeliveryRecord {
+            rejection_id: 7,
+            received_at: "2026-04-10T05:00:00Z".to_owned(),
+            reason_code: "signature_stale".to_owned(),
+            detail: "delivery arrived outside the tolerance window".to_owned(),
+            signature_timestamp: Some("2026-04-10T04:40:00Z".to_owned()),
+            payload_json: "{}".to_owned(),
+            headers_json: "{}".to_owned(),
+            query_json: "{}".to_owned(),
+        });
+    snapshot.webhook.pending_invalidations =
+        vec![crate::store::webhook_store::InvalidationRecord {
+            invalidation_id: 14,
+            queue_key: "daily_sleep:update:2026-04-08".to_owned(),
+            data_type: "daily_sleep".to_owned(),
+            event_type: crate::webhook::WebhookEventType::Update,
+            object_id: Some("daily_sleep_2026-04-08".to_owned()),
+            delivery_id: 101,
+            first_queued_at: "2026-04-10T05:10:00Z".to_owned(),
+            last_queued_at: "2026-04-10T05:10:00Z".to_owned(),
+            available_at: "2026-04-10T05:10:00Z".to_owned(),
+            leased_at: None,
+            lease_owner: None,
+            attempt_count: 2,
+            last_error: Some("receiver heartbeat went stale before processing".to_owned()),
+            completed_at: None,
+        }];
+    snapshot.webhook.recent_processing_attempts =
+        vec![crate::store::webhook_store::ProcessingAttemptRecord {
+            attempt_id: 3,
+            invalidation_id: 14,
+            started_at: "2026-04-10T05:11:00Z".to_owned(),
+            finished_at: Some("2026-04-10T05:12:00Z".to_owned()),
+            outcome: "failed".to_owned(),
+            detail: Some("watch loop was offline".to_owned()),
+        }];
+    for state in &mut snapshot.sync_states {
+        state.failure_count = 2;
+        state.next_attempt_after = Some("2026-04-11T12:05:00Z".to_owned());
+        state.message = Some(
+            "Persisted data is present, but freshness is now outside the expected window."
+                .to_owned(),
+        );
+    }
+    normalize_fixture_snapshot_sync_state_timestamps(
+        &mut snapshot.sync_states,
+        FIXTURE_SNAPSHOT_STALE_SYNC_ATTEMPTED_AT,
+        FIXTURE_SNAPSHOT_STALE_SYNC_COMPLETED_AT,
+    );
+}
+
+fn apply_error_scenario_overlay(snapshot: &mut app::LiveSnapshot) {
+    "2026-04-09T12:00:00Z".clone_into(&mut snapshot.captured_at);
+    let granted_scopes = vec!["personal".to_owned(), "daily".to_owned()];
+    snapshot
+        .auth_status
+        .granted_scopes
+        .clone_from(&granted_scopes);
+    snapshot.auth_status.capability_report = crate::oura::models::CapabilityReport::from_scopes(
+        &snapshot.auth_status.requested_scopes,
+        &granted_scopes,
+    );
+    snapshot.auth_status.access_token_stored = false;
+    snapshot.auth_status.refresh_token_stored = false;
+    snapshot.auth_status.last_error = Some(crate::error::OuraProblem::new(
+        Some(401),
+        "session missing",
+        Some("run `ringmaster auth login` to restore the local session".to_owned()),
+    ));
+    snapshot.heartrate_days.clear();
+    snapshot.heartrate_daily_averages.clear();
+    snapshot.context_events.clear();
+    snapshot.pattern_summaries.clear();
+    snapshot.review_signal_days.clear();
+    snapshot.sleep_time.clear();
+    snapshot.rest_mode_periods.clear();
+    snapshot.record_counts.heartrate_samples = 0;
+    snapshot.record_counts.workouts = 0;
+    snapshot.record_counts.enhanced_tags = 0;
+    snapshot.record_counts.sessions = 0;
+    snapshot.record_counts.derived_context_events = 0;
+    snapshot.record_counts.derived_pattern_summaries = 0;
+    snapshot.record_counts.derived_review_signal_days = 0;
+    snapshot.webhook.callback_url = None;
+    snapshot.webhook.verification_token_configured = false;
+    snapshot.webhook.remote_subscriptions.clear();
+    snapshot.webhook.runtime_heartbeats.clear();
+    snapshot.webhook.latest_rejected_delivery =
+        Some(crate::store::webhook_store::RejectedWebhookDeliveryRecord {
+            rejection_id: 9,
+            received_at: "2026-04-09T11:40:00Z".to_owned(),
+            reason_code: "verification_failed".to_owned(),
+            detail: "receiver is missing the verification token".to_owned(),
+            signature_timestamp: Some("2026-04-09T11:39:00Z".to_owned()),
+            payload_json: "{}".to_owned(),
+            headers_json: "{}".to_owned(),
+            query_json: "{}".to_owned(),
+        });
+    for state in &mut snapshot.sync_states {
+        state.failure_count = 3;
+        state.next_attempt_after = Some("2026-04-09T12:05:00Z".to_owned());
+        match state.sync_key.as_str() {
+            "oura.daily" => {
+                state.status = crate::store::queries::SyncRunStatus::Failed;
+                state.message = Some(
+                    "The last daily sync failed because the local auth session is missing."
+                        .to_owned(),
+                );
+                state.last_error = Some(crate::error::OuraProblem::new(
+                    Some(401),
+                    "auth required",
+                    Some("run `ringmaster auth login` before trying another sync".to_owned()),
+                ));
+            }
+            "oura.heartrate" => {
+                state.status = crate::store::queries::SyncRunStatus::Blocked;
+                state.message = Some(
+                    "Missing `heartrate` scope; timeline and trends cannot refresh.".to_owned(),
+                );
+                state.last_error = None;
+            }
+            "oura.workouts" => {
+                state.status = crate::store::queries::SyncRunStatus::Blocked;
+                state.message =
+                    Some("Missing `workout` scope; workout context stays unavailable.".to_owned());
+                state.last_error = None;
+            }
+            "oura.enhanced_tags" => {
+                state.status = crate::store::queries::SyncRunStatus::Blocked;
+                state.message =
+                    Some("Missing `tag` scope; tag context stays unavailable.".to_owned());
+                state.last_error = None;
+            }
+            "oura.sessions" => {
+                state.status = crate::store::queries::SyncRunStatus::Blocked;
+                state.message =
+                    Some("Missing `session` scope; session context stays unavailable.".to_owned());
+                state.last_error = None;
+            }
+            _ => {}
+        }
+    }
+    normalize_fixture_snapshot_sync_state_timestamps(
+        &mut snapshot.sync_states,
+        FIXTURE_SNAPSHOT_ERROR_SYNC_ATTEMPTED_AT,
+        FIXTURE_SNAPSHOT_ERROR_SYNC_COMPLETED_AT,
+    );
 }
 
 fn scenario_fixture_config_path(
@@ -1606,11 +1698,10 @@ async fn run_sync_watch(config: &Config, args: SyncWatchArgs) -> Result<Option<S
         },
     )
     .await?;
-    let last_status = report
-        .last_report
-        .as_ref()
-        .map(|sync_report| sync_report.status.to_string())
-        .unwrap_or_else(|| "not-run".to_owned());
+    let last_status = report.last_report.as_ref().map_or_else(
+        || "not-run".to_owned(),
+        |sync_report| sync_report.status.to_string(),
+    );
     let notes = if report.notes.is_empty() {
         "  - none".to_owned()
     } else {
@@ -1671,8 +1762,7 @@ async fn run_webhook_replay(config: &Config, args: WebhookReplayArgs) -> Result<
             delivery_id: args.delivery_id,
             recent: args.recent,
         },
-    )
-    .await?;
+    )?;
     let replay_processing_fixture_dir = replay_processing_fixture_dir(config);
     if report
         .entries
@@ -1748,11 +1838,10 @@ async fn run_webhook_replay(config: &Config, args: WebhookReplayArgs) -> Result<
 ringmaster webhook replay
 
 entries:
-{}
+{entries}
 notes:
-{}
-",
-        entries, notes
+{notes}
+"
     );
 
     Ok(Some(output))
@@ -1837,8 +1926,7 @@ notes:
         report
             .fixture_dir
             .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "live".to_owned()),
+            .map_or_else(|| "live".to_owned(), |path| path.display().to_string()),
         desired,
         remote,
         notes,
@@ -1862,6 +1950,44 @@ async fn run_webhook_subscriptions_sync(
         },
     )
     .await?;
+    Ok(Some(render_webhook_subscription_sync_report(&report)))
+}
+
+fn render_webhook_subscription_sync_report(
+    report: &crate::webhook::subscriptions::SubscriptionSyncReport,
+) -> String {
+    format!(
+        "\
+ringmaster webhook subscriptions sync
+
+dry_run: {}
+prune_requested: {}
+callback_url: {}
+fixture_dir: {}
+remote_before: {}
+remote_after: {}
+plan:
+{}
+notes:
+{}
+",
+        report.dry_run,
+        report.prune_requested,
+        report.callback_url,
+        report
+            .fixture_dir
+            .as_ref()
+            .map_or_else(|| "live".to_owned(), |path| path.display().to_string()),
+        report.remote_before.len(),
+        report.remote_after.len(),
+        render_webhook_subscription_plan(report),
+        render_webhook_subscription_notes(report),
+    )
+}
+
+fn render_webhook_subscription_plan(
+    report: &crate::webhook::subscriptions::SubscriptionSyncReport,
+) -> String {
     let plan_lines = [
         report
             .plan
@@ -1928,49 +2054,27 @@ async fn run_webhook_subscriptions_sync(
     .into_iter()
     .flatten()
     .collect::<Vec<_>>();
-    let output = format!(
-        "\
-ringmaster webhook subscriptions sync
 
-dry_run: {}
-prune_requested: {}
-callback_url: {}
-fixture_dir: {}
-remote_before: {}
-remote_after: {}
-plan:
-{}
-notes:
-{}
-",
-        report.dry_run,
-        report.prune_requested,
-        report.callback_url,
+    if plan_lines.is_empty() {
+        "  - no changes".to_owned()
+    } else {
+        plan_lines.join("\n")
+    }
+}
+
+fn render_webhook_subscription_notes(
+    report: &crate::webhook::subscriptions::SubscriptionSyncReport,
+) -> String {
+    if report.notes.is_empty() {
+        "  - none".to_owned()
+    } else {
         report
-            .fixture_dir
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "live".to_owned()),
-        report.remote_before.len(),
-        report.remote_after.len(),
-        if plan_lines.is_empty() {
-            "  - no changes".to_owned()
-        } else {
-            plan_lines.join("\n")
-        },
-        if report.notes.is_empty() {
-            "  - none".to_owned()
-        } else {
-            report
-                .notes
-                .iter()
-                .map(|note| format!("  - {note}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        },
-    );
-
-    Ok(Some(output))
+            .notes
+            .iter()
+            .map(|note| format!("  - {note}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 async fn run_derive_rebuild(config: &Config, args: DeriveRebuildArgs) -> Result<Option<String>> {
@@ -2016,7 +2120,7 @@ notes:
 
 #[derive(Debug)]
 pub(crate) struct SnapshotCommandContext {
-    _guard: Option<TempRootGuard>,
+    guard: Option<TempRootGuard>,
     pub(crate) config: Config,
     pub(crate) store: Store,
     pub(crate) auth_status: oura::models::AuthStatus,
@@ -2171,17 +2275,19 @@ async fn run_ai_review(config: &Config, args: AiReviewArgs) -> Result<Option<Str
         args.fixture.as_deref().and_then(|path| path.parent()),
     )?;
     store.analysis().upsert_ai_artifact(&output.record)?;
-    store.analysis().upsert_ai_run(&completed_ai_run_record(
-        "review",
-        &snapshot_artifact.bundle.metadata.scope,
-        &snapshot_artifact.bundle.metadata.snapshot_hash,
-        None,
-        &output.request_preview,
-        &output.request_fingerprint,
-        &output.record,
-        None,
-        None,
-    )?)?;
+    store
+        .analysis()
+        .upsert_ai_run(&completed_ai_run_record(&CompletedAiRunRecordInput {
+            run_kind: "review",
+            snapshot_scope: &snapshot_artifact.bundle.metadata.scope,
+            snapshot_hash_a: &snapshot_artifact.bundle.metadata.snapshot_hash,
+            snapshot_hash_b: None,
+            request_preview: &output.request_preview,
+            request_fingerprint: &output.request_fingerprint,
+            artifact_record: &output.record,
+            source_ai_artifact_id: None,
+            follow_up_kind: None,
+        })?)?;
     let artifact_output = if let Some(out_path) = args.out {
         write_text_file(
             &out_path,
@@ -2234,17 +2340,19 @@ async fn run_ai_compare(config: &Config, args: AiCompareArgs) -> Result<Option<S
         args.fixture.as_deref().and_then(|path| path.parent()),
     )?;
     store.analysis().upsert_ai_artifact(&output.record)?;
-    store.analysis().upsert_ai_run(&completed_ai_run_record(
-        "compare",
-        &snapshot_b.bundle.metadata.scope,
-        &snapshot_a.bundle.metadata.snapshot_hash,
-        Some(&snapshot_b.bundle.metadata.snapshot_hash),
-        &output.request_preview,
-        &output.request_fingerprint,
-        &output.record,
-        None,
-        None,
-    )?)?;
+    store
+        .analysis()
+        .upsert_ai_run(&completed_ai_run_record(&CompletedAiRunRecordInput {
+            run_kind: "compare",
+            snapshot_scope: &snapshot_b.bundle.metadata.scope,
+            snapshot_hash_a: &snapshot_a.bundle.metadata.snapshot_hash,
+            snapshot_hash_b: Some(&snapshot_b.bundle.metadata.snapshot_hash),
+            request_preview: &output.request_preview,
+            request_fingerprint: &output.request_fingerprint,
+            artifact_record: &output.record,
+            source_ai_artifact_id: None,
+            follow_up_kind: None,
+        })?)?;
     let artifact_output = if let Some(out_path) = args.out {
         write_text_file(
             &out_path,
@@ -2273,44 +2381,47 @@ async fn run_ai_compare(config: &Config, args: AiCompareArgs) -> Result<Option<S
     Ok(Some(rendered))
 }
 
-#[allow(clippy::too_many_arguments)]
+struct CompletedAiRunRecordInput<'a> {
+    run_kind: &'a str,
+    snapshot_scope: &'a str,
+    snapshot_hash_a: &'a str,
+    snapshot_hash_b: Option<&'a str>,
+    request_preview: &'a ai::AiRequestPreview,
+    request_fingerprint: &'a str,
+    artifact_record: &'a store::queries::AiArtifactRecord,
+    source_ai_artifact_id: Option<&'a str>,
+    follow_up_kind: Option<&'a str>,
+}
+
 fn completed_ai_run_record(
-    run_kind: &str,
-    snapshot_scope: &str,
-    snapshot_hash_a: &str,
-    snapshot_hash_b: Option<&str>,
-    request_preview: &ai::AiRequestPreview,
-    request_fingerprint: &str,
-    artifact_record: &store::queries::AiArtifactRecord,
-    source_ai_artifact_id: Option<&str>,
-    follow_up_kind: Option<&str>,
+    input: &CompletedAiRunRecordInput<'_>,
 ) -> Result<store::queries::AiRunRecord> {
     Ok(store::queries::AiRunRecord {
-        run_id: format!("run-{}", artifact_record.artifact_id),
-        run_kind: run_kind.to_owned(),
+        run_id: format!("run-{}", input.artifact_record.artifact_id),
+        run_kind: input.run_kind.to_owned(),
         run_status: ai::AiRunStatus::Succeeded.as_str().to_owned(),
-        provider: artifact_record.provider.clone(),
-        model: artifact_record.model.clone(),
-        reasoning_effort: artifact_record.reasoning_effort.clone(),
-        request_mode: artifact_record.request_mode.clone(),
-        input_transport: artifact_record.input_transport.clone(),
-        run_mode: artifact_record.run_mode.clone(),
-        prompt_version: artifact_record.prompt_version.clone(),
-        output_schema_version: artifact_record.output_schema_version.clone(),
-        privacy_profile: artifact_record.privacy_profile.clone(),
-        snapshot_scope: snapshot_scope.to_owned(),
-        snapshot_hash_a: snapshot_hash_a.to_owned(),
-        snapshot_hash_b: snapshot_hash_b.map(ToOwned::to_owned),
-        source_ai_artifact_id: source_ai_artifact_id.map(ToOwned::to_owned),
-        follow_up_kind: follow_up_kind.map(ToOwned::to_owned),
-        request_fingerprint: Some(request_fingerprint.to_owned()),
-        request_preview_json: serde_json::to_string(request_preview)?,
-        artifact_id: Some(artifact_record.artifact_id.clone()),
+        provider: input.artifact_record.provider.clone(),
+        model: input.artifact_record.model.clone(),
+        reasoning_effort: input.artifact_record.reasoning_effort.clone(),
+        request_mode: input.artifact_record.request_mode.clone(),
+        input_transport: input.artifact_record.input_transport.clone(),
+        run_mode: input.artifact_record.run_mode.clone(),
+        prompt_version: input.artifact_record.prompt_version.clone(),
+        output_schema_version: input.artifact_record.output_schema_version.clone(),
+        privacy_profile: input.artifact_record.privacy_profile.clone(),
+        snapshot_scope: input.snapshot_scope.to_owned(),
+        snapshot_hash_a: input.snapshot_hash_a.to_owned(),
+        snapshot_hash_b: input.snapshot_hash_b.map(ToOwned::to_owned),
+        source_ai_artifact_id: input.source_ai_artifact_id.map(ToOwned::to_owned),
+        follow_up_kind: input.follow_up_kind.map(ToOwned::to_owned),
+        request_fingerprint: Some(input.request_fingerprint.to_owned()),
+        request_preview_json: serde_json::to_string(input.request_preview)?,
+        artifact_id: Some(input.artifact_record.artifact_id.clone()),
         error_message: None,
-        created_at: artifact_record.created_at.clone(),
-        started_at: Some(artifact_record.created_at.clone()),
-        ended_at: Some(artifact_record.created_at.clone()),
-        updated_at: artifact_record.created_at.clone(),
+        created_at: input.artifact_record.created_at.clone(),
+        started_at: Some(input.artifact_record.created_at.clone()),
+        ended_at: Some(input.artifact_record.created_at.clone()),
+        updated_at: input.artifact_record.created_at.clone(),
     })
 }
 
@@ -2375,8 +2486,8 @@ async fn run_report_export(config: &Config, args: ReportExportArgs) -> Result<Op
     report::export_report(config, args).await
 }
 
-async fn run_ai_eval(config: &Config, args: AiEvalArgs) -> Result<Option<String>> {
-    eval::run_eval(config, args).await
+fn run_ai_eval(config: &Config, args: &AiEvalArgs) -> Result<Option<String>> {
+    eval::run_eval(config, args)
 }
 
 #[derive(Debug, Clone)]
@@ -2565,7 +2676,7 @@ async fn load_snapshot_command_context(
         derive::rebuild_store(&store)?;
         let auth_status = oura::auth::inspect_auth(&temp_config, &store)?;
         return Ok(SnapshotCommandContext {
-            _guard: Some(temp_root),
+            guard: Some(temp_root),
             config: temp_config,
             store,
             auth_status,
@@ -2575,7 +2686,7 @@ async fn load_snapshot_command_context(
     let store = Store::open(config)?;
     let auth_status = oura::auth::inspect_auth(config, &store)?;
     Ok(SnapshotCommandContext {
-        _guard: None,
+        guard: None,
         config: config.clone(),
         store,
         auth_status,
@@ -2604,24 +2715,40 @@ pub(crate) async fn load_library_command_context(
     fixture_dir: Option<PathBuf>,
     include_ai_runs: bool,
 ) -> Result<SnapshotCommandContext> {
-    let context = load_snapshot_command_context(config, demo, fixture_dir.clone()).await?;
-    if demo {
-        seed_demo_library_artifacts(
-            &context.config,
-            &context.store,
-            &context.auth_status,
-            fixture_dir.as_deref(),
-            include_ai_runs,
-        )
-        .await?;
+    if !demo {
+        return load_snapshot_command_context(config, demo, fixture_dir).await;
     }
-    Ok(context)
+
+    let context = load_snapshot_command_context(config, demo, fixture_dir.clone()).await?;
+    let SnapshotCommandContext {
+        guard,
+        config,
+        store,
+        auth_status,
+    } = context;
+    let store_plan = store.plan().clone();
+    drop(store);
+    seed_demo_library_artifacts(
+        &config,
+        store_plan.clone(),
+        auth_status.clone(),
+        fixture_dir.as_deref(),
+        include_ai_runs,
+    )
+    .await?;
+    let store = Store::open_with_plan(store_plan, config.app_name)?;
+    Ok(SnapshotCommandContext {
+        guard,
+        config,
+        store,
+        auth_status,
+    })
 }
 
 pub(crate) async fn seed_demo_library_artifacts(
     config: &Config,
-    store: &Store,
-    auth_status: &oura::models::AuthStatus,
+    store_plan: store::StorePlan,
+    auth_status: oura::models::AuthStatus,
     fixture_dir: Option<&std::path::Path>,
     include_ai_runs: bool,
 ) -> Result<()> {
@@ -2630,12 +2757,13 @@ pub(crate) async fn seed_demo_library_artifacts(
     const DEMO_REVIEW_RUN_CREATED_AT: &str = "2026-04-10T00:00:00Z";
     const DEMO_COMPARE_RUN_CREATED_AT: &str = "2026-04-10T00:00:01Z";
 
-    let today_scope = snapshot::resolve_scope(store, "today")?;
-    let week_scope = snapshot::resolve_scope(store, "week")?;
+    let store = Store::open_with_plan(store_plan.clone(), config.app_name)?;
+    let today_scope = snapshot::resolve_scope(&store, "today")?;
+    let week_scope = snapshot::resolve_scope(&store, "week")?;
     let today_export = snapshot::export_snapshot(
         config,
-        store,
-        auth_status,
+        &store,
+        &auth_status,
         snapshot::SnapshotSourceMode::Demo,
         fixture_dir,
         &today_scope,
@@ -2648,8 +2776,8 @@ pub(crate) async fn seed_demo_library_artifacts(
 
     let week_export = snapshot::export_snapshot(
         config,
-        store,
-        auth_status,
+        &store,
+        &auth_status,
         snapshot::SnapshotSourceMode::Demo,
         fixture_dir,
         &week_scope,
@@ -2659,6 +2787,7 @@ pub(crate) async fn seed_demo_library_artifacts(
         &week_export.manifest_record,
         &week_export.provenance_records,
     )?;
+    drop(store);
 
     if include_ai_runs {
         let today_artifact = snapshot::LoadedSnapshotArtifact {
@@ -2678,19 +2807,22 @@ pub(crate) async fn seed_demo_library_artifacts(
         )
         .await?;
         DEMO_REVIEW_RUN_ID.clone_into(&mut review.record.artifact_id);
-        store.analysis().upsert_ai_artifact(&review.record)?;
-        let review_run = completed_ai_run_record(
-            "review",
-            &today_artifact.bundle.metadata.scope,
-            &today_artifact.bundle.metadata.snapshot_hash,
-            None,
-            &review.request_preview,
-            &review.request_fingerprint,
-            &review.record,
-            None,
-            None,
-        )?;
-        store.analysis().upsert_ai_run(&review_run)?;
+        let persist_store = Store::open_with_plan(store_plan.clone(), config.app_name)?;
+        persist_store
+            .analysis()
+            .upsert_ai_artifact(&review.record)?;
+        let review_run = completed_ai_run_record(&CompletedAiRunRecordInput {
+            run_kind: "review",
+            snapshot_scope: &today_artifact.bundle.metadata.scope,
+            snapshot_hash_a: &today_artifact.bundle.metadata.snapshot_hash,
+            snapshot_hash_b: None,
+            request_preview: &review.request_preview,
+            request_fingerprint: &review.request_fingerprint,
+            artifact_record: &review.record,
+            source_ai_artifact_id: None,
+            follow_up_kind: None,
+        })?;
+        persist_store.analysis().upsert_ai_run(&review_run)?;
         let mut compare = ai::compare_snapshots_with_run_identity(
             config,
             &today_artifact,
@@ -2701,19 +2833,22 @@ pub(crate) async fn seed_demo_library_artifacts(
         )
         .await?;
         DEMO_COMPARE_RUN_ID.clone_into(&mut compare.record.artifact_id);
-        store.analysis().upsert_ai_artifact(&compare.record)?;
-        let compare_run = completed_ai_run_record(
-            "compare",
-            &week_artifact.bundle.metadata.scope,
-            &today_artifact.bundle.metadata.snapshot_hash,
-            Some(&week_artifact.bundle.metadata.snapshot_hash),
-            &compare.request_preview,
-            &compare.request_fingerprint,
-            &compare.record,
-            None,
-            None,
-        )?;
-        store.analysis().upsert_ai_run(&compare_run)?;
+        let persist_store = Store::open_with_plan(store_plan, config.app_name)?;
+        persist_store
+            .analysis()
+            .upsert_ai_artifact(&compare.record)?;
+        let compare_run = completed_ai_run_record(&CompletedAiRunRecordInput {
+            run_kind: "compare",
+            snapshot_scope: &week_artifact.bundle.metadata.scope,
+            snapshot_hash_a: &today_artifact.bundle.metadata.snapshot_hash,
+            snapshot_hash_b: Some(&week_artifact.bundle.metadata.snapshot_hash),
+            request_preview: &compare.request_preview,
+            request_fingerprint: &compare.request_fingerprint,
+            artifact_record: &compare.record,
+            source_ai_artifact_id: None,
+            follow_up_kind: None,
+        })?;
+        persist_store.analysis().upsert_ai_run(&compare_run)?;
     }
 
     Ok(())
@@ -2731,9 +2866,9 @@ fn load_review_snapshot_from_artifacts(
             auth_status: auth_status.clone(),
             signal_days: Vec::new(),
             context_events: Vec::new(),
-            pattern_summaries: derived
-                .map(|artifacts| artifacts.pattern_summaries.clone())
-                .unwrap_or(materialized_pattern_summaries),
+            pattern_summaries: derived.map_or(materialized_pattern_summaries, |artifacts| {
+                artifacts.pattern_summaries.clone()
+            }),
             sleep_time: Vec::new(),
             rest_mode_periods: Vec::new(),
         });
@@ -2915,7 +3050,7 @@ fn review_inputs(snapshot: &ReviewStoreSnapshot) -> ReviewInputs<'_> {
     }
 }
 
-fn map_review_focus(focus: ReviewFocusArg) -> ReviewFocus {
+const fn map_review_focus(focus: ReviewFocusArg) -> ReviewFocus {
     match focus {
         ReviewFocusArg::Readiness => ReviewFocus::Readiness,
         ReviewFocusArg::Sleep => ReviewFocus::Sleep,
@@ -3232,7 +3367,7 @@ impl TempRootGuard {
         Self { path }
     }
 
-    fn path(&self) -> &PathBuf {
+    const fn path(&self) -> &PathBuf {
         &self.path
     }
 }
@@ -3268,7 +3403,6 @@ fn interactive_terminal_available() -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use super::{
         run_ai_compare, run_ai_eval, run_ai_review, run_ai_runs_show, run_doctor,
@@ -4433,18 +4567,15 @@ mod tests {
         .unwrap_or_else(|error| panic!("report export should succeed: {error}"))
         .unwrap_or_else(|| panic!("report export should render output"));
 
-        let eval_output = run_ai_eval(
-            &config,
-            AiEvalArgs {
-                fixture_dir: std::path::PathBuf::from("tests/fixtures/ai"),
-                candidate: None,
-                baseline: None,
-                export: Some(eval_export_path.clone()),
-            },
-        )
-        .await
-        .unwrap_or_else(|error| panic!("ai eval should succeed: {error}"))
-        .unwrap_or_else(|| panic!("ai eval should render output"));
+        let eval_args = AiEvalArgs {
+            fixture_dir: std::path::PathBuf::from("tests/fixtures/ai"),
+            candidate: None,
+            baseline: None,
+            export: Some(eval_export_path.clone()),
+        };
+        let eval_output = run_ai_eval(&config, &eval_args)
+            .unwrap_or_else(|error| panic!("ai eval should succeed: {error}"))
+            .unwrap_or_else(|| panic!("ai eval should render output"));
 
         assert!(report_output.contains("ringmaster report export"));
         assert!(
@@ -4671,7 +4802,6 @@ mod tests {
             first_snapshot
                 .contains("Granted scopes: personal, daily, heartrate, workout, tag, session")
         );
-        assert!(first_snapshot.contains("Secret backend: fixture-memory"));
         assert!(first_snapshot.contains("tests/fixtures/phase3/ringmaster.db"));
     }
 
@@ -4788,16 +4918,20 @@ mod tests {
             .items
             .iter()
             .find(|item| item.label == "Refresh policy")
-            .map(|item| item.value.clone())
-            .unwrap_or_else(|| panic!("first demo app should expose refresh policy"));
+            .map_or_else(
+                || panic!("first demo app should expose refresh policy"),
+                |item| item.value.clone(),
+            );
         let second_refresh_policy = second_app
             .model
             .ops
             .items
             .iter()
             .find(|item| item.label == "Refresh policy")
-            .map(|item| item.value.clone())
-            .unwrap_or_else(|| panic!("second demo app should expose refresh policy"));
+            .map_or_else(
+                || panic!("second demo app should expose refresh policy"),
+                |item| item.value.clone(),
+            );
         first_app.active_screen = crate::app::Screen::Ops;
         second_app.active_screen = crate::app::Screen::Ops;
 
@@ -4815,7 +4949,6 @@ mod tests {
             first_snapshot.contains("Granted scopes: email, personal, daily, heartrate, tag"),
             "status snapshot should surface the expanded Oura scope line"
         );
-        assert!(first_snapshot.contains("Secret backend: demo-memory"));
         assert_eq!(
             first_refresh_policy,
             "personal=3600s daily=300s heartrate=60s workouts=600s tags=300s sessions=300s"

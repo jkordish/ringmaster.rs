@@ -8,7 +8,8 @@ pub enum ViewportClass {
 }
 
 impl ViewportClass {
-    pub fn from_width(width: u16) -> Self {
+    #[must_use]
+    pub const fn from_width(width: u16) -> Self {
         if width < 100 {
             Self::Compact
         } else if width < 140 {
@@ -18,11 +19,13 @@ impl ViewportClass {
         }
     }
 
-    pub fn is_compact(self) -> bool {
+    #[must_use]
+    pub const fn is_compact(self) -> bool {
         matches!(self, Self::Compact)
     }
 
-    pub fn is_wide(self) -> bool {
+    #[must_use]
+    pub const fn is_wide(self) -> bool {
         matches!(self, Self::Wide)
     }
 }
@@ -34,7 +37,8 @@ pub struct UiContext {
 }
 
 impl UiContext {
-    pub fn new(area: Rect) -> Self {
+    #[must_use]
+    pub const fn new(area: Rect) -> Self {
         Self {
             area,
             viewport: ViewportClass::from_width(area.width),
@@ -42,16 +46,19 @@ impl UiContext {
     }
 }
 
+#[must_use]
 pub fn equal_columns(count: usize) -> Vec<Constraint> {
     if count == 0 {
         return Vec::new();
     }
 
-    let base = (100 / count) as u16;
-    let remainder = (100 % count) as u16;
+    let Ok(base) = u16::try_from(100 / count) else {
+        return vec![Constraint::Percentage(1); count];
+    };
+    let remainder = 100 % count;
 
     (0..count)
-        .map(|index| Constraint::Percentage(base + u16::from(index < remainder as usize)))
+        .map(|index| Constraint::Percentage(base + u16::from(index < remainder)))
         .collect()
 }
 

@@ -4,10 +4,10 @@ use ratatui::{
     prelude::Rect,
     symbols,
     text::{Line, Span},
-    widgets::{Axis, Chart, Dataset, GraphType, List, ListItem, Paragraph},
+    widgets::{Axis, Chart, Dataset, GraphType, List, ListItem, Paragraph, Tabs},
 };
 
-use crate::app::{OverlayFamilyGroup, TimelineModel};
+use crate::app::{OverlayFamilyGroup, OverlayToggleView, TimelineModel};
 use crate::ui::{
     charts,
     chrome::{self, PanelKind},
@@ -26,6 +26,7 @@ pub fn draw(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(if ui.viewport.is_compact() { 4 } else { 5 }),
+            Constraint::Length(3),
             Constraint::Min(if ui.viewport.is_compact() { 6 } else { 13 }),
             Constraint::Length(if ui.viewport.is_compact() { 4 } else { 7 }),
             Constraint::Min(if ui.viewport.is_compact() { 5 } else { 10 }),
@@ -56,19 +57,20 @@ pub fn draw(
         layout[0],
     );
 
-    draw_chart(frame, layout[1], model, theme);
-    draw_overlay_lane(frame, layout[2], model, theme);
+    draw_controls(frame, layout[1], model, theme);
+    draw_chart(frame, layout[2], model, theme);
+    draw_overlay_lane(frame, layout[3], model, theme);
 
     let bottom = if ui.viewport.is_compact() {
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(2)])
-            .split(layout[3])
+            .split(layout[4])
     } else {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
-            .split(layout[3])
+            .split(layout[4])
     };
 
     frame.render_widget(
@@ -124,6 +126,37 @@ pub fn draw(
         )),
         bottom[1],
     );
+}
+
+fn draw_controls(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel, theme: &Theme) {
+    let controls = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
+        .split(area);
+
+    frame.render_widget(
+        Tabs::new(model.window_presets.iter().map(|preset| preset.label))
+            .block(chrome::panel(
+                theme,
+                chrome::title_with_badge(
+                    theme,
+                    "Window presets",
+                    model
+                        .window_presets
+                        .get(model.selected_window_preset_index)
+                        .map_or("24h", |preset| preset.label),
+                    Tone::Focus,
+                ),
+                PanelKind::Section,
+            ))
+            .style(theme.annotation())
+            .highlight_style(theme.emphasis(Tone::Focus))
+            .divider(" ")
+            .select(model.selected_window_preset_index),
+        controls[0],
+    );
+
+    draw_overlay_tabs(frame, controls[1], &model.overlay_toggles, theme);
 }
 
 fn draw_chart(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel, theme: &Theme) {
@@ -263,6 +296,38 @@ fn draw_overlay_lane(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel, t
     );
 }
 
+fn draw_overlay_tabs(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    toggles: &[OverlayToggleView],
+    theme: &Theme,
+) {
+    let selected_index = toggles
+        .iter()
+        .position(|toggle| toggle.selected)
+        .unwrap_or(0);
+    frame.render_widget(
+        Tabs::new(toggles.iter().map(overlay_tab_label))
+            .block(chrome::panel(
+                theme,
+                chrome::title_with_badge(
+                    theme,
+                    "Overlay filters",
+                    toggles
+                        .get(selected_index)
+                        .map_or("Workouts", |toggle| toggle.label),
+                    Tone::Info,
+                ),
+                PanelKind::Subtle,
+            ))
+            .style(theme.annotation())
+            .highlight_style(theme.emphasis(Tone::Focus))
+            .divider(" ")
+            .select(selected_index),
+        area,
+    );
+}
+
 fn render_overlay_lines(
     width: u16,
     window_start_minute: u16,
@@ -313,7 +378,7 @@ fn render_overlay_lines(
             lines.push(chars.into_iter().collect::<String>());
         }
         if hidden_rows > 0 {
-            lines.push(format!("... {} additional lane row(s)", hidden_rows));
+            lines.push(format!("... {hidden_rows} additional lane row(s)"));
         }
     }
 
@@ -324,4 +389,12 @@ fn format_minutes(value: u16) -> String {
     let hours = value / 60;
     let minutes = value % 60;
     format!("{hours:02}:{minutes:02}")
+}
+
+fn overlay_tab_label(toggle: &OverlayToggleView) -> String {
+    format!(
+        "{} {}",
+        toggle.label,
+        if toggle.enabled { "on" } else { "off" }
+    )
 }

@@ -2,6 +2,7 @@ use crate::review::engine::{ReviewConfidence, ReviewMode};
 use crate::review::features::ReviewSufficiency;
 use crate::review::registry::{SignalDefinition, SignalDirectionality};
 
+#[must_use]
 pub fn headline_for_signal(
     definition: &SignalDefinition,
     mode: ReviewMode,
@@ -34,6 +35,7 @@ pub fn headline_for_signal(
     }
 }
 
+#[must_use]
 pub fn summary_for_signal(
     definition: &SignalDefinition,
     mode: ReviewMode,
@@ -57,6 +59,7 @@ pub fn summary_for_signal(
     }
 }
 
+#[must_use]
 pub fn sufficiency_line(sufficiency: ReviewSufficiency) -> String {
     match sufficiency {
         ReviewSufficiency::Missing => {
@@ -75,6 +78,7 @@ pub fn sufficiency_line(sufficiency: ReviewSufficiency) -> String {
     }
 }
 
+#[must_use]
 pub fn confidence_badge(confidence: ReviewConfidence, sufficiency: ReviewSufficiency) -> String {
     format!(
         "{} confidence / {} data",
@@ -83,6 +87,7 @@ pub fn confidence_badge(confidence: ReviewConfidence, sufficiency: ReviewSuffici
     )
 }
 
+#[must_use]
 pub fn why_this_is_shown(
     baseline_window_days: usize,
     deviation_bucket: i32,
@@ -90,8 +95,7 @@ pub fn why_this_is_shown(
     corroboration_points: i32,
 ) -> String {
     format!(
-        "Why this is shown: deviation bucket={}, persistence bucket={}, corroboration={} against a {}-day baseline.",
-        deviation_bucket, persistence_bucket, corroboration_points, baseline_window_days
+        "Why this is shown: deviation bucket={deviation_bucket}, persistence bucket={persistence_bucket}, corroboration={corroboration_points} against a {baseline_window_days}-day baseline."
     )
 }
 

@@ -298,6 +298,9 @@ struct OpenAiProvider {
     config: AiConfig,
 }
 
+/// # Errors
+///
+/// Returns an error if the snapshot cannot be turned into a valid review request or if the provider run fails.
 pub async fn review_snapshot(
     config: &Config,
     snapshot: &LoadedSnapshotArtifact,
@@ -307,6 +310,9 @@ pub async fn review_snapshot(
     review_snapshot_with_run_identity(config, snapshot, dry_run, fixture, None).await
 }
 
+/// # Errors
+///
+/// Returns an error if the snapshot cannot be converted into a valid review request preview.
 pub fn preview_review_request(
     config: &Config,
     snapshot: &LoadedSnapshotArtifact,
@@ -378,6 +384,9 @@ pub(crate) async fn review_snapshot_with_run_identity(
     })
 }
 
+/// # Errors
+///
+/// Returns an error if the compare request cannot be built, executed, sanitized, or serialized.
 pub async fn compare_snapshots(
     config: &Config,
     snapshot_a: &LoadedSnapshotArtifact,
@@ -389,6 +398,9 @@ pub async fn compare_snapshots(
         .await
 }
 
+/// # Errors
+///
+/// Returns an error if the follow-up request cannot be built, executed, sanitized, or serialized.
 pub async fn follow_up_from_artifact(
     config: &Config,
     snapshots: &[LoadedSnapshotArtifact],
@@ -409,6 +421,9 @@ pub async fn follow_up_from_artifact(
     .await
 }
 
+/// # Errors
+///
+/// Returns an error if the saved artifact or snapshots cannot be converted into a valid follow-up request preview.
 pub fn preview_follow_up_request(
     config: &Config,
     snapshots: &[LoadedSnapshotArtifact],
@@ -429,6 +444,9 @@ pub fn preview_follow_up_request(
     .map(|plan| plan.preview)
 }
 
+/// # Errors
+///
+/// Returns an error if the two snapshots cannot be converted into a valid compare request preview.
 pub fn preview_compare_request(
     config: &Config,
     snapshot_a: &LoadedSnapshotArtifact,
@@ -596,6 +614,7 @@ pub(crate) async fn follow_up_from_artifact_with_run_identity(
     })
 }
 
+#[must_use]
 pub fn render_review_briefing(artifact: &ReviewArtifactV1) -> String {
     let mut lines = vec![
         "ringmaster ai review".to_owned(),
@@ -645,6 +664,7 @@ pub fn render_review_briefing(artifact: &ReviewArtifactV1) -> String {
     lines.join("\n")
 }
 
+#[must_use]
 pub fn render_compare_briefing(artifact: &CompareArtifactV1) -> String {
     let mut lines = vec![
         "ringmaster ai compare".to_owned(),
@@ -694,6 +714,7 @@ pub fn render_compare_briefing(artifact: &CompareArtifactV1) -> String {
     lines.join("\n")
 }
 
+#[must_use]
 pub fn render_follow_up_briefing(artifact: &FollowUpArtifactV1) -> String {
     let mut lines = vec![
         "ringmaster ai follow-up".to_owned(),
@@ -736,6 +757,9 @@ pub fn render_follow_up_briefing(artifact: &FollowUpArtifactV1) -> String {
     lines.join("\n")
 }
 
+/// # Errors
+///
+/// Returns an error if the stored payload does not match a supported artifact kind or fails to deserialize.
 pub fn parse_stored_artifact(record: &AiArtifactRecord) -> Result<StoredArtifact> {
     match record.artifact_kind.as_str() {
         "review" => Ok(StoredArtifact::Review(serde_json::from_str(
@@ -846,9 +870,7 @@ fn sanitize_evidence_refs(
     refs.iter()
         .filter(|evidence| valid_export_refs.contains(&evidence.export_ref))
         .filter(|evidence| {
-            excluded_refs
-                .map(|excluded| !excluded.contains(evidence.export_ref.as_str()))
-                .unwrap_or(true)
+            excluded_refs.is_none_or(|excluded| !excluded.contains(evidence.export_ref.as_str()))
         })
         .filter(|evidence| seen_export_refs.insert(evidence.export_ref.clone()))
         .cloned()
@@ -1138,7 +1160,7 @@ impl OpenAiProvider {
             .json(body)
             .send()
             .await
-            .map_err(|error| ai_transport_error(error, self.config.timeout_secs))?;
+            .map_err(|error| ai_transport_error(&error, self.config.timeout_secs))?;
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
@@ -1153,7 +1175,7 @@ impl OpenAiProvider {
     }
 }
 
-fn ai_transport_error(error: reqwest::Error, timeout_secs: u64) -> RingmasterError {
+fn ai_transport_error(error: &reqwest::Error, timeout_secs: u64) -> RingmasterError {
     if error.is_timeout() {
         return RingmasterError::Ui(ai_timeout_message(timeout_secs));
     }
@@ -1550,7 +1572,9 @@ fn day_span_count(start_day: &str, end_day: &str) -> usize {
         )
     };
     match (parse(start_day), parse(end_day)) {
-        (Ok(start), Ok(end)) if end >= start => ((end - start).whole_days() + 1) as usize,
+        (Ok(start), Ok(end)) if end >= start => {
+            crate::numeric::i64_to_usize((end - start).whole_days() + 1)
+        }
         _ => 0,
     }
 }
@@ -1863,8 +1887,7 @@ fn compare_daily_score_change(
             finding_id: finding_id("daily_scores", "average"),
             title: "Average daily score change".to_owned(),
             summary: format!(
-                "The average combined daily score shifted from {:.1} to {:.1}.",
-                left, right
+                "The average combined daily score shifted from {left:.1} to {right:.1}."
             ),
             confidence: ConfidenceLevel::Medium,
             sufficiency: SufficiencyLevel::Medium,
@@ -1905,8 +1928,7 @@ fn compare_signal_count_change(
         finding_id: finding_id("review_signal_count", "count"),
         title: "Structured signal count changed".to_owned(),
         summary: format!(
-            "Review signal coverage changed from {} signal rows to {} signal rows.",
-            count_a, count_b
+            "Review signal coverage changed from {count_a} signal rows to {count_b} signal rows."
         ),
         confidence: ConfidenceLevel::Low,
         sufficiency: SufficiencyLevel::Thin,
@@ -2020,7 +2042,7 @@ fn retryable_status_code(status: StatusCode) -> bool {
     retryable_status_codes().contains(&status)
 }
 
-fn retryable_status_codes() -> &'static [StatusCode] {
+const fn retryable_status_codes() -> &'static [StatusCode] {
     &[
         StatusCode::REQUEST_TIMEOUT,
         StatusCode::TOO_MANY_REQUESTS,
@@ -2076,7 +2098,7 @@ fn short_fingerprint(value: &str, len: usize) -> String {
     value.chars().take(len).collect()
 }
 
-fn prompt_cache_label(mode: PromptCacheMode) -> &'static str {
+const fn prompt_cache_label(mode: PromptCacheMode) -> &'static str {
     match mode {
         PromptCacheMode::Off => "off",
         PromptCacheMode::Auto => "auto",
@@ -2084,30 +2106,27 @@ fn prompt_cache_label(mode: PromptCacheMode) -> &'static str {
 }
 
 fn review_summary_cache(artifact: &ReviewArtifactV1) -> String {
-    artifact
-        .headline_findings
-        .first()
-        .map(|finding| format!("{}: {}", finding.title, finding.summary))
-        .unwrap_or_else(|| artifact.overview.clone())
+    artifact.headline_findings.first().map_or_else(
+        || artifact.overview.clone(),
+        |finding| format!("{}: {}", finding.title, finding.summary),
+    )
 }
 
 fn compare_summary_cache(artifact: &CompareArtifactV1) -> String {
-    artifact
-        .material_differences
-        .first()
-        .map(|finding| format!("{}: {}", finding.title, finding.summary))
-        .unwrap_or_else(|| artifact.overview.clone())
+    artifact.material_differences.first().map_or_else(
+        || artifact.overview.clone(),
+        |finding| format!("{}: {}", finding.title, finding.summary),
+    )
 }
 
 fn follow_up_summary_cache(artifact: &FollowUpArtifactV1) -> String {
-    artifact
-        .focal_findings
-        .first()
-        .map(|finding| format!("{}: {}", finding.title, finding.summary))
-        .unwrap_or_else(|| artifact.overview.clone())
+    artifact.focal_findings.first().map_or_else(
+        || artifact.overview.clone(),
+        |finding| format!("{}: {}", finding.title, finding.summary),
+    )
 }
 
-fn merged_privacy_profile(left: PrivacyProfile, right: PrivacyProfile) -> PrivacyProfile {
+const fn merged_privacy_profile(left: PrivacyProfile, right: PrivacyProfile) -> PrivacyProfile {
     use PrivacyProfile::{Balanced, Full, Redacted};
     match (left, right) {
         (Full, _) | (_, Full) => Full,
@@ -2174,14 +2193,14 @@ fn average_scores(rows: &[crate::snapshot::SnapshotDailyScore]) -> Option<f64> {
             if parts.is_empty() {
                 None
             } else {
-                Some(parts.iter().sum::<f64>() / parts.len() as f64)
+                Some(parts.iter().sum::<f64>() / crate::numeric::usize_to_f64(parts.len()))
             }
         })
         .collect::<Vec<_>>();
     if values.is_empty() {
         None
     } else {
-        Some(values.iter().sum::<f64>() / values.len() as f64)
+        Some(values.iter().sum::<f64>() / crate::numeric::usize_to_f64(values.len()))
     }
 }
 
@@ -2208,7 +2227,8 @@ fn finding_id(metric_key: &str, label: &str) -> String {
 }
 
 impl AiRunMode {
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Real => "real",
             Self::DryRun => "dry_run",
@@ -2218,7 +2238,8 @@ impl AiRunMode {
 }
 
 impl ArtifactStatus {
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Success => "success",
             Self::Insufficient => "insufficient",
@@ -2229,7 +2250,8 @@ impl ArtifactStatus {
 }
 
 impl AiRunStatus {
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
@@ -2242,7 +2264,8 @@ impl AiRunStatus {
 }
 
 impl GuidedFollowUpKind {
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::ExpandEvidence => "expand_evidence",
             Self::ShowCounterevidence => "show_counterevidence",
@@ -2251,7 +2274,8 @@ impl GuidedFollowUpKind {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
             Self::ExpandEvidence => "Expand evidence",
             Self::ShowCounterevidence => "Show strongest counterevidence",
@@ -2262,7 +2286,8 @@ impl GuidedFollowUpKind {
 }
 
 impl ConfidenceLevel {
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Low => "low",
             Self::Medium => "medium",
@@ -2272,7 +2297,8 @@ impl ConfidenceLevel {
 }
 
 impl SufficiencyLevel {
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Missing => "missing",
             Self::Thin => "thin",
@@ -2283,7 +2309,6 @@ impl SufficiencyLevel {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
@@ -2423,7 +2448,7 @@ mod tests {
             }],
         };
         let canonical_without_hash = serde_json::to_string(&bundle)
-            .unwrap_or_else(|error| panic!("bundle should encode: {error}"));
+            .unwrap_or_else(|error| unreachable!("bundle should encode: {error}"));
         bundle.metadata.snapshot_hash =
             hex::encode(sha2::Sha256::digest(canonical_without_hash.as_bytes()));
         bundle
@@ -2432,7 +2457,7 @@ mod tests {
     fn loaded_snapshot(scope: &str) -> crate::snapshot::LoadedSnapshotArtifact {
         let bundle = snapshot_bundle(scope);
         let compact_json = serde_json::to_string(&bundle)
-            .unwrap_or_else(|error| panic!("bundle should encode: {error}"));
+            .unwrap_or_else(|error| unreachable!("bundle should encode: {error}"));
         crate::snapshot::LoadedSnapshotArtifact {
             bundle,
             compact_json,
@@ -2448,7 +2473,7 @@ mod tests {
                 PathBuf::from("/tmp/state"),
                 PathBuf::from("/tmp/cache"),
             )
-            .unwrap_or_else(|error| panic!("paths should resolve: {error}")),
+            .unwrap_or_else(|error| unreachable!("paths should resolve: {error}")),
             logging: LoggingConfig {
                 filter: "ringmaster=info".to_owned(),
             },
@@ -2462,7 +2487,7 @@ mod tests {
                 secret_file: PathBuf::from("/tmp/state/ringmaster/secrets/oura-tokens.json"),
                 callback_bind: "127.0.0.1:8788"
                     .parse()
-                    .unwrap_or_else(|error| panic!("socket address should parse: {error}")),
+                    .unwrap_or_else(|error| unreachable!("socket address should parse: {error}")),
                 callback_path: "/callback".to_owned(),
                 requested_scopes: vec!["daily".to_owned()],
                 auth_timeout_secs: 120,
@@ -2496,7 +2521,7 @@ mod tests {
             webhook: WebhookConfig {
                 bind: "127.0.0.1:8799"
                     .parse()
-                    .unwrap_or_else(|error| panic!("socket address should parse: {error}")),
+                    .unwrap_or_else(|error| unreachable!("socket address should parse: {error}")),
                 path: "/webhooks/oura".to_owned(),
                 public_base_url: None,
                 verification_token: None,
@@ -2582,8 +2607,8 @@ mod tests {
 
     #[tokio::test]
     async fn fixture_backed_review_uses_fixture_payload() {
-        let temp_dir =
-            tempfile::tempdir().unwrap_or_else(|error| panic!("temp dir should exist: {error}"));
+        let temp_dir = tempfile::tempdir()
+            .unwrap_or_else(|error| unreachable!("temp dir should exist: {error}"));
         let fixture_path = temp_dir.path().join("review.json");
         let loaded = loaded_snapshot("today");
         let expected_follow_ups = rebuild_follow_up_targets(&loaded.bundle);
@@ -2601,18 +2626,18 @@ mod tests {
                 limitations: Vec::new(),
                 follow_up_targets: Vec::new(),
             })
-            .unwrap_or_else(|error| panic!("fixture should encode: {error}")),
+            .unwrap_or_else(|error| unreachable!("fixture should encode: {error}")),
         )
-        .unwrap_or_else(|error| panic!("fixture should write: {error}"));
+        .unwrap_or_else(|error| unreachable!("fixture should write: {error}"));
 
         let output = review_snapshot(
-            &Config::load().unwrap_or_else(|error| panic!("config should load: {error}")),
+            &Config::load().unwrap_or_else(|error| unreachable!("config should load: {error}")),
             &loaded,
             false,
             Some(&fixture_path),
         )
         .await
-        .unwrap_or_else(|error| panic!("fixture review should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("fixture review should succeed: {error}"));
         assert_eq!(output.artifact.status, ArtifactStatus::Fixture);
         assert!(output.payload_json.contains("fixture review"));
         assert_eq!(
@@ -2697,7 +2722,7 @@ mod tests {
         };
 
         let sanitized = sanitize_review_artifact(&snapshot, artifact)
-            .unwrap_or_else(|error| panic!("review artifact should sanitize: {error}"));
+            .unwrap_or_else(|error| unreachable!("review artifact should sanitize: {error}"));
 
         assert_eq!(sanitized.headline_findings.len(), 1);
         assert!(sanitized.positive_findings.is_empty());
@@ -2726,7 +2751,7 @@ mod tests {
         let mut snapshot = loaded_snapshot("today");
         snapshot.bundle.metadata.privacy_profile = PrivacyProfile::Balanced;
         snapshot.compact_json = serde_json::to_string(&snapshot.bundle)
-            .unwrap_or_else(|error| panic!("bundle should encode: {error}"));
+            .unwrap_or_else(|error| unreachable!("bundle should encode: {error}"));
 
         let source_record = AiArtifactRecord {
             artifact_id: "artifact-source".to_owned(),
@@ -2748,7 +2773,7 @@ mod tests {
             summary_cache: "summary".to_owned(),
             request_fingerprint: Some("fingerprint".to_owned()),
             payload_json: serde_json::to_string(&dry_run_review_artifact(&snapshot.bundle))
-                .unwrap_or_else(|error| panic!("artifact should encode: {error}")),
+                .unwrap_or_else(|error| unreachable!("artifact should encode: {error}")),
             rendered_briefing: "briefing".to_owned(),
         };
 
@@ -2762,7 +2787,7 @@ mod tests {
             Some("2026-04-10T00:00:01Z"),
         )
         .await
-        .unwrap_or_else(|error| panic!("follow-up should render: {error}"));
+        .unwrap_or_else(|error| unreachable!("follow-up should render: {error}"));
 
         assert_eq!(output.record.privacy_profile, "balanced");
     }
@@ -2772,11 +2797,11 @@ mod tests {
         let mut snapshot_a = loaded_snapshot("week");
         snapshot_a.bundle.metadata.privacy_profile = PrivacyProfile::Balanced;
         snapshot_a.compact_json = serde_json::to_string(&snapshot_a.bundle)
-            .unwrap_or_else(|error| panic!("bundle should encode: {error}"));
+            .unwrap_or_else(|error| unreachable!("bundle should encode: {error}"));
         let mut snapshot_b = loaded_snapshot("range:2026-04-08..2026-04-10");
         snapshot_b.bundle.metadata.privacy_profile = PrivacyProfile::Full;
         snapshot_b.compact_json = serde_json::to_string(&snapshot_b.bundle)
-            .unwrap_or_else(|error| panic!("bundle should encode: {error}"));
+            .unwrap_or_else(|error| unreachable!("bundle should encode: {error}"));
 
         let source_record = AiArtifactRecord {
             artifact_id: "artifact-source".to_owned(),
@@ -2801,7 +2826,7 @@ mod tests {
                 &snapshot_a.bundle,
                 &snapshot_b.bundle,
             ))
-            .unwrap_or_else(|error| panic!("artifact should encode: {error}")),
+            .unwrap_or_else(|error| unreachable!("artifact should encode: {error}")),
             rendered_briefing: "briefing".to_owned(),
         };
 
@@ -2815,7 +2840,7 @@ mod tests {
             Some("2026-04-10T00:00:01Z"),
         )
         .await
-        .unwrap_or_else(|error| panic!("follow-up should render: {error}"));
+        .unwrap_or_else(|error| unreachable!("follow-up should render: {error}"));
 
         assert_eq!(
             output.record.snapshot_hash_a,
@@ -2831,14 +2856,14 @@ mod tests {
     #[test]
     fn review_schema_generation_includes_expected_title() {
         let schema = schema_value::<ReviewArtifactV1>()
-            .unwrap_or_else(|error| panic!("schema generation should succeed: {error}"));
+            .unwrap_or_else(|error| unreachable!("schema generation should succeed: {error}"));
         assert!(schema.to_string().contains("headline_findings"));
     }
 
     #[test]
     fn compare_schema_generation_includes_expected_title() {
         let schema = schema_value::<CompareArtifactV1>()
-            .unwrap_or_else(|error| panic!("schema generation should succeed: {error}"));
+            .unwrap_or_else(|error| unreachable!("schema generation should succeed: {error}"));
         assert!(schema.to_string().contains("material_differences"));
     }
 
@@ -2847,12 +2872,12 @@ mod tests {
         let loaded = loaded_snapshot("today");
         let plan = build_review_request_plan(
             &Config::load()
-                .unwrap_or_else(|error| panic!("config should load: {error}"))
+                .unwrap_or_else(|error| unreachable!("config should load: {error}"))
                 .ai,
             &loaded.bundle,
             &loaded.compact_json,
         )
-        .unwrap_or_else(|error| panic!("request preview plan should build: {error}"));
+        .unwrap_or_else(|error| unreachable!("request preview plan should build: {error}"));
 
         assert_eq!(plan.preview.task_family, "review");
         assert_eq!(plan.preview.snapshots.len(), 1);
@@ -2871,13 +2896,13 @@ mod tests {
     async fn dry_run_review_preview_uses_selected_provider_metadata() {
         let loaded = loaded_snapshot("today");
         let output = review_snapshot(
-            &Config::load().unwrap_or_else(|error| panic!("config should load: {error}")),
+            &Config::load().unwrap_or_else(|error| unreachable!("config should load: {error}")),
             &loaded,
             true,
             None,
         )
         .await
-        .unwrap_or_else(|error| panic!("dry-run review should succeed: {error}"));
+        .unwrap_or_else(|error| unreachable!("dry-run review should succeed: {error}"));
 
         assert_eq!(output.request_preview.provider, "dry_run");
         assert_eq!(output.request_preview.model, "deterministic");
@@ -2888,7 +2913,7 @@ mod tests {
     fn snapshot_bundle_still_validates_after_round_trip() {
         let loaded = loaded_snapshot("today");
         let reparsed = deserialize_snapshot_bundle(&loaded.compact_json)
-            .unwrap_or_else(|error| panic!("snapshot should parse: {error}"));
+            .unwrap_or_else(|error| unreachable!("snapshot should parse: {error}"));
         assert_eq!(
             reparsed.metadata.snapshot_hash,
             loaded.bundle.metadata.snapshot_hash

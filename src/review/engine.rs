@@ -96,6 +96,9 @@ struct AggregateMeasurement<'a> {
     week_day_count: usize,
 }
 
+/// # Errors
+///
+/// Returns an error if review measurements cannot be derived from the provided inputs.
 pub fn build_review_deck(
     mode: ReviewMode,
     anchor_day: &str,
@@ -147,6 +150,7 @@ pub fn build_review_deck(
     })
 }
 
+#[must_use]
 pub fn focus_cards(focus: ReviewFocus, cards: &[ReviewCard]) -> Vec<&ReviewCard> {
     let focus_keys = focus.primary_signal_keys();
     cards
@@ -155,6 +159,7 @@ pub fn focus_cards(focus: ReviewFocus, cards: &[ReviewCard]) -> Vec<&ReviewCard>
         .collect()
 }
 
+#[must_use]
 pub fn ranked_cards(deck: &ReviewDeck) -> Vec<&ReviewCard> {
     let mut seen = BTreeSet::new();
     let mut cards = Vec::new();
@@ -270,62 +275,87 @@ fn build_week_measurements<'a>(
             continue;
         }
 
-        let numeric_value = aggregate_values(definition.weekly_aggregation, &current_numeric);
-        let baseline_aggregates = aggregate_baseline_weeks(
-            definition.weekly_aggregation,
-            &baseline_values,
-            baseline_start,
-            definition.baseline_window_days,
-        )?;
-        let baseline_mean = mean_value(&baseline_aggregates);
-        let baseline_stddev = standard_deviation(&baseline_aggregates);
-        let delta = match (numeric_value, baseline_mean) {
-            (Some(current_value), Some(mean_value)) => Some(current_value - mean_value),
-            _ => None,
-        };
-        let z_score = match (delta, baseline_stddev) {
-            (Some(delta_value), Some(stddev)) if stddev >= 0.01 => Some(delta_value / stddev),
-            _ => None,
-        };
-        let persistence_days = current_values
-            .iter()
-            .filter(|(_, row)| {
-                row.z_score
-                    .is_some_and(|value| value.abs() >= DEVIATION_THRESHOLD)
-                    && delta.is_some_and(|weekly_delta| {
-                        row.delta
-                            .is_some_and(|day_delta| same_direction(day_delta, weekly_delta))
-                    })
-            })
-            .count();
-        let stale_days = current_values
-            .iter()
-            .map(|(_, row)| row.stale_days)
-            .min()
-            .unwrap_or_default();
-        let sufficiency = ReviewSufficiency::from_comparable_weeks(baseline_aggregates.len());
-
-        measurements.push(AggregateMeasurement {
+        measurements.push(build_week_measurement(
+            anchor_day,
             definition,
-            anchor_day: anchor_day.to_owned(),
-            numeric_value,
-            baseline_mean,
-            baseline_stddev,
-            delta,
-            z_score,
-            persistence_days: u32::try_from(persistence_days).map_err(|error| {
-                RingmasterError::Config(format!(
-                    "weekly persistence overflowed u32 for {}: {error}",
-                    definition.key
-                ))
-            })?,
-            sufficiency,
-            stale_days,
-            week_day_count: current_numeric.len(),
-        });
+            &current_values,
+            &baseline_values,
+            &current_numeric,
+            baseline_start,
+        )?);
     }
 
     Ok(measurements)
+}
+
+fn build_week_measurement<'a>(
+    anchor_day: &str,
+    definition: &'a SignalDefinition,
+    current_values: &[(Date, &ReviewSignalDayRecord)],
+    baseline_values: &[(Date, &ReviewSignalDayRecord)],
+    current_numeric: &[f64],
+    baseline_start: Date,
+) -> Result<AggregateMeasurement<'a>> {
+    let numeric_value = aggregate_values(definition.weekly_aggregation, current_numeric);
+    let baseline_aggregates = aggregate_baseline_weeks(
+        definition.weekly_aggregation,
+        baseline_values,
+        baseline_start,
+        definition.baseline_window_days,
+    )?;
+    let baseline_mean = mean_value(&baseline_aggregates);
+    let baseline_stddev = standard_deviation(&baseline_aggregates);
+    let delta = match (numeric_value, baseline_mean) {
+        (Some(current_value), Some(mean_value)) => Some(current_value - mean_value),
+        _ => None,
+    };
+    let z_score = match (delta, baseline_stddev) {
+        (Some(delta_value), Some(stddev)) if stddev >= 0.01 => Some(delta_value / stddev),
+        _ => None,
+    };
+    let persistence_days = weekly_persistence_days(current_values, delta);
+    let stale_days = current_values
+        .iter()
+        .map(|(_, row)| row.stale_days)
+        .min()
+        .unwrap_or_default();
+    let sufficiency = ReviewSufficiency::from_comparable_weeks(baseline_aggregates.len());
+
+    Ok(AggregateMeasurement {
+        definition,
+        anchor_day: anchor_day.to_owned(),
+        numeric_value,
+        baseline_mean,
+        baseline_stddev,
+        delta,
+        z_score,
+        persistence_days: u32::try_from(persistence_days).map_err(|error| {
+            RingmasterError::Config(format!(
+                "weekly persistence overflowed u32 for {}: {error}",
+                definition.key
+            ))
+        })?,
+        sufficiency,
+        stale_days,
+        week_day_count: current_numeric.len(),
+    })
+}
+
+fn weekly_persistence_days(
+    current_values: &[(Date, &ReviewSignalDayRecord)],
+    weekly_delta: Option<f64>,
+) -> usize {
+    current_values
+        .iter()
+        .filter(|(_, row)| {
+            row.z_score
+                .is_some_and(|value| value.abs() >= DEVIATION_THRESHOLD)
+                && weekly_delta.is_some_and(|delta| {
+                    row.delta
+                        .is_some_and(|day_delta| same_direction(day_delta, delta))
+                })
+        })
+        .count()
 }
 
 fn build_card(
@@ -441,8 +471,7 @@ fn evidence_lines(
     }
     if let Some(z_score) = measurement.z_score {
         lines.push(format!(
-            "Deviation strength is {:.1} standard deviations from baseline.",
-            z_score
+            "Deviation strength is {z_score:.1} standard deviations from baseline."
         ));
     }
     if measurement.persistence_days > 1 {
@@ -566,8 +595,7 @@ fn context_support_lines(
         let rest_mode_days = overlapping_rest_mode_days(mode, anchor_day, inputs.rest_mode_periods);
         if rest_mode_days > 0 {
             lines.push(format!(
-                "Rest mode overlapped {} day(s) in the current review window.",
-                rest_mode_days
+                "Rest mode overlapped {rest_mode_days} day(s) in the current review window."
             ));
         }
     }
@@ -672,7 +700,9 @@ fn aggregate_values(aggregation: WeeklyAggregation, values: &[f64]) -> Option<f6
     }
 
     match aggregation {
-        WeeklyAggregation::Mean => Some(values.iter().sum::<f64>() / values.len() as f64),
+        WeeklyAggregation::Mean => {
+            Some(values.iter().sum::<f64>() / crate::numeric::usize_to_f64(values.len()))
+        }
         WeeklyAggregation::Sum | WeeklyAggregation::Count => Some(values.iter().sum()),
         WeeklyAggregation::Latest => values.last().copied(),
     }
@@ -728,7 +758,7 @@ fn mean_value(values: &[f64]) -> Option<f64> {
     if values.is_empty() {
         None
     } else {
-        Some(values.iter().sum::<f64>() / values.len() as f64)
+        Some(values.iter().sum::<f64>() / crate::numeric::usize_to_f64(values.len()))
     }
 }
 
@@ -736,12 +766,12 @@ fn standard_deviation(values: &[f64]) -> Option<f64> {
     if values.is_empty() {
         return None;
     }
-    let mean_value = values.iter().sum::<f64>() / values.len() as f64;
+    let mean_value = values.iter().sum::<f64>() / crate::numeric::usize_to_f64(values.len());
     let variance = values
         .iter()
         .map(|value| (*value - mean_value).powi(2))
         .sum::<f64>()
-        / values.len() as f64;
+        / crate::numeric::usize_to_f64(values.len());
     Some(variance.sqrt())
 }
 
@@ -761,7 +791,7 @@ fn deviation_bucket(z_score: Option<f64>, delta: Option<f64>) -> i32 {
     }
 }
 
-fn persistence_bucket(persistence_days: u32) -> i32 {
+const fn persistence_bucket(persistence_days: u32) -> i32 {
     match persistence_days {
         0 | 1 => 0,
         2 => 1,
@@ -770,7 +800,7 @@ fn persistence_bucket(persistence_days: u32) -> i32 {
     }
 }
 
-fn recency_points(mode: ReviewMode, stale_days: u32) -> i32 {
+const fn recency_points(mode: ReviewMode, stale_days: u32) -> i32 {
     match mode {
         ReviewMode::Today => 2,
         ReviewMode::Week if stale_days <= 3 => 1,
@@ -786,7 +816,7 @@ fn freshness_penalty(stale_days: u32) -> i32 {
     }
 }
 
-fn sufficiency_penalty(sufficiency: ReviewSufficiency) -> i32 {
+const fn sufficiency_penalty(sufficiency: ReviewSufficiency) -> i32 {
     match sufficiency {
         ReviewSufficiency::Missing => 2,
         ReviewSufficiency::Thin => 1,
@@ -807,9 +837,9 @@ fn sibling_keys(signal_key: &str) -> &'static [&'static str] {
 
 fn pattern_metric_for_signal(signal_key: &str) -> Option<PatternMetric> {
     match signal_key {
-        "sleep_score" => Some(PatternMetric::SleepScore),
-        "readiness_score" => Some(PatternMetric::ReadinessScore),
-        "activity_score" | "active_calories" | "steps" => Some(PatternMetric::ActivityScore),
+        "sleep_score" => Some(PatternMetric::Sleep),
+        "readiness_score" => Some(PatternMetric::Readiness),
+        "activity_score" | "active_calories" | "steps" => Some(PatternMetric::Activity),
         _ => None,
     }
 }
@@ -887,7 +917,7 @@ fn review_window_bounds(mode: ReviewMode, anchor_day: &str) -> Option<(Date, Dat
     Some((window_start, anchor_date))
 }
 
-fn event_family_label(family: ContextEventFamily) -> &'static str {
+const fn event_family_label(family: ContextEventFamily) -> &'static str {
     match family {
         ContextEventFamily::Workout => "Workout",
         ContextEventFamily::Tag => "Tag",
@@ -918,7 +948,8 @@ fn parse_day(day: &str) -> Result<Date> {
 }
 
 impl ReviewConfidence {
-    pub fn label(self) -> &'static str {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Low => "Low",
             Self::Medium => "Medium",
@@ -926,7 +957,7 @@ impl ReviewConfidence {
         }
     }
 
-    fn rank(self) -> i32 {
+    const fn rank(self) -> i32 {
         match self {
             Self::Low => 1,
             Self::Medium => 2,
@@ -1033,7 +1064,7 @@ mod tests {
                     family: ContextEventFamily::Workout,
                     normalized_key: "sport:running".to_owned(),
                     relation_window: PatternRelationWindow::NextDayReadiness,
-                    metric: PatternMetric::ReadinessScore,
+                    metric: PatternMetric::Readiness,
                     sample_count: 6,
                     median_delta: -4.0,
                     effect_direction: crate::store::queries::EffectDirection::Lower,

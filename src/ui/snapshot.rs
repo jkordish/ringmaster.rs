@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use crate::app::{AppState, Screen};
 use crate::error::{Result, RingmasterError};
 use crate::tui::render_snapshot;
-use crate::ui::layout::ViewportClass;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SnapshotScenario {
@@ -26,7 +25,8 @@ impl SnapshotScenario {
 
     pub const FIXTURE_BACKED: [Self; 3] = [Self::Strong, Self::Weak, Self::Empty];
 
-    pub fn label(self) -> &'static str {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Strong => "strong",
             Self::Weak => "weak",
@@ -47,7 +47,8 @@ pub enum SnapshotSize {
 impl SnapshotSize {
     pub const ALL: [Self; 3] = [Self::Compact, Self::Medium, Self::Wide];
 
-    pub fn label(self) -> &'static str {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Compact => "compact",
             Self::Medium => "medium",
@@ -62,10 +63,6 @@ impl SnapshotSize {
             Self::Wide => (160, 44),
         }
     }
-
-    pub fn viewport(self) -> ViewportClass {
-        ViewportClass::from_width(self.dimensions().0)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +73,7 @@ pub struct SnapshotRequest {
 }
 
 impl SnapshotRequest {
+    #[must_use]
     pub fn artifact_name(self) -> String {
         let screen = self.screen.title().to_ascii_lowercase();
         self.scenario.map_or_else(
@@ -85,6 +83,7 @@ impl SnapshotRequest {
     }
 }
 
+#[must_use]
 pub fn build_requests(
     screens: &[Screen],
     sizes: &[SnapshotSize],
@@ -113,12 +112,19 @@ pub fn build_requests(
     requests
 }
 
+#[must_use]
 pub fn is_scenario_fixture_root(path: &Path) -> bool {
     SnapshotScenario::FIXTURE_BACKED
         .into_iter()
         .all(|scenario| path.join(scenario.label()).is_dir())
 }
 
+/// Renders and writes snapshot artifacts for the requested screens and sizes.
+///
+/// # Errors
+///
+/// Returns an error when the output directory cannot be created, when the snapshot
+/// app builder fails, when rendering fails, or when an artifact cannot be written.
 pub fn write_snapshots<F>(
     out_dir: &Path,
     requests: &[SnapshotRequest],
@@ -147,7 +153,6 @@ where
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use std::path::PathBuf;
 
@@ -160,18 +165,22 @@ mod tests {
     use crate::{
         app::{Screen, build_demo_state},
         config::{AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig},
+        test_support::ok,
     };
 
     fn test_config() -> Config {
-        Config {
-            app_name: "ringmaster",
-            paths: AppPaths::from_roots(
+        let paths = ok(
+            AppPaths::from_roots(
                 PathBuf::from("/home/tester"),
                 PathBuf::from("/tmp/config"),
                 PathBuf::from("/tmp/state"),
                 PathBuf::from("/tmp/cache"),
-            )
-            .unwrap_or_else(|error| panic!("paths should resolve: {error}")),
+            ),
+            "paths should resolve",
+        );
+        Config {
+            app_name: "ringmaster",
+            paths,
             logging: LoggingConfig {
                 filter: "ringmaster=info".to_owned(),
             },
@@ -303,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_names_stay_legacy_when_no_scenario_is_requested() {
+    fn artifact_names_stay_single_source_when_no_scenario_is_requested() {
         let request = SnapshotRequest {
             screen: Screen::Timeline,
             size: SnapshotSize::Wide,

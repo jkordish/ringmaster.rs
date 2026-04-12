@@ -57,6 +57,9 @@ enum ReportSource {
     },
 }
 
+/// # Errors
+///
+/// Returns an error if the report source cannot be resolved, rendered, or written to disk.
 pub async fn export_report(config: &Config, args: ReportExportArgs) -> Result<Option<String>> {
     let Some(source_spec) = selected_source(&args)? else {
         return Err(RingmasterError::Cli(
@@ -879,7 +882,7 @@ fn content_hash(contents: &[u8]) -> String {
     hex::encode(Sha256::digest(contents))
 }
 
-fn report_format_label(format: ReportFormatArg) -> &'static str {
+const fn report_format_label(format: ReportFormatArg) -> &'static str {
     match format {
         ReportFormatArg::Markdown => "markdown",
         ReportFormatArg::Html => "html",
@@ -959,17 +962,17 @@ mod tests {
                 export_ref: format!("signal:{scope}:{index}"),
                 day: "2026-04-10".to_owned(),
                 signal_key: format!("signal_{index}"),
-                numeric_value: Some(index as f64),
+                numeric_value: Some(crate::numeric::usize_to_f64(index)),
                 text_value: None,
-                delta: Some(index as f64),
-                z_score: Some(index as f64),
+                delta: Some(crate::numeric::usize_to_f64(index)),
+                z_score: Some(crate::numeric::usize_to_f64(index)),
                 persistence_days: 1,
                 sufficiency: if index < strong_signal_count {
                     "strong".to_owned()
                 } else {
                     "medium".to_owned()
                 },
-                stale_days: usize::from(index + 1 == review_signal_count) as u32,
+                stale_days: u32::from(index + 1 == review_signal_count),
             })
             .collect::<Vec<_>>();
         let follow_up_targets = (0..follow_up_target_count)

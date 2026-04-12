@@ -329,6 +329,7 @@ pub struct TimeSeriesCollection<T> {
 }
 
 impl CapabilityReport {
+    #[must_use]
     pub fn from_scopes(requested_scopes: &[String], granted_scopes: &[String]) -> Self {
         let requested_scopes = normalize_scopes(requested_scopes);
         let granted_scopes = normalize_scopes(granted_scopes);
@@ -359,6 +360,7 @@ impl CapabilityReport {
         Self { entries }
     }
 
+    #[must_use]
     pub fn demo() -> Self {
         Self {
             entries: CapabilityKind::all()
@@ -373,6 +375,7 @@ impl CapabilityReport {
         }
     }
 
+    #[must_use]
     pub fn available_labels(&self) -> Vec<&'static str> {
         self.entries
             .iter()
@@ -381,10 +384,12 @@ impl CapabilityReport {
             .collect()
     }
 
+    #[must_use]
     pub fn missing_scope_names(&self) -> Vec<&'static str> {
         self.scope_names_for(|entry| entry.requested && !entry.granted)
     }
 
+    #[must_use]
     pub fn granted_scope_names(&self) -> Vec<&'static str> {
         self.scope_names_for(|entry| entry.granted)
     }
@@ -399,6 +404,7 @@ impl CapabilityReport {
             .collect()
     }
 
+    #[must_use]
     pub fn is_granted(&self, kind: CapabilityKind) -> bool {
         self.entries
             .iter()
@@ -406,13 +412,15 @@ impl CapabilityReport {
             .is_some_and(|entry| entry.granted)
     }
 
+    #[must_use]
     pub fn status_for(&self, kind: CapabilityKind) -> Option<&CapabilityEntry> {
         self.entries.iter().find(|entry| entry.kind == kind)
     }
 }
 
 impl CapabilityKind {
-    pub fn all() -> [Self; 12] {
+    #[must_use]
+    pub const fn all() -> [Self; 12] {
         [
             Self::Email,
             Self::Personal,
@@ -429,7 +437,8 @@ impl CapabilityKind {
         ]
     }
 
-    pub fn label(self) -> &'static str {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Email => "Email",
             Self::Personal => "Personal",
@@ -446,7 +455,8 @@ impl CapabilityKind {
         }
     }
 
-    pub fn scope_name(self) -> &'static str {
+    #[must_use]
+    pub const fn scope_name(self) -> &'static str {
         match self {
             Self::Email => "email",
             Self::Personal => "personal",
@@ -462,17 +472,20 @@ impl CapabilityKind {
         }
     }
 
+    #[must_use]
     pub fn matches_scope(self, scope: &str) -> bool {
         normalize_scope_name(scope)
             .as_deref()
             .is_some_and(|scope| scope == self.scope_name())
     }
 
-    pub fn is_local_sync_ready(self) -> bool {
+    #[must_use]
+    pub const fn is_local_sync_ready(self) -> bool {
         !matches!(self, Self::Email | Self::Spo2 | Self::RingConfiguration)
     }
 }
 
+#[must_use]
 pub fn normalize_scopes(scopes: &[String]) -> Vec<String> {
     let mut normalized = Vec::new();
     for scope in scopes {
@@ -486,6 +499,7 @@ pub fn normalize_scopes(scopes: &[String]) -> Vec<String> {
     normalized
 }
 
+#[must_use]
 pub fn normalize_scope_name(scope: &str) -> Option<String> {
     let trimmed = scope.trim();
     if trimmed.is_empty() {
@@ -503,6 +517,7 @@ pub fn normalize_scope_name(scope: &str) -> Option<String> {
 }
 
 impl WorkoutDocument {
+    #[must_use]
     pub fn anchor_day(&self) -> String {
         self.day.clone().unwrap_or_else(|| {
             self.start_datetime
@@ -512,6 +527,7 @@ impl WorkoutDocument {
         })
     }
 
+    #[must_use]
     pub fn title(&self) -> String {
         self.label
             .clone()
@@ -520,16 +536,19 @@ impl WorkoutDocument {
             .unwrap_or_else(|| "Workout".to_owned())
     }
 
+    #[must_use]
     pub fn subtype(&self) -> Option<String> {
         self.sport.clone().or_else(|| self.activity.clone())
     }
 }
 
 impl EnhancedTagDocument {
-    pub fn anchor_day(&self) -> &str {
+    #[must_use]
+    pub const fn anchor_day(&self) -> &str {
         self.start_day.as_str()
     }
 
+    #[must_use]
     pub fn title(&self) -> String {
         if self.tags.is_empty() {
             self.tag_type_code
@@ -540,18 +559,21 @@ impl EnhancedTagDocument {
         }
     }
 
+    #[must_use]
     pub fn subtype(&self) -> Option<String> {
         self.tag_type_code.clone()
     }
 }
 
 impl SessionDocument {
+    #[must_use]
     pub fn start_at(&self) -> String {
         self.start_datetime
             .clone()
             .unwrap_or_else(|| format!("{}T00:00:00Z", self.day))
     }
 
+    #[must_use]
     pub fn title(&self) -> String {
         self.label
             .clone()
@@ -561,7 +583,8 @@ impl SessionDocument {
 }
 
 impl SleepTimeRecommendation {
-    pub fn as_str(&self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::ImproveEfficiency => "improve_efficiency",
             Self::EarlierBedtime => "earlier_bedtime",
@@ -574,7 +597,8 @@ impl SleepTimeRecommendation {
 }
 
 impl SleepTimeStatus {
-    pub fn as_str(&self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::NotEnoughNights => "not_enough_nights",
             Self::NotEnoughRecentNights => "not_enough_recent_nights",
@@ -586,7 +610,8 @@ impl SleepTimeStatus {
 }
 
 impl LongTermResilienceLevel {
-    pub fn as_str(&self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Limited => "limited",
             Self::Adequate => "adequate",
@@ -598,12 +623,16 @@ impl LongTermResilienceLevel {
 }
 
 impl RestModePeriodDocument {
+    #[must_use]
     pub fn overlaps_day_window(&self, start_day: &str, end_day: &str) -> bool {
         let current_day = current_local_day_string();
         let effective_end_day = self.end_day.as_deref().unwrap_or(current_day.as_str());
         self.start_day.as_str() <= end_day && effective_end_day >= start_day
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the embedded episode tags cannot be serialized to JSON.
     pub fn tags_json(&self) -> Result<String, serde_json::Error> {
         let tags = self
             .episodes
@@ -623,7 +652,6 @@ fn current_local_day_string() -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use super::{
         CapabilityKind, CapabilityReport, EnhancedTagDocument, RestModeEpisodeDocument,

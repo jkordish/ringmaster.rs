@@ -69,6 +69,9 @@ struct TempRootGuard {
     path: PathBuf,
 }
 
+/// # Errors
+///
+/// Returns an error if the store cannot be opened or seeded, if fixture sync fails, or if derivation fails.
 pub async fn rebuild(config: &Config, options: DeriveOptions) -> Result<DeriveReport> {
     if options.demo || options.fixture_dir.is_some() {
         let fixture_dir = options
@@ -114,14 +117,23 @@ pub async fn rebuild(config: &Config, options: DeriveOptions) -> Result<DeriveRe
     rebuild_store(&store)
 }
 
+/// # Errors
+///
+/// Returns an error if any derived review artifacts cannot be rebuilt into the store.
 pub fn rebuild_store(store: &Store) -> Result<DeriveReport> {
     rebuild_store_with_bounds(store, DeriveBounds::full_history())
 }
 
+/// # Errors
+///
+/// Returns an error if the bounded refresh window cannot be resolved or rebuilt.
 pub fn rebuild_recent_store(store: &Store, config: &Config) -> Result<DeriveReport> {
     rebuild_store_for_anchor_day(store, config, None)
 }
 
+/// # Errors
+///
+/// Returns an error if the anchor day is invalid or if the bounded rebuild fails.
 pub fn rebuild_store_for_anchor_day(
     store: &Store,
     config: &Config,
@@ -148,6 +160,9 @@ pub fn rebuild_store_for_anchor_day(
     )
 }
 
+/// # Errors
+///
+/// Returns an error if the anchor day is invalid or the review artifacts cannot be derived.
 pub fn derive_review_artifacts_for_anchor_day(
     store: &Store,
     config: &Config,
@@ -174,12 +189,15 @@ pub fn derive_review_artifacts_for_anchor_day(
         .map(|resolved_anchor_day| {
             derive_review_artifacts_with_bounds(
                 store,
-                DeriveBounds::bounded_refresh(&config.refresh, Some(resolved_anchor_day)),
+                &DeriveBounds::bounded_refresh(&config.refresh, Some(resolved_anchor_day)),
             )
         })
         .transpose()
 }
 
+/// # Errors
+///
+/// Returns an error if either bound is invalid or the derived review artifacts cannot be built.
 pub fn derive_review_artifacts_between_days(
     store: &Store,
     start_day: &str,
@@ -211,7 +229,7 @@ pub fn derive_review_artifacts_between_days(
 
     derive_review_artifacts_with_bounds(
         store,
-        DeriveBounds {
+        &DeriveBounds {
             start_day: start_day.to_owned(),
             end_day: end_day.to_owned(),
             note: None,
@@ -220,7 +238,7 @@ pub fn derive_review_artifacts_between_days(
 }
 
 fn rebuild_store_with_bounds(store: &Store, bounds: DeriveBounds) -> Result<DeriveReport> {
-    let derived = derive_review_artifacts_with_bounds(store, bounds.clone())?;
+    let derived = derive_review_artifacts_with_bounds(store, &bounds)?;
     store
         .derived()
         .replace_context_events(&derived.context_events)?;
@@ -247,7 +265,7 @@ fn rebuild_store_with_bounds(store: &Store, bounds: DeriveBounds) -> Result<Deri
 
 fn derive_review_artifacts_with_bounds(
     store: &Store,
-    bounds: DeriveBounds,
+    bounds: &DeriveBounds,
 ) -> Result<DerivedReviewArtifacts> {
     let daily_history = store
         .views()
@@ -322,106 +340,19 @@ fn build_context_events(
     let mut records = Vec::new();
 
     for workout in workouts {
-        records.push(ContextEventRecord {
-            context_event_id: format!("workout:{}", workout.workout_id),
-            family: ContextEventFamily::Workout,
-            source_id: workout.workout_id.clone(),
-            anchor_day: workout.day.clone(),
-            start_at: workout.started_at.clone(),
-            end_at: workout.ended_at.clone(),
-            time_semantics: classify_time_semantics(
-                &workout.started_at,
-                workout.ended_at.as_deref(),
-                false,
-            ),
-            title: workout.title.clone(),
-            subtype: workout.sport.clone().or_else(|| workout.activity.clone()),
-            notes: workout.notes.clone(),
-            intensity: workout.intensity.clone(),
-            metadata_json: serde_json::to_string(&json!({
-                "timezone": workout.timezone.clone(),
-                "sport": workout.sport.clone(),
-                "activity": workout.activity.clone(),
-                "source": workout.source.clone(),
-            }))?,
-            updated_at: updated_at.clone(),
-        });
+        records.push(workout_context_event(workout, &updated_at)?);
     }
 
     for tag in tags {
-        records.push(ContextEventRecord {
-            context_event_id: format!("tag:{}", tag.tag_id),
-            family: ContextEventFamily::Tag,
-            source_id: tag.tag_id.clone(),
-            anchor_day: tag.day.clone(),
-            start_at: format!("{}T00:00:00Z", tag.day),
-            end_at: Some(format!("{}T23:59:59Z", tag.day)),
-            time_semantics: TimeSemantics::AllDay,
-            title: tag.label.clone(),
-            subtype: Some("legacy_tag".to_owned()),
-            notes: None,
-            intensity: None,
-            metadata_json: serde_json::to_string(&json!({
-                "source": "legacy_tag"
-            }))?,
-            updated_at: updated_at.clone(),
-        });
+        records.push(legacy_tag_context_event(tag, &updated_at)?);
     }
 
     for tag in enhanced_tags {
-        let all_day = tag.started_at.is_none() && tag.ended_at.is_none();
-        let start_at = tag
-            .started_at
-            .clone()
-            .unwrap_or_else(|| format!("{}T00:00:00Z", tag.day));
-        let end_at = if all_day {
-            Some(format!("{}T23:59:59Z", tag.day))
-        } else {
-            tag.ended_at.clone()
-        };
-
-        records.push(ContextEventRecord {
-            context_event_id: format!("enhanced_tag:{}", tag.enhanced_tag_id),
-            family: ContextEventFamily::EnhancedTag,
-            source_id: tag.enhanced_tag_id.clone(),
-            anchor_day: tag.day.clone(),
-            start_at: start_at.clone(),
-            end_at: end_at.clone(),
-            time_semantics: classify_time_semantics(&start_at, end_at.as_deref(), all_day),
-            title: tag.label.clone(),
-            subtype: tag.subtype.clone(),
-            notes: tag.comment.clone(),
-            intensity: tag.intensity.clone(),
-            metadata_json: serde_json::to_string(&json!({
-                "comment": tag.comment.clone(),
-            }))?,
-            updated_at: updated_at.clone(),
-        });
+        records.push(enhanced_tag_context_event(tag, &updated_at)?);
     }
 
     for session in sessions {
-        records.push(ContextEventRecord {
-            context_event_id: format!("session:{}", session.session_id),
-            family: ContextEventFamily::Session,
-            source_id: session.session_id.clone(),
-            anchor_day: session.day.clone(),
-            start_at: session.started_at.clone(),
-            end_at: session.ended_at.clone(),
-            time_semantics: classify_time_semantics(
-                &session.started_at,
-                session.ended_at.as_deref(),
-                false,
-            ),
-            title: session.title.clone(),
-            subtype: session.kind.clone(),
-            notes: session.state.clone(),
-            intensity: None,
-            metadata_json: serde_json::to_string(&json!({
-                "state": session.state.clone(),
-                "score": session.score,
-            }))?,
-            updated_at: updated_at.clone(),
-        });
+        records.push(session_context_event(session, &updated_at)?);
     }
 
     records.sort_by(|left, right| {
@@ -431,6 +362,112 @@ fn build_context_events(
             .then(left.context_event_id.cmp(&right.context_event_id))
     });
     Ok(records)
+}
+
+fn workout_context_event(workout: &WorkoutRecord, updated_at: &str) -> Result<ContextEventRecord> {
+    Ok(ContextEventRecord {
+        context_event_id: format!("workout:{}", workout.workout_id),
+        family: ContextEventFamily::Workout,
+        source_id: workout.workout_id.clone(),
+        anchor_day: workout.day.clone(),
+        start_at: workout.started_at.clone(),
+        end_at: workout.ended_at.clone(),
+        time_semantics: classify_time_semantics(
+            &workout.started_at,
+            workout.ended_at.as_deref(),
+            false,
+        ),
+        title: workout.title.clone(),
+        subtype: workout.sport.clone().or_else(|| workout.activity.clone()),
+        notes: workout.notes.clone(),
+        intensity: workout.intensity.clone(),
+        metadata_json: serde_json::to_string(&json!({
+            "timezone": workout.timezone.clone(),
+            "sport": workout.sport.clone(),
+            "activity": workout.activity.clone(),
+            "source": workout.source.clone(),
+        }))?,
+        updated_at: updated_at.to_owned(),
+    })
+}
+
+fn legacy_tag_context_event(tag: &TagRecord, updated_at: &str) -> Result<ContextEventRecord> {
+    Ok(ContextEventRecord {
+        context_event_id: format!("tag:{}", tag.tag_id),
+        family: ContextEventFamily::Tag,
+        source_id: tag.tag_id.clone(),
+        anchor_day: tag.day.clone(),
+        start_at: format!("{}T00:00:00Z", tag.day),
+        end_at: Some(format!("{}T23:59:59Z", tag.day)),
+        time_semantics: TimeSemantics::AllDay,
+        title: tag.label.clone(),
+        subtype: Some("legacy_tag".to_owned()),
+        notes: None,
+        intensity: None,
+        metadata_json: serde_json::to_string(&json!({
+            "source": "legacy_tag"
+        }))?,
+        updated_at: updated_at.to_owned(),
+    })
+}
+
+fn enhanced_tag_context_event(
+    tag: &crate::store::queries::EnhancedTagRecord,
+    updated_at: &str,
+) -> Result<ContextEventRecord> {
+    let all_day = tag.started_at.is_none() && tag.ended_at.is_none();
+    let start_at = tag
+        .started_at
+        .clone()
+        .unwrap_or_else(|| format!("{}T00:00:00Z", tag.day));
+    let end_at = if all_day {
+        Some(format!("{}T23:59:59Z", tag.day))
+    } else {
+        tag.ended_at.clone()
+    };
+
+    Ok(ContextEventRecord {
+        context_event_id: format!("enhanced_tag:{}", tag.enhanced_tag_id),
+        family: ContextEventFamily::EnhancedTag,
+        source_id: tag.enhanced_tag_id.clone(),
+        anchor_day: tag.day.clone(),
+        start_at: start_at.clone(),
+        end_at: end_at.clone(),
+        time_semantics: classify_time_semantics(&start_at, end_at.as_deref(), all_day),
+        title: tag.label.clone(),
+        subtype: tag.subtype.clone(),
+        notes: tag.comment.clone(),
+        intensity: tag.intensity.clone(),
+        metadata_json: serde_json::to_string(&json!({
+            "comment": tag.comment.clone(),
+        }))?,
+        updated_at: updated_at.to_owned(),
+    })
+}
+
+fn session_context_event(session: &SessionRecord, updated_at: &str) -> Result<ContextEventRecord> {
+    Ok(ContextEventRecord {
+        context_event_id: format!("session:{}", session.session_id),
+        family: ContextEventFamily::Session,
+        source_id: session.session_id.clone(),
+        anchor_day: session.day.clone(),
+        start_at: session.started_at.clone(),
+        end_at: session.ended_at.clone(),
+        time_semantics: classify_time_semantics(
+            &session.started_at,
+            session.ended_at.as_deref(),
+            false,
+        ),
+        title: session.title.clone(),
+        subtype: session.kind.clone(),
+        notes: session.state.clone(),
+        intensity: None,
+        metadata_json: serde_json::to_string(&json!({
+            "state": session.state.clone(),
+            "score": session.score,
+        }))?,
+        updated_at: updated_at.to_owned(),
+    })
 }
 
 fn build_pattern_summaries(
@@ -609,27 +646,26 @@ fn supported_deltas(
 ) -> Vec<(PatternRelationWindow, PatternMetric, f64)> {
     let mut deltas = Vec::new();
 
-    if let Some(delta) = metric_delta(metric_history, anchor_day, PatternMetric::ActivityScore) {
+    if let Some(delta) = metric_delta(metric_history, anchor_day, PatternMetric::Activity) {
         deltas.push((
             PatternRelationWindow::SameDayActivity,
-            PatternMetric::ActivityScore,
+            PatternMetric::Activity,
             delta,
         ));
     }
 
     if let Some(next_day) = shift_day(anchor_day, 1) {
-        if let Some(delta) = metric_delta(metric_history, &next_day, PatternMetric::ReadinessScore)
-        {
+        if let Some(delta) = metric_delta(metric_history, &next_day, PatternMetric::Readiness) {
             deltas.push((
                 PatternRelationWindow::NextDayReadiness,
-                PatternMetric::ReadinessScore,
+                PatternMetric::Readiness,
                 delta,
             ));
         }
-        if let Some(delta) = metric_delta(metric_history, &next_day, PatternMetric::SleepScore) {
+        if let Some(delta) = metric_delta(metric_history, &next_day, PatternMetric::Sleep) {
             deltas.push((
                 PatternRelationWindow::SameNightSleep,
-                PatternMetric::SleepScore,
+                PatternMetric::Sleep,
                 delta,
             ));
         }
@@ -669,14 +705,14 @@ fn rolling_baseline(
         prior_values.drain(..drain_count);
     }
 
-    Some(prior_values.iter().sum::<f64>() / prior_values.len() as f64)
+    Some(prior_values.iter().sum::<f64>() / crate::numeric::usize_to_f64(prior_values.len()))
 }
 
-fn metric_value(row: &DailyMetricRow, metric: PatternMetric) -> Option<f64> {
+const fn metric_value(row: &DailyMetricRow, metric: PatternMetric) -> Option<f64> {
     match metric {
-        PatternMetric::ActivityScore => row.activity,
-        PatternMetric::ReadinessScore => row.readiness,
-        PatternMetric::SleepScore => row.sleep,
+        PatternMetric::Activity => row.activity,
+        PatternMetric::Readiness => row.readiness,
+        PatternMetric::Sleep => row.sleep,
     }
 }
 
@@ -701,7 +737,7 @@ fn median(values: &[f64]) -> f64 {
     }
 }
 
-fn classify_confidence(sample_count: usize) -> DataSufficiency {
+const fn classify_confidence(sample_count: usize) -> DataSufficiency {
     if sample_count >= 10 {
         DataSufficiency::Strong
     } else if sample_count >= 5 {
@@ -782,8 +818,11 @@ impl DeriveBounds {
                 .ok()
             })
             .unwrap_or_else(|| OffsetDateTime::now_utc().date());
-        let start_day =
-            (anchor_date - Duration::days(recent_window_days.saturating_sub(1) as i64)).to_string();
+        let start_day = (anchor_date
+            - Duration::days(crate::numeric::usize_to_i64(
+                recent_window_days.saturating_sub(1),
+            )))
+        .to_string();
         let end_day = (anchor_date + Duration::days(1)).to_string();
 
         Self {
@@ -829,7 +868,7 @@ impl TempRootGuard {
         Self { path }
     }
 
-    fn path(&self) -> &PathBuf {
+    const fn path(&self) -> &PathBuf {
         &self.path
     }
 }
@@ -849,7 +888,6 @@ fn now_rfc3339() -> Result<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use super::{
         DeriveBounds, TempRootGuard, build_context_events, build_pattern_summaries,
@@ -862,6 +900,7 @@ mod tests {
         DataSufficiency, EnhancedTagRecord, ImportStore, PatternMetric, PatternRelationWindow,
         SessionRecord, WorkoutRecord,
     };
+    use crate::test_support::{ok, some};
     use time::Date;
 
     fn populate_history(store: &Store) {
@@ -942,9 +981,7 @@ mod tests {
                 updated_at: updated_at.clone(),
             },
         ] {
-            imports
-                .upsert_workout(&workout)
-                .unwrap_or_else(|error| panic!("workout should insert: {error}"));
+            ok(imports.upsert_workout(&workout), "workout should insert");
         }
 
         for tag in [
@@ -997,9 +1034,10 @@ mod tests {
                 updated_at: updated_at.clone(),
             },
         ] {
-            imports
-                .upsert_enhanced_tag(&tag)
-                .unwrap_or_else(|error| panic!("enhanced tag should insert: {error}"));
+            ok(
+                imports.upsert_enhanced_tag(&tag),
+                "enhanced tag should insert",
+            );
         }
 
         for session in [
@@ -1052,9 +1090,7 @@ mod tests {
                 updated_at,
             },
         ] {
-            imports
-                .upsert_session(&session)
-                .unwrap_or_else(|error| panic!("session should insert: {error}"));
+            ok(imports.upsert_session(&session), "session should insert");
         }
     }
 
@@ -1095,17 +1131,18 @@ mod tests {
         activity: u8,
         updated_at: &str,
     ) {
-        imports
-            .upsert_daily_sleep(&DailySleepRecord {
+        ok(
+            imports.upsert_daily_sleep(&DailySleepRecord {
                 oura_id: None,
                 day: day.to_owned(),
                 sleep_score: Some(sleep),
                 raw_cache_key: None,
                 updated_at: updated_at.to_owned(),
-            })
-            .unwrap_or_else(|error| panic!("sleep row should insert: {error}"));
-        imports
-            .upsert_daily_readiness(&DailyReadinessRecord {
+            }),
+            "sleep row should insert",
+        );
+        ok(
+            imports.upsert_daily_readiness(&DailyReadinessRecord {
                 oura_id: None,
                 day: day.to_owned(),
                 readiness_score: Some(readiness),
@@ -1113,10 +1150,11 @@ mod tests {
                 temperature_trend_deviation: None,
                 raw_cache_key: None,
                 updated_at: updated_at.to_owned(),
-            })
-            .unwrap_or_else(|error| panic!("readiness row should insert: {error}"));
-        imports
-            .upsert_daily_activity(&DailyActivityRecord {
+            }),
+            "readiness row should insert",
+        );
+        ok(
+            imports.upsert_daily_activity(&DailyActivityRecord {
                 oura_id: None,
                 day: day.to_owned(),
                 activity_score: Some(activity),
@@ -1125,8 +1163,9 @@ mod tests {
                 total_calories: 0,
                 raw_cache_key: None,
                 updated_at: updated_at.to_owned(),
-            })
-            .unwrap_or_else(|error| panic!("activity row should insert: {error}"));
+            }),
+            "activity row should insert",
+        );
     }
 
     #[test]
@@ -1147,8 +1186,10 @@ mod tests {
             updated_at: "2026-04-08T12:00:00Z".to_owned(),
         }];
 
-        let events = build_context_events(&workouts, &[], &[], &[])
-            .unwrap_or_else(|error| panic!("context events should derive: {error}"));
+        let events = ok(
+            build_context_events(&workouts, &[], &[], &[]),
+            "context events should derive",
+        );
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].family, ContextEventFamily::Workout);
@@ -1161,40 +1202,45 @@ mod tests {
 
     #[test]
     fn pattern_summaries_require_enough_samples_and_report_confidence() {
-        let store = Store::open_in_memory()
-            .unwrap_or_else(|error| panic!("store should open in memory: {error}"));
+        let store = ok(Store::open_test_store(), "store should open test store");
         populate_history(&store);
 
-        let context_events = build_context_events(
-            &store
+        let workouts = ok(
+            store
                 .views()
-                .workouts_between_days("0000-01-01", "9999-12-31")
-                .unwrap_or_else(|error| panic!("workouts should load: {error}")),
-            &[],
-            &store
+                .workouts_between_days("0000-01-01", "9999-12-31"),
+            "workouts should load",
+        );
+        let enhanced_tags = ok(
+            store
                 .views()
-                .enhanced_tags_between_days("0000-01-01", "9999-12-31")
-                .unwrap_or_else(|error| panic!("enhanced tags should load: {error}")),
-            &store
+                .enhanced_tags_between_days("0000-01-01", "9999-12-31"),
+            "enhanced tags should load",
+        );
+        let sessions = ok(
+            store
                 .views()
-                .sessions_between_days("0000-01-01", "9999-12-31")
-                .unwrap_or_else(|error| panic!("sessions should load: {error}")),
-        )
-        .unwrap_or_else(|error| panic!("context events should derive: {error}"));
-        let patterns = build_pattern_summaries(
-            &store
-                .views()
-                .daily_history_all()
-                .unwrap_or_else(|error| panic!("daily history should load: {error}")),
-            &context_events,
-        )
-        .unwrap_or_else(|error| panic!("patterns should derive: {error}"));
+                .sessions_between_days("0000-01-01", "9999-12-31"),
+            "sessions should load",
+        );
+        let context_events = ok(
+            build_context_events(&workouts, &[], &enhanced_tags, &sessions),
+            "context events should derive",
+        );
+        let daily_history = ok(
+            store.views().daily_history_all(),
+            "daily history should load",
+        );
+        let patterns = ok(
+            build_pattern_summaries(&daily_history, &context_events),
+            "patterns should derive",
+        );
 
         assert!(patterns.iter().any(|summary| {
             summary.family == ContextEventFamily::Workout
                 && summary.normalized_key == "sport:running"
                 && summary.relation_window == PatternRelationWindow::SameDayActivity
-                && summary.metric == PatternMetric::ActivityScore
+                && summary.metric == PatternMetric::Activity
                 && summary.sample_count >= 3
                 && summary.confidence == DataSufficiency::Thin
         }));
@@ -1202,21 +1248,15 @@ mod tests {
 
     #[test]
     fn rebuild_store_persists_derived_tables() {
-        let store = Store::open_in_memory()
-            .unwrap_or_else(|error| panic!("store should open in memory: {error}"));
+        let store = ok(Store::open_test_store(), "store should open test store");
         populate_history(&store);
 
-        let report =
-            rebuild_store(&store).unwrap_or_else(|error| panic!("rebuild should succeed: {error}"));
+        let report = ok(rebuild_store(&store), "rebuild should succeed");
 
         assert!(report.context_event_count >= 9);
         assert!(report.pattern_summary_count > 0);
         assert_eq!(
-            store
-                .views()
-                .record_counts()
-                .unwrap_or_else(|error| panic!("counts should load: {error}"))
-                .derived_context_events,
+            ok(store.views().record_counts(), "counts should load").derived_context_events,
             report.context_event_count as u64
         );
     }
@@ -1226,16 +1266,20 @@ mod tests {
         let refresh = review_refresh_config();
 
         let bounds = DeriveBounds::bounded_refresh(&refresh, Some("2026-04-08"));
-        let start = Date::parse(
-            &bounds.start_day,
-            &time::macros::format_description!("[year]-[month]-[day]"),
-        )
-        .unwrap_or_else(|error| panic!("start day should parse: {error}"));
-        let end = Date::parse(
-            &bounds.end_day,
-            &time::macros::format_description!("[year]-[month]-[day]"),
-        )
-        .unwrap_or_else(|error| panic!("end day should parse: {error}"));
+        let start = ok(
+            Date::parse(
+                &bounds.start_day,
+                &time::macros::format_description!("[year]-[month]-[day]"),
+            ),
+            "start day should parse",
+        );
+        let end = ok(
+            Date::parse(
+                &bounds.end_day,
+                &time::macros::format_description!("[year]-[month]-[day]"),
+            ),
+            "end day should parse",
+        );
 
         assert!(end > start);
         assert!(
@@ -1252,23 +1296,24 @@ mod tests {
 
     #[test]
     fn bounded_refresh_uses_anchor_day_for_review_freshness() {
-        let store = Store::open_in_memory()
-            .unwrap_or_else(|error| panic!("store should open in memory: {error}"));
+        let store = ok(Store::open_test_store(), "store should open test store");
         populate_history(&store);
 
-        let artifacts = derive_review_artifacts_with_bounds(
-            &store,
-            DeriveBounds::bounded_refresh(&review_refresh_config(), Some("2026-04-08")),
-        )
-        .unwrap_or_else(|error| {
-            panic!("bounded derive should build review artifacts for freshness test: {error}")
-        });
+        let artifacts = ok(
+            derive_review_artifacts_with_bounds(
+                &store,
+                &DeriveBounds::bounded_refresh(&review_refresh_config(), Some("2026-04-08")),
+            ),
+            "bounded derive should build review artifacts for freshness test",
+        );
 
-        let anchored_row = artifacts
-            .review_signal_days
-            .iter()
-            .find(|row| row.signal_key == "sleep_score" && row.day == "2026-04-08")
-            .unwrap_or_else(|| panic!("anchored sleep score row should exist"));
+        let anchored_row = some(
+            artifacts
+                .review_signal_days
+                .iter()
+                .find(|row| row.signal_key == "sleep_score" && row.day == "2026-04-08"),
+            "anchored sleep score row should exist",
+        );
 
         assert_eq!(anchored_row.stale_days, 0);
     }
@@ -1278,10 +1323,14 @@ mod tests {
         let path = {
             let guard = TempRootGuard::new("test");
             let path = guard.path().clone();
-            std::fs::create_dir_all(&path)
-                .unwrap_or_else(|error| panic!("temp directory should create: {error}"));
-            std::fs::write(path.join("sentinel.txt"), "ok")
-                .unwrap_or_else(|error| panic!("sentinel should write: {error}"));
+            ok(
+                std::fs::create_dir_all(&path),
+                "temp directory should create",
+            );
+            ok(
+                std::fs::write(path.join("sentinel.txt"), "ok"),
+                "sentinel should write",
+            );
             path
         };
 

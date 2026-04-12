@@ -6,7 +6,10 @@ use ratatui::{
     widgets::{Clear, List, ListItem, Paragraph, Tabs, Wrap},
 };
 
-use crate::app::{AiLaunchPointView, AiPreflightView, AiWorkbenchModel};
+use crate::app::{
+    AiArtifactActionView, AiLaunchPointView, AiPreflightControlView, AiPreflightView,
+    AiWorkbenchModel,
+};
 use crate::ui::{
     chrome::{self, PanelKind},
     layout::UiContext,
@@ -61,7 +64,7 @@ fn draw_wide(frame: &mut Frame<'_>, area: Rect, model: &AiWorkbenchModel, theme:
     draw_launch_points(frame, left[0], &model.launch_points, theme, true);
     draw_browser_list(frame, left[1], model, theme, false);
     draw_trust(frame, right[0], model, theme);
-    draw_detail(frame, right[1], model, theme);
+    draw_artifact_pane(frame, right[1], model, theme, false);
     draw_warnings(frame, layout[3], model, theme);
 }
 
@@ -109,7 +112,7 @@ fn draw_narrow(
     draw_launch_points(frame, left[0], &model.launch_points, theme, true);
     draw_browser_list(frame, left[1], model, theme, true);
     draw_trust(frame, right[0], model, theme);
-    draw_detail(frame, right[1], model, theme);
+    draw_artifact_pane(frame, right[1], model, theme, compact);
     draw_warnings(frame, layout[3], model, theme);
 }
 
@@ -170,10 +173,11 @@ fn draw_launch_points(
     let rows = items
         .iter()
         .map(|item| {
+            let prefix = chrome::focus_prefix(item.selected);
             let detail = if trim_to_label {
-                format!("{} [{}]", item.label, item.key_hint)
+                format!("{prefix} {}", item.label)
             } else {
-                format!("{} [{}]\n{}", item.label, item.key_hint, item.detail)
+                format!("{prefix} {}\n{}", item.label, item.detail)
             };
             ListItem::new(detail)
         })
@@ -249,20 +253,73 @@ fn draw_trust(frame: &mut Frame<'_>, area: Rect, model: &AiWorkbenchModel, theme
     );
 }
 
-fn draw_detail(frame: &mut Frame<'_>, area: Rect, model: &AiWorkbenchModel, theme: &Theme) {
+fn draw_artifact_pane(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &AiWorkbenchModel,
+    theme: &Theme,
+    compact: bool,
+) {
+    let action_height = if model.artifact_actions.is_empty() {
+        4
+    } else if compact {
+        6
+    } else {
+        8
+    };
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(action_height), Constraint::Min(4)])
+        .split(area);
+    draw_artifact_actions(frame, sections[0], &model.artifact_actions, theme);
+
     let text = if model.detail_lines.is_empty() {
         "Select a saved snapshot, run, or report to inspect the persisted local detail.".to_owned()
     } else {
-        model.detail_lines.join("\n")
+        format!("{}\n{}", model.detail_title, model.detail_lines.join("\n"))
     };
     frame.render_widget(
         Paragraph::new(text)
             .wrap(Wrap { trim: true })
             .block(chrome::panel(
                 theme,
-                chrome::title_with_badge(theme, &model.detail_title, "detail", Tone::Focus),
-                PanelKind::Hero,
+                chrome::title_with_badge(
+                    theme,
+                    "Artifact detail",
+                    "read-only context",
+                    Tone::Muted,
+                ),
+                PanelKind::Diagnostic,
             )),
+        sections[1],
+    );
+}
+
+fn draw_artifact_actions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    actions: &[AiArtifactActionView],
+    theme: &Theme,
+) {
+    let items = if actions.is_empty() {
+        vec![ListItem::new(
+            "[empty] No direct actions are available for this saved artifact.",
+        )]
+    } else {
+        actions
+            .iter()
+            .map(|action| {
+                let focus = chrome::focus_prefix(action.selected);
+                ListItem::new(format!("{focus} {}\n{}", action.label, action.detail))
+            })
+            .collect::<Vec<_>>()
+    };
+    frame.render_widget(
+        List::new(items).block(chrome::panel(
+            theme,
+            chrome::title_with_badge(theme, "Artifact actions", "canonical controls", Tone::Focus),
+            PanelKind::Section,
+        )),
         area,
     );
 }
@@ -306,6 +363,7 @@ fn draw_preflight_overlay(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(8),
+            Constraint::Length(3),
             Constraint::Length(if compact { 5 } else { 7 }),
         ])
         .split(popup);
@@ -339,13 +397,45 @@ fn draw_preflight_overlay(
             .map(|line| ListItem::new(format!("[warn] {line}")))
             .collect::<Vec<_>>()
     };
+
+    draw_preflight_controls(frame, sections[1], &preflight.controls, theme);
+
     frame.render_widget(
         List::new(warning_items).block(chrome::panel(
             theme,
             chrome::title_with_badge(theme, "Confirmation", "trust before upload", Tone::Warning),
             PanelKind::Diagnostic,
         )),
-        sections[1],
+        sections[2],
+    );
+}
+
+fn draw_preflight_controls(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    controls: &[AiPreflightControlView],
+    theme: &Theme,
+) {
+    let selected_index = controls
+        .iter()
+        .position(|control| control.selected)
+        .unwrap_or(0);
+    frame.render_widget(
+        Tabs::new(
+            controls
+                .iter()
+                .map(|control| format!("{}: {}", control.label, control.detail)),
+        )
+        .block(chrome::panel(
+            theme,
+            chrome::title_with_badge(theme, "Controls", "confirm / privacy / cancel", Tone::Focus),
+            PanelKind::Section,
+        ))
+        .style(theme.annotation())
+        .highlight_style(theme.emphasis(Tone::Focus))
+        .divider(" ")
+        .select(selected_index),
+        area,
     );
 }
 

@@ -2,7 +2,31 @@
 
 ## Purpose
 
-This file is the current truth for the repository after the AI eval lab and regression console work landed on `2026-04-10`. It records what shipped, what was verified, and what remains intentionally deferred.
+This file is the current truth for the repository after the navigation, focus, and keyboard-standardization pass landed on `2026-04-11`. It records what shipped, what was verified, and what remains intentionally deferred.
+
+## Navigation and focus truth
+
+The TUI now includes:
+
+- a visible top-level `Views` tab row that remains the primary navigation on wide layouts
+- explicit major-region focus state in `AppState`
+- a centralized keybinding registry with scoped bindings for global, screen, region, and transient behavior
+- one shared keyboard grammar across Dashboard, Timeline, Trends, Explain, Patterns, Review, AI, and Status
+- pane-type consistency so selector panes, list panes, chart/pager panes, and detail panes use the same movement and activation rules wherever they appear
+- read-mostly screens such as Explain and Status collapse informative subpanels into one body region instead of exposing fake focus stops, while Patterns keeps a visible metric selector because it is a real local control
+- a distinct orientation strip that shows the active screen, focused region, and transient state
+- a contextual footer sourced from the registry instead of screen-local hard-coded shortcut copy
+- a scoped `?` help overlay
+- consistent `Ctrl+F` search behavior for the list-heavy surfaces that support search today
+- explicit focus restoration after closing help, closing search, or leaving transient panels
+- region-ordered back-out so `Esc` unwinds one screen layer at a time instead of jumping directly to top-level navigation
+- visible selection markers that remain distinct from focused-region cues
+
+The navigation-specific documentation added in this pass lives in:
+
+- `docs/HCI_NAVIGATION_RESEARCH.md`
+- `docs/NAVIGATION_AUDIT.md`
+- `docs/KEYBINDINGS.md`
 
 ## Baseline before this pass
 
@@ -11,14 +35,16 @@ Verified before implementation:
 - the local-first CLI, sync, derive, review, webhook, UI snapshot, and snapshot/OpenAI artifact flows were already working
 - snapshot export already produced canonical hashed artifacts with privacy profiles
 - `ai review` and `ai compare` already persisted structured artifacts locally
-- reports and eval summaries were already durable and browseable from the CLI
+- reports and eval summaries were already durable and browseable from the CLI and TUI
 
 Primary gaps before this pass:
 
-- evals still felt CLI-first even though snapshots, AI artifacts, reports, and evals were already durable
-- the AI workbench browser still stopped at runs, snapshots, and reports
-- eval summaries did not persist enough detail for in-app inspection
-- the Status/Ops surface did not clearly expose eval health or regression warnings
+- `Tab` and `Shift+Tab` switched screens instead of moving between major regions
+- `Esc` quit the application instead of canceling or backing out
+- visible controls such as trend windows, review tabs, and AI browser tabs did not behave like standard keyboard composites
+- footer help was screen-local, dense, and shortcut-first instead of contextual
+- focus was not modeled explicitly in app state, so focus restoration and selected-vs-focused cues were inconsistent
+- search/find behavior was not standardized across the list-heavy screens
 
 ## Current implemented truth
 
@@ -213,6 +239,9 @@ The repository now has explicit version discipline for:
 
 Coverage now includes:
 
+- keybinding registry collision and scope-precedence tests
+- reducer tests for region traversal, top-level tab activation, help/search focus restore, and back-out behavior
+- deterministic smoke navigation coverage for screen switching, region traversal, search entry, help overlay, and detail return
 - snapshot catalog tests
 - AI artifact and AI run registry tests
 - report export tests
@@ -246,19 +275,20 @@ Coverage now includes:
   - `ui snapshot --screen ai --demo`
   - `ui snapshot --screen status --demo`
 
-## Verification completed for this pass
+## Verification run for this pass
 
-The following commands were run and passed for this pass:
+Passed in this pass:
 
 - `cargo fmt --all --check`
-- `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test --all`
 - `cargo run -- doctor`
-- `cargo run -- snapshot export --demo --profile redacted --out /tmp/ringmaster-snapshot.json`
-- `cargo run -- ai review /tmp/ringmaster-snapshot.json --dry-run`
-- `cargo run -- ai eval --fixture-dir tests/fixtures/ai`
-- `cargo run -- ui snapshot --screen ai --demo --out-dir /tmp/ringmaster-ai-ui`
-- `cargo run -- ui snapshot --screen status --demo --out-dir /tmp/ringmaster-status-ui`
+- `cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-nav-ui`
+
+Still blocked after this pass:
+
+- `cargo clippy --all-targets --all-features -- -D warnings`
+
+The remaining clippy failures are not from the navigation architecture changes themselves. They are a broader pre-1.0 lint backlog spread across existing modules such as `src/ai.rs`, `src/lib.rs`, `src/config.rs`, `src/derive.rs`, store/webhook code, and other older surfaces that still trigger strict pedantic/nursery/cargo findings.
 
 ## Intentionally deferred
 

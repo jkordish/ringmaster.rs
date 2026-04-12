@@ -21,6 +21,9 @@ pub struct InvestigationReport {
     pub look_at: Vec<String>,
 }
 
+/// # Errors
+///
+/// Returns an error if either the today or week review deck cannot be built for the requested focus.
 pub fn build_investigation_report(
     focus: ReviewFocus,
     anchor_day: &str,

@@ -13,6 +13,10 @@ use crate::eval::{
     parse_persisted_eval_details,
 };
 use crate::insights::{InsightConfidence, MetricInsight, MetricPoint, build_metric_insight};
+use crate::keybindings::BindingContext;
+use crate::navigation::{
+    self, FocusRegion, NavMove, PreflightControl, SearchScope, SearchState, TransientLayer,
+};
 use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
 use crate::refresh::SyncFamily;
 use crate::review::{
@@ -41,6 +45,7 @@ const LIVE_REVIEW_SLEEP_LOOKBACK_DAYS: i64 = 60;
 const LIVE_REVIEW_CONTEXT_LOOKBACK_DAYS: i64 = 90;
 const LIVE_REVIEW_REST_MODE_LOOKBACK_DAYS: i64 = 180;
 const LIVE_REVIEW_CONTEXT_FORWARD_DAYS: i64 = 7;
+const TIMELINE_WINDOW_PRESETS: [u16; 3] = [6, 12, 24];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DataFamily {
@@ -102,7 +107,6 @@ pub struct LiveSnapshot {
     pub config_path: String,
 }
 
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AiOpsSnapshot {
     pub enabled: bool,
@@ -116,7 +120,6 @@ pub struct AiOpsSnapshot {
     pub prompt_cache: String,
     pub review_prompt_version: String,
     pub compare_prompt_version: String,
-    pub stateless_default: bool,
     pub tools_disabled: bool,
     pub snapshot_catalog_count: usize,
     pub ai_run_count: usize,
@@ -239,26 +242,35 @@ pub struct AppState {
     pub should_quit: bool,
     pub refresh_in_flight: bool,
     live_snapshot: Option<LiveSnapshot>,
+    focused_region: FocusRegion,
+    screen_focus_memory: [FocusRegion; 8],
+    focused_top_nav_screen: Screen,
+    help_open: bool,
+    focus_before_help: Option<FocusRegion>,
+    search: Option<SearchState>,
     selected_day_index: usize,
     selected_timeline_point: usize,
     timeline_window_hours: u16,
+    selected_overlay_toggle_index: usize,
     trends_window: TrendWindowKind,
     selected_event_id: Option<String>,
     selected_review_card_index: usize,
     ai_preflight: Option<AiPreflightState>,
+    ai_preflight_control: PreflightControl,
     ai_browser_tab: AiBrowserTab,
+    selected_ai_launch_index: usize,
     selected_ai_run_index: usize,
     selected_snapshot_catalog_index: usize,
     selected_report_export_index: usize,
     selected_ai_eval_run_index: usize,
+    selected_ai_artifact_action_index: usize,
     overlay_filters: OverlayFilterState,
     pattern_metric_filter: PatternMetricFilter,
     review_mode: ReviewScreenMode,
     review_focus: ReviewFocus,
 }
 
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct AppModel {
     pub title: String,
     pub dashboard: DashboardModel,
@@ -269,6 +281,20 @@ pub struct AppModel {
     pub review: ReviewModel,
     pub ai: AiWorkbenchModel,
     pub ops: OpsModel,
+}
+
+impl PartialEq for AppModel {
+    fn eq(&self, other: &Self) -> bool {
+        self.title == other.title
+            && self.dashboard == other.dashboard
+            && self.timeline == other.timeline
+            && self.trends == other.trends
+            && self.explain == other.explain
+            && self.patterns == other.patterns
+            && self.review == other.review
+            && self.ai == other.ai
+            && self.ops == other.ops
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,6 +313,8 @@ pub struct TimelineModel {
     pub summary: String,
     pub breadcrumb: String,
     pub day_selector: String,
+    pub window_presets: Vec<TimelineWindowPresetView>,
+    pub selected_window_preset_index: usize,
     pub selected_day_label: String,
     pub selected_day_index: usize,
     pub heart_rate: Vec<TimelinePoint>,
@@ -315,6 +343,8 @@ pub struct ExplainModel {
     pub selected_day_label: String,
     pub breadcrumb: String,
     pub headline: String,
+    pub overlay_toggles: Vec<OverlayToggleView>,
+    pub selected_overlay_toggle_index: usize,
     pub summary_lines: Vec<String>,
     pub measurement_lines: Vec<String>,
     pub evidence_lines: Vec<String>,
@@ -326,6 +356,10 @@ pub struct ExplainModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatternsModel {
     pub header: String,
+    pub metric_filters: Vec<PatternFilterTab>,
+    pub selected_filter_index: usize,
+    pub overlay_toggles: Vec<OverlayToggleView>,
+    pub selected_overlay_toggle_index: usize,
     pub filter_summary: String,
     pub rows: Vec<PatternRowView>,
     pub notes: Vec<String>,
@@ -368,6 +402,8 @@ pub struct AiWorkbenchModel {
     pub selected_tab_index: usize,
     pub browser_items: Vec<AiBrowserItemView>,
     pub selected_item_index: Option<usize>,
+    pub artifact_actions: Vec<AiArtifactActionView>,
+    pub selected_action_index: Option<usize>,
     pub detail_title: String,
     pub detail_lines: Vec<String>,
     pub trust_lines: Vec<String>,
@@ -381,6 +417,7 @@ pub struct AiLaunchPointView {
     pub label: String,
     pub detail: String,
     pub key_hint: String,
+    pub selected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -403,6 +440,8 @@ pub struct AiPreflightView {
     pub title: String,
     pub body_lines: Vec<String>,
     pub warning_lines: Vec<String>,
+    pub controls: Vec<AiPreflightControlView>,
+    pub selected_control_index: usize,
     pub confirm_enabled: bool,
 }
 
@@ -418,6 +457,20 @@ pub struct AiBrowserItemView {
     pub headline: String,
     pub detail: String,
     pub status_badge: String,
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiArtifactActionView {
+    pub label: String,
+    pub detail: String,
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiPreflightControlView {
+    pub label: &'static str,
+    pub detail: String,
     pub selected: bool,
 }
 
@@ -472,6 +525,13 @@ pub struct OverlayToggleView {
     pub label: &'static str,
     pub key_hint: &'static str,
     pub enabled: bool,
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineWindowPresetView {
+    pub label: &'static str,
+    pub selected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -527,6 +587,12 @@ pub struct TrendMetricView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatternFilterTab {
+    pub label: &'static str,
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatternRowView {
     pub headline: String,
     pub detail: String,
@@ -560,12 +626,16 @@ struct LiveModelOptions {
     selected_point_index: usize,
     selected_event_id: Option<String>,
     ai_preflight: Option<AiPreflightState>,
+    ai_preflight_control: PreflightControl,
     ai_browser_tab: AiBrowserTab,
+    selected_ai_launch_index: usize,
     selected_ai_run_index: usize,
     selected_snapshot_catalog_index: usize,
     selected_report_export_index: usize,
     selected_ai_eval_run_index: usize,
+    selected_ai_artifact_action_index: usize,
     overlay_filters: OverlayFilterState,
+    selected_overlay_toggle_index: usize,
     window_hours: u16,
     trends_window: TrendWindowKind,
     pattern_metric_filter: PatternMetricFilter,
@@ -592,6 +662,30 @@ struct EvalHealthSummary {
     improvement_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AiBrowserContent {
+    browser_items: Vec<AiBrowserItemView>,
+    selected_item_index: Option<usize>,
+    artifact_actions: Vec<AiArtifactActionView>,
+    selected_action_index: Option<usize>,
+    detail_title: String,
+    detail_lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AiArtifactActionKind {
+    CancelRun,
+    ExpandEvidence,
+    ShowCounterevidence,
+    ExplainRanking,
+    SuggestDrilldown,
+    GenerateReport,
+    RerunNextPrivacy,
+    RerunNextModel,
+    ComparePreviousSnapshot,
+    OpenLinkedEvidence,
+}
+
 #[derive(Debug, Clone)]
 struct ReviewViewContext<'a> {
     selected_day: &'a str,
@@ -601,8 +695,154 @@ struct ReviewViewContext<'a> {
     selected_review_card_index: usize,
 }
 
+impl AiArtifactActionKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::CancelRun => "Cancel run",
+            Self::ExpandEvidence => "Expand evidence",
+            Self::ShowCounterevidence => "Show counterevidence",
+            Self::ExplainRanking => "Explain ranking",
+            Self::SuggestDrilldown => "Suggest drill-down",
+            Self::GenerateReport => "Generate report",
+            Self::RerunNextPrivacy => "Rerun with next privacy",
+            Self::RerunNextModel => "Rerun with next model",
+            Self::ComparePreviousSnapshot => "Compare previous snapshot",
+            Self::OpenLinkedEvidence => "Open linked evidence",
+        }
+    }
+
+    const fn detail(self) -> &'static str {
+        match self {
+            Self::CancelRun => "Stop the queued or running AI job.",
+            Self::ExpandEvidence => "Ask for stronger support tied to the saved artifact.",
+            Self::ShowCounterevidence => "Surface conflicting evidence from the same saved run.",
+            Self::ExplainRanking => "Explain why the saved run ranked findings the way it did.",
+            Self::SuggestDrilldown => "Ask for the next bounded local investigation to run.",
+            Self::GenerateReport => "Export a readable report from the selected artifact.",
+            Self::RerunNextPrivacy => "Reuse the selection with the next privacy profile.",
+            Self::RerunNextModel => "Reuse the selection with the next configured model.",
+            Self::ComparePreviousSnapshot => "Prepare a compare using the nearest prior snapshot.",
+            Self::OpenLinkedEvidence => "Jump to linked local evidence without leaving the TUI.",
+        }
+    }
+
+    const fn action(self) -> Action {
+        match self {
+            Self::CancelRun => Action::RequestCancelAiRun,
+            Self::ExpandEvidence => {
+                Action::RequestAiGuidedFollowUp(GuidedFollowUpKind::ExpandEvidence)
+            }
+            Self::ShowCounterevidence => {
+                Action::RequestAiGuidedFollowUp(GuidedFollowUpKind::ShowCounterevidence)
+            }
+            Self::ExplainRanking => {
+                Action::RequestAiGuidedFollowUp(GuidedFollowUpKind::ExplainRanking)
+            }
+            Self::SuggestDrilldown => {
+                Action::RequestAiGuidedFollowUp(GuidedFollowUpKind::SuggestLocalDrilldown)
+            }
+            Self::GenerateReport => Action::RequestAiGenerateReport,
+            Self::RerunNextPrivacy => Action::RequestAiRerunNextPrivacy,
+            Self::RerunNextModel => Action::RequestAiRerunNextModel,
+            Self::ComparePreviousSnapshot => Action::RequestAiComparePreviousSnapshot,
+            Self::OpenLinkedEvidence => Action::RequestJumpToAiEvidence,
+        }
+    }
+}
+
 impl AppState {
-    pub fn handle(&mut self, action: Action) {
+    pub fn handle(&mut self, action: Action) -> Vec<Action> {
+        let mut emitted = Vec::new();
+        match &action {
+            Action::FocusNextRegion
+            | Action::FocusPreviousRegion
+            | Action::MoveFocusedRegion(_)
+            | Action::ActivateFocusedRegion
+            | Action::Back
+            | Action::ToggleHelp
+            | Action::OpenSearch
+            | Action::CloseSearch
+            | Action::SearchAppend(_)
+            | Action::SearchBackspace
+            | Action::SearchNextResult
+            | Action::SearchPreviousResult => self.handle_focus_action(&action, &mut emitted),
+            Action::Tick
+            | Action::Quit
+            | Action::NextScreen
+            | Action::PreviousScreen
+            | Action::ShowScreen(_)
+            | Action::RefreshRequested
+            | Action::RefreshStarted { .. }
+            | Action::LiveSnapshotLoaded { .. }
+            | Action::RefreshFailed { .. }
+            | Action::StatusMessage { .. } => self.handle_lifecycle_action(action),
+            Action::PreviousDay
+            | Action::NextDay
+            | Action::PreviousTimelinePoint
+            | Action::NextTimelinePoint
+            | Action::PreviousEvent
+            | Action::NextEvent
+            | Action::TimelineZoomIn
+            | Action::TimelineZoomOut
+            | Action::ToggleWorkoutFilter
+            | Action::ToggleTagFilter
+            | Action::ToggleSessionFilter => self.handle_day_timeline_action(&action),
+            Action::PreviousTrendWindow
+            | Action::NextTrendWindow
+            | Action::CyclePatternMetric
+            | Action::CycleReviewMode
+            | Action::CycleReviewFocus
+            | Action::PreviousReviewCard
+            | Action::NextReviewCard => self.handle_review_action(&action),
+            _ => self.handle_ai_action(action),
+        }
+        emitted
+    }
+
+    fn handle_focus_action(&mut self, action: &Action, emitted: &mut Vec<Action>) {
+        match action {
+            Action::FocusNextRegion => {
+                if self.current_transient().is_none() {
+                    let next = navigation::next_region(self.active_screen, self.focused_region);
+                    self.set_focused_region(next);
+                    self.status_line = format!(
+                        "Focused {}.",
+                        navigation::region_label(self.active_screen, next).unwrap_or("next region")
+                    );
+                }
+            }
+            Action::FocusPreviousRegion => {
+                if self.current_transient().is_none() {
+                    let previous =
+                        navigation::previous_region(self.active_screen, self.focused_region);
+                    self.set_focused_region(previous);
+                    self.status_line = format!(
+                        "Focused {}.",
+                        navigation::region_label(self.active_screen, previous)
+                            .unwrap_or("previous region")
+                    );
+                }
+            }
+            Action::MoveFocusedRegion(movement) => self.move_focused_region(*movement),
+            Action::ActivateFocusedRegion => self.activate_focused_region(emitted),
+            Action::Back => self.back_out(),
+            Action::ToggleHelp => self.toggle_help(),
+            Action::OpenSearch => self.open_search(),
+            Action::CloseSearch => self.close_search(),
+            Action::SearchAppend(character) => self.append_search_character(*character),
+            Action::SearchBackspace => self.backspace_search(),
+            Action::SearchNextResult => self.advance_search(true),
+            Action::SearchPreviousResult => self.advance_search(false),
+            _ => unreachable!("focus handler only receives focus/search actions"),
+        }
+    }
+
+    fn dispatch_emitted_action(&mut self, action: Action, emitted: &mut Vec<Action>) {
+        emitted.push(action.clone());
+        emitted.extend(self.handle(action));
+    }
+
+    fn handle_lifecycle_action(&mut self, action: Action) {
         match action {
             Action::Tick => {
                 self.tick_count = self.tick_count.saturating_add(1);
@@ -611,16 +851,21 @@ impl AppState {
                 self.should_quit = true;
             }
             Action::NextScreen => {
-                self.active_screen = self.active_screen.next();
-                self.status_line = format!("Switched to {}", self.active_screen.title());
+                self.switch_screen(
+                    self.active_screen.next(),
+                    format!("Switched to {}", self.active_screen.next().title()),
+                    false,
+                );
             }
             Action::PreviousScreen => {
-                self.active_screen = self.active_screen.previous();
-                self.status_line = format!("Switched to {}", self.active_screen.title());
+                self.switch_screen(
+                    self.active_screen.previous(),
+                    format!("Switched to {}", self.active_screen.previous().title()),
+                    false,
+                );
             }
             Action::ShowScreen(screen) => {
-                self.active_screen = screen;
-                self.status_line = format!("Switched to {}", self.active_screen.title());
+                self.switch_screen(screen, format!("Switched to {}", screen.title()), false);
             }
             Action::RefreshRequested => {
                 self.status_line = match self.mode {
@@ -650,13 +895,16 @@ impl AppState {
                 self.status_line = message;
                 self.rebuild_live_model();
             }
+            _ => unreachable!("lifecycle handler only receives lifecycle actions"),
+        }
+    }
+
+    fn handle_day_timeline_action(&mut self, action: &Action) {
+        match action {
             Action::PreviousDay => {
                 if self.selected_day_index > 0 {
                     self.selected_day_index -= 1;
-                    self.selected_timeline_point = 0;
-                    self.selected_review_card_index = 0;
-                    self.select_default_event_for_selected_day();
-                    self.align_point_to_selected_event();
+                    self.reset_day_navigation();
                     self.status_line = format!(
                         "Showing {}.",
                         self.selected_day_label()
@@ -668,10 +916,7 @@ impl AppState {
             Action::NextDay => {
                 if self.selected_day_index + 1 < self.available_day_count() {
                     self.selected_day_index += 1;
-                    self.selected_timeline_point = 0;
-                    self.selected_review_card_index = 0;
-                    self.select_default_event_for_selected_day();
-                    self.align_point_to_selected_event();
+                    self.reset_day_navigation();
                     self.status_line = format!(
                         "Showing {}.",
                         self.selected_day_label()
@@ -698,78 +943,30 @@ impl AppState {
                 }
             }
             Action::PreviousEvent => {
-                if self.select_relative_event(-1) {
-                    self.align_point_to_selected_event();
-                    "Moved to an earlier context event.".clone_into(&mut self.status_line);
-                    self.rebuild_live_model();
-                }
+                self.handle_relative_event(-1, "Moved to an earlier context event.");
             }
-            Action::NextEvent => {
-                if self.select_relative_event(1) {
-                    self.align_point_to_selected_event();
-                    "Moved to a later context event.".clone_into(&mut self.status_line);
-                    self.rebuild_live_model();
-                }
-            }
+            Action::NextEvent => self.handle_relative_event(1, "Moved to a later context event."),
             Action::TimelineZoomIn => {
-                self.timeline_window_hours = match self.timeline_window_hours {
+                self.set_timeline_window_hours(match self.timeline_window_hours {
                     24 => 12,
                     _ => 6,
-                };
-                self.align_point_to_selected_event();
-                self.status_line =
-                    format!("Timeline window set to {}h.", self.timeline_window_hours);
-                self.rebuild_live_model();
+                });
             }
             Action::TimelineZoomOut => {
-                self.timeline_window_hours = match self.timeline_window_hours {
+                self.set_timeline_window_hours(match self.timeline_window_hours {
                     6 => 12,
                     _ => 24,
-                };
-                self.align_point_to_selected_event();
-                self.status_line =
-                    format!("Timeline window set to {}h.", self.timeline_window_hours);
-                self.rebuild_live_model();
+                });
             }
-            Action::ToggleWorkoutFilter => {
-                self.overlay_filters.workouts = !self.overlay_filters.workouts;
-                self.normalize_event_selection();
-                self.rebuild_live_model();
-                self.status_line = format!(
-                    "Workout overlays {}.",
-                    if self.overlay_filters.workouts {
-                        "enabled"
-                    } else {
-                        "hidden"
-                    }
-                );
-            }
-            Action::ToggleTagFilter => {
-                self.overlay_filters.tags = !self.overlay_filters.tags;
-                self.normalize_event_selection();
-                self.rebuild_live_model();
-                self.status_line = format!(
-                    "Tag overlays {}.",
-                    if self.overlay_filters.tags {
-                        "enabled"
-                    } else {
-                        "hidden"
-                    }
-                );
-            }
-            Action::ToggleSessionFilter => {
-                self.overlay_filters.sessions = !self.overlay_filters.sessions;
-                self.normalize_event_selection();
-                self.rebuild_live_model();
-                self.status_line = format!(
-                    "Session overlays {}.",
-                    if self.overlay_filters.sessions {
-                        "enabled"
-                    } else {
-                        "hidden"
-                    }
-                );
-            }
+            Action::ToggleWorkoutFilter => self.select_overlay_toggle_and_toggle(0),
+            Action::ToggleTagFilter => self.select_overlay_toggle_and_toggle(1),
+            Action::ToggleSessionFilter => self.select_overlay_toggle_and_toggle(2),
+            _ => unreachable!("day/timeline handler only receives day/timeline actions"),
+        }
+    }
+
+    fn handle_review_action(&mut self, action: &Action) {
+        match action {
             Action::PreviousTrendWindow => {
                 self.trends_window = self.trends_window.previous();
                 self.status_line =
@@ -782,14 +979,7 @@ impl AppState {
                     format!("Trend window changed to {}.", self.trends_window.label());
                 self.rebuild_live_model();
             }
-            Action::CyclePatternMetric => {
-                self.pattern_metric_filter = self.pattern_metric_filter.next();
-                self.status_line = format!(
-                    "Pattern metric filter: {}.",
-                    self.pattern_metric_filter.label()
-                );
-                self.rebuild_live_model();
-            }
+            Action::CyclePatternMetric => self.move_pattern_metric(NavMove::Next),
             Action::CycleReviewMode => {
                 self.review_mode = self.review_mode.next();
                 self.selected_review_card_index = 0;
@@ -820,29 +1010,34 @@ impl AppState {
                     self.rebuild_live_model();
                 }
             }
+            _ => unreachable!("review handler only receives trend/review actions"),
+        }
+    }
+
+    fn handle_ai_action(&mut self, action: Action) {
+        match action {
             Action::RequestAiLaunch(intent) => {
-                self.active_screen = Screen::Ai;
-                self.status_line = format!("Preparing {} preflight.", intent.label());
                 self.ai_preflight = None;
-                self.rebuild_live_model();
+                self.enter_ai_screen(format!("Preparing {} preflight.", intent.label()), true);
             }
             Action::AiPreflightPrepared {
                 preflight,
                 status_line,
             } => {
-                self.active_screen = Screen::Ai;
+                self.enter_ai_screen(status_line, false);
                 self.ai_preflight = Some(*preflight);
-                self.status_line = status_line;
+                self.ai_preflight_control = PreflightControl::Confirm;
                 self.rebuild_live_model();
             }
             Action::AiPreflightFailed { message } => {
-                self.active_screen = Screen::Ai;
+                self.enter_ai_screen(message, false);
                 self.ai_preflight = None;
-                self.status_line = message;
+                self.ai_preflight_control = PreflightControl::Confirm;
                 self.rebuild_live_model();
             }
             Action::DismissAiPreflight => {
                 if self.ai_preflight.take().is_some() {
+                    self.ai_preflight_control = PreflightControl::Confirm;
                     "AI preflight dismissed.".clone_into(&mut self.status_line);
                     self.rebuild_live_model();
                 }
@@ -870,125 +1065,212 @@ impl AppState {
                 "Requesting AI run cancellation.".clone_into(&mut self.status_line);
             }
             Action::RequestAiGuidedFollowUp(kind) => {
-                self.active_screen = Screen::Ai;
-                self.status_line = format!("Preparing {} follow-up.", kind.label());
+                self.enter_ai_screen(format!("Preparing {} follow-up.", kind.label()), false);
             }
             Action::RequestAiRerunNextPrivacy => {
-                self.active_screen = Screen::Ai;
-                "Preparing rerun with another privacy profile.".clone_into(&mut self.status_line);
+                self.enter_ai_screen(
+                    "Preparing rerun with another privacy profile.".to_owned(),
+                    false,
+                );
             }
             Action::RequestAiRerunNextModel => {
-                self.active_screen = Screen::Ai;
-                "Preparing rerun with another model.".clone_into(&mut self.status_line);
+                self.enter_ai_screen("Preparing rerun with another model.".to_owned(), false);
             }
             Action::RequestAiComparePreviousSnapshot => {
-                self.active_screen = Screen::Ai;
-                "Preparing compare against the nearest previous similar snapshot."
-                    .clone_into(&mut self.status_line);
+                self.enter_ai_screen(
+                    "Preparing compare against the nearest previous similar snapshot.".to_owned(),
+                    false,
+                );
             }
             Action::RequestAiGenerateReport => {
-                self.active_screen = Screen::Ai;
-                "Exporting a local report for the selected AI artifact."
-                    .clone_into(&mut self.status_line);
+                self.enter_ai_screen(
+                    "Exporting a local report for the selected AI artifact.".to_owned(),
+                    false,
+                );
             }
             Action::RequestJumpToAiEvidence => {
-                self.active_screen = Screen::Ai;
-                "Resolving saved evidence back into the local investigation views."
-                    .clone_into(&mut self.status_line);
+                self.enter_ai_screen(
+                    "Resolving saved evidence back into the local investigation views.".to_owned(),
+                    false,
+                );
             }
             Action::JumpToDayAndScreen {
                 day,
                 screen,
                 status_line,
-            } => {
-                if self.select_day_by_label(&day) {
-                    self.active_screen = screen;
-                    self.status_line = status_line;
-                    self.rebuild_live_model();
-                } else {
-                    self.status_line = format!(
-                        "Could not resolve saved evidence day `{day}` back into the local views."
-                    );
-                }
-            }
+            } => self.handle_jump_to_day_and_screen(&day, screen, status_line),
             Action::JumpToAiBrowserRecord {
                 tab,
                 record_id,
                 status_line,
-            } => {
-                if self.select_ai_browser_record(tab, &record_id) {
-                    self.active_screen = Screen::Ai;
-                    self.status_line = status_line;
-                    self.rebuild_live_model();
-                } else {
-                    self.status_line = format!(
-                        "Could not resolve saved {} `{record_id}` back into the local AI registry.",
-                        tab.label()
-                    );
-                }
-            }
-            Action::PreviousAiBrowserTab => {
-                self.ai_browser_tab = self.ai_browser_tab.previous();
-                self.status_line =
-                    format!("AI browser switched to {}.", self.ai_browser_tab.label());
-                self.rebuild_live_model();
-            }
-            Action::NextAiBrowserTab => {
-                self.ai_browser_tab = self.ai_browser_tab.next();
-                self.status_line =
-                    format!("AI browser switched to {}.", self.ai_browser_tab.label());
-                self.rebuild_live_model();
-            }
-            Action::PreviousAiBrowserItem => {
-                if self.adjust_ai_browser_index(-1) {
-                    self.status_line =
-                        format!("AI selection moved within {}.", self.ai_browser_tab.label());
-                    self.rebuild_live_model();
-                }
-            }
-            Action::NextAiBrowserItem => {
-                if self.adjust_ai_browser_index(1) {
-                    self.status_line =
-                        format!("AI selection moved within {}.", self.ai_browser_tab.label());
-                    self.rebuild_live_model();
-                }
-            }
+            } => self.handle_jump_to_ai_browser_record(tab, &record_id, status_line),
+            Action::PreviousAiBrowserTab => self.move_ai_browser_tab(AiBrowserTab::previous),
+            Action::NextAiBrowserTab => self.move_ai_browser_tab(AiBrowserTab::next),
+            Action::PreviousAiBrowserItem => self.move_ai_browser_item(-1),
+            Action::NextAiBrowserItem => self.move_ai_browser_item(1),
+            _ => unreachable!("AI handler only receives AI-specific actions"),
+        }
+    }
+
+    fn switch_screen(&mut self, screen: Screen, status_line: String, rebuild: bool) {
+        if screen != Screen::Ai && self.ai_preflight.is_some() {
+            self.ai_preflight = None;
+            self.ai_preflight_control = PreflightControl::Confirm;
+        }
+        self.active_screen = screen;
+        self.focused_top_nav_screen = screen;
+        self.restore_screen_focus();
+        self.status_line = status_line;
+        if rebuild {
+            self.rebuild_live_model();
+        }
+    }
+
+    fn enter_ai_screen(&mut self, status_line: String, rebuild: bool) {
+        self.switch_screen(Screen::Ai, status_line, rebuild);
+    }
+
+    fn reset_day_navigation(&mut self) {
+        self.selected_timeline_point = 0;
+        self.selected_review_card_index = 0;
+        self.select_default_event_for_selected_day();
+        self.align_point_to_selected_event();
+    }
+
+    fn handle_relative_event(&mut self, delta: isize, status_line: &str) {
+        if self.select_relative_event(delta) {
+            self.align_point_to_selected_event();
+            status_line.clone_into(&mut self.status_line);
+            self.rebuild_live_model();
+        }
+    }
+
+    fn select_overlay_toggle_and_toggle(&mut self, index: usize) {
+        self.selected_overlay_toggle_index = index;
+        self.toggle_overlay_filter(index);
+    }
+
+    fn handle_jump_to_day_and_screen(&mut self, day: &str, screen: Screen, status_line: String) {
+        if self.select_day_by_label(day) {
+            self.switch_screen(screen, status_line, true);
+        } else {
+            self.status_line =
+                format!("Could not resolve saved evidence day `{day}` back into the local views.");
+        }
+    }
+
+    fn handle_jump_to_ai_browser_record(
+        &mut self,
+        tab: AiBrowserTab,
+        record_id: &str,
+        status_line: String,
+    ) {
+        if self.select_ai_browser_record(tab, record_id) {
+            self.enter_ai_screen(status_line, true);
+        } else {
+            self.status_line = format!(
+                "Could not resolve saved {} `{record_id}` back into the local AI registry.",
+                tab.label()
+            );
+        }
+    }
+
+    fn move_ai_browser_tab(&mut self, movement: impl FnOnce(AiBrowserTab) -> AiBrowserTab) {
+        self.ai_browser_tab = movement(self.ai_browser_tab);
+        self.selected_ai_artifact_action_index = 0;
+        self.status_line = format!("AI browser switched to {}.", self.ai_browser_tab.label());
+        self.rebuild_live_model();
+    }
+
+    fn move_ai_browser_item(&mut self, delta: isize) {
+        if self.adjust_ai_browser_index(delta) {
+            self.selected_ai_artifact_action_index = 0;
+            self.status_line =
+                format!("AI selection moved within {}.", self.ai_browser_tab.label());
+            self.rebuild_live_model();
         }
     }
 
     #[must_use]
     pub fn footer(&self) -> String {
         let spinner = ["·", "o", "O", "o"][(self.tick_count % 4) as usize];
-        let screen_hint = match self.active_screen {
-            Screen::Dashboard => "[ ] day | a review | c compare | 1-8 jump",
-            Screen::Timeline => "[ ] day | , . hr | j k event | -/= zoom | w/t/s filters",
-            Screen::Trends => "[ ] window",
-            Screen::Explain => "[ ] day | j k event | a review | w/t/s filters",
-            Screen::Patterns => "w/t/s family | m metric | c compare",
-            Screen::Review => "[ ] day | v mode | f focus | j k cards | a/c AI",
-            Screen::Ai if self.ai_preflight.is_some() => {
-                "enter confirm | n cancel | p privacy | 1-8 jump"
-            }
-            Screen::Ai => {
-                "[ ] tab | j k select | a/c launch | e/y/i/d follow-up | g report | u/m rerun | b baseline | o evidence | x cancel run"
-            }
-            Screen::Ops => "1-8 jump",
-        };
         let refresh_hint = if self.refresh_in_flight {
             "refreshing"
         } else {
             "r refresh"
         };
+        let region = navigation::region_label(self.active_screen, self.focused_region)
+            .unwrap_or_else(|| self.active_screen.title());
+        let hints = crate::keybindings::footer_hints(self.binding_context());
+        let hint_text = if hints.is_empty() {
+            "No contextual keys".to_owned()
+        } else {
+            hints.join(" | ")
+        };
 
         format!(
-            "{spinner} {} | {} | {} | q quit",
-            self.status_line, screen_hint, refresh_hint
+            "{spinner} {} | Focus: {} | {} | {}",
+            self.status_line, region, hint_text, refresh_hint
         )
     }
 
     #[must_use]
-    pub fn active_tab_index(&self) -> usize {
+    pub const fn active_tab_index(&self) -> usize {
         self.active_screen.index()
+    }
+
+    #[must_use]
+    pub const fn focused_region(&self) -> FocusRegion {
+        self.focused_region
+    }
+
+    #[must_use]
+    pub const fn focused_top_nav_screen(&self) -> Screen {
+        self.focused_top_nav_screen
+    }
+
+    #[must_use]
+    pub const fn help_open(&self) -> bool {
+        self.help_open
+    }
+
+    #[must_use]
+    pub const fn search_state(&self) -> Option<&SearchState> {
+        self.search.as_ref()
+    }
+
+    #[must_use]
+    pub const fn ai_preflight_control(&self) -> PreflightControl {
+        self.ai_preflight_control
+    }
+
+    #[must_use]
+    pub const fn binding_context(&self) -> BindingContext {
+        BindingContext {
+            active_screen: self.active_screen,
+            focused_region: self.focused_region,
+            search_open: self.search.is_some(),
+            help_open: self.help_open,
+            ai_preflight_open: self.ai_preflight.is_some(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_region_focused(&self, region: FocusRegion) -> bool {
+        self.focused_region == region && self.current_transient().is_none()
+    }
+
+    #[must_use]
+    pub const fn current_transient(&self) -> Option<TransientLayer> {
+        if self.search.is_some() {
+            Some(TransientLayer::Search)
+        } else if self.help_open {
+            Some(TransientLayer::Help)
+        } else if self.ai_preflight.is_some() {
+            Some(TransientLayer::AiPreflight)
+        } else {
+            None
+        }
     }
 
     fn replace_live_snapshot(&mut self, snapshot: LiveSnapshot) {
@@ -1025,12 +1307,16 @@ impl AppState {
                     selected_point_index: self.selected_timeline_point,
                     selected_event_id: self.selected_event_id.clone(),
                     ai_preflight: self.ai_preflight.clone(),
+                    ai_preflight_control: self.ai_preflight_control,
                     ai_browser_tab: self.ai_browser_tab,
+                    selected_ai_launch_index: self.selected_ai_launch_index,
                     selected_ai_run_index: self.selected_ai_run_index,
                     selected_snapshot_catalog_index: self.selected_snapshot_catalog_index,
                     selected_report_export_index: self.selected_report_export_index,
                     selected_ai_eval_run_index: self.selected_ai_eval_run_index,
+                    selected_ai_artifact_action_index: self.selected_ai_artifact_action_index,
                     overlay_filters: self.overlay_filters.clone(),
+                    selected_overlay_toggle_index: self.selected_overlay_toggle_index,
                     window_hours: self.timeline_window_hours,
                     trends_window: self.trends_window,
                     pattern_metric_filter: self.pattern_metric_filter,
@@ -1057,7 +1343,7 @@ impl AppState {
         })
     }
 
-    pub(crate) fn ai_preflight_state(&self) -> Option<&AiPreflightState> {
+    pub(crate) const fn ai_preflight_state(&self) -> Option<&AiPreflightState> {
         self.ai_preflight.as_ref()
     }
 
@@ -1097,7 +1383,7 @@ impl AppState {
             .cloned()
     }
 
-    pub(crate) fn selected_ai_browser_tab(&self) -> AiBrowserTab {
+    pub(crate) const fn selected_ai_browser_tab(&self) -> AiBrowserTab {
         self.ai_browser_tab
     }
 
@@ -1129,6 +1415,7 @@ impl AppState {
         };
         if found.is_some() {
             self.ai_browser_tab = tab;
+            self.selected_ai_artifact_action_index = 0;
             true
         } else {
             false
@@ -1166,7 +1453,7 @@ impl AppState {
             .unwrap_or(0)
     }
 
-    fn current_review_card_count(&self) -> usize {
+    const fn current_review_card_count(&self) -> usize {
         self.model.review.cards.len()
     }
 
@@ -1287,7 +1574,7 @@ impl AppState {
             current_index.saturating_sub(delta.unsigned_abs())
         } else {
             usize::min(
-                current_index.saturating_add(delta as usize),
+                current_index.saturating_add(delta.cast_unsigned()),
                 events.len().saturating_sub(1),
             )
         };
@@ -1329,13 +1616,847 @@ impl AppState {
             selected.saturating_sub(delta.unsigned_abs())
         } else {
             usize::min(
-                selected.saturating_add(delta as usize),
+                selected.saturating_add(delta.cast_unsigned()),
                 len.saturating_sub(1),
             )
         };
         let changed = *selected != new_index;
         *selected = new_index;
         changed
+    }
+
+    fn set_focused_region(&mut self, region: FocusRegion) {
+        self.focused_region = region;
+        if region != FocusRegion::TopNav {
+            self.screen_focus_memory[self.active_screen.index()] = region;
+        }
+        if region == FocusRegion::TopNav {
+            self.focused_top_nav_screen = self.active_screen;
+        }
+    }
+
+    const fn restore_screen_focus(&mut self) {
+        let region = self.screen_focus_memory[self.active_screen.index()];
+        self.focused_region = region;
+    }
+
+    fn move_focused_region(&mut self, movement: NavMove) {
+        if self.search.is_some() {
+            match movement {
+                NavMove::Previous | NavMove::PageBackward => self.advance_search(false),
+                NavMove::Next | NavMove::PageForward => self.advance_search(true),
+                NavMove::First => self.advance_search_to_edge(true),
+                NavMove::Last => self.advance_search_to_edge(false),
+            }
+            return;
+        }
+        if self.help_open {
+            return;
+        }
+        if self.ai_preflight.is_some() {
+            self.ai_preflight_control = match movement {
+                NavMove::Previous => self.ai_preflight_control.previous(),
+                NavMove::Next => self.ai_preflight_control.next(),
+                NavMove::First | NavMove::PageBackward => PreflightControl::Confirm,
+                NavMove::Last | NavMove::PageForward => PreflightControl::Cancel,
+            };
+            self.status_line = format!(
+                "Focused {}.",
+                self.ai_preflight_control.label().to_ascii_lowercase()
+            );
+            return;
+        }
+
+        match (self.active_screen, self.focused_region) {
+            (_, FocusRegion::TopNav) => self.move_top_nav_focus(movement),
+            (Screen::Timeline, FocusRegion::ContextPrimary) => {
+                self.move_timeline_window_preset(movement);
+            }
+            (Screen::Timeline | Screen::Patterns, FocusRegion::ContextSecondary)
+            | (Screen::Explain, FocusRegion::ContextPrimary) => {
+                self.move_overlay_toggle_selection(movement);
+            }
+            (Screen::Timeline, FocusRegion::Primary) => {
+                self.move_timeline_chart(movement);
+            }
+            (Screen::Timeline, FocusRegion::Secondary) => {
+                self.move_timeline_events(movement);
+            }
+            (Screen::Trends, FocusRegion::ContextPrimary) => {
+                self.move_trend_window(movement);
+            }
+            (Screen::Patterns, FocusRegion::ContextPrimary) => {
+                self.move_pattern_metric(movement);
+            }
+            (Screen::Review, FocusRegion::ContextPrimary) => {
+                self.move_review_mode(movement);
+            }
+            (Screen::Review, FocusRegion::ContextSecondary) => {
+                self.move_review_focus(movement);
+            }
+            (Screen::Review, FocusRegion::Primary) => {
+                self.move_review_cards(movement);
+            }
+            (Screen::Ai, FocusRegion::ContextPrimary) => {
+                self.move_ai_browser_tabs(movement);
+            }
+            (Screen::Ai, FocusRegion::Primary) => {
+                self.move_ai_launch_points(movement);
+            }
+            (Screen::Ai, FocusRegion::Secondary) => {
+                self.move_ai_browser_items(movement);
+            }
+            (Screen::Ai, FocusRegion::Tertiary) => {
+                self.move_ai_artifact_actions(movement);
+            }
+            (screen, FocusRegion::Primary) => {
+                if matches!(movement, NavMove::PageBackward)
+                    && Self::screen_supports_day_paging(screen)
+                {
+                    self.handle(Action::PreviousDay);
+                } else if matches!(movement, NavMove::PageForward)
+                    && Self::screen_supports_day_paging(screen)
+                {
+                    self.handle(Action::NextDay);
+                }
+            }
+            (screen, _) if Self::screen_supports_day_paging(screen) => match movement {
+                NavMove::PageBackward => {
+                    self.handle(Action::PreviousDay);
+                }
+                NavMove::PageForward => {
+                    self.handle(Action::NextDay);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn activate_focused_region(&mut self, emitted: &mut Vec<Action>) {
+        if self.search.is_some() {
+            self.advance_search(true);
+            return;
+        }
+        if self.help_open {
+            self.toggle_help();
+            return;
+        }
+        if self.ai_preflight.is_some() {
+            match self.ai_preflight_control {
+                PreflightControl::Confirm => {
+                    self.dispatch_emitted_action(Action::ConfirmAiPreflight, emitted);
+                }
+                PreflightControl::Privacy => {
+                    self.dispatch_emitted_action(Action::CycleAiPreflightPrivacyProfile, emitted);
+                }
+                PreflightControl::Cancel => {
+                    self.dispatch_emitted_action(Action::DismissAiPreflight, emitted);
+                }
+            }
+            return;
+        }
+
+        match (self.active_screen, self.focused_region) {
+            (_, FocusRegion::TopNav) => {
+                self.active_screen = self.focused_top_nav_screen;
+                self.restore_screen_focus();
+                self.status_line = format!("Switched to {}.", self.active_screen.title());
+            }
+            (Screen::Timeline | Screen::Patterns, FocusRegion::ContextSecondary)
+            | (Screen::Explain, FocusRegion::ContextPrimary) => {
+                self.toggle_selected_overlay_filter();
+            }
+            (Screen::Timeline, FocusRegion::Secondary) => {
+                self.set_focused_region(FocusRegion::Tertiary);
+                "Inspecting selected event details.".clone_into(&mut self.status_line);
+            }
+            (Screen::Timeline, FocusRegion::Tertiary) => {
+                self.set_focused_region(FocusRegion::Secondary);
+                "Returned to day events.".clone_into(&mut self.status_line);
+            }
+            (Screen::Review, FocusRegion::Primary) => {
+                self.set_focused_region(FocusRegion::Secondary);
+                "Inspecting selected review brief.".clone_into(&mut self.status_line);
+            }
+            (Screen::Review, FocusRegion::Secondary) => {
+                self.set_focused_region(FocusRegion::Primary);
+                "Returned to ranked observations.".clone_into(&mut self.status_line);
+            }
+            (Screen::Ai, FocusRegion::Primary) => match self.selected_ai_launch_index() {
+                0 => self.dispatch_emitted_action(
+                    Action::RequestAiLaunch(AiLaunchIntent::ReviewSelectedDay),
+                    emitted,
+                ),
+                1 => self.dispatch_emitted_action(
+                    Action::RequestAiLaunch(AiLaunchIntent::CompareSelectedWeek),
+                    emitted,
+                ),
+                _ => {}
+            },
+            (Screen::Ai, FocusRegion::Secondary) => {
+                self.set_focused_region(FocusRegion::Tertiary);
+                "Focused artifact actions for the selected saved item."
+                    .clone_into(&mut self.status_line);
+            }
+            (Screen::Ai, FocusRegion::Tertiary) => {
+                if let Some(action) = self.current_ai_artifact_action() {
+                    self.dispatch_emitted_action(action, emitted);
+                } else {
+                    "No direct actions are available for the selected saved artifact."
+                        .clone_into(&mut self.status_line);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn back_out(&mut self) {
+        if self.search.is_some() {
+            self.close_search();
+            return;
+        }
+        if self.help_open {
+            self.toggle_help();
+            return;
+        }
+        if self.ai_preflight.take().is_some() {
+            self.ai_preflight_control = PreflightControl::Confirm;
+            "AI preflight dismissed.".clone_into(&mut self.status_line);
+            self.rebuild_live_model();
+            return;
+        }
+
+        if self.focused_region != FocusRegion::TopNav {
+            let region = navigation::previous_region(self.active_screen, self.focused_region);
+            self.set_focused_region(region);
+            self.status_line = format!(
+                "Focused {}.",
+                navigation::region_label(self.active_screen, region).unwrap_or("navigation")
+            );
+        }
+    }
+
+    fn toggle_help(&mut self) {
+        if self.help_open {
+            self.help_open = false;
+            if let Some(region) = self.focus_before_help.take() {
+                self.set_focused_region(region);
+            }
+            "Closed keyboard help.".clone_into(&mut self.status_line);
+        } else {
+            if let Some(search) = self.search.take() {
+                self.set_focused_region(search.previous_region);
+            }
+            self.focus_before_help = Some(self.focused_region);
+            self.help_open = true;
+            "Opened keyboard help.".clone_into(&mut self.status_line);
+        }
+    }
+
+    fn open_search(&mut self) {
+        let Some(scope) = navigation::search_scope(self.active_screen, self.focused_region)
+            .or_else(|| navigation::default_search_scope(self.active_screen))
+        else {
+            self.status_line = format!(
+                "Search is not available in {}.",
+                navigation::region_label(self.active_screen, self.focused_region)
+                    .unwrap_or_else(|| self.active_screen.title())
+            );
+            return;
+        };
+        self.help_open = false;
+        self.focus_before_help = None;
+
+        let previous_region = self.focused_region;
+        self.search = Some(SearchState {
+            scope,
+            query: String::new(),
+            active_match_index: 0,
+            total_matches: 0,
+            previous_region,
+        });
+        "Find opened. Type to search the current list.".clone_into(&mut self.status_line);
+    }
+
+    fn close_search(&mut self) {
+        if let Some(search) = self.search.take() {
+            self.set_focused_region(search.previous_region);
+            "Closed search.".clone_into(&mut self.status_line);
+        }
+    }
+
+    fn append_search_character(&mut self, character: char) {
+        if let Some(search) = self.search.as_mut() {
+            search.query.push(character);
+            self.advance_search_to_edge(true);
+        }
+    }
+
+    fn backspace_search(&mut self) {
+        if let Some(search) = self.search.as_mut() {
+            search.query.pop();
+            self.advance_search_to_edge(true);
+        }
+    }
+
+    fn advance_search_to_edge(&mut self, first: bool) {
+        let Some((scope, query)) = self
+            .search
+            .as_ref()
+            .map(|search| (search.scope, search.query.clone()))
+        else {
+            return;
+        };
+        let matches = self.search_matches(scope, &query);
+        if matches.is_empty() {
+            if let Some(search) = self.search.as_mut() {
+                search.total_matches = 0;
+                search.active_match_index = 0;
+            }
+            self.status_line = format!("No matches for `{query}`.");
+            return;
+        }
+        let match_index = if first {
+            0
+        } else {
+            matches.len().saturating_sub(1)
+        };
+        self.apply_search_match(scope, &matches, match_index);
+    }
+
+    fn advance_search(&mut self, forward: bool) {
+        let Some((scope, query, current)) = self.search.as_ref().map(|search| {
+            (
+                search.scope,
+                search.query.clone(),
+                search.active_match_index,
+            )
+        }) else {
+            return;
+        };
+        let matches = self.search_matches(scope, &query);
+        if matches.is_empty() {
+            self.status_line = format!("No matches for `{query}`.");
+            return;
+        }
+        let next = if forward {
+            (current + 1) % matches.len()
+        } else if current == 0 {
+            matches.len().saturating_sub(1)
+        } else {
+            current - 1
+        };
+        self.apply_search_match(scope, &matches, next);
+    }
+
+    fn apply_search_match(&mut self, scope: SearchScope, matches: &[usize], match_index: usize) {
+        let Some(item_index) = matches.get(match_index).copied() else {
+            return;
+        };
+        match scope {
+            SearchScope::TimelineEvents => {
+                self.select_timeline_event_at(item_index);
+            }
+            SearchScope::ReviewCards => {
+                self.selected_review_card_index = item_index;
+                self.rebuild_live_model();
+            }
+            SearchScope::AiBrowserItems => {
+                self.set_ai_browser_index(item_index);
+                self.rebuild_live_model();
+            }
+        }
+        if let Some(search) = self.search.as_mut() {
+            search.total_matches = matches.len();
+            search.active_match_index = match_index;
+        }
+        let query = self
+            .search
+            .as_ref()
+            .map(|search| search.query.clone())
+            .unwrap_or_default();
+        self.status_line = format!(
+            "Match {} of {} for `{}`.",
+            match_index + 1,
+            matches.len(),
+            query
+        );
+    }
+
+    fn search_matches(&self, scope: SearchScope, query: &str) -> Vec<usize> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let needle = query.to_ascii_lowercase();
+        match scope {
+            SearchScope::TimelineEvents => self
+                .model
+                .timeline
+                .events
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| {
+                    format!("{} {}", item.headline, item.detail)
+                        .to_ascii_lowercase()
+                        .contains(&needle)
+                })
+                .map(|(index, _)| index)
+                .collect(),
+            SearchScope::ReviewCards => self
+                .model
+                .review
+                .cards
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| {
+                    format!(
+                        "{} {} {}",
+                        item.headline, item.confidence_label, item.section_label
+                    )
+                    .to_ascii_lowercase()
+                    .contains(&needle)
+                })
+                .map(|(index, _)| index)
+                .collect(),
+            SearchScope::AiBrowserItems => self
+                .model
+                .ai
+                .browser_items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| {
+                    format!("{} {}", item.headline, item.detail)
+                        .to_ascii_lowercase()
+                        .contains(&needle)
+                })
+                .map(|(index, _)| index)
+                .collect(),
+        }
+    }
+
+    fn move_top_nav_focus(&mut self, movement: NavMove) {
+        self.focused_top_nav_screen = match movement {
+            NavMove::Previous => self.focused_top_nav_screen.previous(),
+            NavMove::Next => self.focused_top_nav_screen.next(),
+            NavMove::First | NavMove::PageBackward => Screen::Dashboard,
+            NavMove::Last | NavMove::PageForward => Screen::Ops,
+        };
+        self.status_line = format!(
+            "Focused {} in primary navigation.",
+            self.focused_top_nav_screen.title()
+        );
+    }
+
+    fn move_timeline_window_preset(&mut self, movement: NavMove) {
+        let current = timeline_window_preset_index(self.timeline_window_hours);
+        let last = TIMELINE_WINDOW_PRESETS.len().saturating_sub(1);
+        let next = match movement {
+            NavMove::Previous => current.saturating_sub(1),
+            NavMove::Next => usize::min(current + 1, last),
+            NavMove::First | NavMove::PageBackward => 0,
+            NavMove::Last | NavMove::PageForward => last,
+        };
+        self.set_timeline_window_hours(TIMELINE_WINDOW_PRESETS[next]);
+    }
+
+    fn move_overlay_toggle_selection(&mut self, movement: NavMove) {
+        let current = self
+            .selected_overlay_toggle_index
+            .min(overlay_toggle_count() - 1);
+        let last = overlay_toggle_count().saturating_sub(1);
+        self.selected_overlay_toggle_index = match movement {
+            NavMove::Previous => current.saturating_sub(1),
+            NavMove::Next => usize::min(current + 1, last),
+            NavMove::First | NavMove::PageBackward => 0,
+            NavMove::Last | NavMove::PageForward => last,
+        };
+        let selected = overlay_toggle_descriptor(self.selected_overlay_toggle_index);
+        self.status_line = format!("Focused {} overlays.", selected.label.to_ascii_lowercase());
+        self.rebuild_live_model();
+    }
+
+    fn set_timeline_window_hours(&mut self, window_hours: u16) {
+        self.timeline_window_hours = window_hours;
+        self.align_point_to_selected_event();
+        self.status_line = format!("Timeline window set to {}h.", self.timeline_window_hours);
+        self.rebuild_live_model();
+    }
+
+    fn toggle_selected_overlay_filter(&mut self) {
+        self.toggle_overlay_filter(self.selected_overlay_toggle_index);
+    }
+
+    fn toggle_overlay_filter(&mut self, index: usize) {
+        let descriptor = overlay_toggle_descriptor(index);
+        let enabled = match descriptor.family {
+            ContextEventFamily::Workout => {
+                self.overlay_filters.workouts = !self.overlay_filters.workouts;
+                self.overlay_filters.workouts
+            }
+            ContextEventFamily::Tag | ContextEventFamily::EnhancedTag => {
+                self.overlay_filters.tags = !self.overlay_filters.tags;
+                self.overlay_filters.tags
+            }
+            ContextEventFamily::Session => {
+                self.overlay_filters.sessions = !self.overlay_filters.sessions;
+                self.overlay_filters.sessions
+            }
+        };
+        self.selected_overlay_toggle_index = index.min(overlay_toggle_count() - 1);
+        self.normalize_event_selection();
+        self.rebuild_live_model();
+        self.status_line = format!(
+            "{} overlays {}.",
+            descriptor.label,
+            if enabled { "enabled" } else { "hidden" }
+        );
+    }
+
+    fn move_timeline_chart(&mut self, movement: NavMove) {
+        match movement {
+            NavMove::Previous => {
+                self.handle(Action::PreviousTimelinePoint);
+            }
+            NavMove::Next => {
+                self.handle(Action::NextTimelinePoint);
+            }
+            NavMove::First => {
+                self.selected_timeline_point = 0;
+                self.select_nearest_event_for_current_point();
+                self.rebuild_live_model();
+                "Moved to the first heartrate point.".clone_into(&mut self.status_line);
+            }
+            NavMove::Last => {
+                self.selected_timeline_point =
+                    self.visible_timeline_point_count().saturating_sub(1);
+                self.select_nearest_event_for_current_point();
+                self.rebuild_live_model();
+                "Moved to the last heartrate point.".clone_into(&mut self.status_line);
+            }
+            NavMove::PageBackward => {
+                self.handle(Action::PreviousDay);
+            }
+            NavMove::PageForward => {
+                self.handle(Action::NextDay);
+            }
+        }
+    }
+
+    fn move_timeline_events(&mut self, movement: NavMove) {
+        match movement {
+            NavMove::Previous => {
+                self.handle(Action::PreviousEvent);
+            }
+            NavMove::Next => {
+                self.handle(Action::NextEvent);
+            }
+            NavMove::First => {
+                self.select_timeline_event_at(0);
+            }
+            NavMove::Last => {
+                let last = self.model.timeline.events.len().saturating_sub(1);
+                self.select_timeline_event_at(last);
+            }
+            NavMove::PageBackward => {
+                self.select_relative_event(-5);
+                self.align_point_to_selected_event();
+                self.rebuild_live_model();
+            }
+            NavMove::PageForward => {
+                self.select_relative_event(5);
+                self.align_point_to_selected_event();
+                self.rebuild_live_model();
+            }
+        }
+    }
+
+    fn move_trend_window(&mut self, movement: NavMove) {
+        self.trends_window = match movement {
+            NavMove::Previous => self.trends_window.previous(),
+            NavMove::Next => self.trends_window.next(),
+            NavMove::First | NavMove::PageBackward => TrendWindowKind::Days7,
+            NavMove::Last | NavMove::PageForward => TrendWindowKind::Days90,
+        };
+        self.status_line = format!("Trend window changed to {}.", self.trends_window.label());
+        self.rebuild_live_model();
+    }
+
+    fn move_pattern_metric(&mut self, movement: NavMove) {
+        self.pattern_metric_filter = match movement {
+            NavMove::Previous => self.pattern_metric_filter.previous(),
+            NavMove::Next => self.pattern_metric_filter.next(),
+            NavMove::First | NavMove::PageBackward => PatternMetricFilter::All,
+            NavMove::Last | NavMove::PageForward => PatternMetricFilter::Sleep,
+        };
+        self.status_line = format!(
+            "Pattern metric filter changed to {}.",
+            self.pattern_metric_filter.label()
+        );
+        self.rebuild_live_model();
+    }
+
+    fn move_review_mode(&mut self, movement: NavMove) {
+        self.review_mode = match movement {
+            NavMove::Previous => match self.review_mode {
+                ReviewScreenMode::Today => ReviewScreenMode::Investigate,
+                ReviewScreenMode::Week => ReviewScreenMode::Today,
+                ReviewScreenMode::Investigate => ReviewScreenMode::Week,
+            },
+            NavMove::Next => self.review_mode.next(),
+            NavMove::First | NavMove::PageBackward => ReviewScreenMode::Today,
+            NavMove::Last | NavMove::PageForward => ReviewScreenMode::Investigate,
+        };
+        self.selected_review_card_index = 0;
+        self.status_line = format!("Review mode changed to {}.", self.review_mode.label());
+        self.rebuild_live_model();
+    }
+
+    fn move_review_focus(&mut self, movement: NavMove) {
+        let all = ReviewFocus::ALL;
+        let current = all
+            .iter()
+            .position(|focus| *focus == self.review_focus)
+            .unwrap_or(0);
+        let next = match movement {
+            NavMove::Previous => {
+                if current == 0 {
+                    all.len().saturating_sub(1)
+                } else {
+                    current - 1
+                }
+            }
+            NavMove::Next => (current + 1) % all.len(),
+            NavMove::First | NavMove::PageBackward => 0,
+            NavMove::Last | NavMove::PageForward => all.len().saturating_sub(1),
+        };
+        self.review_focus = all[next];
+        self.selected_review_card_index = 0;
+        self.status_line = format!(
+            "Investigation focus changed to {}.",
+            self.review_focus.label()
+        );
+        self.rebuild_live_model();
+    }
+
+    fn move_review_cards(&mut self, movement: NavMove) {
+        match movement {
+            NavMove::Previous => {
+                self.handle(Action::PreviousReviewCard);
+            }
+            NavMove::Next => {
+                self.handle(Action::NextReviewCard);
+            }
+            NavMove::First => {
+                self.selected_review_card_index = 0;
+                self.rebuild_live_model();
+                "Moved to the first review card.".clone_into(&mut self.status_line);
+            }
+            NavMove::Last => {
+                self.selected_review_card_index =
+                    self.current_review_card_count().saturating_sub(1);
+                self.rebuild_live_model();
+                "Moved to the last review card.".clone_into(&mut self.status_line);
+            }
+            NavMove::PageBackward => {
+                self.selected_review_card_index = self.selected_review_card_index.saturating_sub(5);
+                self.rebuild_live_model();
+                "Jumped earlier in the review deck.".clone_into(&mut self.status_line);
+            }
+            NavMove::PageForward => {
+                let max_index = self.current_review_card_count().saturating_sub(1);
+                self.selected_review_card_index =
+                    usize::min(self.selected_review_card_index.saturating_add(5), max_index);
+                self.rebuild_live_model();
+                "Jumped later in the review deck.".clone_into(&mut self.status_line);
+            }
+        }
+    }
+
+    fn move_ai_browser_tabs(&mut self, movement: NavMove) {
+        self.ai_browser_tab = match movement {
+            NavMove::Previous => self.ai_browser_tab.previous(),
+            NavMove::Next => self.ai_browser_tab.next(),
+            NavMove::First | NavMove::PageBackward => AiBrowserTab::Runs,
+            NavMove::Last | NavMove::PageForward => AiBrowserTab::Evals,
+        };
+        self.selected_ai_artifact_action_index = 0;
+        self.status_line = format!("AI browser switched to {}.", self.ai_browser_tab.label());
+        self.rebuild_live_model();
+    }
+
+    fn move_ai_launch_points(&mut self, movement: NavMove) {
+        let count = self.model.ai.launch_points.len();
+        if count == 0 {
+            return;
+        }
+        let current = self.selected_ai_launch_index();
+        let next = match movement {
+            NavMove::Previous => current.saturating_sub(1),
+            NavMove::Next => usize::min(current + 1, count.saturating_sub(1)),
+            NavMove::First => 0,
+            NavMove::Last => count.saturating_sub(1),
+            NavMove::PageBackward => current.saturating_sub(5),
+            NavMove::PageForward => usize::min(current.saturating_add(5), count.saturating_sub(1)),
+        };
+        self.set_selected_ai_launch_index(next);
+        self.status_line = format!("Focused AI launch point {}.", next + 1);
+    }
+
+    fn move_ai_browser_items(&mut self, movement: NavMove) {
+        match movement {
+            NavMove::Previous => {
+                self.handle(Action::PreviousAiBrowserItem);
+            }
+            NavMove::Next => {
+                self.handle(Action::NextAiBrowserItem);
+            }
+            NavMove::First => {
+                self.set_ai_browser_index(0);
+                self.selected_ai_artifact_action_index = 0;
+                self.rebuild_live_model();
+                "Moved to the first saved artifact.".clone_into(&mut self.status_line);
+            }
+            NavMove::Last => {
+                let last = self.ai_browser_item_count().saturating_sub(1);
+                self.set_ai_browser_index(last);
+                self.selected_ai_artifact_action_index = 0;
+                self.rebuild_live_model();
+                "Moved to the last saved artifact.".clone_into(&mut self.status_line);
+            }
+            NavMove::PageBackward => {
+                self.adjust_ai_browser_index(-5);
+                self.selected_ai_artifact_action_index = 0;
+                self.rebuild_live_model();
+                "Jumped earlier in saved artifacts.".clone_into(&mut self.status_line);
+            }
+            NavMove::PageForward => {
+                self.adjust_ai_browser_index(5);
+                self.selected_ai_artifact_action_index = 0;
+                self.rebuild_live_model();
+                "Jumped later in saved artifacts.".clone_into(&mut self.status_line);
+            }
+        }
+    }
+
+    fn move_ai_artifact_actions(&mut self, movement: NavMove) {
+        let count = self.model.ai.artifact_actions.len();
+        if count == 0 {
+            "No direct actions are available for the selected saved artifact."
+                .clone_into(&mut self.status_line);
+            return;
+        }
+        let current = self.selected_ai_artifact_action_index();
+        let next = match movement {
+            NavMove::Previous => current.saturating_sub(1),
+            NavMove::Next => usize::min(current + 1, count.saturating_sub(1)),
+            NavMove::First => 0,
+            NavMove::Last => count.saturating_sub(1),
+            NavMove::PageBackward => current.saturating_sub(5),
+            NavMove::PageForward => usize::min(current.saturating_add(5), count.saturating_sub(1)),
+        };
+        self.set_selected_ai_artifact_action_index(next);
+        self.status_line = format!("Focused artifact action {}.", next + 1);
+    }
+
+    const fn screen_supports_day_paging(screen: Screen) -> bool {
+        matches!(
+            screen,
+            Screen::Dashboard | Screen::Timeline | Screen::Explain | Screen::Review
+        )
+    }
+
+    fn selected_ai_launch_index(&self) -> usize {
+        let count = self.model.ai.launch_points.len();
+        if count == 0 {
+            0
+        } else {
+            usize::min(self.selected_ai_launch_index, count.saturating_sub(1))
+        }
+    }
+
+    fn set_selected_ai_launch_index(&mut self, index: usize) {
+        let count = self.model.ai.launch_points.len();
+        if count == 0 {
+            return;
+        }
+        self.selected_ai_launch_index = usize::min(index, count.saturating_sub(1));
+        self.rebuild_live_model();
+    }
+
+    fn selected_ai_artifact_action_index(&self) -> usize {
+        let count = self.model.ai.artifact_actions.len();
+        if count == 0 {
+            0
+        } else {
+            usize::min(
+                self.selected_ai_artifact_action_index,
+                count.saturating_sub(1),
+            )
+        }
+    }
+
+    fn set_selected_ai_artifact_action_index(&mut self, index: usize) {
+        let count = self.model.ai.artifact_actions.len();
+        if count == 0 {
+            self.selected_ai_artifact_action_index = 0;
+            return;
+        }
+        self.selected_ai_artifact_action_index = usize::min(index, count.saturating_sub(1));
+        self.rebuild_live_model();
+    }
+
+    fn current_ai_artifact_action(&self) -> Option<Action> {
+        let action_kind = self
+            .current_ai_artifact_action_kinds()
+            .get(self.selected_ai_artifact_action_index())
+            .copied()?;
+        Some(action_kind.action())
+    }
+
+    fn current_ai_artifact_action_kinds(&self) -> Vec<AiArtifactActionKind> {
+        let snapshot = self.live_snapshot.as_ref();
+        ai_artifact_action_kinds(
+            self.ai_browser_tab,
+            snapshot.and_then(|data| data.ai_runs.get(self.selected_ai_run_index)),
+            snapshot.and_then(|data| {
+                data.snapshot_catalog
+                    .get(self.selected_snapshot_catalog_index)
+            }),
+            snapshot.and_then(|data| data.report_exports.get(self.selected_report_export_index)),
+            snapshot.and_then(|data| data.ai_eval_runs.get(self.selected_ai_eval_run_index)),
+        )
+    }
+
+    const fn ai_browser_item_count(&self) -> usize {
+        self.model.ai.browser_items.len()
+    }
+
+    const fn set_ai_browser_index(&mut self, index: usize) {
+        match self.ai_browser_tab {
+            AiBrowserTab::Runs => self.selected_ai_run_index = index,
+            AiBrowserTab::Snapshots => self.selected_snapshot_catalog_index = index,
+            AiBrowserTab::Reports => self.selected_report_export_index = index,
+            AiBrowserTab::Evals => self.selected_ai_eval_run_index = index,
+        }
+    }
+
+    fn select_timeline_event_at(&mut self, index: usize) {
+        let Some(snapshot) = &self.live_snapshot else {
+            return;
+        };
+        let Some(day) = self.selected_day_label() else {
+            return;
+        };
+        let events = filtered_events_for_day(snapshot, &day, &self.overlay_filters);
+        if let Some(event) = events.get(index) {
+            let selected_id = event.context_event_id.clone();
+            let title = event.title.clone();
+            self.selected_event_id = Some(selected_id);
+            self.align_point_to_selected_event();
+            self.rebuild_live_model();
+            self.status_line = format!("Selected {title}.");
+        }
     }
 }
 
@@ -1352,7 +2473,7 @@ impl Screen {
     ];
 
     #[must_use]
-    pub fn title(self) -> &'static str {
+    pub const fn title(self) -> &'static str {
         match self {
             Self::Dashboard => "Dashboard",
             Self::Timeline => "Timeline",
@@ -1365,7 +2486,7 @@ impl Screen {
         }
     }
 
-    fn index(self) -> usize {
+    const fn index(self) -> usize {
         match self {
             Self::Dashboard => 0,
             Self::Timeline => 1,
@@ -1378,7 +2499,7 @@ impl Screen {
         }
     }
 
-    fn next(self) -> Self {
+    const fn next(self) -> Self {
         match self {
             Self::Dashboard => Self::Timeline,
             Self::Timeline => Self::Trends,
@@ -1391,7 +2512,7 @@ impl Screen {
         }
     }
 
-    fn previous(self) -> Self {
+    const fn previous(self) -> Self {
         match self {
             Self::Dashboard => Self::Ops,
             Self::Timeline => Self::Dashboard,
@@ -1407,7 +2528,7 @@ impl Screen {
 
 impl AiBrowserTab {
     #[must_use]
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Runs => "runs",
             Self::Snapshots => "snapshots",
@@ -1417,7 +2538,7 @@ impl AiBrowserTab {
     }
 
     #[must_use]
-    pub fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::Runs => 0,
             Self::Snapshots => 1,
@@ -1427,7 +2548,7 @@ impl AiBrowserTab {
     }
 
     #[must_use]
-    pub fn next(self) -> Self {
+    pub const fn next(self) -> Self {
         match self {
             Self::Runs => Self::Snapshots,
             Self::Snapshots => Self::Reports,
@@ -1437,7 +2558,7 @@ impl AiBrowserTab {
     }
 
     #[must_use]
-    pub fn previous(self) -> Self {
+    pub const fn previous(self) -> Self {
         match self {
             Self::Runs => Self::Evals,
             Self::Snapshots => Self::Runs,
@@ -1448,7 +2569,8 @@ impl AiBrowserTab {
 }
 
 impl AiLaunchIntent {
-    pub fn label(self) -> &'static str {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
             Self::ReviewSelectedDay => "AI review for the selected day",
             Self::CompareSelectedWeek => "AI compare for the selected week",
@@ -1456,7 +2578,8 @@ impl AiLaunchIntent {
         }
     }
 
-    pub fn short_label(self) -> &'static str {
+    #[must_use]
+    pub const fn short_label(self) -> &'static str {
         match self {
             Self::ReviewSelectedDay => "Review this day",
             Self::CompareSelectedWeek => "Compare this week",
@@ -1467,7 +2590,7 @@ impl AiLaunchIntent {
 
 impl ReviewScreenMode {
     #[must_use]
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Today => "Today",
             Self::Week => "Week",
@@ -1475,7 +2598,7 @@ impl ReviewScreenMode {
         }
     }
 
-    fn next(self) -> Self {
+    const fn next(self) -> Self {
         match self {
             Self::Today => Self::Week,
             Self::Week => Self::Investigate,
@@ -1483,7 +2606,7 @@ impl ReviewScreenMode {
         }
     }
 
-    fn index(self) -> usize {
+    const fn index(self) -> usize {
         match self {
             Self::Today => 0,
             Self::Week => 1,
@@ -1494,7 +2617,7 @@ impl ReviewScreenMode {
 
 impl TrendWindowKind {
     #[must_use]
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Days7 => "7d",
             Self::Days30 => "30d",
@@ -1503,7 +2626,7 @@ impl TrendWindowKind {
     }
 
     #[must_use]
-    pub fn days(self) -> usize {
+    pub const fn days(self) -> usize {
         match self {
             Self::Days7 => 7,
             Self::Days30 => 30,
@@ -1511,7 +2634,7 @@ impl TrendWindowKind {
         }
     }
 
-    fn next(self) -> Self {
+    const fn next(self) -> Self {
         match self {
             Self::Days7 => Self::Days30,
             Self::Days30 => Self::Days90,
@@ -1519,7 +2642,7 @@ impl TrendWindowKind {
         }
     }
 
-    fn previous(self) -> Self {
+    const fn previous(self) -> Self {
         match self {
             Self::Days7 => Self::Days90,
             Self::Days30 => Self::Days7,
@@ -1527,7 +2650,7 @@ impl TrendWindowKind {
         }
     }
 
-    fn index(self) -> usize {
+    const fn index(self) -> usize {
         match self {
             Self::Days7 => 0,
             Self::Days30 => 1,
@@ -1537,8 +2660,10 @@ impl TrendWindowKind {
 }
 
 impl PatternMetricFilter {
+    const ALL: [Self; 4] = [Self::All, Self::Activity, Self::Readiness, Self::Sleep];
+
     #[must_use]
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::All => "all metrics",
             Self::Activity => "activity",
@@ -1547,7 +2672,17 @@ impl PatternMetricFilter {
         }
     }
 
-    fn next(self) -> Self {
+    #[must_use]
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Activity => "Activity",
+            Self::Readiness => "Readiness",
+            Self::Sleep => "Sleep",
+        }
+    }
+
+    const fn next(self) -> Self {
         match self {
             Self::All => Self::Activity,
             Self::Activity => Self::Readiness,
@@ -1556,12 +2691,30 @@ impl PatternMetricFilter {
         }
     }
 
-    fn metric(self) -> Option<PatternMetric> {
+    const fn previous(self) -> Self {
+        match self {
+            Self::All => Self::Sleep,
+            Self::Activity => Self::All,
+            Self::Readiness => Self::Activity,
+            Self::Sleep => Self::Readiness,
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::All => 0,
+            Self::Activity => 1,
+            Self::Readiness => 2,
+            Self::Sleep => 3,
+        }
+    }
+
+    const fn metric(self) -> Option<PatternMetric> {
         match self {
             Self::All => None,
-            Self::Activity => Some(PatternMetric::ActivityScore),
-            Self::Readiness => Some(PatternMetric::ReadinessScore),
-            Self::Sleep => Some(PatternMetric::SleepScore),
+            Self::Activity => Some(PatternMetric::Activity),
+            Self::Readiness => Some(PatternMetric::Readiness),
+            Self::Sleep => Some(PatternMetric::Sleep),
         }
     }
 }
@@ -1592,6 +2745,8 @@ pub fn build_state_from_snapshot(
     snapshot: LiveSnapshot,
 ) -> AppState {
     let selected_day_index = newest_day_index(&snapshot);
+    let screen_focus_memory =
+        std::array::from_fn(|index| navigation::default_region(Screen::ALL[index]));
     let mut app = AppState {
         mode,
         active_screen: Screen::Dashboard,
@@ -1601,18 +2756,28 @@ pub fn build_state_from_snapshot(
         should_quit: false,
         refresh_in_flight: false,
         live_snapshot: Some(snapshot),
+        focused_region: navigation::default_region(Screen::Dashboard),
+        screen_focus_memory,
+        focused_top_nav_screen: Screen::Dashboard,
+        help_open: false,
+        focus_before_help: None,
+        search: None,
         selected_day_index,
         selected_timeline_point: 0,
         timeline_window_hours: 24,
+        selected_overlay_toggle_index: 0,
         trends_window: TrendWindowKind::Days7,
         selected_event_id: None,
         selected_review_card_index: 0,
         ai_preflight: None,
+        ai_preflight_control: PreflightControl::Confirm,
         ai_browser_tab: AiBrowserTab::Runs,
+        selected_ai_launch_index: 0,
         selected_ai_run_index: 0,
         selected_snapshot_catalog_index: 0,
         selected_report_export_index: 0,
         selected_ai_eval_run_index: 0,
+        selected_ai_artifact_action_index: 0,
         overlay_filters: OverlayFilterState::all(),
         pattern_metric_filter: PatternMetricFilter::All,
         review_mode: ReviewScreenMode::Today,
@@ -1774,6 +2939,7 @@ pub fn load_live_snapshot(
     })
 }
 
+#[must_use]
 pub fn build_demo_state(config: &Config) -> AppState {
     let snapshot = demo_snapshot(config);
     build_state_from_snapshot(RunMode::Demo, "Demo mode ready.", snapshot)
@@ -1834,7 +3000,6 @@ fn build_ai_ops_snapshot(
         },
         review_prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
         compare_prompt_version: COMPARE_PROMPT_VERSION.to_owned(),
-        stateless_default: matches!(config.ai.request_mode, AiRequestMode::Stateless),
         tools_disabled: true,
         snapshot_catalog_count: snapshot_catalog.len(),
         ai_run_count: ai_runs.len(),
@@ -1862,13 +3027,13 @@ fn build_live_model(snapshot: &LiveSnapshot, options: &LiveModelOptions) -> AppM
         rest_mode_periods: &snapshot.rest_mode_periods,
     };
     let today_review = build_review_deck(ReviewMode::Today, &selected_day, &review_inputs)
-        .unwrap_or_else(|error| empty_review_deck(ReviewMode::Today, &selected_day, error));
+        .unwrap_or_else(|error| empty_review_deck(ReviewMode::Today, &selected_day, &error));
     let week_review = build_review_deck(ReviewMode::Week, &selected_day, &review_inputs)
-        .unwrap_or_else(|error| empty_review_deck(ReviewMode::Week, &selected_day, error));
+        .unwrap_or_else(|error| empty_review_deck(ReviewMode::Week, &selected_day, &error));
     let investigation =
         build_investigation_report(options.review_focus, &selected_day, &review_inputs)
             .unwrap_or_else(|error| {
-                empty_investigation_report(options.review_focus, &selected_day, error)
+                empty_investigation_report(options.review_focus, &selected_day, &error)
             });
     let review_context = ReviewViewContext {
         selected_day: &selected_day,
@@ -1892,6 +3057,7 @@ fn build_live_model(snapshot: &LiveSnapshot, options: &LiveModelOptions) -> AppM
             options.selected_point_index,
             options.selected_event_id.as_deref(),
             &options.overlay_filters,
+            options.selected_overlay_toggle_index,
             options.window_hours,
         ),
         trends: build_trends_model(snapshot, options.trends_window, &week_review),
@@ -1900,11 +3066,13 @@ fn build_live_model(snapshot: &LiveSnapshot, options: &LiveModelOptions) -> AppM
             options.selected_day_index,
             options.selected_event_id.as_deref(),
             &options.overlay_filters,
+            options.selected_overlay_toggle_index,
             &today_review,
         ),
         patterns: build_patterns_model(
             snapshot,
             &options.overlay_filters,
+            options.selected_overlay_toggle_index,
             options.pattern_metric_filter,
         ),
         review: build_review_model(&today_review, &week_review, &investigation, &review_context),
@@ -1922,86 +3090,12 @@ fn build_dashboard_model(
     let selected_day = selected_day_label(snapshot, selected_day_index)
         .unwrap_or_else(|| "no selected day".to_owned());
     let selected_daily = selected_daily_row(snapshot, &selected_day);
-    let sleep_insight = build_day_metric_insight(snapshot, &selected_day, "sleep", |row| {
-        row.sleep_score.map(f64::from)
-    });
-    let readiness_insight = build_day_metric_insight(snapshot, &selected_day, "readiness", |row| {
-        row.readiness_score.map(f64::from)
-    });
-    let activity_insight = build_day_metric_insight(snapshot, &selected_day, "activity", |row| {
-        row.activity_score.map(f64::from)
-    });
+    let [sleep_insight, readiness_insight, activity_insight] =
+        dashboard_metric_insights(snapshot, &selected_day);
     let heartrate_insight = build_metric_insight("heartrate", &snapshot.heartrate_daily_averages);
 
-    let freshness = [
-        format!(
-            "Daily {}",
-            freshness_badge(&family_freshness(snapshot, DataFamily::Daily))
-        ),
-        format!(
-            "Heartrate {}",
-            freshness_badge(&family_freshness(snapshot, DataFamily::Heartrate))
-        ),
-        format!(
-            "Workouts {}",
-            freshness_badge(&family_freshness(snapshot, DataFamily::Workout))
-        ),
-        format!(
-            "Tags {}",
-            freshness_badge(&family_freshness(snapshot, DataFamily::EnhancedTag))
-        ),
-        format!(
-            "Sessions {}",
-            freshness_badge(&family_freshness(snapshot, DataFamily::Session))
-        ),
-    ]
-    .join(" | ");
-
-    let change_summary = today_review.observations.first().map_or_else(
-        || {
-            [
-                short_baseline_phrase("sleep", &sleep_insight),
-                short_baseline_phrase("readiness", &readiness_insight),
-                short_baseline_phrase("activity", &activity_insight),
-            ]
-            .join(" ")
-        },
-        |card| format!("{} {}", card.headline, card.confidence_label),
-    );
-
-    let mut highlights = vec![
-        selected_day_baseline_sentence("Sleep", &selected_day, &sleep_insight),
-        selected_day_baseline_sentence("Readiness", &selected_day, &readiness_insight),
-        selected_day_baseline_sentence("Activity", &selected_day, &activity_insight),
-    ];
-    highlights.extend(
-        top_context_events_for_day(snapshot, &selected_day)
-            .into_iter()
-            .take(2)
-            .map(|event| format!("{} {}.", event.family_label, event.headline)),
-    );
-    highlights.extend(
-        today_review
-            .observations
-            .iter()
-            .take(2)
-            .map(|card| format!("Review: {}", card.headline)),
-    );
-    if snapshot.heartrate_daily_averages.is_empty() {
-        highlights.push(family_freshness(snapshot, DataFamily::Heartrate).detail);
-    } else {
-        highlights.push(heartrate_insight.summary);
-    }
-    if refresh_in_flight {
-        highlights.insert(
-            0,
-            "Background refresh is running; the dashboard stays on persisted data until the next snapshot lands."
-                .to_owned(),
-        );
-    }
-
     DashboardModel {
-        selected_day_label: selected_day,
+        selected_day_label: selected_day.clone(),
         scores: vec![
             score_card(
                 "Sleep",
@@ -2022,16 +3116,115 @@ fn build_dashboard_model(
                 metric_subtitle(&activity_insight),
             ),
         ],
-        freshness,
+        freshness: dashboard_freshness_summary(snapshot),
         capabilities: capability_views(&snapshot.auth_status.capability_report),
-        change_summary,
-        highlights,
+        change_summary: dashboard_change_summary(
+            today_review,
+            [&sleep_insight, &readiness_insight, &activity_insight],
+        ),
+        highlights: dashboard_highlights(
+            snapshot,
+            &selected_day,
+            &heartrate_insight,
+            [&sleep_insight, &readiness_insight, &activity_insight],
+            today_review,
+            refresh_in_flight,
+        ),
         ai_actions: vec![
-            "[ai] a review this day".to_owned(),
-            "[ai] c compare this week to the previous week".to_owned(),
-            "[ai] 7 open the AI workbench".to_owned(),
+            "[ai] Review this day from the AI launch region.".to_owned(),
+            "[ai] Compare this week with the previous week from the AI launch region.".to_owned(),
+            "[ai] Open the AI workbench from Views for saved runs and reports.".to_owned(),
         ],
     }
+}
+
+fn dashboard_metric_insights(snapshot: &LiveSnapshot, selected_day: &str) -> [MetricInsight; 3] {
+    [
+        build_day_metric_insight(snapshot, selected_day, "sleep", |row| {
+            row.sleep_score.map(f64::from)
+        }),
+        build_day_metric_insight(snapshot, selected_day, "readiness", |row| {
+            row.readiness_score.map(f64::from)
+        }),
+        build_day_metric_insight(snapshot, selected_day, "activity", |row| {
+            row.activity_score.map(f64::from)
+        }),
+    ]
+}
+
+fn dashboard_freshness_summary(snapshot: &LiveSnapshot) -> String {
+    [
+        DataFamily::Daily,
+        DataFamily::Heartrate,
+        DataFamily::Workout,
+        DataFamily::EnhancedTag,
+        DataFamily::Session,
+    ]
+    .into_iter()
+    .map(|family| {
+        format!(
+            "{} {}",
+            family.label(),
+            freshness_badge(&family_freshness(snapshot, family))
+        )
+    })
+    .collect::<Vec<_>>()
+    .join(" | ")
+}
+
+fn dashboard_change_summary(today_review: &ReviewDeck, insights: [&MetricInsight; 3]) -> String {
+    today_review.observations.first().map_or_else(
+        || {
+            ["sleep", "readiness", "activity"]
+                .into_iter()
+                .zip(insights)
+                .map(|(label, insight)| short_baseline_phrase(label, insight))
+                .collect::<Vec<_>>()
+                .join(" ")
+        },
+        |card| format!("{} {}", card.headline, card.confidence_label),
+    )
+}
+
+fn dashboard_highlights(
+    snapshot: &LiveSnapshot,
+    selected_day: &str,
+    heartrate_insight: &MetricInsight,
+    insights: [&MetricInsight; 3],
+    today_review: &ReviewDeck,
+    refresh_in_flight: bool,
+) -> Vec<String> {
+    let mut highlights = ["Sleep", "Readiness", "Activity"]
+        .into_iter()
+        .zip(insights)
+        .map(|(label, insight)| selected_day_baseline_sentence(label, selected_day, insight))
+        .collect::<Vec<_>>();
+    highlights.extend(
+        top_context_events_for_day(snapshot, selected_day)
+            .into_iter()
+            .take(2)
+            .map(|event| format!("{} {}.", event.family_label, event.headline)),
+    );
+    highlights.extend(
+        today_review
+            .observations
+            .iter()
+            .take(2)
+            .map(|card| format!("Review: {}", card.headline)),
+    );
+    if snapshot.heartrate_daily_averages.is_empty() {
+        highlights.push(family_freshness(snapshot, DataFamily::Heartrate).detail);
+    } else {
+        highlights.push(heartrate_insight.summary.clone());
+    }
+    if refresh_in_flight {
+        highlights.insert(
+            0,
+            "Background refresh is running; the dashboard stays on persisted data until the next snapshot lands."
+                .to_owned(),
+        );
+    }
+    highlights
 }
 
 fn build_timeline_model(
@@ -2040,10 +3233,64 @@ fn build_timeline_model(
     selected_point_index: usize,
     selected_event_id: Option<&str>,
     overlay_filters: &OverlayFilterState,
+    selected_overlay_toggle_index: usize,
     window_hours: u16,
 ) -> TimelineModel {
     let freshness = family_freshness(snapshot, DataFamily::Heartrate);
     let day_labels = available_days(snapshot);
+    let (clamped_day_index, selected_day) = timeline_day_selection(&day_labels, selected_day_index);
+    let visible = visible_timeline_for_selected_day(snapshot, &selected_day, window_hours);
+    let selected_point_index = clamp_selected_index(selected_point_index, visible.points.len());
+    let events = filtered_events_for_day(snapshot, &selected_day, overlay_filters);
+    let selected_event_index = timeline_selected_event_index(&events, selected_event_id);
+    let selected_detail =
+        timeline_selected_point_detail(&visible.points, selected_point_index, &freshness);
+
+    TimelineModel {
+        summary: format!(
+            "Timeline for {} | heartrate {}",
+            selected_day,
+            freshness_badge(&freshness)
+        ),
+        day_selector: format!(
+            "{} | window={}h | filters {}",
+            format_day_selector(&day_labels, clamped_day_index),
+            window_hours,
+            overlay_filters.summary()
+        ),
+        window_presets: timeline_window_preset_views(window_hours),
+        selected_window_preset_index: timeline_window_preset_index(window_hours),
+        selected_day_label: selected_day.clone(),
+        selected_day_index: clamped_day_index,
+        heart_rate: visible.points,
+        selected_point_index,
+        window_hours,
+        window_start_minute: visible.window_start_minute,
+        window_end_minute: visible.window_end_minute,
+        overlay_toggles: overlay_toggle_views(overlay_filters, selected_overlay_toggle_index),
+        overlay_groups: build_overlay_groups(
+            &selected_day,
+            events.as_slice(),
+            selected_event_id,
+            visible.window_start_minute,
+            visible.window_end_minute,
+        ),
+        events: events
+            .iter()
+            .map(|event| event_list_item(&selected_day, event, selected_event_id))
+            .collect(),
+        selected_event_index,
+        selected_detail,
+        event_detail_lines: timeline_event_detail_lines(
+            &selected_day,
+            &events,
+            selected_event_index,
+        ),
+        breadcrumb: timeline_breadcrumb(&selected_day, &events, selected_event_index),
+    }
+}
+
+fn timeline_day_selection(day_labels: &[String], selected_day_index: usize) -> (usize, String) {
     let clamped_day_index = if day_labels.is_empty() {
         0
     } else {
@@ -2053,30 +3300,64 @@ fn build_timeline_model(
         .get(clamped_day_index)
         .cloned()
         .unwrap_or_else(|| "no day selected".to_owned());
-    let visible = selected_heartrate_day(snapshot, &selected_day).map_or_else(
+    (clamped_day_index, selected_day)
+}
+
+fn visible_timeline_for_selected_day(
+    snapshot: &LiveSnapshot,
+    selected_day: &str,
+    window_hours: u16,
+) -> VisibleTimeline {
+    selected_heartrate_day(snapshot, selected_day).map_or_else(
         || VisibleTimeline {
             points: Vec::new(),
             window_start_minute: 0,
             window_end_minute: 24 * 60 - 1,
         },
         |day| visible_timeline(day, window_hours),
-    );
-    let selected_point_index = if visible.points.is_empty() {
+    )
+}
+
+fn clamp_selected_index(selected_index: usize, len: usize) -> Option<usize> {
+    if len == 0 {
         None
     } else {
-        Some(usize::min(
-            selected_point_index,
-            visible.points.len().saturating_sub(1),
-        ))
-    };
-    let events = filtered_events_for_day(snapshot, &selected_day, overlay_filters);
-    let selected_event_index = selected_event_id.and_then(|event_id| {
+        Some(usize::min(selected_index, len.saturating_sub(1)))
+    }
+}
+
+fn timeline_selected_event_index(
+    events: &[&ContextEventRecord],
+    selected_event_id: Option<&str>,
+) -> Option<usize> {
+    selected_event_id.and_then(|event_id| {
         events
             .iter()
             .position(|event| event.context_event_id == event_id)
-    });
-    let selected_point_detail = selected_point_index
-        .and_then(|index| visible.points.get(index))
+    })
+}
+
+fn timeline_window_preset_views(window_hours: u16) -> Vec<TimelineWindowPresetView> {
+    TIMELINE_WINDOW_PRESETS
+        .into_iter()
+        .map(|preset| TimelineWindowPresetView {
+            label: match preset {
+                6 => "6h",
+                12 => "12h",
+                _ => "24h",
+            },
+            selected: preset == window_hours,
+        })
+        .collect()
+}
+
+fn timeline_selected_point_detail(
+    points: &[TimelinePoint],
+    selected_point_index: Option<usize>,
+    freshness: &FreshnessState,
+) -> String {
+    selected_point_index
+        .and_then(|index| points.get(index))
         .map_or_else(
             || freshness.detail.clone(),
             |point| {
@@ -2085,9 +3366,15 @@ fn build_timeline_model(
                     point.recorded_at, point.bpm
                 )
             },
-        );
+        )
+}
 
-    let event_detail_lines = selected_event_index
+fn timeline_event_detail_lines(
+    selected_day: &str,
+    events: &[&ContextEventRecord],
+    selected_event_index: Option<usize>,
+) -> Vec<String> {
+    selected_event_index
         .and_then(|index| events.get(index))
         .map_or_else(
             || {
@@ -2096,9 +3383,16 @@ fn build_timeline_model(
                     "Use j/k or move the heartrate cursor to inspect nearby events.".to_owned(),
                 ]
             },
-            |event| explain_event_detail_lines(&selected_day, event),
-        );
-    let breadcrumb = selected_event_index
+            |event| explain_event_detail_lines(selected_day, event),
+        )
+}
+
+fn timeline_breadcrumb(
+    selected_day: &str,
+    events: &[&ContextEventRecord],
+    selected_event_index: Option<usize>,
+) -> String {
+    selected_event_index
         .and_then(|index| events.get(index))
         .map_or_else(
             || {
@@ -2123,44 +3417,7 @@ fn build_timeline_model(
                     carryover
                 )
             },
-        );
-
-    TimelineModel {
-        summary: format!(
-            "Timeline for {} | heartrate {}",
-            selected_day,
-            freshness_badge(&freshness)
-        ),
-        breadcrumb,
-        day_selector: format!(
-            "{} | window={}h | filters {}",
-            format_day_selector(&day_labels, clamped_day_index),
-            window_hours,
-            overlay_filters.summary()
-        ),
-        selected_day_label: selected_day.clone(),
-        selected_day_index: clamped_day_index,
-        heart_rate: visible.points,
-        selected_point_index,
-        window_hours,
-        window_start_minute: visible.window_start_minute,
-        window_end_minute: visible.window_end_minute,
-        overlay_toggles: overlay_toggle_views(overlay_filters),
-        overlay_groups: build_overlay_groups(
-            &selected_day,
-            events.as_slice(),
-            selected_event_id,
-            visible.window_start_minute,
-            visible.window_end_minute,
-        ),
-        events: events
-            .iter()
-            .map(|event| event_list_item(&selected_day, event, selected_event_id))
-            .collect(),
-        selected_event_index,
-        selected_detail: selected_point_detail,
-        event_detail_lines,
-    }
+        )
 }
 
 fn build_trends_model(
@@ -2246,29 +3503,73 @@ fn build_explain_model(
     selected_day_index: usize,
     selected_event_id: Option<&str>,
     overlay_filters: &OverlayFilterState,
+    selected_overlay_toggle_index: usize,
     today_review: &ReviewDeck,
 ) -> ExplainModel {
     let selected_day = selected_day_label(snapshot, selected_day_index)
         .unwrap_or_else(|| "no selected day".to_owned());
-    let sleep_insight = build_day_metric_insight(snapshot, &selected_day, "sleep", |row| {
-        row.sleep_score.map(f64::from)
-    });
-    let readiness_insight = build_day_metric_insight(snapshot, &selected_day, "readiness", |row| {
-        row.readiness_score.map(f64::from)
-    });
-    let activity_insight = build_day_metric_insight(snapshot, &selected_day, "activity", |row| {
-        row.activity_score.map(f64::from)
-    });
+    let [sleep_insight, readiness_insight, activity_insight] =
+        explain_metric_insights(snapshot, &selected_day);
     let selected_daily = selected_daily_row(snapshot, &selected_day);
     let heartrate = selected_heartrate_day(snapshot, &selected_day);
     let supporting_events =
         supporting_events_for_explain(snapshot, &selected_day, overlay_filters, selected_event_id);
 
+    ExplainModel {
+        selected_day_label: selected_day.clone(),
+        breadcrumb: explain_breadcrumb(&selected_day, &supporting_events),
+        headline: format!("Day story for {selected_day}"),
+        overlay_toggles: overlay_toggle_views(overlay_filters, selected_overlay_toggle_index),
+        selected_overlay_toggle_index,
+        summary_lines: vec![
+            selected_day_baseline_sentence("Sleep", &selected_day, &sleep_insight),
+            selected_day_baseline_sentence("Readiness", &selected_day, &readiness_insight),
+            selected_day_baseline_sentence("Activity", &selected_day, &activity_insight),
+        ],
+        measurement_lines: measurement_lines_for_day(selected_daily, heartrate),
+        evidence_lines: explain_evidence_lines(&supporting_events),
+        caveat_lines: explain_caveat_lines(
+            snapshot,
+            &selected_day,
+            [&sleep_insight, &readiness_insight, &activity_insight],
+            selected_daily,
+            heartrate,
+            &supporting_events,
+            today_review,
+        ),
+        context_lines: explain_context_lines(&supporting_events),
+        ai_actions: vec![
+            "[ai] Review this day from the AI launch region.".to_owned(),
+            "[ai] Open the AI workbench from Views for saved runs and reports.".to_owned(),
+        ],
+    }
+}
+
+fn explain_metric_insights(snapshot: &LiveSnapshot, selected_day: &str) -> [MetricInsight; 3] {
+    [
+        build_day_metric_insight(snapshot, selected_day, "sleep", |row| {
+            row.sleep_score.map(f64::from)
+        }),
+        build_day_metric_insight(snapshot, selected_day, "readiness", |row| {
+            row.readiness_score.map(f64::from)
+        }),
+        build_day_metric_insight(snapshot, selected_day, "activity", |row| {
+            row.activity_score.map(f64::from)
+        }),
+    ]
+}
+
+fn explain_caveat_lines(
+    snapshot: &LiveSnapshot,
+    selected_day: &str,
+    insights: [&MetricInsight; 3],
+    selected_daily: Option<&DailyOverviewRow>,
+    heartrate: Option<&HeartRateDay>,
+    supporting_events: &[ExplainSupportingEvent],
+    today_review: &ReviewDeck,
+) -> Vec<String> {
     let mut caveat_lines = missing_scope_messages(&snapshot.auth_status.capability_report);
-    if insight_is_thin(&sleep_insight)
-        || insight_is_thin(&readiness_insight)
-        || insight_is_thin(&activity_insight)
-    {
+    if insights.iter().any(|insight| insight_is_thin(insight)) {
         caveat_lines.push(
             "Baseline comparisons are still tentative because local history is thin for this day."
                 .to_owned(),
@@ -2297,67 +3598,59 @@ fn build_explain_model(
     {
         caveat_lines.push(format!("Today's review also flagged: {}", card.headline));
     }
-    let breadcrumb = explain_breadcrumb(&selected_day, &supporting_events);
+    caveat_lines
+}
 
-    ExplainModel {
-        selected_day_label: selected_day.clone(),
-        breadcrumb,
-        headline: format!("Day story for {selected_day}"),
-        summary_lines: vec![
-            selected_day_baseline_sentence("Sleep", &selected_day, &sleep_insight),
-            selected_day_baseline_sentence("Readiness", &selected_day, &readiness_insight),
-            selected_day_baseline_sentence("Activity", &selected_day, &activity_insight),
-        ],
-        measurement_lines: measurement_lines_for_day(selected_daily, heartrate),
-        evidence_lines: if supporting_events.is_empty() {
-            vec!["Evidence is still sparse for this day.".to_owned()]
-        } else {
-            supporting_events
-                .iter()
-                .map(|event| {
-                    if event.carried_forward {
-                        format!(
-                            "{} carryover from {}: {}.",
-                            event.family_label, event.source_day, event.headline
-                        )
-                    } else {
-                        format!("{} {}.", event.family_label, event.headline)
-                    }
-                })
-                .collect()
-        },
-        caveat_lines,
-        context_lines: if supporting_events.is_empty() {
-            vec!["Open Timeline after a sync to inspect raw context entries.".to_owned()]
-        } else {
-            let mut lines = supporting_events
-                .iter()
-                .map(|event| {
-                    let breadcrumb = if event.carried_forward {
-                        format!("Carryover from {}: ", event.source_day)
-                    } else {
-                        String::new()
-                    };
-                    if event.selected {
-                        format!("> {}{} ({})", breadcrumb, event.headline, event.detail)
-                    } else {
-                        format!("  {}{} ({})", breadcrumb, event.headline, event.detail)
-                    }
-                })
-                .collect::<Vec<_>>();
-            lines.push("Press 2 to open Timeline with the same selected event.".to_owned());
-            lines
-        },
-        ai_actions: vec![
-            "[ai] a review this day inside the AI workbench".to_owned(),
-            "[ai] 7 open the AI workbench for saved runs and reports".to_owned(),
-        ],
+fn explain_evidence_lines(supporting_events: &[ExplainSupportingEvent]) -> Vec<String> {
+    if supporting_events.is_empty() {
+        vec!["Evidence is still sparse for this day.".to_owned()]
+    } else {
+        supporting_events
+            .iter()
+            .map(|event| {
+                if event.carried_forward {
+                    format!(
+                        "{} carryover from {}: {}.",
+                        event.family_label, event.source_day, event.headline
+                    )
+                } else {
+                    format!("{} {}.", event.family_label, event.headline)
+                }
+            })
+            .collect()
+    }
+}
+
+fn explain_context_lines(supporting_events: &[ExplainSupportingEvent]) -> Vec<String> {
+    if supporting_events.is_empty() {
+        vec!["Open Timeline after a sync to inspect raw context entries.".to_owned()]
+    } else {
+        let mut lines = supporting_events
+            .iter()
+            .map(|event| {
+                let breadcrumb = if event.carried_forward {
+                    format!("Carryover from {}: ", event.source_day)
+                } else {
+                    String::new()
+                };
+                if event.selected {
+                    format!("> {}{} ({})", breadcrumb, event.headline, event.detail)
+                } else {
+                    format!("  {}{} ({})", breadcrumb, event.headline, event.detail)
+                }
+            })
+            .collect::<Vec<_>>();
+        lines.push(
+            "Move to Views and activate Timeline to inspect the same selected event.".to_owned(),
+        );
+        lines
     }
 }
 
 fn build_patterns_model(
     snapshot: &LiveSnapshot,
     overlay_filters: &OverlayFilterState,
+    selected_overlay_toggle_index: usize,
     metric_filter: PatternMetricFilter,
 ) -> PatternsModel {
     let rows = snapshot
@@ -2374,6 +3667,16 @@ fn build_patterns_model(
 
     PatternsModel {
         header: "Patterns".to_owned(),
+        metric_filters: PatternMetricFilter::ALL
+            .into_iter()
+            .map(|filter| PatternFilterTab {
+                label: filter.short_label(),
+                selected: filter == metric_filter,
+            })
+            .collect(),
+        selected_filter_index: metric_filter.index(),
+        overlay_toggles: overlay_toggle_views(overlay_filters, selected_overlay_toggle_index),
+        selected_overlay_toggle_index,
         filter_summary: format!(
             "Families {} | metric {}",
             overlay_filters.summary(),
@@ -2387,14 +3690,48 @@ fn build_patterns_model(
         empty_message:
             "Not enough data yet. Patterns appear after at least 3 comparable days.".to_owned(),
         ai_actions: vec![
-            "[ai] c compare this week to the previous week".to_owned(),
-            "[ai] 7 open the AI workbench".to_owned(),
+            "[ai] Compare this week with the previous week from the AI launch region."
+                .to_owned(),
+            "[ai] Open the AI workbench from Views for saved runs and reports.".to_owned(),
         ],
     }
 }
 
 fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel {
-    let family_statuses = [
+    let family_statuses = build_ops_family_statuses(snapshot);
+    let queue_oldest = ops_queue_oldest(snapshot);
+    let recent_failures = ops_recent_failures(snapshot);
+    let last_accepted_delivery = snapshot
+        .webhook
+        .recent_deliveries
+        .first()
+        .map_or_else(|| "none".to_owned(), format_delivery_record);
+    let last_rejected_delivery = snapshot
+        .webhook
+        .latest_rejected_delivery
+        .as_ref()
+        .map_or_else(|| "none".to_owned(), format_rejection_record);
+    let queue_depth = snapshot.webhook.pending_invalidations.len();
+    let warnings = build_ops_warning_lines(snapshot, refresh_in_flight, &family_statuses);
+
+    OpsModel {
+        mode_label: ops_runtime_mode(snapshot),
+        summary_lines: build_ops_summary_lines(snapshot, &queue_oldest, recent_failures),
+        family_statuses,
+        items: build_ops_items(
+            snapshot,
+            &last_accepted_delivery,
+            &last_rejected_delivery,
+            &queue_oldest,
+            queue_depth,
+            recent_failures,
+        ),
+        warnings,
+    }
+}
+
+fn build_ops_family_statuses(snapshot: &LiveSnapshot) -> Vec<FamilyStatusView> {
+    [
         DataFamily::Personal,
         DataFamily::Daily,
         DataFamily::Heartrate,
@@ -2422,7 +3759,6 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
                     }
                 },
             );
-
         FamilyStatusView {
             label: family.label(),
             state_label: freshness_badge(&freshness),
@@ -2439,39 +3775,42 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
             detail: freshness.detail,
         }
     })
-    .collect::<Vec<_>>();
+    .collect()
+}
 
-    let last_accepted_delivery = snapshot
-        .webhook
-        .recent_deliveries
-        .first()
-        .map_or_else(|| "none".to_owned(), format_delivery_record);
-    let last_rejected_delivery = snapshot
-        .webhook
-        .latest_rejected_delivery
-        .as_ref()
-        .map_or_else(|| "none".to_owned(), format_rejection_record);
-    let queue_depth = snapshot.webhook.pending_invalidations.len();
-    let queue_oldest = snapshot
+fn ops_queue_oldest(snapshot: &LiveSnapshot) -> String {
+    snapshot
         .webhook
         .pending_invalidations
         .iter()
         .map(|record| record.first_queued_at.as_str())
         .min()
         .unwrap_or("n/a")
-        .to_owned();
-    let recent_failures = snapshot
+        .to_owned()
+}
+
+fn ops_recent_failures(snapshot: &LiveSnapshot) -> usize {
+    snapshot
         .webhook
         .recent_processing_attempts
         .iter()
         .filter(|attempt| attempt.outcome == "failed")
-        .count();
+        .count()
+}
+
+fn build_ops_summary_lines(
+    snapshot: &LiveSnapshot,
+    queue_oldest: &str,
+    recent_failures: usize,
+) -> Vec<String> {
     let mut summary_lines = vec![
         format!("Mode: {}", ops_runtime_mode(snapshot)),
         format!("Receiver: {}", receiver_status_line(snapshot)),
         format!(
             "Queue: pending={} oldest={} failed_attempts={}",
-            queue_depth, queue_oldest, recent_failures
+            snapshot.webhook.pending_invalidations.len(),
+            queue_oldest,
+            recent_failures
         ),
         format!(
             "AI: enabled={} key_ready={} model={}",
@@ -2490,7 +3829,14 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
             summary.improvement_count
         ));
     }
+    summary_lines
+}
 
+fn build_ops_warning_lines(
+    snapshot: &LiveSnapshot,
+    refresh_in_flight: bool,
+    family_statuses: &[FamilyStatusView],
+) -> Vec<String> {
     let mut warnings = family_statuses
         .iter()
         .filter(|status| status.state_label.starts_with("stale"))
@@ -2529,204 +3875,242 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
         ));
     }
     warnings.extend(recent_health_incidents(snapshot));
+    warnings
+}
 
-    OpsModel {
-        mode_label: ops_runtime_mode(snapshot),
-        summary_lines,
-        family_statuses,
-        items: vec![
-            ops_item("Config path", snapshot.config_path.clone()),
-            ops_item("Database path", snapshot.database_path.clone()),
-            ops_item("Schema version", snapshot.schema_version.to_string()),
-            ops_item(
-                "Webhook bind",
-                format!("{}{}", snapshot.webhook.bind_address, snapshot.webhook.path),
+fn build_ops_items(
+    snapshot: &LiveSnapshot,
+    last_accepted_delivery: &str,
+    last_rejected_delivery: &str,
+    queue_oldest: &str,
+    queue_depth: usize,
+    recent_failures: usize,
+) -> Vec<OpsItem> {
+    let mut items = build_ops_core_items(snapshot);
+    items.extend(build_ops_ai_items(snapshot));
+    items.extend(build_ops_webhook_items(
+        snapshot,
+        last_accepted_delivery,
+        last_rejected_delivery,
+        queue_oldest,
+        queue_depth,
+        recent_failures,
+    ));
+    items.extend(build_ops_refresh_items(snapshot));
+    items
+}
+
+fn build_ops_core_items(snapshot: &LiveSnapshot) -> Vec<OpsItem> {
+    vec![
+        ops_item("Config path", snapshot.config_path.clone()),
+        ops_item("Database path", snapshot.database_path.clone()),
+        ops_item("Schema version", snapshot.schema_version.to_string()),
+        ops_item(
+            "Webhook bind",
+            format!("{}{}", snapshot.webhook.bind_address, snapshot.webhook.path),
+        ),
+        ops_item(
+            "Webhook callback",
+            snapshot
+                .webhook
+                .callback_url
+                .clone()
+                .unwrap_or_else(|| "unconfigured".to_owned()),
+        ),
+        ops_item(
+            "Webhook config",
+            if receiver_config_complete(snapshot) {
+                format!(
+                    "complete | tolerance={}s | renewal_lead={}s",
+                    snapshot.webhook.signature_tolerance_secs, snapshot.webhook.renewal_lead_secs
+                )
+            } else {
+                "incomplete".to_owned()
+            },
+        ),
+        ops_item("Auth state", auth_state_label(&snapshot.auth_status)),
+        ops_item(
+            "Granted scopes",
+            if snapshot.auth_status.granted_scopes.is_empty() {
+                "none".to_owned()
+            } else {
+                snapshot.auth_status.granted_scopes.join(", ")
+            },
+        ),
+        ops_item(
+            "Access token expiry",
+            snapshot
+                .auth_status
+                .access_token_expires_at
+                .clone()
+                .unwrap_or_else(|| "unknown".to_owned()),
+        ),
+        ops_item(
+            "Last auth refresh",
+            snapshot
+                .auth_status
+                .last_refresh_at
+                .clone()
+                .unwrap_or_else(|| "never".to_owned()),
+        ),
+        ops_item(
+            "Secret backend",
+            snapshot.auth_status.secret_backend.clone(),
+        ),
+    ]
+}
+
+fn build_ops_ai_items(snapshot: &LiveSnapshot) -> Vec<OpsItem> {
+    vec![
+        ops_item(
+            "AI provider",
+            format!(
+                "{} | enabled={} | key_ready={}",
+                snapshot.ai_ops.provider,
+                yes_no(snapshot.ai_ops.enabled),
+                yes_no(snapshot.ai_ops.api_key_ready)
             ),
-            ops_item(
-                "Webhook callback",
-                snapshot
-                    .webhook
-                    .callback_url
-                    .clone()
-                    .unwrap_or_else(|| "unconfigured".to_owned()),
+        ),
+        ops_item("AI default model", snapshot.ai_ops.default_model.clone()),
+        ops_item(
+            "AI request mode",
+            format!(
+                "{} | transport={} | prompt_cache={}",
+                snapshot.ai_ops.request_mode,
+                snapshot.ai_ops.input_transport,
+                snapshot.ai_ops.prompt_cache
             ),
-            ops_item(
-                "Webhook config",
-                if receiver_config_complete(snapshot) {
+        ),
+        ops_item(
+            "AI prompt/schema",
+            format!(
+                "review={} | compare={}",
+                snapshot.ai_ops.review_prompt_version, snapshot.ai_ops.compare_prompt_version
+            ),
+        ),
+        ops_item(
+            "Latest eval",
+            latest_eval_health_summary(&snapshot.ai_eval_runs).map_or_else(
+                || "none".to_owned(),
+                |summary| format!("{} | {}", summary.created_at, summary.labels),
+            ),
+        ),
+        ops_item(
+            "Eval health",
+            latest_eval_health_summary(&snapshot.ai_eval_runs).map_or_else(
+                || "no eval history".to_owned(),
+                |summary| {
                     format!(
-                        "complete | tolerance={}s | renewal_lead={}s",
-                        snapshot.webhook.signature_tolerance_secs,
-                        snapshot.webhook.renewal_lead_secs
+                        "failed_cases={} regressions={} improvements={}",
+                        summary.failed_cases, summary.regression_count, summary.improvement_count
                     )
-                } else {
-                    "incomplete".to_owned()
                 },
             ),
-            ops_item("Auth state", auth_state_label(&snapshot.auth_status)),
-            ops_item(
-                "Granted scopes",
-                if snapshot.auth_status.granted_scopes.is_empty() {
-                    "none".to_owned()
-                } else {
-                    snapshot.auth_status.granted_scopes.join(", ")
-                },
+        ),
+        ops_item(
+            "AI last successful run",
+            snapshot
+                .ai_ops
+                .last_successful_run
+                .clone()
+                .unwrap_or_else(|| "none".to_owned()),
+        ),
+        ops_item(
+            "AI last failed run",
+            snapshot
+                .ai_ops
+                .last_failed_run
+                .clone()
+                .unwrap_or_else(|| "none".to_owned()),
+        ),
+        ops_item(
+            "Artifact registry",
+            format!(
+                "snapshots={} runs={} artifacts={} reports={} evals={}",
+                snapshot.ai_ops.snapshot_catalog_count,
+                snapshot.ai_ops.ai_run_count,
+                snapshot.ai_ops.ai_artifact_count,
+                snapshot.ai_ops.report_export_count,
+                snapshot.ai_ops.ai_eval_run_count,
             ),
-            ops_item(
-                "Access token expiry",
-                snapshot
-                    .auth_status
-                    .access_token_expires_at
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_owned()),
+        ),
+    ]
+}
+
+fn build_ops_webhook_items(
+    snapshot: &LiveSnapshot,
+    last_accepted_delivery: &str,
+    last_rejected_delivery: &str,
+    queue_oldest: &str,
+    queue_depth: usize,
+    recent_failures: usize,
+) -> Vec<OpsItem> {
+    vec![
+        ops_item(
+            "Receiver heartbeat",
+            heartbeat_for(snapshot, "webhook.receiver").map_or_else(
+                || "missing".to_owned(),
+                |record| format_heartbeat_status(snapshot, record),
             ),
-            ops_item(
-                "Last auth refresh",
-                snapshot
-                    .auth_status
-                    .last_refresh_at
-                    .clone()
-                    .unwrap_or_else(|| "never".to_owned()),
+        ),
+        ops_item(
+            "Watch heartbeat",
+            heartbeat_for(snapshot, "sync.watch").map_or_else(
+                || "missing".to_owned(),
+                |record| format_heartbeat_status(snapshot, record),
             ),
-            ops_item(
-                "Secret backend",
-                snapshot.auth_status.secret_backend.clone(),
+        ),
+        ops_item("Subscriptions", overall_subscription_summary(snapshot)),
+        ops_item(
+            "Subscription horizons",
+            subscription_horizon_summary(snapshot),
+        ),
+        ops_item("Last delivery by family", family_delivery_summary(snapshot)),
+        ops_item("Last accepted delivery", last_accepted_delivery.to_owned()),
+        ops_item("Last rejected delivery", last_rejected_delivery.to_owned()),
+        ops_item(
+            "Invalidation queue",
+            format!(
+                "pending={} oldest={} recent_attempts={} failures={}",
+                queue_depth,
+                queue_oldest,
+                snapshot.webhook.recent_processing_attempts.len(),
+                recent_failures
             ),
-            ops_item(
-                "AI provider",
-                format!(
-                    "{} | enabled={} | key_ready={}",
-                    snapshot.ai_ops.provider,
-                    yes_no(snapshot.ai_ops.enabled),
-                    yes_no(snapshot.ai_ops.api_key_ready)
-                ),
+        ),
+    ]
+}
+
+fn build_ops_refresh_items(snapshot: &LiveSnapshot) -> Vec<OpsItem> {
+    vec![
+        ops_item("Freshness sources", freshness_source_summary(snapshot)),
+        ops_item(
+            "Last webhook sync",
+            last_trigger_summary(snapshot, "webhook"),
+        ),
+        ops_item(
+            "Last periodic sync",
+            last_trigger_summary(snapshot, "periodic_reconcile"),
+        ),
+        ops_item("Refresh policy", snapshot.refresh_policy.summary()),
+        ops_item(
+            "Record counts",
+            format!(
+                "profile={} daily={} heartrate={} workouts={} tags={} sessions={} derived={} patterns={} raw={}",
+                snapshot.record_counts.personal_info,
+                snapshot.record_counts.daily_sleep
+                    + snapshot.record_counts.daily_readiness
+                    + snapshot.record_counts.daily_activity,
+                snapshot.record_counts.heartrate_samples,
+                snapshot.record_counts.workouts,
+                snapshot.record_counts.tags + snapshot.record_counts.enhanced_tags,
+                snapshot.record_counts.sessions,
+                snapshot.record_counts.derived_context_events,
+                snapshot.record_counts.derived_pattern_summaries,
+                snapshot.record_counts.raw_payloads,
             ),
-            ops_item("AI default model", snapshot.ai_ops.default_model.clone()),
-            ops_item(
-                "AI request mode",
-                format!(
-                    "{} | transport={} | prompt_cache={}",
-                    snapshot.ai_ops.request_mode,
-                    snapshot.ai_ops.input_transport,
-                    snapshot.ai_ops.prompt_cache
-                ),
-            ),
-            ops_item(
-                "AI prompt/schema",
-                format!(
-                    "review={} | compare={}",
-                    snapshot.ai_ops.review_prompt_version, snapshot.ai_ops.compare_prompt_version
-                ),
-            ),
-            ops_item(
-                "Latest eval",
-                latest_eval_health_summary(&snapshot.ai_eval_runs).map_or_else(
-                    || "none".to_owned(),
-                    |summary| format!("{} | {}", summary.created_at, summary.labels),
-                ),
-            ),
-            ops_item(
-                "Eval health",
-                latest_eval_health_summary(&snapshot.ai_eval_runs).map_or_else(
-                    || "no eval history".to_owned(),
-                    |summary| {
-                        format!(
-                            "failed_cases={} regressions={} improvements={}",
-                            summary.failed_cases,
-                            summary.regression_count,
-                            summary.improvement_count
-                        )
-                    },
-                ),
-            ),
-            ops_item(
-                "AI last successful run",
-                snapshot
-                    .ai_ops
-                    .last_successful_run
-                    .clone()
-                    .unwrap_or_else(|| "none".to_owned()),
-            ),
-            ops_item(
-                "AI last failed run",
-                snapshot
-                    .ai_ops
-                    .last_failed_run
-                    .clone()
-                    .unwrap_or_else(|| "none".to_owned()),
-            ),
-            ops_item(
-                "Artifact registry",
-                format!(
-                    "snapshots={} runs={} artifacts={} reports={} evals={}",
-                    snapshot.ai_ops.snapshot_catalog_count,
-                    snapshot.ai_ops.ai_run_count,
-                    snapshot.ai_ops.ai_artifact_count,
-                    snapshot.ai_ops.report_export_count,
-                    snapshot.ai_ops.ai_eval_run_count,
-                ),
-            ),
-            ops_item(
-                "Receiver heartbeat",
-                heartbeat_for(snapshot, "webhook.receiver").map_or_else(
-                    || "missing".to_owned(),
-                    |record| format_heartbeat_status(snapshot, record),
-                ),
-            ),
-            ops_item(
-                "Watch heartbeat",
-                heartbeat_for(snapshot, "sync.watch").map_or_else(
-                    || "missing".to_owned(),
-                    |record| format_heartbeat_status(snapshot, record),
-                ),
-            ),
-            ops_item("Subscriptions", overall_subscription_summary(snapshot)),
-            ops_item(
-                "Subscription horizons",
-                subscription_horizon_summary(snapshot),
-            ),
-            ops_item("Last delivery by family", family_delivery_summary(snapshot)),
-            ops_item("Last accepted delivery", last_accepted_delivery),
-            ops_item("Last rejected delivery", last_rejected_delivery),
-            ops_item(
-                "Invalidation queue",
-                format!(
-                    "pending={} oldest={} recent_attempts={} failures={}",
-                    queue_depth,
-                    queue_oldest,
-                    snapshot.webhook.recent_processing_attempts.len(),
-                    recent_failures
-                ),
-            ),
-            ops_item("Freshness sources", freshness_source_summary(snapshot)),
-            ops_item(
-                "Last webhook sync",
-                last_trigger_summary(snapshot, "webhook"),
-            ),
-            ops_item(
-                "Last periodic sync",
-                last_trigger_summary(snapshot, "periodic_reconcile"),
-            ),
-            ops_item("Refresh policy", snapshot.refresh_policy.summary()),
-            ops_item(
-                "Record counts",
-                format!(
-                    "profile={} daily={} heartrate={} workouts={} tags={} sessions={} derived={} patterns={} raw={}",
-                    snapshot.record_counts.personal_info,
-                    snapshot.record_counts.daily_sleep
-                        + snapshot.record_counts.daily_readiness
-                        + snapshot.record_counts.daily_activity,
-                    snapshot.record_counts.heartrate_samples,
-                    snapshot.record_counts.workouts,
-                    snapshot.record_counts.tags + snapshot.record_counts.enhanced_tags,
-                    snapshot.record_counts.sessions,
-                    snapshot.record_counts.derived_context_events,
-                    snapshot.record_counts.derived_pattern_summaries,
-                    snapshot.record_counts.raw_payloads,
-                ),
-            ),
-        ],
-        warnings,
-    }
+        ),
+    ]
 }
 
 fn build_review_model(
@@ -2808,9 +4192,9 @@ fn build_review_model(
         ),
         empty_message: review_empty_message(context.review_mode, context.review_focus),
         ai_actions: vec![
-            "[ai] a review this day in the AI workbench".to_owned(),
-            "[ai] c compare this week to the previous week".to_owned(),
-            "[ai] 7 open the dedicated AI workbench".to_owned(),
+            "[ai] Review this day from the AI launch region.".to_owned(),
+            "[ai] Compare this week with the previous week from the AI launch region.".to_owned(),
+            "[ai] Open the AI workbench from Views for saved runs and reports.".to_owned(),
         ],
     }
 }
@@ -2821,44 +4205,59 @@ fn build_ai_workbench_model(
 ) -> AiWorkbenchModel {
     let selected_day = selected_day_label(snapshot, options.selected_day_index)
         .unwrap_or_else(|| latest_review_anchor_day(snapshot));
-    let launch_points = build_ai_launch_points(&selected_day);
-    let browser_tabs = [
-        (
-            AiBrowserTab::Runs,
-            "Runs",
-            snapshot.ai_runs.len(),
-            options.ai_browser_tab == AiBrowserTab::Runs,
-        ),
+    let launch_points = build_ai_launch_points(&selected_day, options.selected_ai_launch_index);
+    let browser_content = build_ai_browser_content(snapshot, options);
+    let preflight = options
+        .ai_preflight
+        .as_ref()
+        .map(|preflight| build_ai_preflight_view(preflight, options.ai_preflight_control));
+
+    AiWorkbenchModel {
+        headline: format!("AI workbench for {selected_day}"),
+        summary_lines: build_ai_workbench_summary_lines(snapshot),
+        launch_points,
+        browser_tabs: build_ai_browser_tabs(snapshot, options.ai_browser_tab),
+        selected_tab_index: options.ai_browser_tab.index(),
+        browser_items: browser_content.browser_items,
+        selected_item_index: browser_content.selected_item_index,
+        artifact_actions: browser_content.artifact_actions,
+        selected_action_index: browser_content.selected_action_index,
+        detail_title: browser_content.detail_title,
+        detail_lines: browser_content.detail_lines,
+        trust_lines: build_ai_workbench_trust_lines(snapshot),
+        warning_lines: build_ai_workbench_warning_lines(snapshot),
+        preflight,
+    }
+}
+
+fn build_ai_browser_tabs(
+    snapshot: &LiveSnapshot,
+    selected_tab: AiBrowserTab,
+) -> Vec<AiBrowserTabView> {
+    [
+        (AiBrowserTab::Runs, "Runs", snapshot.ai_runs.len()),
         (
             AiBrowserTab::Snapshots,
             "Snapshots",
             snapshot.snapshot_catalog.len(),
-            options.ai_browser_tab == AiBrowserTab::Snapshots,
         ),
         (
             AiBrowserTab::Reports,
             "Reports",
             snapshot.report_exports.len(),
-            options.ai_browser_tab == AiBrowserTab::Reports,
         ),
-        (
-            AiBrowserTab::Evals,
-            "Evals",
-            snapshot.ai_eval_runs.len(),
-            options.ai_browser_tab == AiBrowserTab::Evals,
-        ),
+        (AiBrowserTab::Evals, "Evals", snapshot.ai_eval_runs.len()),
     ]
     .into_iter()
-    .map(|(_, label, count, selected)| AiBrowserTabView {
+    .map(|(tab, label, count)| AiBrowserTabView {
         label: label.to_owned(),
         count,
-        selected,
+        selected: selected_tab == tab,
     })
-    .collect::<Vec<_>>();
+    .collect()
+}
 
-    let (browser_items, selected_item_index, detail_title, detail_lines) =
-        build_ai_browser_content(snapshot, options);
-
+fn build_ai_workbench_summary_lines(snapshot: &LiveSnapshot) -> Vec<String> {
     let mut summary_lines = vec![
         format!(
             "Snapshot-first AI is {} and {} by default.",
@@ -2867,7 +4266,7 @@ fn build_ai_workbench_model(
             } else {
                 "disabled"
             },
-            if snapshot.ai_ops.stateless_default {
+            if snapshot.ai_ops.request_mode == AiRequestMode::Stateless.as_str() {
                 "stateless"
             } else {
                 "stateful"
@@ -2898,7 +4297,10 @@ fn build_ai_workbench_model(
             eval_summary.improvement_count
         ));
     }
+    summary_lines
+}
 
+fn build_ai_workbench_trust_lines(snapshot: &LiveSnapshot) -> Vec<String> {
     let mut trust_lines = vec![
         format!(
             "Provider: {} | API key ready: {}",
@@ -2932,7 +4334,10 @@ fn build_ai_workbench_model(
             eval_summary.improvement_count
         ));
     }
+    trust_lines
+}
 
+fn build_ai_workbench_warning_lines(snapshot: &LiveSnapshot) -> Vec<String> {
     let mut warning_lines = Vec::new();
     if !snapshot.ai_ops.enabled {
         warning_lines.push(
@@ -2968,25 +4373,10 @@ fn build_ai_workbench_model(
             eval_summary.failed_cases, eval_summary.regression_count
         ));
     }
-    let preflight = options.ai_preflight.as_ref().map(build_ai_preflight_view);
-
-    AiWorkbenchModel {
-        headline: format!("AI workbench for {}", selected_day),
-        summary_lines,
-        launch_points,
-        browser_tabs,
-        selected_tab_index: options.ai_browser_tab.index(),
-        browser_items,
-        selected_item_index,
-        detail_title,
-        detail_lines,
-        trust_lines,
-        warning_lines,
-        preflight,
-    }
+    warning_lines
 }
 
-fn build_ai_launch_points(selected_day: &str) -> Vec<AiLaunchPointView> {
+fn build_ai_launch_points(selected_day: &str, selected_index: usize) -> Vec<AiLaunchPointView> {
     vec![
         AiLaunchPointView {
             intent: AiLaunchIntent::ReviewSelectedDay,
@@ -2995,6 +4385,7 @@ fn build_ai_launch_points(selected_day: &str) -> Vec<AiLaunchPointView> {
                 "Prepare a snapshot-scoped review for day:{selected_day}, then confirm the exact payload in preflight before any upload."
             ),
             key_hint: "a".to_owned(),
+            selected: selected_index == 0,
         },
         AiLaunchPointView {
             intent: AiLaunchIntent::CompareSelectedWeek,
@@ -3003,27 +4394,15 @@ fn build_ai_launch_points(selected_day: &str) -> Vec<AiLaunchPointView> {
                 "Prepare a week-to-week compare with explicit snapshot A/B provenance and model/privacy choices."
                     .to_owned(),
             key_hint: "c".to_owned(),
-        },
-        AiLaunchPointView {
-            intent: AiLaunchIntent::ChallengeSelectedDay,
-            label: "Challenge a saved finding".to_owned(),
-            detail:
-                "Launch a bounded follow-up that expands evidence, surfaces counterevidence, or suggests the next local drill-down."
-                    .to_owned(),
-            key_hint: "e/y/i/d on saved run".to_owned(),
-        },
-        AiLaunchPointView {
-            intent: AiLaunchIntent::ChallengeSelectedDay,
-            label: "Generate a report".to_owned(),
-            detail:
-                "Export a human-readable report from the selected snapshot or saved AI run without leaving the TUI flow."
-                    .to_owned(),
-            key_hint: "g on saved item".to_owned(),
+            selected: selected_index == 1,
         },
     ]
 }
 
-fn build_ai_preflight_view(preflight: &AiPreflightState) -> AiPreflightView {
+fn build_ai_preflight_view(
+    preflight: &AiPreflightState,
+    selected_control: PreflightControl,
+) -> AiPreflightView {
     let mut body_lines = vec![
         format!("intent: {}", preflight.intent.label()),
         format!("source: {}", preflight.source_screen.title()),
@@ -3068,47 +4447,213 @@ fn build_ai_preflight_view(preflight: &AiPreflightState) -> AiPreflightView {
                 .map(|path| format!("  - {path}")),
         );
     }
-    body_lines.push("confirm with Enter | cancel with n | cycle privacy with p".to_owned());
+    body_lines.push(
+        "Tab moves focus | Left/Right selects control | Enter activates | Esc closes".to_owned(),
+    );
 
     AiPreflightView {
         title: format!("Preflight | {}", preflight.intent.short_label()),
         body_lines,
         warning_lines: preflight.warning_lines.clone(),
+        controls: ai_preflight_controls(preflight.confirm_enabled, selected_control),
+        selected_control_index: preflight_control_index(selected_control),
         confirm_enabled: preflight.confirm_enabled,
+    }
+}
+
+fn ai_preflight_controls(
+    confirm_enabled: bool,
+    selected_control: PreflightControl,
+) -> Vec<AiPreflightControlView> {
+    PreflightControl::ALL
+        .into_iter()
+        .map(|control| AiPreflightControlView {
+            label: control.label(),
+            detail: match control {
+                PreflightControl::Confirm if confirm_enabled => {
+                    "Send the prepared snapshot-bounded request.".to_owned()
+                }
+                PreflightControl::Confirm => {
+                    "Blocked until readiness issues are resolved.".to_owned()
+                }
+                PreflightControl::Privacy => {
+                    "Cycle the privacy profile before confirming.".to_owned()
+                }
+                PreflightControl::Cancel => {
+                    "Dismiss this preflight without sending anything.".to_owned()
+                }
+            },
+            selected: control == selected_control,
+        })
+        .collect()
+}
+
+const fn preflight_control_index(control: PreflightControl) -> usize {
+    match control {
+        PreflightControl::Confirm => 0,
+        PreflightControl::Privacy => 1,
+        PreflightControl::Cancel => 2,
     }
 }
 
 fn build_ai_browser_content(
     snapshot: &LiveSnapshot,
     options: &LiveModelOptions,
-) -> (Vec<AiBrowserItemView>, Option<usize>, String, Vec<String>) {
-    match options.ai_browser_tab {
-        AiBrowserTab::Runs => build_ai_run_browser(snapshot, options.selected_ai_run_index),
-        AiBrowserTab::Snapshots => {
-            build_snapshot_browser(snapshot, options.selected_snapshot_catalog_index)
-        }
-        AiBrowserTab::Reports => {
-            build_report_browser(snapshot, options.selected_report_export_index)
-        }
-        AiBrowserTab::Evals => build_eval_browser(snapshot, options.selected_ai_eval_run_index),
+) -> AiBrowserContent {
+    let (browser_items, selected_item_index, detail_title, detail_lines) =
+        match options.ai_browser_tab {
+            AiBrowserTab::Runs => build_ai_run_browser(snapshot, options.selected_ai_run_index),
+            AiBrowserTab::Snapshots => {
+                build_snapshot_browser(snapshot, options.selected_snapshot_catalog_index)
+            }
+            AiBrowserTab::Reports => {
+                build_report_browser(snapshot, options.selected_report_export_index)
+            }
+            AiBrowserTab::Evals => build_eval_browser(snapshot, options.selected_ai_eval_run_index),
+        };
+    let action_kinds = ai_artifact_action_kinds(
+        options.ai_browser_tab,
+        selected_item_index.and_then(|index| snapshot.ai_runs.get(index)),
+        selected_item_index.and_then(|index| snapshot.snapshot_catalog.get(index)),
+        selected_item_index.and_then(|index| snapshot.report_exports.get(index)),
+        selected_item_index.and_then(|index| snapshot.ai_eval_runs.get(index)),
+    );
+    let selected_action_index = if action_kinds.is_empty() {
+        None
+    } else {
+        Some(usize::min(
+            options.selected_ai_artifact_action_index,
+            action_kinds.len().saturating_sub(1),
+        ))
+    };
+    let artifact_actions = action_kinds
+        .iter()
+        .enumerate()
+        .map(|(index, kind)| AiArtifactActionView {
+            label: kind.label().to_owned(),
+            detail: kind.detail().to_owned(),
+            selected: selected_action_index == Some(index),
+        })
+        .collect::<Vec<_>>();
+
+    AiBrowserContent {
+        browser_items,
+        selected_item_index,
+        artifact_actions,
+        selected_action_index,
+        detail_title,
+        detail_lines,
     }
+}
+
+fn ai_artifact_action_kinds(
+    tab: AiBrowserTab,
+    selected_run: Option<&AiRunRecord>,
+    selected_snapshot: Option<&SnapshotCatalogEntry>,
+    _selected_report: Option<&ReportExportRecord>,
+    selected_eval: Option<&AiEvalRunRecord>,
+) -> Vec<AiArtifactActionKind> {
+    match tab {
+        AiBrowserTab::Runs => selected_run.map_or_else(Vec::new, |run| {
+            let mut actions = Vec::new();
+            if ai_run_is_cancellable(run) {
+                actions.push(AiArtifactActionKind::CancelRun);
+            }
+            if ai_run_has_follow_up_source(run) {
+                actions.extend([
+                    AiArtifactActionKind::ExpandEvidence,
+                    AiArtifactActionKind::ShowCounterevidence,
+                    AiArtifactActionKind::ExplainRanking,
+                    AiArtifactActionKind::SuggestDrilldown,
+                ]);
+            }
+            if run.artifact_id.is_some() {
+                actions.push(AiArtifactActionKind::GenerateReport);
+            }
+            actions.push(AiArtifactActionKind::RerunNextPrivacy);
+            actions.push(AiArtifactActionKind::RerunNextModel);
+            actions.push(AiArtifactActionKind::ComparePreviousSnapshot);
+            if run.artifact_id.is_some() {
+                actions.push(AiArtifactActionKind::OpenLinkedEvidence);
+            }
+            actions
+        }),
+        AiBrowserTab::Snapshots => selected_snapshot.map_or_else(Vec::new, |_| {
+            vec![
+                AiArtifactActionKind::ComparePreviousSnapshot,
+                AiArtifactActionKind::GenerateReport,
+            ]
+        }),
+        AiBrowserTab::Reports => Vec::new(),
+        AiBrowserTab::Evals => selected_eval.map_or_else(Vec::new, |eval| {
+            if eval_has_linked_evidence(eval) {
+                vec![AiArtifactActionKind::OpenLinkedEvidence]
+            } else {
+                Vec::new()
+            }
+        }),
+    }
+}
+
+fn ai_run_is_cancellable(run: &AiRunRecord) -> bool {
+    matches!(run.run_status.as_str(), "queued" | "running")
+}
+
+fn ai_run_has_follow_up_source(run: &AiRunRecord) -> bool {
+    if run.run_kind == "follow_up" {
+        run.source_ai_artifact_id.is_some() || run.artifact_id.is_some()
+    } else {
+        run.artifact_id.is_some()
+    }
+}
+
+fn eval_has_linked_evidence(eval: &AiEvalRunRecord) -> bool {
+    let Some(details) = parse_persisted_eval_details(&eval.details_json) else {
+        return false;
+    };
+    details.cases.iter().any(|case| {
+        case.snapshot_hash_a.is_some()
+            || case.snapshot_hash_b.is_some()
+            || case.candidate.lineage.ai_run_id.is_some()
+            || case.candidate.lineage.ai_artifact_id.is_some()
+            || case.candidate.lineage.report_id.is_some()
+            || case.baseline.as_ref().is_some_and(|baseline| {
+                baseline.lineage.ai_run_id.is_some()
+                    || baseline.lineage.ai_artifact_id.is_some()
+                    || baseline.lineage.report_id.is_some()
+            })
+    })
 }
 
 fn build_ai_run_browser(
     snapshot: &LiveSnapshot,
     selected_index: usize,
 ) -> (Vec<AiBrowserItemView>, Option<usize>, String, Vec<String>) {
-    let selected_item_index = if snapshot.ai_runs.is_empty() {
-        None
-    } else {
-        Some(usize::min(
-            selected_index,
-            snapshot.ai_runs.len().saturating_sub(1),
-        ))
-    };
+    let selected_item_index = clamp_selected_index(selected_index, snapshot.ai_runs.len());
+    let browser_items = build_ai_run_browser_items(&snapshot.ai_runs, selected_item_index);
 
-    let browser_items = snapshot
-        .ai_runs
+    let Some(selected_item_index) = selected_item_index else {
+        return (
+            browser_items,
+            None,
+            "Saved AI runs".to_owned(),
+            vec!["No persisted AI runs yet.".to_owned()],
+        );
+    };
+    let run = &snapshot.ai_runs[selected_item_index];
+    (
+        browser_items,
+        Some(selected_item_index),
+        "Saved AI run".to_owned(),
+        ai_run_detail_lines(snapshot, run),
+    )
+}
+
+fn build_ai_run_browser_items(
+    ai_runs: &[AiRunRecord],
+    selected_item_index: Option<usize>,
+) -> Vec<AiBrowserItemView> {
+    ai_runs
         .iter()
         .enumerate()
         .map(|(index, run)| AiBrowserItemView {
@@ -3125,17 +4670,23 @@ fn build_ai_run_browser(
             status_badge: run.run_status.clone(),
             selected: selected_item_index == Some(index),
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
 
-    let Some(selected_item_index) = selected_item_index else {
-        return (
-            browser_items,
-            None,
-            "Saved AI runs".to_owned(),
-            vec!["No persisted AI runs yet.".to_owned()],
-        );
-    };
-    let run = &snapshot.ai_runs[selected_item_index];
+fn ai_run_detail_lines(snapshot: &LiveSnapshot, run: &AiRunRecord) -> Vec<String> {
+    let mut detail_lines = ai_run_metadata_lines(run);
+    if let Ok(preview) = serde_json::from_str::<AiRequestPreview>(&run.request_preview_json) {
+        detail_lines.push(String::new());
+        detail_lines.push("request preview:".to_owned());
+        detail_lines.extend(ai_request_preview_lines(&preview));
+    }
+    if let Some(artifact_id) = &run.artifact_id {
+        detail_lines.extend(ai_run_artifact_lines(snapshot, artifact_id));
+    }
+    detail_lines
+}
+
+fn ai_run_metadata_lines(run: &AiRunRecord) -> Vec<String> {
     let mut detail_lines = vec![
         format!("run_id: {}", run.run_id),
         format!("kind: {} | status: {}", run.run_kind, run.run_status),
@@ -3180,49 +4731,34 @@ fn build_ai_run_browser(
         detail_lines.push(String::new());
         detail_lines.push(format!("error: {error_message}"));
     }
-    if let Ok(preview) = serde_json::from_str::<AiRequestPreview>(&run.request_preview_json) {
-        detail_lines.push(String::new());
-        detail_lines.push("request preview:".to_owned());
-        detail_lines.extend(ai_request_preview_lines(&preview));
-    }
-    if let Some(artifact_id) = &run.artifact_id {
-        detail_lines.push(String::new());
-        detail_lines.push(format!("linked_artifact: {artifact_id}"));
-        if let Some(artifact_record) = snapshot
-            .ai_artifact_records
-            .iter()
-            .find(|record| &record.artifact_id == artifact_id)
-        {
-            detail_lines.extend(ai_artifact_detail_lines(artifact_record));
-        }
-        let linked_reports = snapshot
-            .report_exports
-            .iter()
-            .filter(|record| record.source_ai_artifact_id.as_deref() == Some(artifact_id.as_str()))
-            .collect::<Vec<_>>();
-        if !linked_reports.is_empty() {
-            detail_lines.push(String::new());
-            detail_lines.push("linked_reports:".to_owned());
-            detail_lines.extend(linked_reports.iter().map(|report| {
-                format!(
-                    "  - {} | {} | {}",
-                    report.title, report.format, report.output_path
-                )
-            }));
-        }
-    }
-    detail_lines.push(String::new());
-    detail_lines.push(
-        "actions: e expand evidence | y counterevidence | i explain ranking | d next drill-down | g report | u rerun privacy | m rerun model | b compare previous | o open local evidence"
-            .to_owned(),
-    );
+    detail_lines
+}
 
-    (
-        browser_items,
-        Some(selected_item_index),
-        "Saved AI run".to_owned(),
-        detail_lines,
-    )
+fn ai_run_artifact_lines(snapshot: &LiveSnapshot, artifact_id: &str) -> Vec<String> {
+    let mut detail_lines = vec![String::new(), format!("linked_artifact: {artifact_id}")];
+    if let Some(artifact_record) = snapshot
+        .ai_artifact_records
+        .iter()
+        .find(|record| record.artifact_id == artifact_id)
+    {
+        detail_lines.extend(ai_artifact_detail_lines(artifact_record));
+    }
+    let linked_reports = snapshot
+        .report_exports
+        .iter()
+        .filter(|record| record.source_ai_artifact_id.as_deref() == Some(artifact_id))
+        .collect::<Vec<_>>();
+    if !linked_reports.is_empty() {
+        detail_lines.push(String::new());
+        detail_lines.push("linked_reports:".to_owned());
+        detail_lines.extend(linked_reports.iter().map(|report| {
+            format!(
+                "  - {} | {} | {}",
+                report.title, report.format, report.output_path
+            )
+        }));
+    }
+    detail_lines
 }
 
 fn build_snapshot_browser(
@@ -3510,7 +5046,26 @@ fn render_eval_detail_lines(
     details: &PersistedEvalRunDetails,
 ) -> Vec<String> {
     let comparison_counts = eval_comparison_counts(&details.cases);
-    let mut lines = vec![
+    let mut lines = render_eval_overview_lines(record, details, comparison_counts);
+    lines.extend(render_eval_change_lines(
+        "regressions",
+        &details.regressions,
+    ));
+    lines.extend(render_eval_change_lines(
+        "improvements",
+        &details.improvements,
+    ));
+    lines.extend(render_failing_eval_case_lines(snapshot, &details.cases));
+    lines.extend(render_passing_eval_case_lines(&details.cases));
+    lines
+}
+
+fn render_eval_overview_lines(
+    record: &AiEvalRunRecord,
+    details: &PersistedEvalRunDetails,
+    comparison_counts: EvalComparisonCounts,
+) -> Vec<String> {
+    vec![
         format!("eval_run_id: {}", record.eval_run_id),
         format!(
             "fixture_manifest: {} | {}",
@@ -3543,92 +5098,97 @@ fn render_eval_detail_lines(
             details.scores.honesty
         ),
         format!("regression_summary: {}", details.regression_summary),
-    ];
+    ]
+}
 
-    if !details.regressions.is_empty() {
-        lines.push("regressions:".to_owned());
-        lines.extend(
-            details
-                .regressions
-                .iter()
-                .map(|regression| format!("  - {regression}")),
-        );
+fn render_eval_change_lines(title: &str, items: &[String]) -> Vec<String> {
+    if items.is_empty() {
+        Vec::new()
+    } else {
+        let mut lines = vec![format!("{title}:")];
+        lines.extend(items.iter().map(|item| format!("  - {item}")));
+        lines
     }
-    if !details.improvements.is_empty() {
-        lines.push("improvements:".to_owned());
-        lines.extend(
-            details
-                .improvements
-                .iter()
-                .map(|improvement| format!("  - {improvement}")),
-        );
-    }
+}
 
-    let failing_cases = details
-        .cases
+fn render_failing_eval_case_lines(
+    snapshot: &LiveSnapshot,
+    cases: &[PersistedEvalCaseDetail],
+) -> Vec<String> {
+    let failing_cases = cases
         .iter()
         .filter(|case| case.graders.iter().any(|grader| !grader.candidate_passed))
         .collect::<Vec<_>>();
-    if !failing_cases.is_empty() {
-        lines.push(String::new());
-        lines.push("failing_graders:".to_owned());
+    if failing_cases.is_empty() {
+        Vec::new()
+    } else {
+        let mut lines = vec![String::new(), "failing_graders:".to_owned()];
         for case in failing_cases {
+            lines.extend(render_failing_eval_case(snapshot, case));
+        }
+        lines
+    }
+}
+
+fn render_failing_eval_case(
+    snapshot: &LiveSnapshot,
+    case: &PersistedEvalCaseDetail,
+) -> Vec<String> {
+    let mut lines = vec![
+        format!(
+            "case {} | {} | {}",
+            case.case_id, case.task_family, case.candidate.label
+        ),
+        format!("  snapshot_a_fixture: {}", case.snapshot_a_path),
+        format!("  candidate_artifact: {}", case.candidate.artifact_path),
+    ];
+    if let Some(snapshot_b_path) = &case.snapshot_b_path {
+        lines.push(format!("  snapshot_b_fixture: {snapshot_b_path}"));
+    }
+    if let Some(baseline) = &case.baseline {
+        lines.push(format!("  baseline_artifact: {}", baseline.artifact_path));
+    }
+    lines.extend(render_eval_case_link_lines(snapshot, case));
+    for grader in case
+        .graders
+        .iter()
+        .filter(|grader| !grader.candidate_passed)
+    {
+        lines.push(format!(
+            "  - {} [{}] | candidate={} | note={}",
+            grader.grader,
+            grader.comparison,
+            pass_fail_word(grader.candidate_passed),
+            grader.candidate_note
+        ));
+        if let Some(baseline_passed) = grader.baseline_passed {
             lines.push(format!(
-                "case {} | {} | {}",
-                case.case_id, case.task_family, case.candidate.label
+                "    baseline={} | baseline_note={}",
+                pass_fail_word(baseline_passed),
+                grader.baseline_note.as_deref().unwrap_or("none")
             ));
-            lines.push(format!("  snapshot_a_fixture: {}", case.snapshot_a_path));
-            if let Some(snapshot_b_path) = &case.snapshot_b_path {
-                lines.push(format!("  snapshot_b_fixture: {snapshot_b_path}"));
-            }
-            lines.push(format!(
-                "  candidate_artifact: {}",
-                case.candidate.artifact_path
-            ));
-            if let Some(baseline) = &case.baseline {
-                lines.push(format!("  baseline_artifact: {}", baseline.artifact_path));
-            }
-            lines.extend(render_eval_case_link_lines(snapshot, case));
-            for grader in case
-                .graders
-                .iter()
-                .filter(|grader| !grader.candidate_passed)
-            {
-                lines.push(format!(
-                    "  - {} [{}] | candidate={} | note={}",
-                    grader.grader,
-                    grader.comparison,
-                    pass_fail_word(grader.candidate_passed),
-                    grader.candidate_note
-                ));
-                if let Some(baseline_passed) = grader.baseline_passed {
-                    lines.push(format!(
-                        "    baseline={} | baseline_note={}",
-                        pass_fail_word(baseline_passed),
-                        grader.baseline_note.as_deref().unwrap_or("none")
-                    ));
-                }
-            }
         }
     }
+    lines
+}
 
-    let passing_cases = details
-        .cases
+fn render_passing_eval_case_lines(cases: &[PersistedEvalCaseDetail]) -> Vec<String> {
+    let passing_cases = cases
         .iter()
         .filter(|case| case.graders.iter().all(|grader| grader.candidate_passed))
         .collect::<Vec<_>>();
-    if !passing_cases.is_empty() {
-        lines.push(String::new());
-        lines.push("passing_remainder:".to_owned());
+    if passing_cases.is_empty() {
+        Vec::new()
+    } else {
+        let mut lines = vec![String::new(), "passing_remainder:".to_owned()];
         lines.extend(passing_cases.iter().map(|case| {
             format!(
                 "  - {} | {} | {}",
                 case.case_id, case.task_family, case.candidate.label
             )
         }));
+        lines
     }
-
-    lines
 }
 
 fn render_eval_case_link_lines(
@@ -3738,7 +5298,7 @@ fn resolve_report_reference(snapshot: &LiveSnapshot, report_id: &str) -> String 
         )
 }
 
-fn pass_fail_word(passed: bool) -> &'static str {
+const fn pass_fail_word(passed: bool) -> &'static str {
     if passed { "pass" } else { "fail" }
 }
 
@@ -4247,7 +5807,7 @@ fn parse_app_day(day: &str) -> crate::error::Result<Date> {
     })
 }
 
-fn empty_review_deck(mode: ReviewMode, anchor_day: &str, error: impl ToString) -> ReviewDeck {
+fn empty_review_deck(mode: ReviewMode, anchor_day: &str, error: &impl ToString) -> ReviewDeck {
     ReviewDeck {
         mode,
         anchor_day: anchor_day.to_owned(),
@@ -4265,7 +5825,7 @@ fn empty_review_deck(mode: ReviewMode, anchor_day: &str, error: impl ToString) -
 fn empty_investigation_report(
     focus: ReviewFocus,
     anchor_day: &str,
-    error: impl ToString,
+    error: &impl ToString,
 ) -> InvestigationReport {
     InvestigationReport {
         focus,
@@ -4572,7 +6132,7 @@ fn latest_sync_summary(snapshot: &LiveSnapshot) -> String {
         )
 }
 
-fn header_connection_label(auth_status: &AuthStatus) -> &'static str {
+const fn header_connection_label(auth_status: &AuthStatus) -> &'static str {
     if auth_status.access_token_stored || auth_status.refresh_token_stored {
         "Connected"
     } else if auth_status.configured {
@@ -4634,7 +6194,7 @@ fn format_rejection_record(record: &RejectedWebhookDeliveryRecord) -> String {
     )
 }
 
-fn family_supports_webhooks(family: DataFamily) -> bool {
+const fn family_supports_webhooks(family: DataFamily) -> bool {
     matches!(
         family,
         DataFamily::Daily | DataFamily::Workout | DataFamily::EnhancedTag | DataFamily::Session
@@ -4758,7 +6318,7 @@ fn load_heartrate_daily_averages(
             .iter()
             .map(|point| f64::from(point.bpm))
             .sum::<f64>()
-            / samples.len() as f64;
+            / crate::numeric::usize_to_f64(samples.len());
         points.push(MetricPoint {
             day,
             value: mean_bpm,
@@ -4770,112 +6330,180 @@ fn load_heartrate_daily_averages(
 
 fn family_freshness(snapshot: &LiveSnapshot, family: DataFamily) -> FreshnessState {
     let capability_report = &snapshot.auth_status.capability_report;
-    if !capability_report.is_granted(family.capability_kind()) {
-        return FreshnessState {
-            family,
-            kind: FreshnessKind::StaleCapabilityMissing,
-            summary: freshness_label(FreshnessKind::StaleCapabilityMissing),
-            detail: format!(
-                "{} scope was not granted, so {} stay unavailable.",
-                family.capability_kind().scope_name(),
-                family.label().to_lowercase()
-            ),
-        };
+    if let Some(state) = freshness_capability_state(capability_report, family) {
+        return state;
     }
 
     let has_data = family_has_data(snapshot, family);
     let sync_state = sync_state_for(&snapshot.sync_states, family);
     let now = parse_timestamp(&snapshot.captured_at).unwrap_or_else(OffsetDateTime::now_utc);
-    let supports_webhooks = family_supports_webhooks(family);
-    let subscription_ready = !supports_webhooks || family_subscription_ready(snapshot, family);
-    let receiver_ready = !supports_webhooks || receiver_config_complete(snapshot);
-    let receiver_runtime_healthy = !supports_webhooks || receiver_healthy(snapshot);
+    let webhook_state = freshness_webhook_state(snapshot, family);
     let last_delivery = family_last_delivery(snapshot, family);
 
-    if let Some(sync_state) = sync_state {
-        if sync_state.last_error.as_ref().is_some_and(is_auth_problem)
-            || matches!(sync_state.status, SyncRunStatus::Failed)
-        {
-            return FreshnessState {
-                family,
-                kind: FreshnessKind::StaleSyncFailed,
-                summary: freshness_label(FreshnessKind::StaleSyncFailed),
-                detail: sync_state.message.clone().unwrap_or_else(|| {
-                    sync_state.last_error.as_ref().map_or_else(
-                        || format!("{} failed to sync.", family.label()),
-                        ToString::to_string,
-                    )
-                }),
-            };
-        }
-
-        let reference = sync_state
-            .last_completed_at
-            .as_deref()
-            .or(Some(sync_state.last_attempted_at.as_str()));
-        let is_fresh = reference
-            .and_then(parse_timestamp)
-            .is_some_and(|timestamp| {
-                now - timestamp
-                    <= time::Duration::seconds(
-                        snapshot.refresh_policy.stale_after_seconds(family) as i64
-                    )
-            });
-
-        if is_fresh
-            && matches!(
-                sync_state.status,
-                SyncRunStatus::Success | SyncRunStatus::Partial
-            )
-        {
-            let kind = if sync_state.last_trigger_source.as_deref() == Some("webhook") {
-                FreshnessKind::FreshWebhook
-            } else {
-                FreshnessKind::FreshPeriodic
-            };
-            let detail = match (family, latest_day_is_before_today(snapshot)) {
-                (DataFamily::Daily, true) => {
-                    "Daily closeout is current through the latest fully available upstream day."
-                        .to_owned()
-                }
-                _ => format!(
-                    "{} updated at {}.",
-                    family.label(),
-                    sync_state
-                        .last_completed_at
-                        .clone()
-                        .unwrap_or_else(|| sync_state.last_attempted_at.clone())
-                ),
-            };
-            return FreshnessState {
-                family,
-                kind,
-                summary: freshness_label(kind),
-                detail,
-            };
-        }
+    if let Some(state) = freshness_from_sync_state(snapshot, family, sync_state, now) {
+        return state;
     }
 
-    if supports_webhooks && !receiver_ready {
-        return FreshnessState {
+    if let Some(state) = freshness_webhook_guard_state(family, webhook_state) {
+        return state;
+    }
+
+    if !has_data {
+        return freshness_missing_data_state(family, sync_state);
+    }
+
+    freshness_delivery_state(family, webhook_state.supports_webhooks(), last_delivery)
+}
+
+fn freshness_capability_state(
+    capability_report: &CapabilityReport,
+    family: DataFamily,
+) -> Option<FreshnessState> {
+    (!capability_report.is_granted(family.capability_kind())).then(|| FreshnessState {
+        family,
+        kind: FreshnessKind::StaleCapabilityMissing,
+        summary: freshness_label(FreshnessKind::StaleCapabilityMissing),
+        detail: format!(
+            "{} scope was not granted, so {} stay unavailable.",
+            family.capability_kind().scope_name(),
+            family.label().to_lowercase()
+        ),
+    })
+}
+
+fn freshness_from_sync_state(
+    snapshot: &LiveSnapshot,
+    family: DataFamily,
+    sync_state: Option<&SyncStateRecord>,
+    now: OffsetDateTime,
+) -> Option<FreshnessState> {
+    let sync_state = sync_state?;
+    if sync_state.last_error.as_ref().is_some_and(is_auth_problem)
+        || matches!(sync_state.status, SyncRunStatus::Failed)
+    {
+        return Some(FreshnessState {
+            family,
+            kind: FreshnessKind::StaleSyncFailed,
+            summary: freshness_label(FreshnessKind::StaleSyncFailed),
+            detail: sync_state.message.clone().unwrap_or_else(|| {
+                sync_state.last_error.as_ref().map_or_else(
+                    || format!("{} failed to sync.", family.label()),
+                    ToString::to_string,
+                )
+            }),
+        });
+    }
+
+    let reference = sync_state
+        .last_completed_at
+        .as_deref()
+        .or(Some(sync_state.last_attempted_at.as_str()));
+    let is_fresh = reference
+        .and_then(parse_timestamp)
+        .is_some_and(|timestamp| {
+            now - timestamp
+                <= time::Duration::seconds(
+                    snapshot
+                        .refresh_policy
+                        .stale_after_seconds(family)
+                        .cast_signed(),
+                )
+        });
+    if is_fresh
+        && matches!(
+            sync_state.status,
+            SyncRunStatus::Success | SyncRunStatus::Partial
+        )
+    {
+        let kind = if sync_state.last_trigger_source.as_deref() == Some("webhook") {
+            FreshnessKind::FreshWebhook
+        } else {
+            FreshnessKind::FreshPeriodic
+        };
+        Some(FreshnessState {
+            family,
+            kind,
+            summary: freshness_label(kind),
+            detail: fresh_sync_detail(snapshot, family, sync_state),
+        })
+    } else {
+        None
+    }
+}
+
+fn fresh_sync_detail(
+    snapshot: &LiveSnapshot,
+    family: DataFamily,
+    sync_state: &SyncStateRecord,
+) -> String {
+    match (family, latest_day_is_before_today(snapshot)) {
+        (DataFamily::Daily, true) => {
+            "Daily closeout is current through the latest fully available upstream day.".to_owned()
+        }
+        _ => format!(
+            "{} updated at {}.",
+            family.label(),
+            sync_state
+                .last_completed_at
+                .clone()
+                .unwrap_or_else(|| sync_state.last_attempted_at.clone())
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FreshnessWebhookState {
+    Unsupported,
+    ReceiverConfigMissing,
+    ReceiverRuntimeUnhealthy,
+    SubscriptionMissing,
+    Ready,
+}
+
+impl FreshnessWebhookState {
+    const fn supports_webhooks(self) -> bool {
+        !matches!(self, Self::Unsupported)
+    }
+}
+
+fn freshness_webhook_state(snapshot: &LiveSnapshot, family: DataFamily) -> FreshnessWebhookState {
+    if !family_supports_webhooks(family) {
+        return FreshnessWebhookState::Unsupported;
+    }
+
+    if !receiver_config_complete(snapshot) {
+        return FreshnessWebhookState::ReceiverConfigMissing;
+    }
+
+    if !receiver_healthy(snapshot) {
+        return FreshnessWebhookState::ReceiverRuntimeUnhealthy;
+    }
+
+    if !family_subscription_ready(snapshot, family) {
+        return FreshnessWebhookState::SubscriptionMissing;
+    }
+
+    FreshnessWebhookState::Ready
+}
+
+fn freshness_webhook_guard_state(
+    family: DataFamily,
+    webhook_state: FreshnessWebhookState,
+) -> Option<FreshnessState> {
+    match webhook_state {
+        FreshnessWebhookState::ReceiverConfigMissing => Some(FreshnessState {
             family,
             kind: FreshnessKind::StaleReceiverDown,
             summary: freshness_label(FreshnessKind::StaleReceiverDown),
             detail: "Webhook receiver configuration is incomplete for this family.".to_owned(),
-        };
-    }
-
-    if supports_webhooks && !receiver_runtime_healthy {
-        return FreshnessState {
+        }),
+        FreshnessWebhookState::ReceiverRuntimeUnhealthy => Some(FreshnessState {
             family,
             kind: FreshnessKind::StaleReceiverDown,
             summary: freshness_label(FreshnessKind::StaleReceiverDown),
             detail: "Webhook receiver heartbeat is stale or missing.".to_owned(),
-        };
-    }
-
-    if supports_webhooks && !subscription_ready {
-        return FreshnessState {
+        }),
+        FreshnessWebhookState::SubscriptionMissing => Some(FreshnessState {
             family,
             kind: FreshnessKind::StaleSubscriptionMissing,
             summary: freshness_label(FreshnessKind::StaleSubscriptionMissing),
@@ -4883,27 +6511,37 @@ fn family_freshness(snapshot: &LiveSnapshot, family: DataFamily) -> FreshnessSta
                 "{} subscriptions are missing, drifted, or expired.",
                 family.label()
             ),
-        };
+        }),
+        FreshnessWebhookState::Unsupported | FreshnessWebhookState::Ready => None,
     }
+}
 
-    if !has_data {
-        return FreshnessState {
-            family,
-            kind: FreshnessKind::StaleUpstreamPending,
-            summary: freshness_label(FreshnessKind::StaleUpstreamPending),
-            detail: sync_state
-                .and_then(|state| state.message.clone())
-                .unwrap_or_else(|| {
-                    format!(
-                        "{} has not produced any persisted records yet.",
-                        family.label()
-                    )
-                }),
-        };
+fn freshness_missing_data_state(
+    family: DataFamily,
+    sync_state: Option<&SyncStateRecord>,
+) -> FreshnessState {
+    FreshnessState {
+        family,
+        kind: FreshnessKind::StaleUpstreamPending,
+        summary: freshness_label(FreshnessKind::StaleUpstreamPending),
+        detail: sync_state
+            .and_then(|state| state.message.clone())
+            .unwrap_or_else(|| {
+                format!(
+                    "{} has not produced any persisted records yet.",
+                    family.label()
+                )
+            }),
     }
+}
 
+fn freshness_delivery_state(
+    family: DataFamily,
+    supports_webhooks: bool,
+    last_delivery: Option<&AcceptedWebhookDeliveryRecord>,
+) -> FreshnessState {
     if supports_webhooks {
-        return FreshnessState {
+        FreshnessState {
             family,
             kind: FreshnessKind::StaleNoRecentDelivery,
             summary: freshness_label(FreshnessKind::StaleNoRecentDelivery),
@@ -4922,17 +6560,17 @@ fn family_freshness(snapshot: &LiveSnapshot, family: DataFamily) -> FreshnessSta
                     )
                 },
             ),
-        };
-    }
-
-    FreshnessState {
-        family,
-        kind: FreshnessKind::StaleUnsupportedWebhook,
-        summary: freshness_label(FreshnessKind::StaleUnsupportedWebhook),
-        detail: format!(
-            "{} still relies on scheduled reconcile windows because Oura does not expose webhook invalidations for it.",
-            family.label()
-        ),
+        }
+    } else {
+        FreshnessState {
+            family,
+            kind: FreshnessKind::StaleUnsupportedWebhook,
+            summary: freshness_label(FreshnessKind::StaleUnsupportedWebhook),
+            detail: format!(
+                "{} still relies on scheduled reconcile windows because Oura does not expose webhook invalidations for it.",
+                family.label()
+            ),
+        }
     }
 }
 
@@ -5157,14 +6795,15 @@ fn family_has_data(snapshot: &LiveSnapshot, family: DataFamily) -> bool {
 }
 
 fn latest_day_is_before_today(snapshot: &LiveSnapshot) -> bool {
-    latest_day_is_before_reference_day(snapshot, current_local_day_string())
+    let reference_day = current_local_day_string();
+    latest_day_is_before_reference_day(snapshot, &reference_day)
 }
 
-fn latest_day_is_before_reference_day(snapshot: &LiveSnapshot, reference_day: String) -> bool {
+fn latest_day_is_before_reference_day(snapshot: &LiveSnapshot, reference_day: &str) -> bool {
     snapshot
         .daily_history
         .last()
-        .is_some_and(|row| row.day < reference_day)
+        .is_some_and(|row| row.day.as_str() < reference_day)
 }
 
 fn current_local_day_string() -> String {
@@ -5310,12 +6949,49 @@ fn top_context_events_for_day(snapshot: &LiveSnapshot, day: &str) -> Vec<EventLi
         .collect()
 }
 
-fn overlay_filter_matches(filters: &OverlayFilterState, family: ContextEventFamily) -> bool {
+const fn overlay_filter_matches(filters: &OverlayFilterState, family: ContextEventFamily) -> bool {
     match family {
         ContextEventFamily::Workout => filters.workouts,
         ContextEventFamily::Tag | ContextEventFamily::EnhancedTag => filters.tags,
         ContextEventFamily::Session => filters.sessions,
     }
+}
+
+struct OverlayToggleDescriptor {
+    label: &'static str,
+    key_hint: &'static str,
+    family: ContextEventFamily,
+}
+
+const fn overlay_toggle_count() -> usize {
+    3
+}
+
+fn overlay_toggle_descriptor(index: usize) -> OverlayToggleDescriptor {
+    match index.min(overlay_toggle_count().saturating_sub(1)) {
+        0 => OverlayToggleDescriptor {
+            label: "Workouts",
+            key_hint: "w",
+            family: ContextEventFamily::Workout,
+        },
+        1 => OverlayToggleDescriptor {
+            label: "Tags",
+            key_hint: "t",
+            family: ContextEventFamily::EnhancedTag,
+        },
+        _ => OverlayToggleDescriptor {
+            label: "Sessions",
+            key_hint: "s",
+            family: ContextEventFamily::Session,
+        },
+    }
+}
+
+fn timeline_window_preset_index(window_hours: u16) -> usize {
+    TIMELINE_WINDOW_PRESETS
+        .iter()
+        .position(|preset| *preset == window_hours)
+        .unwrap_or(TIMELINE_WINDOW_PRESETS.len().saturating_sub(1))
 }
 
 fn nearest_event_for_point<'a>(
@@ -5364,24 +7040,26 @@ fn event_distance_seconds(event: &ContextEventRecord, timestamp: &str) -> i64 {
     }
 }
 
-fn overlay_toggle_views(filters: &OverlayFilterState) -> Vec<OverlayToggleView> {
-    vec![
-        OverlayToggleView {
-            label: "Workouts",
-            key_hint: "w",
-            enabled: filters.workouts,
-        },
-        OverlayToggleView {
-            label: "Tags",
-            key_hint: "t",
-            enabled: filters.tags,
-        },
-        OverlayToggleView {
-            label: "Sessions",
-            key_hint: "s",
-            enabled: filters.sessions,
-        },
-    ]
+fn overlay_toggle_views(
+    filters: &OverlayFilterState,
+    selected_index: usize,
+) -> Vec<OverlayToggleView> {
+    (0..overlay_toggle_count())
+        .map(|index| {
+            let descriptor = overlay_toggle_descriptor(index);
+            let enabled = match descriptor.family {
+                ContextEventFamily::Workout => filters.workouts,
+                ContextEventFamily::Tag | ContextEventFamily::EnhancedTag => filters.tags,
+                ContextEventFamily::Session => filters.sessions,
+            };
+            OverlayToggleView {
+                label: descriptor.label,
+                key_hint: descriptor.key_hint,
+                enabled,
+                selected: index == selected_index.min(overlay_toggle_count().saturating_sub(1)),
+            }
+        })
+        .collect()
 }
 
 fn build_overlay_groups(
@@ -5505,7 +7183,7 @@ fn measurement_lines_for_day(
                 .iter()
                 .map(|point| f64::from(point.bpm))
                 .sum::<f64>()
-                / heartrate_day.points.len() as f64;
+                / crate::numeric::usize_to_f64(heartrate_day.points.len());
             lines.push(format!(
                 "Heartrate mean {} bpm across {} samples.",
                 format_float(mean),
@@ -5558,7 +7236,7 @@ fn missing_scope_messages(report: &CapabilityReport) -> Vec<String> {
     .collect()
 }
 
-fn insight_is_thin(insight: &MetricInsight) -> bool {
+const fn insight_is_thin(insight: &MetricInsight) -> bool {
     matches!(insight.confidence, InsightConfidence::Thin)
 }
 
@@ -5695,7 +7373,7 @@ fn format_event_time(day: &str, event: &ContextEventRecord) -> String {
     }
 }
 
-fn overlay_family_label(family: ContextEventFamily) -> &'static str {
+const fn overlay_family_label(family: ContextEventFamily) -> &'static str {
     match family {
         ContextEventFamily::Workout => "Workout",
         ContextEventFamily::Tag | ContextEventFamily::EnhancedTag => "Tag",
@@ -5703,7 +7381,7 @@ fn overlay_family_label(family: ContextEventFamily) -> &'static str {
     }
 }
 
-fn overlay_family_glyph(family: ContextEventFamily) -> char {
+const fn overlay_family_glyph(family: ContextEventFamily) -> char {
     match family {
         ContextEventFamily::Workout => 'W',
         ContextEventFamily::Tag | ContextEventFamily::EnhancedTag => 'T',
@@ -5711,7 +7389,7 @@ fn overlay_family_glyph(family: ContextEventFamily) -> char {
     }
 }
 
-fn relation_phrase(window: PatternRelationWindow) -> &'static str {
+const fn relation_phrase(window: PatternRelationWindow) -> &'static str {
     match window {
         PatternRelationWindow::SameDayActivity => "same-day activity",
         PatternRelationWindow::NextDayReadiness => "next-day readiness",
@@ -5721,9 +7399,9 @@ fn relation_phrase(window: PatternRelationWindow) -> &'static str {
 
 fn effect_direction_phrase(direction: EffectDirection, metric: PatternMetric) -> String {
     let metric_label = match metric {
-        PatternMetric::ActivityScore => "activity score",
-        PatternMetric::ReadinessScore => "readiness score",
-        PatternMetric::SleepScore => "sleep score",
+        PatternMetric::Activity => "activity score",
+        PatternMetric::Readiness => "readiness score",
+        PatternMetric::Sleep => "sleep score",
     };
     match direction {
         EffectDirection::Higher => format!("higher {metric_label}"),
@@ -5736,7 +7414,7 @@ fn prettify_key(value: &str) -> String {
     value.replace("::", " / ").replace('_', " ")
 }
 
-fn data_sufficiency_label(value: crate::store::queries::DataSufficiency) -> &'static str {
+const fn data_sufficiency_label(value: crate::store::queries::DataSufficiency) -> &'static str {
     match value {
         crate::store::queries::DataSufficiency::Thin => "thin",
         crate::store::queries::DataSufficiency::Medium => "medium",
@@ -5748,7 +7426,7 @@ fn signed_delta(value: f64) -> String {
     format!("{value:+.1}")
 }
 
-fn toggle_state(enabled: bool) -> &'static str {
+const fn toggle_state(enabled: bool) -> &'static str {
     if enabled { "on" } else { "off" }
 }
 
@@ -5807,7 +7485,7 @@ fn window_sparkline(history: &[MetricPoint], days: usize) -> Vec<u64> {
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
-        .map(|point| point.value.round().max(0.0) as u64)
+        .map(|point| crate::numeric::rounded_nonnegative_f64_to_u64(point.value))
         .collect()
 }
 
@@ -5912,7 +7590,7 @@ fn now_rfc3339() -> String {
 }
 
 impl DataFamily {
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Personal => "Personal",
             Self::Daily => "Daily",
@@ -5923,7 +7601,7 @@ impl DataFamily {
         }
     }
 
-    fn sync_key(self) -> &'static str {
+    const fn sync_key(self) -> &'static str {
         match self {
             Self::Personal => SyncFamily::Personal.sync_key(),
             Self::Daily => SyncFamily::Daily.sync_key(),
@@ -5934,7 +7612,7 @@ impl DataFamily {
         }
     }
 
-    fn capability_kind(self) -> CapabilityKind {
+    const fn capability_kind(self) -> CapabilityKind {
         match self {
             Self::Personal => CapabilityKind::Personal,
             Self::Daily => CapabilityKind::Daily,
@@ -5947,7 +7625,7 @@ impl DataFamily {
 }
 
 impl RefreshPolicySnapshot {
-    fn from_config(config: &Config) -> Self {
+    const fn from_config(config: &Config) -> Self {
         Self {
             personal_interval_secs: config.refresh.personal_interval_secs,
             daily_interval_secs: config.refresh.daily_interval_secs,
@@ -5964,7 +7642,7 @@ impl RefreshPolicySnapshot {
         }
     }
 
-    fn stale_after_seconds(&self, family: DataFamily) -> u64 {
+    const fn stale_after_seconds(&self, family: DataFamily) -> u64 {
         match family {
             DataFamily::Personal => self.personal_stale_after_secs,
             DataFamily::Daily => self.daily_stale_after_secs,
@@ -5992,101 +7670,191 @@ impl AppModel {
     fn empty() -> Self {
         Self {
             title: "ringmaster".to_owned(),
-            dashboard: DashboardModel {
-                selected_day_label: String::new(),
-                scores: Vec::new(),
-                freshness: String::new(),
-                capabilities: Vec::new(),
-                change_summary: String::new(),
-                highlights: Vec::new(),
-                ai_actions: Vec::new(),
-            },
-            timeline: TimelineModel {
-                summary: String::new(),
-                breadcrumb: String::new(),
-                day_selector: String::new(),
-                selected_day_label: String::new(),
-                selected_day_index: 0,
-                heart_rate: Vec::new(),
-                selected_point_index: None,
-                window_hours: 24,
-                window_start_minute: 0,
-                window_end_minute: 24 * 60 - 1,
-                overlay_toggles: Vec::new(),
-                overlay_groups: Vec::new(),
-                events: Vec::new(),
-                selected_event_index: None,
-                selected_detail: String::new(),
-                event_detail_lines: Vec::new(),
-            },
-            trends: TrendsModel {
-                windows: Vec::new(),
-                selected_window_index: 0,
-                metrics: Vec::new(),
-                notes: Vec::new(),
-            },
-            explain: ExplainModel {
-                selected_day_label: String::new(),
-                breadcrumb: String::new(),
-                headline: String::new(),
-                summary_lines: Vec::new(),
-                measurement_lines: Vec::new(),
-                evidence_lines: Vec::new(),
-                caveat_lines: Vec::new(),
-                context_lines: Vec::new(),
-                ai_actions: Vec::new(),
-            },
-            patterns: PatternsModel {
-                header: String::new(),
-                filter_summary: String::new(),
-                rows: Vec::new(),
-                notes: Vec::new(),
-                empty_message: String::new(),
-                ai_actions: Vec::new(),
-            },
-            ops: OpsModel {
-                mode_label: String::new(),
-                summary_lines: Vec::new(),
-                family_statuses: Vec::new(),
-                items: Vec::new(),
-                warnings: Vec::new(),
-            },
-            review: ReviewModel {
-                selected_day_label: String::new(),
-                breadcrumb: String::new(),
-                mode_tabs: Vec::new(),
-                selected_mode_index: 0,
-                focus_tabs: Vec::new(),
-                selected_focus_index: 0,
-                cards: Vec::new(),
-                selected_card_index: None,
-                ai_artifact: empty_ai_artifact_summary_view(),
-                detail_lines: Vec::new(),
-                warning_lines: Vec::new(),
-                empty_message: String::new(),
-                ai_actions: Vec::new(),
-            },
-            ai: AiWorkbenchModel {
-                headline: String::new(),
-                summary_lines: Vec::new(),
-                launch_points: Vec::new(),
-                browser_tabs: Vec::new(),
-                selected_tab_index: 0,
-                browser_items: Vec::new(),
-                selected_item_index: None,
-                detail_title: String::new(),
-                detail_lines: Vec::new(),
-                trust_lines: Vec::new(),
-                warning_lines: Vec::new(),
-                preflight: None,
-            },
+            dashboard: empty_dashboard_model(),
+            timeline: empty_timeline_model(),
+            trends: empty_trends_model(),
+            explain: empty_explain_model(),
+            patterns: empty_patterns_model(),
+            ops: empty_ops_model(),
+            review: empty_review_model(),
+            ai: empty_ai_workbench_model(),
         }
     }
 }
 
+const fn empty_dashboard_model() -> DashboardModel {
+    DashboardModel {
+        selected_day_label: String::new(),
+        scores: Vec::new(),
+        freshness: String::new(),
+        capabilities: Vec::new(),
+        change_summary: String::new(),
+        highlights: Vec::new(),
+        ai_actions: Vec::new(),
+    }
+}
+
+const fn empty_timeline_model() -> TimelineModel {
+    TimelineModel {
+        summary: String::new(),
+        breadcrumb: String::new(),
+        day_selector: String::new(),
+        window_presets: Vec::new(),
+        selected_window_preset_index: 0,
+        selected_day_label: String::new(),
+        selected_day_index: 0,
+        heart_rate: Vec::new(),
+        selected_point_index: None,
+        window_hours: 24,
+        window_start_minute: 0,
+        window_end_minute: 24 * 60 - 1,
+        overlay_toggles: Vec::new(),
+        overlay_groups: Vec::new(),
+        events: Vec::new(),
+        selected_event_index: None,
+        selected_detail: String::new(),
+        event_detail_lines: Vec::new(),
+    }
+}
+
+const fn empty_trends_model() -> TrendsModel {
+    TrendsModel {
+        windows: Vec::new(),
+        selected_window_index: 0,
+        metrics: Vec::new(),
+        notes: Vec::new(),
+    }
+}
+
+const fn empty_explain_model() -> ExplainModel {
+    ExplainModel {
+        selected_day_label: String::new(),
+        breadcrumb: String::new(),
+        headline: String::new(),
+        overlay_toggles: Vec::new(),
+        selected_overlay_toggle_index: 0,
+        summary_lines: Vec::new(),
+        measurement_lines: Vec::new(),
+        evidence_lines: Vec::new(),
+        caveat_lines: Vec::new(),
+        context_lines: Vec::new(),
+        ai_actions: Vec::new(),
+    }
+}
+
+const fn empty_patterns_model() -> PatternsModel {
+    PatternsModel {
+        header: String::new(),
+        metric_filters: Vec::new(),
+        selected_filter_index: 0,
+        overlay_toggles: Vec::new(),
+        selected_overlay_toggle_index: 0,
+        filter_summary: String::new(),
+        rows: Vec::new(),
+        notes: Vec::new(),
+        empty_message: String::new(),
+        ai_actions: Vec::new(),
+    }
+}
+
+const fn empty_ops_model() -> OpsModel {
+    OpsModel {
+        mode_label: String::new(),
+        summary_lines: Vec::new(),
+        family_statuses: Vec::new(),
+        items: Vec::new(),
+        warnings: Vec::new(),
+    }
+}
+
+fn empty_review_model() -> ReviewModel {
+    ReviewModel {
+        selected_day_label: String::new(),
+        breadcrumb: String::new(),
+        mode_tabs: Vec::new(),
+        selected_mode_index: 0,
+        focus_tabs: Vec::new(),
+        selected_focus_index: 0,
+        cards: Vec::new(),
+        selected_card_index: None,
+        ai_artifact: empty_ai_artifact_summary_view(),
+        detail_lines: Vec::new(),
+        warning_lines: Vec::new(),
+        empty_message: String::new(),
+        ai_actions: Vec::new(),
+    }
+}
+
+const fn empty_ai_workbench_model() -> AiWorkbenchModel {
+    AiWorkbenchModel {
+        headline: String::new(),
+        summary_lines: Vec::new(),
+        launch_points: Vec::new(),
+        browser_tabs: Vec::new(),
+        selected_tab_index: 0,
+        browser_items: Vec::new(),
+        selected_item_index: None,
+        artifact_actions: Vec::new(),
+        selected_action_index: None,
+        detail_title: String::new(),
+        detail_lines: Vec::new(),
+        trust_lines: Vec::new(),
+        warning_lines: Vec::new(),
+        preflight: None,
+    }
+}
+
 fn demo_snapshot(config: &Config) -> LiveSnapshot {
+    let ai_fixture = demo_ai_fixture_data();
+    let ai_ops = build_ai_ops_snapshot(
+        config,
+        &ai_fixture.snapshot_catalog,
+        &ai_fixture.ai_runs,
+        &ai_fixture.ai_artifact_records,
+        &ai_fixture.report_exports,
+        &ai_fixture.ai_eval_runs,
+    );
+
+    LiveSnapshot {
+        captured_at: "2026-04-08T22:30:00Z".to_owned(),
+        refresh_policy: demo_refresh_policy_snapshot(),
+        auth_status: demo_auth_status(),
+        ai_ops,
+        webhook: demo_webhook_snapshot(),
+        personal_info: Some(demo_personal_info()),
+        daily_history: demo_daily_history(),
+        heartrate_days: demo_heartrate_days(),
+        heartrate_daily_averages: demo_heartrate_daily_averages(),
+        context_events: demo_context_events(),
+        pattern_summaries: demo_pattern_summaries(),
+        review_signal_days: demo_review_signal_days(),
+        sleep_time: demo_sleep_time_records(),
+        rest_mode_periods: demo_rest_mode_periods(),
+        ai_artifacts_by_day: demo_ai_artifacts_by_day(),
+        snapshot_catalog: ai_fixture.snapshot_catalog,
+        ai_runs: ai_fixture.ai_runs,
+        ai_artifact_records: ai_fixture.ai_artifact_records,
+        report_exports: ai_fixture.report_exports,
+        ai_eval_runs: ai_fixture.ai_eval_runs,
+        sync_states: demo_sync_states(),
+        record_counts: demo_record_counts(),
+        schema_version: crate::store::migrations::current_version(),
+        database_path: "~/.local/share/ringmaster/demo/ringmaster.db".to_owned(),
+        config_path: "~/.config/ringmaster/demo-config.toml".to_owned(),
+    }
+}
+
+struct DemoAiFixtureData {
+    snapshot_catalog: Vec<SnapshotCatalogEntry>,
+    ai_runs: Vec<AiRunRecord>,
+    ai_artifact_records: Vec<AiArtifactRecord>,
+    report_exports: Vec<ReportExportRecord>,
+    ai_eval_runs: Vec<AiEvalRunRecord>,
+}
+
+fn demo_auth_status() -> AuthStatus {
     let capability_report = CapabilityReport::demo();
-    let auth_status = AuthStatus {
+    AuthStatus {
         configured: true,
         callback_url: "http://localhost:8788/callback".to_owned(),
         requested_scopes: demo_requested_scopes(),
@@ -6103,9 +7871,11 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
         account_id: Some("demo-user".to_owned()),
         account_email: Some("demo@example.com".to_owned()),
         last_error: None,
-    };
+    }
+}
 
-    let daily_history = vec![
+fn demo_daily_history() -> Vec<DailyOverviewRow> {
+    vec![
         DailyOverviewRow {
             day: "2026-04-05".to_owned(),
             sleep_score: Some(82),
@@ -6134,8 +7904,11 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
             activity_score: Some(88),
             updated_at: "2026-04-08T10:00:00Z".to_owned(),
         },
-    ];
-    let heartrate_days = vec![
+    ]
+}
+
+fn demo_heartrate_days() -> Vec<HeartRateDay> {
+    vec![
         HeartRateDay {
             day: "2026-04-07".to_owned(),
             points: vec![
@@ -6191,8 +7964,11 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
                 },
             ],
         },
-    ];
-    let heartrate_daily_averages = vec![
+    ]
+}
+
+fn demo_heartrate_daily_averages() -> Vec<MetricPoint> {
+    vec![
         MetricPoint {
             day: "2026-04-05".to_owned(),
             value: 63.0,
@@ -6209,8 +7985,11 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
             day: "2026-04-08".to_owned(),
             value: 72.0,
         },
-    ];
-    let context_events = vec![
+    ]
+}
+
+fn demo_context_events() -> Vec<ContextEventRecord> {
+    vec![
         ContextEventRecord {
             context_event_id: "workout:demo-run".to_owned(),
             family: ContextEventFamily::Workout,
@@ -6256,14 +8035,17 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
             metadata_json: "{}".to_owned(),
             updated_at: "2026-04-08T21:40:00Z".to_owned(),
         },
-    ];
-    let pattern_summaries = vec![
+    ]
+}
+
+fn demo_pattern_summaries() -> Vec<PatternSummaryRecord> {
+    vec![
         PatternSummaryRecord {
             summary_id: "pattern:run:readiness".to_owned(),
             family: ContextEventFamily::Workout,
             normalized_key: "running::moderate".to_owned(),
             relation_window: PatternRelationWindow::NextDayReadiness,
-            metric: PatternMetric::ReadinessScore,
+            metric: PatternMetric::Readiness,
             sample_count: 6,
             median_delta: -4.0,
             effect_direction: EffectDirection::Lower,
@@ -6276,7 +8058,7 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
             family: ContextEventFamily::EnhancedTag,
             normalized_key: "caffeine".to_owned(),
             relation_window: PatternRelationWindow::SameNightSleep,
-            metric: PatternMetric::SleepScore,
+            metric: PatternMetric::Sleep,
             sample_count: 4,
             median_delta: -3.0,
             effect_direction: EffectDirection::Lower,
@@ -6284,8 +8066,11 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
             metadata_json: "{}".to_owned(),
             updated_at: "2026-04-08T22:00:00Z".to_owned(),
         },
-    ];
-    let review_signal_days = vec![
+    ]
+}
+
+fn demo_review_signal_days() -> Vec<ReviewSignalDayRecord> {
+    vec![
         ReviewSignalDayRecord {
             signal_key: "sleep_score".to_owned(),
             day: "2026-04-08".to_owned(),
@@ -6346,8 +8131,11 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
             metadata_json: "{}".to_owned(),
             updated_at: "2026-04-08T22:30:00Z".to_owned(),
         },
-    ];
-    let sleep_time = vec![SleepTimeRecord {
+    ]
+}
+
+fn demo_sleep_time_records() -> Vec<SleepTimeRecord> {
+    vec![SleepTimeRecord {
         oura_id: Some("demo-sleep-time".to_owned()),
         day: "2026-04-08".to_owned(),
         status: Some("late".to_owned()),
@@ -6357,8 +8145,11 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
         optimal_bedtime_day_tz: Some(0),
         raw_cache_key: None,
         updated_at: "2026-04-08T22:00:00Z".to_owned(),
-    }];
-    let rest_mode_periods = vec![RestModePeriodRecord {
+    }]
+}
+
+fn demo_rest_mode_periods() -> Vec<RestModePeriodRecord> {
+    vec![RestModePeriodRecord {
         period_id: "demo-rest-mode".to_owned(),
         start_day: "2026-04-07".to_owned(),
         start_time: Some("2026-04-07T00:00:00Z".to_owned()),
@@ -6368,8 +8159,136 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
         tags_json: "[]".to_owned(),
         raw_cache_key: None,
         updated_at: "2026-04-08T08:00:00Z".to_owned(),
-    }];
-    let demo_review_preview = AiRequestPreview {
+    }]
+}
+
+fn demo_webhook_snapshot() -> WebhookOpsSnapshot {
+    WebhookOpsSnapshot {
+        bind_address: "127.0.0.1:8799".to_owned(),
+        path: "/webhooks/oura".to_owned(),
+        callback_url: Some("https://example.ngrok.dev/webhooks/oura".to_owned()),
+        verification_token_configured: true,
+        signature_tolerance_secs: 300,
+        heartbeat_secs: 15,
+        renewal_lead_secs: 7 * 24 * 60 * 60,
+        desired_subscriptions: Vec::new(),
+        remote_subscriptions: Vec::new(),
+        recent_deliveries: Vec::new(),
+        latest_rejected_delivery: None,
+        pending_invalidations: Vec::new(),
+        recent_processing_attempts: Vec::new(),
+        runtime_heartbeats: Vec::new(),
+    }
+}
+
+fn demo_personal_info() -> PersonalInfoRecord {
+    PersonalInfoRecord {
+        profile_id: "demo-user".to_owned(),
+        age: Some(34),
+        weight: Some(72.4),
+        height: Some(178.0),
+        biological_sex: Some("male".to_owned()),
+        email: Some("demo@example.com".to_owned()),
+        raw_cache_key: Some("demo".to_owned()),
+        updated_at: "2026-04-08T22:00:00Z".to_owned(),
+    }
+}
+
+fn demo_ai_artifacts_by_day() -> BTreeMap<String, AiArtifactDaySummaryRecord> {
+    BTreeMap::from([(
+        "2026-04-08".to_owned(),
+        AiArtifactDaySummaryRecord {
+            artifact_id: "run-demo-review-20260408".to_owned(),
+            artifact_kind: "review".to_owned(),
+            created_at: "2026-04-08T22:20:00Z".to_owned(),
+            provider: "openai".to_owned(),
+            model: "gpt-4o-2024-08-06".to_owned(),
+            prompt_version: "review_prompt_v1".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            privacy_profile: "redacted".to_owned(),
+            summary_cache:
+                "Sleep debt and elevated stress likely drove the readiness dip.".to_owned(),
+            overview:
+                "Workout load held up, but the bedtime drift means the saved review still recommends an earlier wind-down tonight."
+                    .to_owned(),
+            matched_snapshot_hash: "demo-snapshot-20260408".to_owned(),
+            peer_snapshot_hash: None,
+        },
+    )])
+}
+
+fn demo_sync_states() -> Vec<SyncStateRecord> {
+    vec![
+        demo_sync_state(
+            SyncFamily::Personal,
+            "Personal info is current.",
+            SyncRunStatus::Success,
+        ),
+        demo_sync_state(
+            SyncFamily::Daily,
+            "Daily closeout landed for the selected day.",
+            SyncRunStatus::Success,
+        ),
+        demo_sync_state(
+            SyncFamily::Heartrate,
+            "Heartrate samples are current.",
+            SyncRunStatus::Success,
+        ),
+        demo_sync_state(
+            SyncFamily::Workout,
+            "Workouts are current.",
+            SyncRunStatus::Success,
+        ),
+        demo_sync_state(
+            SyncFamily::EnhancedTag,
+            "Enhanced tags are current.",
+            SyncRunStatus::Success,
+        ),
+        demo_sync_state(
+            SyncFamily::Session,
+            "Sessions are current.",
+            SyncRunStatus::Success,
+        ),
+    ]
+}
+
+fn demo_record_counts() -> RecordCounts {
+    RecordCounts {
+        raw_payloads: 12,
+        personal_info: 1,
+        daily_sleep: 4,
+        daily_readiness: 4,
+        daily_activity: 4,
+        heartrate_samples: 9,
+        workouts: 1,
+        tags: 0,
+        enhanced_tags: 1,
+        sessions: 1,
+        derived_context_events: 3,
+        derived_pattern_summaries: 2,
+        sleep_time: 1,
+        daily_stress: 1,
+        rest_mode_periods: 1,
+        derived_review_signal_days: 4,
+        ..RecordCounts::default()
+    }
+}
+
+fn demo_ai_fixture_data() -> DemoAiFixtureData {
+    let review_preview = demo_review_preview();
+    let compare_preview = demo_compare_preview();
+    let snapshot_catalog = demo_snapshot_catalog();
+    DemoAiFixtureData {
+        ai_runs: demo_ai_runs(&review_preview, &compare_preview),
+        ai_artifact_records: vec![demo_review_artifact()],
+        report_exports: demo_report_exports(),
+        ai_eval_runs: demo_ai_eval_runs(),
+        snapshot_catalog,
+    }
+}
+
+fn demo_review_preview() -> AiRequestPreview {
+    AiRequestPreview {
         task_family: "review".to_owned(),
         provider: "openai".to_owned(),
         model: "gpt-5-mini".to_owned(),
@@ -6399,8 +8318,11 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
         prefix_fingerprint: "demo-review-prefix".to_owned(),
         payload_fingerprint: "demo-review-payload".to_owned(),
         request_fingerprint: "demo-review-request".to_owned(),
-    };
-    let demo_review_artifact = AiArtifactRecord {
+    }
+}
+
+fn demo_review_artifact() -> AiArtifactRecord {
+    AiArtifactRecord {
         artifact_id: "run-demo-review-20260408".to_owned(),
         artifact_kind: "review".to_owned(),
         artifact_status: "dry_run".to_owned(),
@@ -6417,8 +8339,9 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
         snapshot_hash_b: None,
         privacy_profile: "redacted".to_owned(),
         overview: "Sleep debt and elevated stress likely drove the readiness dip.".to_owned(),
-        summary_cache: "Saved review: bedtime drift plus higher stress load explained the weaker morning readiness."
-            .to_owned(),
+        summary_cache:
+            "Saved review: bedtime drift plus higher stress load explained the weaker morning readiness."
+                .to_owned(),
         request_fingerprint: Some("demo-review-request".to_owned()),
         payload_json: serialize_pretty_json(&ai::ReviewArtifactV1 {
             schema_version: "ringmaster.ai.review.v1".to_owned(),
@@ -6457,10 +8380,15 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
                 }],
                 counterevidence_refs: Vec::new(),
             }],
-            unresolved_questions: vec!["Would an earlier wind-down reverse the readiness dip over the next three days?".to_owned()],
+            unresolved_questions: vec![
+                "Would an earlier wind-down reverse the readiness dip over the next three days?"
+                    .to_owned(),
+            ],
             limitations: vec![ai::ArtifactLimitation {
                 code: "thin_window".to_owned(),
-                message: "The review only had one directly comparable late bedtime in the recent window.".to_owned(),
+                message:
+                    "The review only had one directly comparable late bedtime in the recent window."
+                        .to_owned(),
             }],
             follow_up_targets: vec![ai::ArtifactFollowUpTarget {
                 label: "Expand evidence".to_owned(),
@@ -6471,8 +8399,11 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
         rendered_briefing:
             "ringmaster ai review\n\nstatus: dry_run\noverview: Sleep debt and elevated stress likely drove the readiness dip."
                 .to_owned(),
-    };
-    let demo_compare_preview = AiRequestPreview {
+    }
+}
+
+fn demo_compare_preview() -> AiRequestPreview {
+    AiRequestPreview {
         task_family: "compare".to_owned(),
         provider: "openai".to_owned(),
         model: "gpt-5-mini".to_owned(),
@@ -6512,8 +8443,11 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
         prefix_fingerprint: "demo-compare-prefix".to_owned(),
         payload_fingerprint: "demo-compare-payload".to_owned(),
         request_fingerprint: "demo-compare-request".to_owned(),
-    };
-    let snapshot_catalog = vec![
+    }
+}
+
+fn demo_snapshot_catalog() -> Vec<SnapshotCatalogEntry> {
+    vec![
         SnapshotCatalogEntry {
             snapshot_hash: "demo-snapshot-20260408".to_owned(),
             schema_version: "ringmaster.snapshot.v1".to_owned(),
@@ -6554,8 +8488,14 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
             provenance_summary: "review refs + pattern summaries".to_owned(),
             created_at: "2026-04-08T22:19:00Z".to_owned(),
         },
-    ];
-    let ai_runs = vec![
+    ]
+}
+
+fn demo_ai_runs(
+    review_preview: &AiRequestPreview,
+    compare_preview: &AiRequestPreview,
+) -> Vec<AiRunRecord> {
+    vec![
         AiRunRecord {
             run_id: "airun-demo-review-20260408".to_owned(),
             run_kind: "review".to_owned(),
@@ -6575,7 +8515,7 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
             source_ai_artifact_id: None,
             follow_up_kind: None,
             request_fingerprint: Some("demo-review-request".to_owned()),
-            request_preview_json: serialize_json(&demo_review_preview),
+            request_preview_json: serialize_json(review_preview),
             artifact_id: Some("run-demo-review-20260408".to_owned()),
             error_message: None,
             created_at: "2026-04-08T22:20:00Z".to_owned(),
@@ -6602,7 +8542,7 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
             source_ai_artifact_id: None,
             follow_up_kind: Some("explain_ranking".to_owned()),
             request_fingerprint: Some("demo-compare-request".to_owned()),
-            request_preview_json: serialize_json(&demo_compare_preview),
+            request_preview_json: serialize_json(compare_preview),
             artifact_id: None,
             error_message: Some("Provider disabled in this deterministic fixture.".to_owned()),
             created_at: "2026-04-08T22:24:00Z".to_owned(),
@@ -6610,9 +8550,11 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
             ended_at: Some("2026-04-08T22:24:02Z".to_owned()),
             updated_at: "2026-04-08T22:24:02Z".to_owned(),
         },
-    ];
-    let ai_artifact_records = vec![demo_review_artifact];
-    let report_exports = vec![ReportExportRecord {
+    ]
+}
+
+fn demo_report_exports() -> Vec<ReportExportRecord> {
+    vec![ReportExportRecord {
         report_id: "demo-report-review".to_owned(),
         report_kind: "ai_review".to_owned(),
         title: "Daily review briefing".to_owned(),
@@ -6631,9 +8573,12 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
         export_status: "written".to_owned(),
         last_verified_exists: true,
         last_verified_at: "2026-04-08T22:26:00Z".to_owned(),
-    }];
+    }]
+}
+
+fn demo_ai_eval_runs() -> Vec<AiEvalRunRecord> {
     let demo_eval_details = demo_eval_run_details();
-    let ai_eval_runs = vec![AiEvalRunRecord {
+    vec![AiEvalRunRecord {
         eval_run_id: "demo-eval-review".to_owned(),
         task_family: "mixed".to_owned(),
         fixture_dir: demo_eval_details.fixture_dir.clone(),
@@ -6656,135 +8601,7 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
         honesty_score: demo_eval_details.scores.honesty,
         regression_summary: demo_eval_details.regression_summary.clone(),
         details_json: serialize_json(&demo_eval_details),
-    }];
-    let ai_ops = build_ai_ops_snapshot(
-        config,
-        &snapshot_catalog,
-        &ai_runs,
-        &ai_artifact_records,
-        &report_exports,
-        &ai_eval_runs,
-    );
-
-    LiveSnapshot {
-        captured_at: "2026-04-08T22:30:00Z".to_owned(),
-        refresh_policy: demo_refresh_policy_snapshot(),
-        auth_status,
-        ai_ops,
-        webhook: WebhookOpsSnapshot {
-            bind_address: "127.0.0.1:8799".to_owned(),
-            path: "/webhooks/oura".to_owned(),
-            callback_url: Some("https://example.ngrok.dev/webhooks/oura".to_owned()),
-            verification_token_configured: true,
-            signature_tolerance_secs: 300,
-            heartbeat_secs: 15,
-            renewal_lead_secs: 7 * 24 * 60 * 60,
-            desired_subscriptions: Vec::new(),
-            remote_subscriptions: Vec::new(),
-            recent_deliveries: Vec::new(),
-            latest_rejected_delivery: None,
-            pending_invalidations: Vec::new(),
-            recent_processing_attempts: Vec::new(),
-            runtime_heartbeats: Vec::new(),
-        },
-        personal_info: Some(PersonalInfoRecord {
-            profile_id: "demo-user".to_owned(),
-            age: Some(34),
-            weight: Some(72.4),
-            height: Some(178.0),
-            biological_sex: Some("male".to_owned()),
-            email: Some("demo@example.com".to_owned()),
-            raw_cache_key: Some("demo".to_owned()),
-            updated_at: "2026-04-08T22:00:00Z".to_owned(),
-        }),
-        daily_history,
-        heartrate_days,
-        heartrate_daily_averages,
-        context_events,
-        pattern_summaries,
-        review_signal_days,
-        sleep_time,
-        rest_mode_periods,
-        ai_artifacts_by_day: BTreeMap::from([(
-            "2026-04-08".to_owned(),
-            AiArtifactDaySummaryRecord {
-                artifact_id: "run-demo-review-20260408".to_owned(),
-                artifact_kind: "review".to_owned(),
-                created_at: "2026-04-08T22:20:00Z".to_owned(),
-                provider: "openai".to_owned(),
-                model: "gpt-4o-2024-08-06".to_owned(),
-                prompt_version: "review_prompt_v1".to_owned(),
-                output_schema_version: "ringmaster.ai.review.v1".to_owned(),
-                privacy_profile: "redacted".to_owned(),
-                summary_cache: "Sleep debt and elevated stress likely drove the readiness dip."
-                    .to_owned(),
-                overview:
-                    "Workout load held up, but the bedtime drift means the saved review still recommends an earlier wind-down tonight."
-                        .to_owned(),
-                matched_snapshot_hash: "demo-snapshot-20260408".to_owned(),
-                peer_snapshot_hash: None,
-                },
-        )]),
-        snapshot_catalog,
-        ai_runs,
-        ai_artifact_records,
-        report_exports,
-        ai_eval_runs,
-        sync_states: vec![
-            demo_sync_state(
-                SyncFamily::Personal,
-                "Personal info is current.",
-                SyncRunStatus::Success,
-            ),
-            demo_sync_state(
-                SyncFamily::Daily,
-                "Daily closeout landed for the selected day.",
-                SyncRunStatus::Success,
-            ),
-            demo_sync_state(
-                SyncFamily::Heartrate,
-                "Heartrate samples are current.",
-                SyncRunStatus::Success,
-            ),
-            demo_sync_state(
-                SyncFamily::Workout,
-                "Workouts are current.",
-                SyncRunStatus::Success,
-            ),
-            demo_sync_state(
-                SyncFamily::EnhancedTag,
-                "Enhanced tags are current.",
-                SyncRunStatus::Success,
-            ),
-            demo_sync_state(
-                SyncFamily::Session,
-                "Sessions are current.",
-                SyncRunStatus::Success,
-            ),
-        ],
-        record_counts: RecordCounts {
-            raw_payloads: 12,
-            personal_info: 1,
-            daily_sleep: 4,
-            daily_readiness: 4,
-            daily_activity: 4,
-            heartrate_samples: 9,
-            workouts: 1,
-            tags: 0,
-            enhanced_tags: 1,
-            sessions: 1,
-            derived_context_events: 3,
-            derived_pattern_summaries: 2,
-            sleep_time: 1,
-            daily_stress: 1,
-            rest_mode_periods: 1,
-            derived_review_signal_days: 4,
-            ..RecordCounts::default()
-        },
-        schema_version: crate::store::migrations::current_version(),
-        database_path: "~/.local/share/ringmaster/demo/ringmaster.db".to_owned(),
-        config_path: "~/.config/ringmaster/demo-config.toml".to_owned(),
-    }
+    }]
 }
 
 fn demo_eval_run_details() -> PersistedEvalRunDetails {
@@ -6810,134 +8627,137 @@ fn demo_eval_run_details() -> PersistedEvalRunDetails {
                 .to_owned(),
         improvements: vec!["review-stale-snapshot:honesty".to_owned()],
         regressions: vec!["compare-evidence-regression:evidence".to_owned()],
-        cases: vec![
-            PersistedEvalCaseDetail {
-                case_id: "review-stale-snapshot".to_owned(),
-                task_family: "review".to_owned(),
-                snapshot_a_path: "review-snapshot.json".to_owned(),
-                snapshot_b_path: None,
-                snapshot_hash_a: Some("demo-snapshot-20260408".to_owned()),
-                snapshot_hash_b: None,
-                expectations: EvalExpectations {
-                    min_primary_findings: Some(1),
-                    expected_primary_title: Some("Sleep score remained elevated".to_owned()),
-                    required_substrings: Vec::new(),
-                    forbidden_substrings: vec![
-                        "user@example.com".to_owned(),
-                        "refresh_token".to_owned(),
-                        "client_secret".to_owned(),
-                    ],
-                    expected_follow_up_commands: Vec::new(),
-                    require_distinct_finding_titles: false,
-                    honesty_required: true,
-                },
-                overall_pass: true,
-                candidate: PersistedEvalArtifactDetail {
-                    label: "gpt-5-mini".to_owned(),
-                    artifact_path: "review-candidate.json".to_owned(),
-                    provider: "openai".to_owned(),
-                    model: "gpt-5-mini".to_owned(),
-                    prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
-                    output_schema_version: "ringmaster.ai.review.v1".to_owned(),
-                    lineage: EvalArtifactLineage {
-                        ai_run_id: Some("airun-demo-review-20260408".to_owned()),
-                        ai_artifact_id: Some("run-demo-review-20260408".to_owned()),
-                        report_id: Some("demo-report-review".to_owned()),
-                    },
-                },
-                baseline: Some(PersistedEvalArtifactDetail {
-                    label: "fixture".to_owned(),
-                    artifact_path: "review-baseline.json".to_owned(),
-                    provider: "fixture".to_owned(),
-                    model: "fixture".to_owned(),
-                    prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
-                    output_schema_version: "ringmaster.ai.review.v1".to_owned(),
-                    lineage: EvalArtifactLineage::default(),
-                }),
-                graders: vec![
-                    PersistedEvalGraderResult {
-                        grader: "schema_validity".to_owned(),
-                        candidate_passed: true,
-                        candidate_note: "matched schema `ringmaster.ai.review.v1`".to_owned(),
-                        baseline_passed: Some(true),
-                        baseline_note: Some("matched schema `ringmaster.ai.review.v1`".to_owned()),
-                        comparison: "matched".to_owned(),
-                    },
-                    PersistedEvalGraderResult {
-                        grader: "honesty".to_owned(),
-                        candidate_passed: true,
-                        candidate_note:
-                            "artifact acknowledged freshness or capability limits".to_owned(),
-                        baseline_passed: Some(false),
-                        baseline_note: Some(
-                            "artifact did not acknowledge stale or missing-data caveats".to_owned(),
-                        ),
-                        comparison: "improved".to_owned(),
-                    },
-                ],
+        cases: vec![demo_eval_review_case(), demo_eval_compare_case()],
+    }
+}
+
+fn demo_eval_review_case() -> PersistedEvalCaseDetail {
+    PersistedEvalCaseDetail {
+        case_id: "review-stale-snapshot".to_owned(),
+        task_family: "review".to_owned(),
+        snapshot_a_path: "review-snapshot.json".to_owned(),
+        snapshot_b_path: None,
+        snapshot_hash_a: Some("demo-snapshot-20260408".to_owned()),
+        snapshot_hash_b: None,
+        expectations: EvalExpectations {
+            min_primary_findings: Some(1),
+            expected_primary_title: Some("Sleep score remained elevated".to_owned()),
+            required_substrings: Vec::new(),
+            forbidden_substrings: vec![
+                "user@example.com".to_owned(),
+                "refresh_token".to_owned(),
+                "client_secret".to_owned(),
+            ],
+            expected_follow_up_commands: Vec::new(),
+            require_distinct_finding_titles: false,
+            honesty_required: true,
+        },
+        overall_pass: true,
+        candidate: PersistedEvalArtifactDetail {
+            label: "gpt-5-mini".to_owned(),
+            artifact_path: "review-candidate.json".to_owned(),
+            provider: "openai".to_owned(),
+            model: "gpt-5-mini".to_owned(),
+            prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
+            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            lineage: EvalArtifactLineage {
+                ai_run_id: Some("airun-demo-review-20260408".to_owned()),
+                ai_artifact_id: Some("run-demo-review-20260408".to_owned()),
+                report_id: Some("demo-report-review".to_owned()),
             },
-            PersistedEvalCaseDetail {
-                case_id: "compare-evidence-regression".to_owned(),
-                task_family: "compare".to_owned(),
-                snapshot_a_path: "compare-snapshot-a.json".to_owned(),
-                snapshot_b_path: Some("compare-snapshot-b.json".to_owned()),
-                snapshot_hash_a: Some("demo-snapshot-20260408".to_owned()),
-                snapshot_hash_b: Some("demo-snapshot-20260401-20260408".to_owned()),
-                expectations: EvalExpectations {
-                    min_primary_findings: Some(1),
-                    expected_primary_title: Some("Average daily score increased".to_owned()),
-                    required_substrings: Vec::new(),
-                    forbidden_substrings: vec![
-                        "user@example.com".to_owned(),
-                        "refresh_token".to_owned(),
-                        "client_secret".to_owned(),
-                    ],
-                    expected_follow_up_commands: Vec::new(),
-                    require_distinct_finding_titles: false,
-                    honesty_required: false,
-                },
-                overall_pass: false,
-                candidate: PersistedEvalArtifactDetail {
-                    label: "gpt-5-mini".to_owned(),
-                    artifact_path: "compare-candidate.json".to_owned(),
-                    provider: "openai".to_owned(),
-                    model: "gpt-5-mini".to_owned(),
-                    prompt_version: COMPARE_PROMPT_VERSION.to_owned(),
-                    output_schema_version: "ringmaster.ai.compare.v1".to_owned(),
-                    lineage: EvalArtifactLineage {
-                        ai_run_id: Some("airun-demo-compare-20260408".to_owned()),
-                        ai_artifact_id: None,
-                        report_id: None,
-                    },
-                },
-                baseline: Some(PersistedEvalArtifactDetail {
-                    label: "fixture".to_owned(),
-                    artifact_path: "compare-baseline.json".to_owned(),
-                    provider: "fixture".to_owned(),
-                    model: "fixture".to_owned(),
-                    prompt_version: COMPARE_PROMPT_VERSION.to_owned(),
-                    output_schema_version: "ringmaster.ai.compare.v1".to_owned(),
-                    lineage: EvalArtifactLineage::default(),
-                }),
-                graders: vec![
-                    PersistedEvalGraderResult {
-                        grader: "schema_validity".to_owned(),
-                        candidate_passed: true,
-                        candidate_note: "matched schema `ringmaster.ai.compare.v1`".to_owned(),
-                        baseline_passed: Some(true),
-                        baseline_note: Some("matched schema `ringmaster.ai.compare.v1`".to_owned()),
-                        comparison: "matched".to_owned(),
-                    },
-                    PersistedEvalGraderResult {
-                        grader: "evidence".to_owned(),
-                        candidate_passed: false,
-                        candidate_note:
-                            "missing evidence reference `stress:2026-04-08`".to_owned(),
-                        baseline_passed: Some(true),
-                        baseline_note: Some("validated 3 evidence references".to_owned()),
-                        comparison: "regressed".to_owned(),
-                    },
-                ],
+        },
+        baseline: Some(PersistedEvalArtifactDetail {
+            label: "fixture".to_owned(),
+            artifact_path: "review-baseline.json".to_owned(),
+            provider: "fixture".to_owned(),
+            model: "fixture".to_owned(),
+            prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
+            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+            lineage: EvalArtifactLineage::default(),
+        }),
+        graders: vec![
+            PersistedEvalGraderResult {
+                grader: "schema_validity".to_owned(),
+                candidate_passed: true,
+                candidate_note: "matched schema `ringmaster.ai.review.v1`".to_owned(),
+                baseline_passed: Some(true),
+                baseline_note: Some("matched schema `ringmaster.ai.review.v1`".to_owned()),
+                comparison: "matched".to_owned(),
+            },
+            PersistedEvalGraderResult {
+                grader: "honesty".to_owned(),
+                candidate_passed: true,
+                candidate_note: "artifact acknowledged freshness or capability limits".to_owned(),
+                baseline_passed: Some(false),
+                baseline_note: Some(
+                    "artifact did not acknowledge stale or missing-data caveats".to_owned(),
+                ),
+                comparison: "improved".to_owned(),
+            },
+        ],
+    }
+}
+
+fn demo_eval_compare_case() -> PersistedEvalCaseDetail {
+    PersistedEvalCaseDetail {
+        case_id: "compare-evidence-regression".to_owned(),
+        task_family: "compare".to_owned(),
+        snapshot_a_path: "compare-snapshot-a.json".to_owned(),
+        snapshot_b_path: Some("compare-snapshot-b.json".to_owned()),
+        snapshot_hash_a: Some("demo-snapshot-20260408".to_owned()),
+        snapshot_hash_b: Some("demo-snapshot-20260401-20260408".to_owned()),
+        expectations: EvalExpectations {
+            min_primary_findings: Some(1),
+            expected_primary_title: Some("Average daily score increased".to_owned()),
+            required_substrings: Vec::new(),
+            forbidden_substrings: vec![
+                "user@example.com".to_owned(),
+                "refresh_token".to_owned(),
+                "client_secret".to_owned(),
+            ],
+            expected_follow_up_commands: Vec::new(),
+            require_distinct_finding_titles: false,
+            honesty_required: false,
+        },
+        overall_pass: false,
+        candidate: PersistedEvalArtifactDetail {
+            label: "gpt-5-mini".to_owned(),
+            artifact_path: "compare-candidate.json".to_owned(),
+            provider: "openai".to_owned(),
+            model: "gpt-5-mini".to_owned(),
+            prompt_version: COMPARE_PROMPT_VERSION.to_owned(),
+            output_schema_version: "ringmaster.ai.compare.v1".to_owned(),
+            lineage: EvalArtifactLineage {
+                ai_run_id: Some("airun-demo-compare-20260408".to_owned()),
+                ai_artifact_id: None,
+                report_id: None,
+            },
+        },
+        baseline: Some(PersistedEvalArtifactDetail {
+            label: "fixture".to_owned(),
+            artifact_path: "compare-baseline.json".to_owned(),
+            provider: "fixture".to_owned(),
+            model: "fixture".to_owned(),
+            prompt_version: COMPARE_PROMPT_VERSION.to_owned(),
+            output_schema_version: "ringmaster.ai.compare.v1".to_owned(),
+            lineage: EvalArtifactLineage::default(),
+        }),
+        graders: vec![
+            PersistedEvalGraderResult {
+                grader: "schema_validity".to_owned(),
+                candidate_passed: true,
+                candidate_note: "matched schema `ringmaster.ai.compare.v1`".to_owned(),
+                baseline_passed: Some(true),
+                baseline_note: Some("matched schema `ringmaster.ai.compare.v1`".to_owned()),
+                comparison: "matched".to_owned(),
+            },
+            PersistedEvalGraderResult {
+                grader: "evidence".to_owned(),
+                candidate_passed: false,
+                candidate_note: "missing evidence reference `stress:2026-04-08`".to_owned(),
+                baseline_passed: Some(true),
+                baseline_note: Some("validated 3 evidence references".to_owned()),
+                comparison: "regressed".to_owned(),
             },
         ],
     }
@@ -6959,7 +8779,7 @@ fn demo_requested_scopes() -> Vec<String> {
     ]
 }
 
-fn demo_refresh_policy_snapshot() -> RefreshPolicySnapshot {
+const fn demo_refresh_policy_snapshot() -> RefreshPolicySnapshot {
     RefreshPolicySnapshot {
         personal_interval_secs: 3_600,
         daily_interval_secs: 300,
@@ -6994,16 +8814,16 @@ fn demo_sync_state(family: SyncFamily, message: &str, status: SyncRunStatus) -> 
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        AiBrowserTab, AiOpsSnapshot, AiPreflightState, AppState, COMPARE_PROMPT_VERSION,
-        DataFamily, HeartRateDay, LiveModelOptions, LiveSnapshot, OverlayFilterState,
-        PatternMetricFilter, REVIEW_PROMPT_VERSION, RefreshPolicySnapshot, ReviewScreenMode,
-        RunMode, Screen, TrendWindowKind, WebhookOpsSnapshot, build_ai_artifact_summary_view,
-        build_live_model, build_ops_model, demo_eval_run_details, newest_day_index, serialize_json,
+        AiBrowserTab, AiLaunchIntent, AiOpsSnapshot, AiPreflightState, AppState,
+        COMPARE_PROMPT_VERSION, DataFamily, HeartRateDay, LiveModelOptions, LiveSnapshot,
+        OverlayFilterState, PatternMetricFilter, REVIEW_PROMPT_VERSION, RefreshPolicySnapshot,
+        ReviewScreenMode, RunMode, Screen, TrendWindowKind, WebhookOpsSnapshot,
+        build_ai_artifact_summary_view, build_live_model, build_ops_model,
+        build_state_from_snapshot, demo_eval_run_details, newest_day_index, serialize_json,
     };
     use crate::action::Action;
     use crate::ai::{
@@ -7011,6 +8831,7 @@ mod tests {
         ArtifactStatus, ConfidenceLevel, GuidedFollowUpKind, ReviewArtifactV1, SufficiencyLevel,
     };
     use crate::insights::MetricPoint;
+    use crate::navigation::{self, FocusRegion, PreflightControl, SearchScope, TransientLayer};
     use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
     use crate::review::{
         InvestigationReport, ReviewCard, ReviewConfidence, ReviewDeck, ReviewFocus, ReviewMode,
@@ -7024,6 +8845,7 @@ mod tests {
         ReportExportRecord, RestModePeriodRecord, ReviewSignalDayRecord, SleepTimeRecord,
         SnapshotCatalogEntry, TimeSemantics,
     };
+    use crate::test_support::{ok, some};
 
     fn make_review_card(id: &str, signal_key: &str, score: i32) -> ReviewCard {
         ReviewCard {
@@ -7044,6 +8866,99 @@ mod tests {
         }
     }
 
+    fn test_refresh_policy() -> RefreshPolicySnapshot {
+        RefreshPolicySnapshot {
+            personal_interval_secs: 3600,
+            daily_interval_secs: 300,
+            heartrate_interval_secs: 60,
+            workout_interval_secs: 600,
+            enhanced_tag_interval_secs: 300,
+            session_interval_secs: 300,
+            personal_stale_after_secs: 72 * 60 * 60,
+            daily_stale_after_secs: 12 * 60 * 60,
+            heartrate_stale_after_secs: 15 * 60,
+            workout_stale_after_secs: 24 * 60 * 60,
+            enhanced_tag_stale_after_secs: 12 * 60 * 60,
+            session_stale_after_secs: 12 * 60 * 60,
+        }
+    }
+
+    fn test_auth_status() -> AuthStatus {
+        let scopes = vec![
+            "email".to_owned(),
+            "personal".to_owned(),
+            "daily".to_owned(),
+            "heartrate".to_owned(),
+            "tag".to_owned(),
+            "workout".to_owned(),
+            "session".to_owned(),
+            "spo2".to_owned(),
+            "ring_configuration".to_owned(),
+            "stress".to_owned(),
+            "heart_health".to_owned(),
+        ];
+        AuthStatus {
+            configured: true,
+            callback_url: "http://localhost:8788/callback".to_owned(),
+            requested_scopes: scopes.clone(),
+            granted_scopes: scopes,
+            missing_fields: Vec::new(),
+            capability_report: CapabilityReport::demo(),
+            auth_timeout_secs: 120,
+            secret_backend: "memory".to_owned(),
+            access_token_stored: true,
+            refresh_token_stored: true,
+            access_token_expires_at: None,
+            last_authenticated_at: None,
+            last_refresh_at: None,
+            account_id: None,
+            account_email: None,
+            last_error: None,
+        }
+    }
+
+    fn test_ai_ops_snapshot() -> AiOpsSnapshot {
+        AiOpsSnapshot {
+            enabled: false,
+            provider: "openai".to_owned(),
+            api_key_env: "OPENAI_API_KEY".to_owned(),
+            api_key_ready: false,
+            default_model: "gpt-5-mini".to_owned(),
+            reasoning_effort: "default".to_owned(),
+            request_mode: "stateless".to_owned(),
+            input_transport: "inline".to_owned(),
+            prompt_cache: "off".to_owned(),
+            review_prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
+            compare_prompt_version: COMPARE_PROMPT_VERSION.to_owned(),
+            tools_disabled: true,
+            snapshot_catalog_count: 0,
+            ai_run_count: 0,
+            ai_artifact_count: 0,
+            report_export_count: 0,
+            ai_eval_run_count: 0,
+            last_successful_run: None,
+            last_failed_run: None,
+        }
+    }
+
+    fn test_context_event() -> ContextEventRecord {
+        ContextEventRecord {
+            context_event_id: "workout:test".to_owned(),
+            family: ContextEventFamily::Workout,
+            source_id: "test".to_owned(),
+            anchor_day: "2026-04-08".to_owned(),
+            start_at: "2026-04-08T06:00:00Z".to_owned(),
+            end_at: Some("2026-04-08T06:30:00Z".to_owned()),
+            time_semantics: TimeSemantics::Interval,
+            title: "Workout".to_owned(),
+            subtype: Some("running".to_owned()),
+            notes: None,
+            intensity: Some("moderate".to_owned()),
+            metadata_json: "{}".to_owned(),
+            updated_at: "2026-04-08T06:40:00Z".to_owned(),
+        }
+    }
+
     fn make_snapshot(days: &[&str]) -> LiveSnapshot {
         let heartrate_days = days
             .iter()
@@ -7052,7 +8967,7 @@ mod tests {
                 day: (*day).to_owned(),
                 points: vec![HeartRatePoint {
                     recorded_at: format!("{day}T0{}:00:00Z", index + 6),
-                    bpm: 60 + index as u16,
+                    bpm: 60 + u16::try_from(index).unwrap_or(u16::MAX),
                     source_day: Some((*day).to_owned()),
                 }],
             })
@@ -7060,84 +8975,9 @@ mod tests {
 
         LiveSnapshot {
             captured_at: "2026-04-08T12:00:00Z".to_owned(),
-            refresh_policy: RefreshPolicySnapshot {
-                personal_interval_secs: 3600,
-                daily_interval_secs: 300,
-                heartrate_interval_secs: 60,
-                workout_interval_secs: 600,
-                enhanced_tag_interval_secs: 300,
-                session_interval_secs: 300,
-                personal_stale_after_secs: 72 * 60 * 60,
-                daily_stale_after_secs: 12 * 60 * 60,
-                heartrate_stale_after_secs: 15 * 60,
-                workout_stale_after_secs: 24 * 60 * 60,
-                enhanced_tag_stale_after_secs: 12 * 60 * 60,
-                session_stale_after_secs: 12 * 60 * 60,
-            },
-            auth_status: AuthStatus {
-                configured: true,
-                callback_url: "http://localhost:8788/callback".to_owned(),
-                requested_scopes: vec![
-                    "email".to_owned(),
-                    "personal".to_owned(),
-                    "daily".to_owned(),
-                    "heartrate".to_owned(),
-                    "tag".to_owned(),
-                    "workout".to_owned(),
-                    "session".to_owned(),
-                    "spo2".to_owned(),
-                    "ring_configuration".to_owned(),
-                    "stress".to_owned(),
-                    "heart_health".to_owned(),
-                ],
-                granted_scopes: vec![
-                    "email".to_owned(),
-                    "personal".to_owned(),
-                    "daily".to_owned(),
-                    "heartrate".to_owned(),
-                    "tag".to_owned(),
-                    "workout".to_owned(),
-                    "session".to_owned(),
-                    "spo2".to_owned(),
-                    "ring_configuration".to_owned(),
-                    "stress".to_owned(),
-                    "heart_health".to_owned(),
-                ],
-                missing_fields: Vec::new(),
-                capability_report: CapabilityReport::demo(),
-                auth_timeout_secs: 120,
-                secret_backend: "memory".to_owned(),
-                access_token_stored: true,
-                refresh_token_stored: true,
-                access_token_expires_at: None,
-                last_authenticated_at: None,
-                last_refresh_at: None,
-                account_id: None,
-                account_email: None,
-                last_error: None,
-            },
-            ai_ops: AiOpsSnapshot {
-                enabled: false,
-                provider: "openai".to_owned(),
-                api_key_env: "OPENAI_API_KEY".to_owned(),
-                api_key_ready: false,
-                default_model: "gpt-5-mini".to_owned(),
-                reasoning_effort: "default".to_owned(),
-                request_mode: "stateless".to_owned(),
-                input_transport: "inline".to_owned(),
-                prompt_cache: "off".to_owned(),
-                review_prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
-                compare_prompt_version: COMPARE_PROMPT_VERSION.to_owned(),
-                stateless_default: true,
-                tools_disabled: true,
-                snapshot_catalog_count: 0,
-                ai_run_count: 0,
-                ai_artifact_count: 0,
-                report_export_count: 0,
-                ai_eval_run_count: 0,
-                last_successful_run: None,
-                last_failed_run: None,
-            },
+            refresh_policy: test_refresh_policy(),
+            auth_status: test_auth_status(),
+            ai_ops: test_ai_ops_snapshot(),
             webhook: WebhookOpsSnapshot::default(),
             personal_info: None,
             daily_history: days
@@ -7158,21 +8998,7 @@ mod tests {
                     value: 65.0,
                 })
                 .collect(),
-            context_events: vec![ContextEventRecord {
-                context_event_id: "workout:test".to_owned(),
-                family: ContextEventFamily::Workout,
-                source_id: "test".to_owned(),
-                anchor_day: "2026-04-08".to_owned(),
-                start_at: "2026-04-08T06:00:00Z".to_owned(),
-                end_at: Some("2026-04-08T06:30:00Z".to_owned()),
-                time_semantics: TimeSemantics::Interval,
-                title: "Workout".to_owned(),
-                subtype: Some("running".to_owned()),
-                notes: None,
-                intensity: Some("moderate".to_owned()),
-                metadata_json: "{}".to_owned(),
-                updated_at: "2026-04-08T06:40:00Z".to_owned(),
-            }],
+            context_events: vec![test_context_event()],
             pattern_summaries: Vec::new(),
             review_signal_days: Vec::new(),
             sleep_time: Vec::new(),
@@ -7196,6 +9022,8 @@ mod tests {
 
     fn make_live_app(snapshot: LiveSnapshot) -> AppState {
         let selected_day_index = newest_day_index(&snapshot);
+        let screen_focus_memory =
+            std::array::from_fn(|index| navigation::default_region(Screen::ALL[index]));
         let mut app = AppState {
             mode: RunMode::Live,
             active_screen: Screen::Timeline,
@@ -7205,18 +9033,28 @@ mod tests {
             should_quit: false,
             refresh_in_flight: false,
             live_snapshot: Some(snapshot),
+            focused_region: navigation::default_region(Screen::Timeline),
+            screen_focus_memory,
+            focused_top_nav_screen: Screen::Timeline,
+            help_open: false,
+            focus_before_help: None,
+            search: None,
             selected_day_index,
             selected_timeline_point: 0,
             timeline_window_hours: 24,
+            selected_overlay_toggle_index: 0,
             trends_window: TrendWindowKind::Days7,
             selected_event_id: None,
             selected_review_card_index: 0,
             ai_preflight: None,
+            ai_preflight_control: PreflightControl::Confirm,
             ai_browser_tab: AiBrowserTab::Runs,
+            selected_ai_launch_index: 0,
             selected_ai_run_index: 0,
             selected_snapshot_catalog_index: 0,
             selected_report_export_index: 0,
             selected_ai_eval_run_index: 0,
+            selected_ai_artifact_action_index: 0,
             overlay_filters: OverlayFilterState::all(),
             pattern_metric_filter: PatternMetricFilter::All,
             review_mode: ReviewScreenMode::Today,
@@ -7334,8 +9172,10 @@ mod tests {
             summary_cache: "Saved review: steadier bedtime correlated with stronger readiness."
                 .to_owned(),
             request_fingerprint: Some("test-preview-request".to_owned()),
-            payload_json: serde_json::to_string(&payload)
-                .unwrap_or_else(|error| panic!("artifact payload should serialize: {error}")),
+            payload_json: ok(
+                serde_json::to_string(&payload),
+                "artifact payload should serialize",
+            ),
             rendered_briefing: "ringmaster ai review\n\noverview: steadier bedtime correlated with stronger readiness."
                 .to_owned(),
         }
@@ -7384,8 +9224,10 @@ mod tests {
             source_ai_artifact_id: None,
             follow_up_kind: None,
             request_fingerprint: Some("test-preview-request".to_owned()),
-            request_preview_json: serde_json::to_string(&make_ai_preview("snapshot-ai-20260408"))
-                .unwrap_or_else(|error| panic!("request preview should serialize: {error}")),
+            request_preview_json: ok(
+                serde_json::to_string(&make_ai_preview("snapshot-ai-20260408")),
+                "request preview should serialize",
+            ),
             artifact_id: artifact_id.map(str::to_owned),
             error_message: error_message.map(str::to_owned),
             created_at: created_at.to_owned(),
@@ -7428,12 +9270,16 @@ mod tests {
             selected_point_index: 0,
             selected_event_id: None,
             ai_preflight: None,
+            ai_preflight_control: PreflightControl::Confirm,
             ai_browser_tab: AiBrowserTab::Runs,
+            selected_ai_launch_index: 0,
             selected_ai_run_index: 0,
             selected_snapshot_catalog_index: 0,
             selected_report_export_index: 0,
             selected_ai_eval_run_index: 0,
+            selected_ai_artifact_action_index: 0,
             overlay_filters: OverlayFilterState::all(),
+            selected_overlay_toggle_index: 0,
             window_hours: 24,
             trends_window: TrendWindowKind::Days7,
             pattern_metric_filter: PatternMetricFilter::All,
@@ -7444,17 +9290,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn live_selection_defaults_to_newest_available_day() {
-        let snapshot = make_snapshot(&["2026-04-06", "2026-04-07", "2026-04-08"]);
-        let app = make_live_app(snapshot);
-
-        assert_eq!(app.selected_day_index, 2);
-        assert_eq!(app.model.timeline.selected_day_label, "2026-04-08");
-    }
-
-    #[test]
-    fn ai_run_browser_surfaces_lifecycle_statuses_and_saved_actions() {
+    fn make_ai_run_browser_snapshot() -> LiveSnapshot {
         let mut snapshot = make_snapshot(&["2026-04-08"]);
         snapshot.ai_ops.enabled = true;
         snapshot.ai_ops.api_key_ready = true;
@@ -7492,15 +9328,55 @@ mod tests {
                 Some("Cancelled from the AI workbench."),
             ),
         ];
+        snapshot
+    }
+
+    fn build_ai_model_for_run(
+        snapshot: &LiveSnapshot,
+        selected_ai_run_index: usize,
+    ) -> super::AppModel {
+        let mut options = base_live_model_options();
+        options.ai_browser_tab = AiBrowserTab::Runs;
+        options.selected_ai_run_index = selected_ai_run_index;
+        build_live_model(snapshot, &options)
+    }
+
+    fn assert_ai_detail_contains(model: &super::AppModel, expected: &str) {
+        assert!(
+            model.ai.detail_lines.iter().any(|line| line == expected),
+            "detail should contain `{expected}`"
+        );
+    }
+
+    fn assert_ai_action_present(model: &super::AppModel, expected: &str) {
+        assert!(
+            model
+                .ai
+                .artifact_actions
+                .iter()
+                .any(|action| action.label == expected),
+            "artifact actions should contain `{expected}`"
+        );
+    }
+
+    #[test]
+    fn live_selection_defaults_to_newest_available_day() {
+        let snapshot = make_snapshot(&["2026-04-06", "2026-04-07", "2026-04-08"]);
+        let app = make_live_app(snapshot);
+
+        assert_eq!(app.selected_day_index, 2);
+        assert_eq!(app.model.timeline.selected_day_label, "2026-04-08");
+    }
+
+    #[test]
+    fn ai_run_browser_surfaces_lifecycle_statuses_and_saved_actions() {
+        let snapshot = make_ai_run_browser_snapshot();
 
         for (index, status) in ["queued", "running", "succeeded", "failed", "cancelled"]
             .iter()
             .enumerate()
         {
-            let mut options = base_live_model_options();
-            options.ai_browser_tab = AiBrowserTab::Runs;
-            options.selected_ai_run_index = index;
-            let model = build_live_model(&snapshot, &options);
+            let model = build_ai_model_for_run(&snapshot, index);
 
             assert_eq!(model.ai.browser_items[index].status_badge, *status);
             assert!(
@@ -7513,52 +9389,20 @@ mod tests {
             );
         }
 
-        let mut succeeded_options = base_live_model_options();
-        succeeded_options.selected_ai_run_index = 2;
-        let succeeded_model = build_live_model(&snapshot, &succeeded_options);
-        assert!(
-            succeeded_model
-                .ai
-                .detail_lines
-                .iter()
-                .any(|line| line == "linked_artifact: artifact-ai-succeeded")
-        );
-        assert!(
-            succeeded_model
-                .ai
-                .detail_lines
-                .iter()
-                .any(|line| line == "guided_follow_ups:")
-        );
-        assert!(
-            succeeded_model
-                .ai
-                .detail_lines
-                .iter()
-                .any(|line| line.contains("actions: e expand evidence"))
+        let succeeded_model = build_ai_model_for_run(&snapshot, 2);
+        assert_ai_detail_contains(&succeeded_model, "linked_artifact: artifact-ai-succeeded");
+        assert_ai_detail_contains(&succeeded_model, "guided_follow_ups:");
+        assert_ai_action_present(&succeeded_model, "Expand evidence");
+        assert_ai_action_present(&succeeded_model, "Generate report");
+
+        let failed_model = build_ai_model_for_run(&snapshot, 3);
+        assert_ai_detail_contains(
+            &failed_model,
+            "error: Provider returned a structured error.",
         );
 
-        let mut failed_options = base_live_model_options();
-        failed_options.selected_ai_run_index = 3;
-        let failed_model = build_live_model(&snapshot, &failed_options);
-        assert!(
-            failed_model
-                .ai
-                .detail_lines
-                .iter()
-                .any(|line| line == "error: Provider returned a structured error.")
-        );
-
-        let mut cancelled_options = base_live_model_options();
-        cancelled_options.selected_ai_run_index = 4;
-        let cancelled_model = build_live_model(&snapshot, &cancelled_options);
-        assert!(
-            cancelled_model
-                .ai
-                .detail_lines
-                .iter()
-                .any(|line| line == "error: Cancelled from the AI workbench.")
-        );
+        let cancelled_model = build_ai_model_for_run(&snapshot, 4);
+        assert_ai_detail_contains(&cancelled_model, "error: Cancelled from the AI workbench.");
     }
 
     #[test]
@@ -7582,10 +9426,7 @@ mod tests {
             confirm_enabled: true,
         });
         let model = build_live_model(&snapshot, &options);
-        let preflight = model
-            .ai
-            .preflight
-            .unwrap_or_else(|| panic!("preflight view should be present"));
+        let preflight = some(model.ai.preflight, "preflight view should be present");
 
         assert_eq!(preflight.title, "Preflight | Review this day");
         assert!(
@@ -7983,8 +9824,10 @@ mod tests {
             updated_at: "2026-04-09T07:00:00Z".to_owned(),
         };
 
-        let bounds = super::event_bounds_for_day(&event, "2026-04-08")
-            .unwrap_or_else(|| panic!("event should remain visible on its local anchor day"));
+        let bounds = some(
+            super::event_bounds_for_day(&event, "2026-04-08"),
+            "event should remain visible on its local anchor day",
+        );
         assert_eq!(bounds, (23 * 60 + 30, 23 * 60 + 45));
     }
 
@@ -8039,12 +9882,16 @@ mod tests {
                 selected_point_index: 0,
                 selected_event_id: None,
                 ai_preflight: None,
+                ai_preflight_control: PreflightControl::Confirm,
                 ai_browser_tab: AiBrowserTab::Runs,
+                selected_ai_launch_index: 0,
                 selected_ai_run_index: 0,
                 selected_snapshot_catalog_index: 0,
                 selected_report_export_index: 0,
                 selected_ai_eval_run_index: 0,
+                selected_ai_artifact_action_index: 0,
                 overlay_filters: OverlayFilterState::all(),
+                selected_overlay_toggle_index: 0,
                 window_hours: 24,
                 trends_window: TrendWindowKind::Days7,
                 pattern_metric_filter: PatternMetricFilter::All,
@@ -8098,12 +9945,16 @@ mod tests {
                 selected_point_index: 0,
                 selected_event_id: None,
                 ai_preflight: None,
+                ai_preflight_control: PreflightControl::Confirm,
                 ai_browser_tab: AiBrowserTab::Runs,
+                selected_ai_launch_index: 0,
                 selected_ai_run_index: 0,
                 selected_snapshot_catalog_index: 0,
                 selected_report_export_index: 0,
                 selected_ai_eval_run_index: 0,
+                selected_ai_artifact_action_index: 0,
                 overlay_filters: OverlayFilterState::all(),
+                selected_overlay_toggle_index: 0,
                 window_hours: 24,
                 trends_window: TrendWindowKind::Days7,
                 pattern_metric_filter: PatternMetricFilter::All,
@@ -8188,7 +10039,7 @@ mod tests {
             family: ContextEventFamily::Workout,
             normalized_key: "strength_builder".to_owned(),
             relation_window: PatternRelationWindow::NextDayReadiness,
-            metric: PatternMetric::ReadinessScore,
+            metric: PatternMetric::Readiness,
             sample_count: 5,
             median_delta: -2.4,
             effect_direction: EffectDirection::Lower,
@@ -8213,12 +10064,16 @@ mod tests {
                 selected_point_index: 0,
                 selected_event_id: None,
                 ai_preflight: None,
+                ai_preflight_control: PreflightControl::Confirm,
                 ai_browser_tab: AiBrowserTab::Runs,
+                selected_ai_launch_index: 0,
                 selected_ai_run_index: 0,
                 selected_snapshot_catalog_index: 0,
                 selected_report_export_index: 0,
                 selected_ai_eval_run_index: 0,
+                selected_ai_artifact_action_index: 0,
                 overlay_filters: OverlayFilterState::all(),
+                selected_overlay_toggle_index: 0,
                 window_hours: 24,
                 trends_window: TrendWindowKind::Days7,
                 pattern_metric_filter: PatternMetricFilter::All,
@@ -8347,10 +10202,13 @@ mod tests {
             points: Vec::new(),
         }];
 
-        let bounds =
-            super::live_review_load_bounds(&daily_history, &heartrate_days, Some("2026-04-12"))
-                .unwrap_or_else(|error| panic!("load bounds should build: {error}"))
-                .unwrap_or_else(|| panic!("load bounds should exist"));
+        let bounds = some(
+            ok(
+                super::live_review_load_bounds(&daily_history, &heartrate_days, Some("2026-04-12")),
+                "load bounds should build",
+            ),
+            "load bounds should exist",
+        );
 
         assert_eq!(bounds.signal_start, "2026-02-07");
         assert_eq!(bounds.signal_end, "2026-04-12");
@@ -8358,5 +10216,516 @@ mod tests {
         assert_eq!(bounds.context_end, "2026-04-19");
         assert_eq!(bounds.rest_mode_start, "2025-10-10");
         assert_eq!(bounds.rest_mode_end, "2026-04-19");
+    }
+
+    #[test]
+    fn help_toggle_restores_the_previous_region() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Review;
+        app.handle(Action::FocusPreviousRegion);
+        app.handle(Action::FocusPreviousRegion);
+
+        assert_eq!(app.focused_region(), FocusRegion::ContextPrimary);
+
+        app.handle(Action::ToggleHelp);
+        assert!(app.help_open());
+
+        app.handle(Action::ToggleHelp);
+        assert!(!app.help_open());
+        assert_eq!(app.focused_region(), FocusRegion::ContextPrimary);
+    }
+
+    #[test]
+    fn closing_search_restores_the_previous_region() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Review;
+
+        assert_eq!(app.focused_region(), FocusRegion::Primary);
+
+        app.handle(Action::OpenSearch);
+        assert!(app.search_state().is_some());
+
+        app.handle(Action::CloseSearch);
+        assert!(app.search_state().is_none());
+        assert_eq!(app.focused_region(), FocusRegion::Primary);
+    }
+
+    #[test]
+    fn visible_transient_takes_priority_over_underlying_preflight() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Ai;
+        app.handle(Action::AiPreflightPrepared {
+            preflight: Box::new(AiPreflightState {
+                intent: AiLaunchIntent::ReviewSelectedDay,
+                source_screen: Screen::Review,
+                snapshot_scope: "day:2026-04-08".to_owned(),
+                snapshot_paths: vec!["/tmp/preflight-snapshot.json".to_owned()],
+                request_preview: make_ai_preview("demo-snapshot-20260408"),
+                privacy_profile: PrivacyProfile::Redacted,
+                model_override: Some("gpt-5-mini".to_owned()),
+                source_ai_artifact_id: Some("run-demo-review-20260408".to_owned()),
+                follow_up_kind: None,
+                warning_lines: Vec::new(),
+                confirm_enabled: true,
+            }),
+            status_line: "Prepared review preflight.".to_owned(),
+        });
+        app.handle(Action::ToggleHelp);
+        assert_eq!(app.current_transient(), Some(TransientLayer::Help));
+
+        app.handle(Action::OpenSearch);
+        assert_eq!(app.current_transient(), Some(TransientLayer::Search));
+    }
+
+    #[test]
+    fn back_closes_topmost_overlay_before_preflight() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Ai;
+        app.handle(Action::AiPreflightPrepared {
+            preflight: Box::new(AiPreflightState {
+                intent: AiLaunchIntent::ReviewSelectedDay,
+                source_screen: Screen::Review,
+                snapshot_scope: "day:2026-04-08".to_owned(),
+                snapshot_paths: vec!["/tmp/preflight-snapshot.json".to_owned()],
+                request_preview: make_ai_preview("demo-snapshot-20260408"),
+                privacy_profile: PrivacyProfile::Redacted,
+                model_override: Some("gpt-5-mini".to_owned()),
+                source_ai_artifact_id: Some("run-demo-review-20260408".to_owned()),
+                follow_up_kind: None,
+                warning_lines: Vec::new(),
+                confirm_enabled: true,
+            }),
+            status_line: "Prepared review preflight.".to_owned(),
+        });
+
+        app.handle(Action::ToggleHelp);
+        app.handle(Action::Back);
+        assert_eq!(app.current_transient(), Some(TransientLayer::AiPreflight));
+
+        app.handle(Action::OpenSearch);
+        app.handle(Action::Back);
+        assert_eq!(app.current_transient(), Some(TransientLayer::AiPreflight));
+
+        app.handle(Action::Back);
+        assert_eq!(app.current_transient(), None);
+    }
+
+    #[test]
+    fn switching_away_from_ai_clears_hidden_preflight_transient() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Ai;
+        app.handle(Action::AiPreflightPrepared {
+            preflight: Box::new(AiPreflightState {
+                intent: AiLaunchIntent::ReviewSelectedDay,
+                source_screen: Screen::Review,
+                snapshot_scope: "day:2026-04-08".to_owned(),
+                snapshot_paths: vec!["/tmp/preflight-snapshot.json".to_owned()],
+                request_preview: make_ai_preview("demo-snapshot-20260408"),
+                privacy_profile: PrivacyProfile::Redacted,
+                model_override: Some("gpt-5-mini".to_owned()),
+                source_ai_artifact_id: Some("run-demo-review-20260408".to_owned()),
+                follow_up_kind: None,
+                warning_lines: Vec::new(),
+                confirm_enabled: true,
+            }),
+            status_line: "Prepared review preflight.".to_owned(),
+        });
+
+        assert_eq!(app.current_transient(), Some(TransientLayer::AiPreflight));
+        assert!(app.binding_context().ai_preflight_open);
+
+        app.handle(Action::ShowScreen(Screen::Review));
+
+        assert_eq!(app.active_screen, Screen::Review);
+        assert!(app.ai_preflight_state().is_none());
+        assert_eq!(app.current_transient(), None);
+        assert!(!app.binding_context().ai_preflight_open);
+    }
+
+    #[test]
+    fn open_search_falls_back_to_the_screen_primary_list() {
+        let mut timeline = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        timeline.active_screen = Screen::Timeline;
+        timeline.set_focused_region(FocusRegion::ContextPrimary);
+
+        timeline.handle(Action::OpenSearch);
+        assert_eq!(
+            timeline.search_state().map(|search| search.scope),
+            Some(SearchScope::TimelineEvents)
+        );
+        assert_eq!(timeline.focused_region(), FocusRegion::ContextPrimary);
+
+        let mut review = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        review.active_screen = Screen::Review;
+        review.set_focused_region(FocusRegion::ContextPrimary);
+
+        review.handle(Action::OpenSearch);
+        assert_eq!(
+            review.search_state().map(|search| search.scope),
+            Some(SearchScope::ReviewCards)
+        );
+        assert_eq!(review.focused_region(), FocusRegion::ContextPrimary);
+
+        let mut ai = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        ai.active_screen = Screen::Ai;
+        ai.set_focused_region(FocusRegion::ContextPrimary);
+
+        ai.handle(Action::OpenSearch);
+        assert_eq!(
+            ai.search_state().map(|search| search.scope),
+            Some(SearchScope::AiBrowserItems)
+        );
+        assert_eq!(ai.focused_region(), FocusRegion::ContextPrimary);
+    }
+
+    #[test]
+    fn top_nav_activation_switches_screens_and_restores_screen_focus() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Review;
+        app.set_focused_region(FocusRegion::ContextPrimary);
+
+        app.handle(Action::Back);
+        app.handle(Action::Back);
+        app.handle(Action::Back);
+        assert_eq!(app.focused_region(), FocusRegion::TopNav);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::Next));
+        assert_eq!(app.focused_top_nav_screen(), Screen::Ai);
+
+        app.handle(Action::ActivateFocusedRegion);
+        assert_eq!(app.active_screen, Screen::Ai);
+        assert_eq!(app.focused_region(), FocusRegion::ContextPrimary);
+    }
+
+    #[test]
+    fn navigation_smoke_path_covers_screen_switching_search_help_and_back_out() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+
+        app.handle(Action::Back);
+        assert_eq!(app.focused_region(), FocusRegion::TopNav);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::Next));
+        assert_eq!(app.focused_top_nav_screen(), Screen::Timeline);
+
+        app.handle(Action::ActivateFocusedRegion);
+        assert_eq!(app.active_screen, Screen::Timeline);
+        assert_eq!(app.focused_region(), FocusRegion::ContextPrimary);
+
+        app.handle(Action::FocusNextRegion);
+        assert_eq!(app.focused_region(), FocusRegion::ContextSecondary);
+
+        app.handle(Action::FocusNextRegion);
+        assert_eq!(app.focused_region(), FocusRegion::Primary);
+
+        app.handle(Action::FocusNextRegion);
+        assert_eq!(app.focused_region(), FocusRegion::Secondary);
+
+        app.handle(Action::OpenSearch);
+        assert!(app.search_state().is_some());
+        app.handle(Action::SearchAppend('c'));
+        assert_eq!(
+            app.search_state().map(|search| search.query.as_str()),
+            Some("c")
+        );
+
+        app.handle(Action::Back);
+        assert!(app.search_state().is_none());
+        assert_eq!(app.focused_region(), FocusRegion::Secondary);
+
+        app.handle(Action::ToggleHelp);
+        assert!(app.help_open());
+
+        app.handle(Action::Back);
+        assert!(!app.help_open());
+        assert_eq!(app.focused_region(), FocusRegion::Secondary);
+
+        app.handle(Action::ActivateFocusedRegion);
+        assert_eq!(app.focused_region(), FocusRegion::Tertiary);
+
+        app.handle(Action::Back);
+        assert_eq!(app.focused_region(), FocusRegion::Secondary);
+    }
+
+    #[test]
+    fn back_out_walks_back_through_screen_region_order() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Review;
+        app.set_focused_region(FocusRegion::ContextPrimary);
+
+        assert_eq!(app.focused_region(), FocusRegion::ContextPrimary);
+
+        app.handle(Action::FocusNextRegion);
+        app.handle(Action::FocusNextRegion);
+        assert_eq!(app.focused_region(), FocusRegion::Primary);
+
+        app.handle(Action::Back);
+        assert_eq!(app.focused_region(), FocusRegion::ContextSecondary);
+
+        app.handle(Action::Back);
+        assert_eq!(app.focused_region(), FocusRegion::ContextPrimary);
+
+        app.handle(Action::Back);
+        assert_eq!(app.focused_region(), FocusRegion::TopNav);
+    }
+
+    #[test]
+    fn selector_page_navigation_jumps_to_selector_edges() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Trends;
+        app.set_focused_region(FocusRegion::ContextPrimary);
+
+        assert_eq!(app.focused_region(), FocusRegion::ContextPrimary);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::PageForward));
+        assert_eq!(app.trends_window, TrendWindowKind::Days90);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::PageBackward));
+        assert_eq!(app.trends_window, TrendWindowKind::Days7);
+    }
+
+    #[test]
+    fn pattern_metric_selector_uses_the_shared_selector_contract() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Patterns;
+        app.set_focused_region(FocusRegion::ContextPrimary);
+
+        assert_eq!(app.focused_region(), FocusRegion::ContextPrimary);
+        assert_eq!(app.pattern_metric_filter, PatternMetricFilter::All);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::Next));
+        assert_eq!(app.pattern_metric_filter, PatternMetricFilter::Activity);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::Last));
+        assert_eq!(app.pattern_metric_filter, PatternMetricFilter::Sleep);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::PageBackward));
+        assert_eq!(app.pattern_metric_filter, PatternMetricFilter::All);
+    }
+
+    #[test]
+    fn timeline_window_selector_uses_the_shared_selector_contract() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Timeline;
+        app.set_focused_region(FocusRegion::ContextPrimary);
+
+        assert_eq!(app.timeline_window_hours, 24);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::Previous));
+        assert_eq!(app.timeline_window_hours, 12);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::First));
+        assert_eq!(app.timeline_window_hours, 6);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::PageForward));
+        assert_eq!(app.timeline_window_hours, 24);
+    }
+
+    #[test]
+    fn explain_overlay_selector_toggles_the_selected_family() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Explain;
+        app.set_focused_region(FocusRegion::ContextPrimary);
+
+        assert!(app.overlay_filters.workouts);
+        assert!(app.overlay_filters.tags);
+        assert!(app.overlay_filters.sessions);
+
+        app.handle(Action::ActivateFocusedRegion);
+        assert!(!app.overlay_filters.workouts);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::Next));
+        app.handle(Action::ActivateFocusedRegion);
+        assert!(!app.overlay_filters.tags);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::Next));
+        app.handle(Action::ActivateFocusedRegion);
+        assert!(!app.overlay_filters.sessions);
+    }
+
+    #[test]
+    fn patterns_family_selector_uses_the_shared_selector_contract() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Patterns;
+        app.set_focused_region(FocusRegion::ContextSecondary);
+
+        assert_eq!(app.selected_overlay_toggle_index, 0);
+        assert!(app.overlay_filters.workouts);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::Last));
+        assert_eq!(app.selected_overlay_toggle_index, 2);
+
+        app.handle(Action::ActivateFocusedRegion);
+        assert!(!app.overlay_filters.sessions);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::PageBackward));
+        assert_eq!(app.selected_overlay_toggle_index, 0);
+    }
+
+    #[test]
+    fn ai_launch_points_follow_list_style_navigation() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Ai;
+        app.set_focused_region(FocusRegion::ContextPrimary);
+
+        assert_eq!(app.focused_region(), FocusRegion::ContextPrimary);
+
+        app.handle(Action::FocusNextRegion);
+        assert_eq!(app.focused_region(), FocusRegion::Primary);
+        assert_eq!(app.selected_ai_launch_index(), 0);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::Next));
+        assert_eq!(app.selected_ai_launch_index(), 1);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::PageForward));
+        assert_eq!(
+            app.selected_ai_launch_index(),
+            app.model.ai.launch_points.len().saturating_sub(1)
+        );
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::First));
+        assert_eq!(app.selected_ai_launch_index(), 0);
+    }
+
+    #[test]
+    fn activating_ai_launch_point_emits_request_ai_launch() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Ai;
+        app.set_focused_region(FocusRegion::Primary);
+
+        let emitted = app.handle(Action::ActivateFocusedRegion);
+
+        assert_eq!(
+            emitted,
+            vec![Action::RequestAiLaunch(AiLaunchIntent::ReviewSelectedDay)]
+        );
+        assert_eq!(
+            app.status_line,
+            "Preparing AI review for the selected day preflight."
+        );
+    }
+
+    #[test]
+    fn activating_ai_preflight_confirm_emits_confirm_action() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Ai;
+        app.ai_preflight = Some(AiPreflightState {
+            intent: AiLaunchIntent::ReviewSelectedDay,
+            source_screen: Screen::Review,
+            snapshot_scope: "day:2026-04-08".to_owned(),
+            snapshot_paths: vec!["/tmp/preflight-snapshot.json".to_owned()],
+            request_preview: make_ai_preview("demo-snapshot-20260408"),
+            privacy_profile: PrivacyProfile::Redacted,
+            model_override: Some("gpt-5-mini".to_owned()),
+            source_ai_artifact_id: Some("run-demo-review-20260408".to_owned()),
+            follow_up_kind: None,
+            warning_lines: Vec::new(),
+            confirm_enabled: true,
+        });
+        app.ai_preflight_control = PreflightControl::Confirm;
+
+        let emitted = app.handle(Action::ActivateFocusedRegion);
+
+        assert_eq!(emitted, vec![Action::ConfirmAiPreflight]);
+        assert_eq!(app.status_line, "Queueing AI run from preflight.");
+        assert!(app.ai_preflight.is_none());
+    }
+
+    #[test]
+    fn activating_ai_artifact_action_emits_selected_action() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.ai_runs = vec![make_ai_run_record(
+            "run-review-queued",
+            "queued",
+            Some("artifact-ai-queued"),
+            None,
+        )];
+        let mut app = build_state_from_snapshot(RunMode::Demo, "Demo mode ready.", snapshot);
+        app.active_screen = Screen::Ai;
+        app.set_focused_region(FocusRegion::Tertiary);
+
+        let emitted = app.handle(Action::ActivateFocusedRegion);
+
+        assert_eq!(
+            app.current_ai_artifact_action(),
+            Some(Action::RequestCancelAiRun)
+        );
+        assert_eq!(emitted, vec![Action::RequestCancelAiRun]);
+        assert_eq!(app.status_line, "Requesting AI run cancellation.");
     }
 }

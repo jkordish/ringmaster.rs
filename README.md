@@ -92,13 +92,37 @@ cargo run -- report export --from-snapshot /tmp/ringmaster-snapshot.json --forma
 cargo run -- ai eval --fixture-dir tests/fixtures/ai
 ```
 
+## Keyboard model
+
+The TUI now follows one standard navigation grammar across Dashboard, Timeline, Trends, Explain, Patterns, Review, AI, and Status.
+
+- `Tab` / `Shift+Tab` move between major regions such as `Views`, local controls, lists, and detail panes.
+- Arrow keys move within the focused tabset, pager, chart, or list according to pane type.
+- `Enter` / `Space` activate the focused control or commit the current selection.
+- `Esc` closes help, closes search, dismisses a transient panel, or backs out one interaction layer.
+- `Ctrl+F` opens search in the current searchable context.
+- `?` opens a scoped keyboard-help overlay.
+
+Pane behavior is now consistent by pane type:
+
+- selectors and tabs use `Left` / `Right` plus `Home` / `End`
+- lists use `Up` / `Down` plus `Home` / `End` and `PageUp` / `PageDown`
+- detail panes use `Enter` / `Space` and `Esc` to return cleanly
+- `Esc` backs out region-by-region instead of jumping straight to top-level navigation
+
+Only panes with their own keyboard contract become major focus stops. Timeline now exposes visible window and overlay selectors, Explain and Patterns expose visible overlay-family selectors, and the AI workbench exposes a dedicated artifact-actions pane. Read-mostly screens such as Explain and Status still stay lean everywhere else instead of pretending that every visible subpanel is independently operable.
+
+Wide layouts keep the primary `Views` navigation visible. Compact layouts keep the same interaction model while collapsing secondary content more aggressively. Optional expert aliases still exist, but they are supplemental rather than required. The canonical reference lives in [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md).
+
 ## AI in the TUI
 
 AI is now a top-level product workflow, not a CLI-only add-on.
 
-- `7` opens the dedicated `AI` workbench screen.
-- `a` and `c` launch snapshot-bounded review or compare work from `Dashboard`, `Explain`, `Patterns`, `Review`, and the workbench itself.
+- the dedicated `AI` workbench is one of the visible `Views` tabs
+- the workbench follows the same region model as the rest of the app: `Views`, browser tabs, launch points, saved artifacts, artifact actions, and read-only artifact detail
+- `Ctrl+F` searches saved-artifact lists and `?` opens the current keyboard help without leaving the screen
 - every launch routes through an explicit preflight that shows snapshot scope, privacy profile, provider/model, stateless mode, tools-disabled status, content classes, payload size estimate, and the exact local artifact path that will be sent
+- saved-artifact actions are now visible canonical controls instead of hidden letter-only workflows
 - the workbench browses saved snapshots, AI runs, reports, and persisted eval runs in one place
 - saved AI runs render structured findings, evidence, counterevidence, uncertainty, and provenance directly in the TUI
 - saved eval runs render fixture manifest summaries, baseline-vs-candidate rollups, failing graders first, and lineage back to saved snapshots, AI runs, and reports when those local handles are available
@@ -155,6 +179,10 @@ For the complete config and runtime behavior, use the docs below instead of the 
 - Product/runtime guide: [docs/IMPLEMENT.md](docs/IMPLEMENT.md)
 - Architecture and boundaries: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - Current shipped status: [docs/STATUS.md](docs/STATUS.md)
+- Navigation and keyboard model: [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md)
+- HCI research and audit for this pass:
+  - [docs/HCI_NAVIGATION_RESEARCH.md](docs/HCI_NAVIGATION_RESEARCH.md)
+  - [docs/NAVIGATION_AUDIT.md](docs/NAVIGATION_AUDIT.md)
 - OpenAI snapshot flow and privacy model: [docs/OPENAI_INTEGRATION.md](docs/OPENAI_INTEGRATION.md)
 - Eval workflow and grading rules: [docs/EVALS.md](docs/EVALS.md)
 - Visual system references:
@@ -177,12 +205,7 @@ cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
 cargo run -- doctor
-cargo run -- snapshot export --demo --profile redacted --out /tmp/ringmaster-snapshot.json
-cargo run -- snapshot list --demo
-cargo run -- ai review /tmp/ringmaster-snapshot.json --dry-run
-cargo run -- ai runs list --demo
-cargo run -- ui snapshot --screen ai --demo --out-dir /tmp/ringmaster-ai-ui
-cargo run -- ui snapshot --screen status --demo --out-dir /tmp/ringmaster-status-ui
-cargo run -- report export --from-snapshot /tmp/ringmaster-snapshot.json --format markdown --out /tmp/ringmaster-report.md
-cargo run -- ai eval --fixture-dir tests/fixtures/ai
+cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-nav-ui
 ```
+
+For the navigation model specifically, the deterministic smoke path now lives in the test suite and exercises top-level screen switching, region traversal, search open/close, help open/close, and detail back-out behavior through the same reducer and binding paths used by the live TUI.

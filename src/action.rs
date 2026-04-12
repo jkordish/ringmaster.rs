@@ -1,10 +1,23 @@
 use crate::ai::GuidedFollowUpKind;
 use crate::app::{AiBrowserTab, AiLaunchIntent, AiPreflightState, LiveSnapshot, Screen};
+use crate::navigation::NavMove;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Tick,
     Quit,
+    FocusNextRegion,
+    FocusPreviousRegion,
+    MoveFocusedRegion(NavMove),
+    ActivateFocusedRegion,
+    Back,
+    ToggleHelp,
+    OpenSearch,
+    CloseSearch,
+    SearchAppend(char),
+    SearchBackspace,
+    SearchNextResult,
+    SearchPreviousResult,
     NextScreen,
     PreviousScreen,
     ShowScreen(Screen),

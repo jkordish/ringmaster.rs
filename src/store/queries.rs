@@ -256,9 +256,9 @@ pub struct ContextEventRecord {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PatternMetric {
-    ActivityScore,
-    ReadinessScore,
-    SleepScore,
+    Activity,
+    Readiness,
+    Sleep,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -611,7 +611,7 @@ impl Display for SyncRunStatus {
 }
 
 impl SyncRunStatus {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Ready => "ready",
             Self::Blocked => "blocked",
@@ -633,7 +633,7 @@ impl SyncRunStatus {
 }
 
 impl ContextEventFamily {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Workout => "workout",
             Self::Tag => "tag",
@@ -654,7 +654,7 @@ impl ContextEventFamily {
 }
 
 impl TimeSemantics {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Interval => "interval",
             Self::Point => "point",
@@ -673,34 +673,34 @@ impl TimeSemantics {
 }
 
 impl PatternMetric {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Self::ActivityScore => "activity_score",
-            Self::ReadinessScore => "next_day_readiness",
-            Self::SleepScore => "same_night_sleep",
+            Self::Activity => "activity_score",
+            Self::Readiness => "next_day_readiness",
+            Self::Sleep => "same_night_sleep",
         }
     }
 
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
-            Self::ActivityScore => "Activity",
-            Self::ReadinessScore => "Next-day readiness",
-            Self::SleepScore => "Same-night sleep",
+            Self::Activity => "Activity",
+            Self::Readiness => "Next-day readiness",
+            Self::Sleep => "Same-night sleep",
         }
     }
 
     fn parse(value: &str) -> Option<Self> {
         match value {
-            "activity_score" => Some(Self::ActivityScore),
-            "next_day_readiness" => Some(Self::ReadinessScore),
-            "same_night_sleep" => Some(Self::SleepScore),
+            "activity_score" => Some(Self::Activity),
+            "next_day_readiness" => Some(Self::Readiness),
+            "same_night_sleep" => Some(Self::Sleep),
             _ => None,
         }
     }
 }
 
 impl PatternRelationWindow {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::SameDayActivity => "same_day_activity",
             Self::NextDayReadiness => "next_day_readiness",
@@ -719,7 +719,7 @@ impl PatternRelationWindow {
 }
 
 impl DataSufficiency {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Thin => "thin",
             Self::Medium => "medium",
@@ -738,7 +738,7 @@ impl DataSufficiency {
 }
 
 impl EffectDirection {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Higher => "higher",
             Self::Lower => "lower",
@@ -757,7 +757,7 @@ impl EffectDirection {
 }
 
 impl<'connection> MetadataStore<'connection> {
-    pub fn new(connection: &'connection Connection) -> Self {
+    pub const fn new(connection: &'connection Connection) -> Self {
         Self { connection }
     }
 
@@ -798,7 +798,7 @@ impl<'connection> MetadataStore<'connection> {
 }
 
 impl<'connection> SyncStateStore<'connection> {
-    pub fn new(connection: &'connection Connection) -> Self {
+    pub const fn new(connection: &'connection Connection) -> Self {
         Self { connection }
     }
 
@@ -838,7 +838,7 @@ impl<'connection> SyncStateStore<'connection> {
                 record.last_completed_at,
                 record.message,
                 join_scopes(&record.granted_scopes),
-                encode_problem(&record.last_error)?,
+                encode_problem(record.last_error.as_ref())?,
                 i64::from(record.failure_count),
                 record.next_attempt_after,
                 record.last_trigger_source,
@@ -929,7 +929,7 @@ impl<'connection> SyncStateStore<'connection> {
 }
 
 impl<'connection> AuthStore<'connection> {
-    pub fn new(connection: &'connection Connection) -> Self {
+    pub const fn new(connection: &'connection Connection) -> Self {
         Self { connection }
     }
 
@@ -960,7 +960,8 @@ impl<'connection> AuthStore<'connection> {
                         access_token_expires_at: row.get(5)?,
                         last_authenticated_at: row.get(6)?,
                         last_refresh_at: row.get(7)?,
-                        last_error: decode_problem(row.get(8)?).map_err(json_to_sql_error)?,
+                        last_error: decode_problem(row.get::<_, Option<String>>(8)?.as_deref())
+                            .map_err(json_to_sql_error)?,
                         updated_at: row.get(9)?,
                     })
                 },
@@ -1002,7 +1003,7 @@ impl<'connection> AuthStore<'connection> {
                 record.access_token_expires_at,
                 record.last_authenticated_at,
                 record.last_refresh_at,
-                encode_problem(&record.last_error)?,
+                encode_problem(record.last_error.as_ref())?,
                 record.updated_at,
             ],
         )?;
@@ -1012,7 +1013,7 @@ impl<'connection> AuthStore<'connection> {
 }
 
 impl<'connection> ImportStore<'connection> {
-    pub fn new(connection: &'connection Connection) -> Self {
+    pub const fn new(connection: &'connection Connection) -> Self {
         Self { connection }
     }
 
@@ -1603,7 +1604,7 @@ impl<'connection> ImportStore<'connection> {
 }
 
 impl<'connection> DerivedStore<'connection> {
-    pub fn new(connection: &'connection Connection) -> Self {
+    pub const fn new(connection: &'connection Connection) -> Self {
         Self { connection }
     }
 
@@ -1779,7 +1780,7 @@ impl<'connection> DerivedStore<'connection> {
 }
 
 impl<'connection> AnalysisStore<'connection> {
-    pub fn new(connection: &'connection Connection) -> Self {
+    pub const fn new(connection: &'connection Connection) -> Self {
         Self { connection }
     }
 
@@ -3396,7 +3397,7 @@ impl<'connection> AnalysisStore<'connection> {
 }
 
 impl<'connection> ViewStore<'connection> {
-    pub fn new(connection: &'connection Connection) -> Self {
+    pub const fn new(connection: &'connection Connection) -> Self {
         Self { connection }
     }
 
@@ -3475,15 +3476,18 @@ impl<'connection> ViewStore<'connection> {
             LIMIT ?1
             ",
         )?;
-        let rows = statement.query_map(params![bounded_limit as i64], |row| {
-            Ok(DailyOverviewRow {
-                day: row.get(0)?,
-                sleep_score: parse_optional_score(row.get::<_, Option<i64>>(1)?),
-                readiness_score: parse_optional_score(row.get::<_, Option<i64>>(2)?),
-                activity_score: parse_optional_score(row.get::<_, Option<i64>>(3)?),
-                updated_at: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            })
-        })?;
+        let rows = statement.query_map(
+            params![crate::numeric::usize_to_i64(bounded_limit)],
+            |row| {
+                Ok(DailyOverviewRow {
+                    day: row.get(0)?,
+                    sleep_score: parse_optional_score(row.get::<_, Option<i64>>(1)?),
+                    readiness_score: parse_optional_score(row.get::<_, Option<i64>>(2)?),
+                    activity_score: parse_optional_score(row.get::<_, Option<i64>>(3)?),
+                    updated_at: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                })
+            },
+        )?;
 
         let mut history = Vec::new();
         for row in rows {
@@ -3688,22 +3692,25 @@ impl<'connection> ViewStore<'connection> {
              ORDER BY recorded_at DESC
              LIMIT ?1",
         )?;
-        let rows = statement.query_map(params![bounded_limit as i64], |row| {
-            let bpm = row.get::<_, i64>(1)?;
-            let bpm = u16::try_from(bpm).map_err(|_| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    1,
-                    rusqlite::types::Type::Integer,
-                    Box::new(std::fmt::Error),
-                )
-            })?;
+        let rows = statement.query_map(
+            params![crate::numeric::usize_to_i64(bounded_limit)],
+            |row| {
+                let bpm = row.get::<_, i64>(1)?;
+                let bpm = u16::try_from(bpm).map_err(|_| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Integer,
+                        Box::new(std::fmt::Error),
+                    )
+                })?;
 
-            Ok(HeartRatePoint {
-                recorded_at: row.get(0)?,
-                bpm,
-                source_day: row.get(2)?,
-            })
-        })?;
+                Ok(HeartRatePoint {
+                    recorded_at: row.get(0)?,
+                    bpm,
+                    source_day: row.get(2)?,
+                })
+            },
+        )?;
 
         let mut points = Vec::new();
         for row in rows {
@@ -3740,9 +3747,10 @@ impl<'connection> ViewStore<'connection> {
              ORDER BY source_day DESC
              LIMIT ?1",
         )?;
-        let rows = statement.query_map(params![bounded_limit as i64], |row| {
-            row.get::<_, Option<String>>(0)
-        })?;
+        let rows = statement.query_map(
+            params![crate::numeric::usize_to_i64(bounded_limit)],
+            |row| row.get::<_, Option<String>>(0),
+        )?;
 
         let mut days = Vec::new();
         for row in rows {
@@ -4353,7 +4361,8 @@ fn read_sync_state_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncStateRec
         last_completed_at: row.get(4)?,
         message: row.get(5)?,
         granted_scopes: split_scopes(&row.get::<_, String>(6)?),
-        last_error: decode_problem(row.get(7)?).map_err(json_to_sql_error)?,
+        last_error: decode_problem(row.get::<_, Option<String>>(7)?.as_deref())
+            .map_err(json_to_sql_error)?,
         failure_count: parse_u32(row.get::<_, i64>(8)?, 8)?,
         next_attempt_after: row.get(9)?,
         last_trigger_source: row.get(10)?,
@@ -4599,21 +4608,17 @@ fn split_scopes(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn encode_problem(problem: &Option<OuraProblem>) -> Result<Option<String>> {
+fn encode_problem(problem: Option<&OuraProblem>) -> Result<Option<String>> {
     problem
-        .as_ref()
         .map(serde_json::to_string)
         .transpose()
         .map_err(Into::into)
 }
 
 fn decode_problem(
-    value: Option<String>,
+    value: Option<&str>,
 ) -> std::result::Result<Option<OuraProblem>, serde_json::Error> {
-    value
-        .as_deref()
-        .map(serde_json::from_str::<OuraProblem>)
-        .transpose()
+    value.map(serde_json::from_str::<OuraProblem>).transpose()
 }
 
 fn json_to_sql_error(error: serde_json::Error) -> rusqlite::Error {
@@ -4627,7 +4632,6 @@ fn now_rfc3339() -> Result<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use super::{AiEvalRunRecord, ReportExportRecord};
 
@@ -4656,7 +4660,7 @@ mod tests {
                     raw_cache_key: None,
                     updated_at: format!("{day}T06:00:00Z"),
                 })
-                .unwrap_or_else(|error| panic!("sleep row should seed: {error}"));
+                .unwrap_or_else(|error| unreachable!("sleep row should seed: {error}"));
             store
                 .imports()
                 .upsert_daily_readiness(&DailyReadinessRecord {
@@ -4668,7 +4672,7 @@ mod tests {
                     raw_cache_key: None,
                     updated_at: format!("{day}T06:05:00Z"),
                 })
-                .unwrap_or_else(|error| panic!("readiness row should seed: {error}"));
+                .unwrap_or_else(|error| unreachable!("readiness row should seed: {error}"));
             store
                 .imports()
                 .upsert_daily_activity(&DailyActivityRecord {
@@ -4681,7 +4685,7 @@ mod tests {
                     raw_cache_key: None,
                     updated_at: format!("{day}T06:10:00Z"),
                 })
-                .unwrap_or_else(|error| panic!("activity row should seed: {error}"));
+                .unwrap_or_else(|error| unreachable!("activity row should seed: {error}"));
         }
     }
 
@@ -4779,10 +4783,64 @@ mod tests {
         }
     }
 
+    fn make_report_export(
+        report_id: &str,
+        snapshot_hash: &str,
+        artifact_id: &str,
+    ) -> ReportExportRecord {
+        ReportExportRecord {
+            report_id: report_id.to_owned(),
+            report_kind: "ai_review_report".to_owned(),
+            title: "AI review report".to_owned(),
+            format: "markdown".to_owned(),
+            output_path: "/tmp/report.md".to_owned(),
+            content_hash: "content-hash".to_owned(),
+            privacy_profile: "redacted".to_owned(),
+            created_at: "2026-04-10T00:10:00Z".to_owned(),
+            source_snapshot_hash_a: Some(snapshot_hash.to_owned()),
+            source_snapshot_hash_b: None,
+            source_ai_artifact_id: Some(artifact_id.to_owned()),
+            provider: Some("dry_run".to_owned()),
+            model: Some("deterministic".to_owned()),
+            prompt_version: Some("review_prompt_v1".to_owned()),
+            output_schema_version: Some("ringmaster.ai.review.v1".to_owned()),
+            export_status: "written".to_owned(),
+            last_verified_exists: true,
+            last_verified_at: "2026-04-10T00:10:01Z".to_owned(),
+        }
+    }
+
+    fn make_ai_eval_run(eval_run_id: &str) -> AiEvalRunRecord {
+        AiEvalRunRecord {
+            eval_run_id: eval_run_id.to_owned(),
+            task_family: "mixed".to_owned(),
+            fixture_dir: "tests/fixtures/ai".to_owned(),
+            candidate_label: "candidate".to_owned(),
+            baseline_label: Some("baseline".to_owned()),
+            provider: "fixture".to_owned(),
+            model: "mixed".to_owned(),
+            prompt_version: "mixed".to_owned(),
+            output_schema_version: "mixed".to_owned(),
+            created_at: "2026-04-10T00:11:00Z".to_owned(),
+            total_cases: 2,
+            passed_cases: 2,
+            failed_cases: 0,
+            schema_validity_score: 1.0,
+            completeness_score: 1.0,
+            overclaiming_score: 1.0,
+            medical_safety_score: 1.0,
+            privacy_score: 1.0,
+            evidence_score: 1.0,
+            honesty_score: 1.0,
+            regression_summary: "Improvements: compare:evidence; regressions: none.".to_owned(),
+            details_json: r#"{"fixture_dir":"tests/fixtures/ai","fixture_schema_version":"ringmaster.ai.eval.fixtures.v1","candidate_label":"candidate","baseline_label":"baseline","total_cases":2,"passed_cases":2,"failed_cases":0,"scores":{"schema_validity":1.0,"completeness":1.0,"overclaiming":1.0,"medical_safety":1.0,"privacy":1.0,"evidence":1.0,"honesty":1.0},"regression_summary":"Improvements: compare:evidence; regressions: none.","improvements":["compare:evidence"],"regressions":[],"cases":[]}"#.to_owned(),
+        }
+    }
+
     #[test]
     fn sync_state_round_trips_backoff_metadata() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
 
         store
             .sync_state()
@@ -4804,13 +4862,13 @@ mod tests {
                 last_trigger_source: Some("periodic_reconcile".to_owned()),
                 last_trigger_detail: Some("daily scheduler".to_owned()),
             })
-            .unwrap_or_else(|error| panic!("sync state should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("sync state should persist: {error}"));
 
         let record = store
             .sync_state()
             .get("oura.daily")
-            .unwrap_or_else(|error| panic!("sync state should read: {error}"))
-            .unwrap_or_else(|| panic!("sync state should exist"));
+            .unwrap_or_else(|error| unreachable!("sync state should read: {error}"))
+            .unwrap_or_else(|| unreachable!("sync state should exist"));
 
         assert_eq!(record.failure_count, 3);
         assert_eq!(
@@ -4822,14 +4880,14 @@ mod tests {
 
     #[test]
     fn daily_history_returns_oldest_to_newest_rows() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         seed_daily_history(&store);
 
         let history = store
             .views()
             .daily_history(30)
-            .unwrap_or_else(|error| panic!("daily history should load: {error}"));
+            .unwrap_or_else(|error| unreachable!("daily history should load: {error}"));
 
         assert_eq!(history.len(), 3);
         assert_eq!(
@@ -4845,8 +4903,8 @@ mod tests {
 
     #[test]
     fn heartrate_queries_return_per_day_points_and_day_list() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
 
         for (timestamp, bpm, day) in [
             ("2026-04-07T08:00:00Z", 58, "2026-04-07"),
@@ -4862,17 +4920,17 @@ mod tests {
                     raw_cache_key: None,
                     updated_at: timestamp.to_owned(),
                 })
-                .unwrap_or_else(|error| panic!("heartrate sample should seed: {error}"));
+                .unwrap_or_else(|error| unreachable!("heartrate sample should seed: {error}"));
         }
 
         let days = store
             .views()
             .available_heartrate_days(10)
-            .unwrap_or_else(|error| panic!("heartrate days should load: {error}"));
+            .unwrap_or_else(|error| unreachable!("heartrate days should load: {error}"));
         let points = store
             .views()
             .heartrate_for_day("2026-04-07")
-            .unwrap_or_else(|error| panic!("heartrate day should load: {error}"));
+            .unwrap_or_else(|error| unreachable!("heartrate day should load: {error}"));
 
         assert_eq!(days, vec!["2026-04-07".to_owned(), "2026-04-08".to_owned()]);
         assert_eq!(points.len(), 2);
@@ -4882,8 +4940,8 @@ mod tests {
 
     #[test]
     fn latest_source_day_tracks_newest_persisted_family_day() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         seed_daily_history(&store);
         store
             .imports()
@@ -4898,13 +4956,13 @@ mod tests {
                 raw_cache_key: None,
                 updated_at: "2026-04-09T23:59:59Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("rest mode period should seed: {error}"));
+            .unwrap_or_else(|error| unreachable!("rest mode period should seed: {error}"));
 
         assert_eq!(
             store
                 .views()
                 .latest_source_day()
-                .unwrap_or_else(|error| panic!("latest day should load: {error}"))
+                .unwrap_or_else(|error| unreachable!("latest day should load: {error}"))
                 .as_deref(),
             Some("2026-04-09")
         );
@@ -4912,8 +4970,8 @@ mod tests {
 
     #[test]
     fn latest_source_day_treats_open_rest_mode_as_current() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let current_day = super::current_local_day_string();
         store
             .imports()
@@ -4928,13 +4986,13 @@ mod tests {
                 raw_cache_key: None,
                 updated_at: "2026-04-01T00:00:00Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("rest mode period should seed: {error}"));
+            .unwrap_or_else(|error| unreachable!("rest mode period should seed: {error}"));
 
         assert_eq!(
             store
                 .views()
                 .latest_source_day()
-                .unwrap_or_else(|error| panic!("latest day should load: {error}"))
+                .unwrap_or_else(|error| unreachable!("latest day should load: {error}"))
                 .as_deref(),
             Some(current_day.as_str())
         );
@@ -4942,8 +5000,8 @@ mod tests {
 
     #[test]
     fn latest_review_day_prefers_reviewable_sources() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
 
         store
             .derived()
@@ -4962,7 +5020,7 @@ mod tests {
                 metadata_json: "{}".to_owned(),
                 updated_at: "2026-04-08T12:00:00Z".to_owned(),
             }])
-            .unwrap_or_else(|error| panic!("review signal day should seed: {error}"));
+            .unwrap_or_else(|error| unreachable!("review signal day should seed: {error}"));
         store
             .imports()
             .upsert_rest_mode_period(&RestModePeriodRecord {
@@ -4976,13 +5034,13 @@ mod tests {
                 raw_cache_key: None,
                 updated_at: "2026-04-10T23:59:59Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("rest mode period should seed: {error}"));
+            .unwrap_or_else(|error| unreachable!("rest mode period should seed: {error}"));
 
         assert_eq!(
             store
                 .views()
                 .latest_review_day()
-                .unwrap_or_else(|error| panic!("latest review day should load: {error}"))
+                .unwrap_or_else(|error| unreachable!("latest review day should load: {error}"))
                 .as_deref(),
             Some("2026-04-10")
         );
@@ -4990,8 +5048,8 @@ mod tests {
 
     #[test]
     fn latest_review_day_treats_open_rest_mode_as_current() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let current_day = super::current_local_day_string();
         store
             .imports()
@@ -5006,13 +5064,13 @@ mod tests {
                 raw_cache_key: None,
                 updated_at: "2026-04-01T00:00:00Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("rest mode period should seed: {error}"));
+            .unwrap_or_else(|error| unreachable!("rest mode period should seed: {error}"));
 
         assert_eq!(
             store
                 .views()
                 .latest_review_day()
-                .unwrap_or_else(|error| panic!("latest review day should load: {error}"))
+                .unwrap_or_else(|error| unreachable!("latest review day should load: {error}"))
                 .as_deref(),
             Some(current_day.as_str())
         );
@@ -5020,8 +5078,8 @@ mod tests {
 
     #[test]
     fn analysis_store_round_trips_snapshot_exports_and_provenance() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let record = SnapshotExportRecord {
             snapshot_hash: "hash-123".to_owned(),
             schema_version: "ringmaster.snapshot.v1".to_owned(),
@@ -5056,17 +5114,17 @@ mod tests {
         store
             .analysis()
             .upsert_snapshot_export(&record, &provenance)
-            .unwrap_or_else(|error| panic!("snapshot export should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("snapshot export should persist: {error}"));
 
         let loaded = store
             .analysis()
             .snapshot_export("hash-123")
-            .unwrap_or_else(|error| panic!("snapshot export should load: {error}"))
-            .unwrap_or_else(|| panic!("snapshot export should exist"));
+            .unwrap_or_else(|error| unreachable!("snapshot export should load: {error}"))
+            .unwrap_or_else(|| unreachable!("snapshot export should exist"));
         let loaded_provenance = store
             .analysis()
             .snapshot_provenance_refs("hash-123")
-            .unwrap_or_else(|error| panic!("provenance refs should load: {error}"));
+            .unwrap_or_else(|error| unreachable!("provenance refs should load: {error}"));
 
         assert_eq!(loaded.scope, "today");
         assert_eq!(loaded.privacy_profile, "redacted");
@@ -5076,8 +5134,8 @@ mod tests {
 
     #[test]
     fn analysis_store_preserves_provenance_on_metadata_only_snapshot_upsert() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let record = SnapshotExportRecord {
             snapshot_hash: "hash-keep".to_owned(),
             schema_version: "ringmaster.snapshot.v1".to_owned(),
@@ -5112,7 +5170,7 @@ mod tests {
         store
             .analysis()
             .upsert_snapshot_export(&record, &provenance)
-            .unwrap_or_else(|error| panic!("snapshot export should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("snapshot export should persist: {error}"));
 
         let metadata_only = SnapshotExportRecord {
             fixture_dir: None,
@@ -5125,17 +5183,17 @@ mod tests {
         store
             .analysis()
             .upsert_snapshot_export(&metadata_only, &[])
-            .unwrap_or_else(|error| panic!("metadata-only upsert should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("metadata-only upsert should persist: {error}"));
 
         let loaded = store
             .analysis()
             .snapshot_export("hash-keep")
-            .unwrap_or_else(|error| panic!("snapshot export should load: {error}"))
-            .unwrap_or_else(|| panic!("snapshot export should exist"));
+            .unwrap_or_else(|error| unreachable!("snapshot export should load: {error}"))
+            .unwrap_or_else(|| unreachable!("snapshot export should exist"));
         let loaded_provenance = store
             .analysis()
             .snapshot_provenance_refs("hash-keep")
-            .unwrap_or_else(|error| panic!("provenance refs should load: {error}"));
+            .unwrap_or_else(|error| unreachable!("provenance refs should load: {error}"));
 
         assert_eq!(
             loaded.fixture_dir.as_deref(),
@@ -5149,8 +5207,8 @@ mod tests {
 
     #[test]
     fn analysis_store_preserves_snapshot_created_at_on_upsert() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let original = SnapshotExportRecord {
             snapshot_hash: "hash-created-at".to_owned(),
             schema_version: "ringmaster.snapshot.v1".to_owned(),
@@ -5178,7 +5236,7 @@ mod tests {
         store
             .analysis()
             .upsert_snapshot_export(&original, &[])
-            .unwrap_or_else(|error| panic!("snapshot export should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("snapshot export should persist: {error}"));
 
         let refreshed = SnapshotExportRecord {
             created_at: "2026-04-09T23:59:59Z".to_owned(),
@@ -5190,13 +5248,13 @@ mod tests {
         store
             .analysis()
             .upsert_snapshot_export(&refreshed, &[])
-            .unwrap_or_else(|error| panic!("snapshot export should refresh: {error}"));
+            .unwrap_or_else(|error| unreachable!("snapshot export should refresh: {error}"));
 
         let loaded = store
             .analysis()
             .snapshot_export("hash-created-at")
-            .unwrap_or_else(|error| panic!("snapshot export should load: {error}"))
-            .unwrap_or_else(|| panic!("snapshot export should exist"));
+            .unwrap_or_else(|error| unreachable!("snapshot export should load: {error}"))
+            .unwrap_or_else(|| unreachable!("snapshot export should exist"));
 
         assert_eq!(loaded.created_at, "2026-04-10T00:00:01Z");
         assert_eq!(loaded.freshness_summary, refreshed.freshness_summary);
@@ -5204,8 +5262,8 @@ mod tests {
 
     #[test]
     fn analysis_store_round_trips_ai_artifacts() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let artifact = AiArtifactRecord {
             artifact_id: "artifact-123".to_owned(),
             artifact_kind: "review".to_owned(),
@@ -5232,13 +5290,13 @@ mod tests {
         store
             .analysis()
             .upsert_ai_artifact(&artifact)
-            .unwrap_or_else(|error| panic!("ai artifact should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("ai artifact should persist: {error}"));
 
         let loaded = store
             .analysis()
             .latest_ai_artifact("review", "hash-123")
-            .unwrap_or_else(|error| panic!("ai artifact should load: {error}"))
-            .unwrap_or_else(|| panic!("ai artifact should exist"));
+            .unwrap_or_else(|error| unreachable!("ai artifact should load: {error}"))
+            .unwrap_or_else(|| unreachable!("ai artifact should exist"));
 
         assert_eq!(loaded.provider, "dry_run");
         assert_eq!(loaded.payload_json, "{\"status\":\"dry_run\"}");
@@ -5246,24 +5304,24 @@ mod tests {
 
     #[test]
     fn analysis_store_round_trips_ai_runs() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         store
             .analysis()
             .upsert_snapshot_export(&make_snapshot_export("hash-123", "2026-04-10"), &[])
-            .unwrap_or_else(|error| panic!("snapshot export should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("snapshot export should persist: {error}"));
         let run = make_ai_run("run-123", "review", "queued", "hash-123", None);
 
         store
             .analysis()
             .upsert_ai_run(&run)
-            .unwrap_or_else(|error| panic!("ai run should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("ai run should persist: {error}"));
 
         let loaded = store
             .analysis()
             .ai_run("run-123")
-            .unwrap_or_else(|error| panic!("ai run should load: {error}"))
-            .unwrap_or_else(|| panic!("ai run should exist"));
+            .unwrap_or_else(|error| unreachable!("ai run should load: {error}"))
+            .unwrap_or_else(|| unreachable!("ai run should exist"));
 
         assert_eq!(loaded.run_status, "queued");
         assert_eq!(loaded.provider, "openai");
@@ -5272,18 +5330,18 @@ mod tests {
 
     #[test]
     fn analysis_store_updates_ai_runs_only_while_active() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         store
             .analysis()
             .upsert_snapshot_export(&make_snapshot_export("hash-123", "2026-04-10"), &[])
-            .unwrap_or_else(|error| panic!("snapshot export should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("snapshot export should persist: {error}"));
 
         let queued = make_ai_run("run-conditional", "review", "queued", "hash-123", None);
         store
             .analysis()
             .upsert_ai_run(&queued)
-            .unwrap_or_else(|error| panic!("queued run should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("queued run should persist: {error}"));
 
         let mut cancelled = queued;
         cancelled.run_status = "cancelled".to_owned();
@@ -5294,14 +5352,14 @@ mod tests {
         let updated = store
             .analysis()
             .update_ai_run_if_active(&cancelled)
-            .unwrap_or_else(|error| panic!("active run transition should succeed: {error}"));
+            .unwrap_or_else(|error| unreachable!("active run transition should succeed: {error}"));
         assert!(updated);
 
         let persisted = store
             .analysis()
             .ai_run("run-conditional")
-            .unwrap_or_else(|error| panic!("ai run should load: {error}"))
-            .unwrap_or_else(|| panic!("ai run should exist"));
+            .unwrap_or_else(|error| unreachable!("ai run should load: {error}"))
+            .unwrap_or_else(|| unreachable!("ai run should exist"));
         assert_eq!(persisted.run_status, "cancelled");
 
         let mut succeeded = persisted;
@@ -5311,7 +5369,7 @@ mod tests {
         store
             .analysis()
             .upsert_ai_run(&succeeded)
-            .unwrap_or_else(|error| panic!("succeeded run should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("succeeded run should persist: {error}"));
 
         let mut interrupted = succeeded;
         interrupted.run_status = "interrupted".to_owned();
@@ -5321,30 +5379,32 @@ mod tests {
         let updated = store
             .analysis()
             .update_ai_run_if_active(&interrupted)
-            .unwrap_or_else(|error| panic!("inactive run transition should not error: {error}"));
+            .unwrap_or_else(|error| {
+                unreachable!("inactive run transition should not error: {error}")
+            });
         assert!(!updated);
 
         let persisted = store
             .analysis()
             .ai_run("run-conditional")
-            .unwrap_or_else(|error| panic!("ai run should reload: {error}"))
-            .unwrap_or_else(|| panic!("ai run should still exist"));
+            .unwrap_or_else(|error| unreachable!("ai run should reload: {error}"))
+            .unwrap_or_else(|| unreachable!("ai run should still exist"));
         assert_eq!(persisted.run_status, "succeeded");
         assert!(persisted.error_message.is_none());
     }
 
     #[test]
     fn list_ai_runs_for_snapshot_includes_compare_runs_on_either_side() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         store
             .analysis()
             .upsert_snapshot_export(&make_snapshot_export("hash-left", "2026-04-09"), &[])
-            .unwrap_or_else(|error| panic!("left snapshot should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("left snapshot should persist: {error}"));
         store
             .analysis()
             .upsert_snapshot_export(&make_snapshot_export("hash-right", "2026-04-10"), &[])
-            .unwrap_or_else(|error| panic!("right snapshot should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("right snapshot should persist: {error}"));
 
         store
             .analysis()
@@ -5355,12 +5415,12 @@ mod tests {
                 "hash-left",
                 Some("hash-right"),
             ))
-            .unwrap_or_else(|error| panic!("compare run should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("compare run should persist: {error}"));
 
         let right_runs = store
             .analysis()
             .list_ai_runs_for_snapshot("hash-right")
-            .unwrap_or_else(|error| panic!("ai runs should load: {error}"));
+            .unwrap_or_else(|error| unreachable!("ai runs should load: {error}"));
 
         assert_eq!(right_runs.len(), 1);
         assert_eq!(right_runs[0].run_id, "run-compare");
@@ -5369,31 +5429,33 @@ mod tests {
 
     #[test]
     fn latest_ai_artifact_for_anchor_day_returns_none_when_day_has_no_snapshot_artifact() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
 
         assert_eq!(
             store
                 .analysis()
                 .latest_ai_artifact_for_anchor_day("2026-04-10")
-                .unwrap_or_else(|error| panic!("ai artifact day summary should load: {error}")),
+                .unwrap_or_else(|error| unreachable!(
+                    "ai artifact day summary should load: {error}"
+                )),
             None
         );
     }
 
     #[test]
     fn latest_ai_artifact_for_anchor_day_prefers_newest_review_for_matching_day() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
 
         store
             .analysis()
             .upsert_snapshot_export(&make_snapshot_export("hash-older", "2026-04-10"), &[])
-            .unwrap_or_else(|error| panic!("older snapshot should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("older snapshot should persist: {error}"));
         store
             .analysis()
             .upsert_snapshot_export(&make_snapshot_export("hash-newer", "2026-04-10"), &[])
-            .unwrap_or_else(|error| panic!("newer snapshot should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("newer snapshot should persist: {error}"));
         store
             .analysis()
             .upsert_ai_artifact(&make_ai_artifact(
@@ -5403,7 +5465,7 @@ mod tests {
                 "hash-older",
                 None,
             ))
-            .unwrap_or_else(|error| panic!("older artifact should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("older artifact should persist: {error}"));
         store
             .analysis()
             .upsert_ai_artifact(&make_ai_artifact(
@@ -5413,13 +5475,13 @@ mod tests {
                 "hash-newer",
                 None,
             ))
-            .unwrap_or_else(|error| panic!("newer artifact should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("newer artifact should persist: {error}"));
 
         let loaded = store
             .analysis()
             .latest_ai_artifact_for_anchor_day("2026-04-10")
-            .unwrap_or_else(|error| panic!("ai artifact day summary should load: {error}"))
-            .unwrap_or_else(|| panic!("ai artifact day summary should exist"));
+            .unwrap_or_else(|error| unreachable!("ai artifact day summary should load: {error}"))
+            .unwrap_or_else(|| unreachable!("ai artifact day summary should exist"));
 
         assert_eq!(
             loaded,
@@ -5442,17 +5504,17 @@ mod tests {
 
     #[test]
     fn latest_ai_artifact_for_anchor_day_matches_compare_runs_on_either_snapshot_side() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
 
         store
             .analysis()
             .upsert_snapshot_export(&make_snapshot_export("hash-left", "2026-04-09"), &[])
-            .unwrap_or_else(|error| panic!("left snapshot should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("left snapshot should persist: {error}"));
         store
             .analysis()
             .upsert_snapshot_export(&make_snapshot_export("hash-right", "2026-04-10"), &[])
-            .unwrap_or_else(|error| panic!("right snapshot should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("right snapshot should persist: {error}"));
         store
             .analysis()
             .upsert_ai_artifact(&make_ai_artifact(
@@ -5462,13 +5524,13 @@ mod tests {
                 "hash-left",
                 Some("hash-right"),
             ))
-            .unwrap_or_else(|error| panic!("compare artifact should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("compare artifact should persist: {error}"));
 
         let loaded = store
             .analysis()
             .latest_ai_artifact_for_anchor_day("2026-04-10")
-            .unwrap_or_else(|error| panic!("ai artifact day summary should load: {error}"))
-            .unwrap_or_else(|| panic!("compare artifact day summary should exist"));
+            .unwrap_or_else(|error| unreachable!("ai artifact day summary should load: {error}"))
+            .unwrap_or_else(|| unreachable!("compare artifact day summary should exist"));
 
         assert_eq!(loaded.artifact_kind, "compare");
         assert_eq!(loaded.matched_snapshot_hash, "hash-right");
@@ -5477,8 +5539,8 @@ mod tests {
         let loaded_left = store
             .analysis()
             .latest_ai_artifact_for_anchor_day("2026-04-09")
-            .unwrap_or_else(|error| panic!("ai artifact day summary should load: {error}"))
-            .unwrap_or_else(|| panic!("compare artifact day summary should exist"));
+            .unwrap_or_else(|error| unreachable!("ai artifact day summary should load: {error}"))
+            .unwrap_or_else(|| unreachable!("compare artifact day summary should exist"));
 
         assert_eq!(loaded_left.matched_snapshot_hash, "hash-left");
         assert_eq!(
@@ -5489,128 +5551,49 @@ mod tests {
 
     #[test]
     fn analysis_store_round_trips_report_exports_and_eval_runs() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
-        let snapshot = SnapshotExportRecord {
-            snapshot_hash: "hash-123".to_owned(),
-            schema_version: "ringmaster.snapshot.v1".to_owned(),
-            app_version: "0.1.0".to_owned(),
-            generated_at: "2026-04-10T00:00:00Z".to_owned(),
-            scope: "today".to_owned(),
-            start_day: "2026-04-10".to_owned(),
-            end_day: "2026-04-10".to_owned(),
-            anchor_day: "2026-04-10".to_owned(),
-            day_count: 1,
-            privacy_profile: "redacted".to_owned(),
-            source_mode: "demo".to_owned(),
-            fixture_dir: None,
-            latest_source_day: Some("2026-04-10".to_owned()),
-            latest_review_day: Some("2026-04-10".to_owned()),
-            freshness_summary:
-                "latest_source_day=2026-04-10 latest_review_day=2026-04-10 warnings=0".to_owned(),
-            trust_summary: "review_signals=1 strong=1 stale=0 follow_up_targets=1".to_owned(),
-            capability_summary: "granted=1 missing=0 requested=1".to_owned(),
-            provenance_summary: "refs=0 local_kinds=0".to_owned(),
-            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v1\"}".to_owned(),
-            created_at: "2026-04-10T00:00:01Z".to_owned(),
-        };
-        let ai_artifact = AiArtifactRecord {
-            artifact_id: "artifact-123".to_owned(),
-            artifact_kind: "review".to_owned(),
-            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
-            prompt_version: "review_prompt_v1".to_owned(),
-            provider: "dry_run".to_owned(),
-            model: "deterministic".to_owned(),
-            reasoning_effort: None,
-            request_mode: "stateless".to_owned(),
-            input_transport: "inline".to_owned(),
-            run_mode: "dry_run".to_owned(),
-            created_at: "2026-04-10T00:05:00Z".to_owned(),
-            snapshot_hash_a: "hash-123".to_owned(),
-            snapshot_hash_b: None,
-            privacy_profile: "redacted".to_owned(),
-            artifact_status: "dry_run".to_owned(),
-            overview: "Dry-run review for today.".to_owned(),
-            summary_cache: "Dry-run review for today.".to_owned(),
-            request_fingerprint: Some("fingerprint-123".to_owned()),
-            payload_json: "{\"status\":\"dry_run\"}".to_owned(),
-            rendered_briefing: "ringmaster ai review".to_owned(),
-        };
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
+        let snapshot = make_snapshot_export("hash-123", "2026-04-10");
+        let ai_artifact = make_ai_artifact(
+            "artifact-123",
+            "review",
+            "2026-04-10T00:05:00Z",
+            "hash-123",
+            None,
+        );
         store
             .analysis()
             .upsert_snapshot_export(&snapshot, &[])
-            .unwrap_or_else(|error| panic!("snapshot export should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("snapshot export should persist: {error}"));
         store
             .analysis()
             .upsert_ai_artifact(&ai_artifact)
-            .unwrap_or_else(|error| panic!("ai artifact should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("ai artifact should persist: {error}"));
 
-        let report = ReportExportRecord {
-            report_id: "report-123".to_owned(),
-            report_kind: "ai_review_report".to_owned(),
-            title: "AI review report".to_owned(),
-            format: "markdown".to_owned(),
-            output_path: "/tmp/report.md".to_owned(),
-            content_hash: "content-hash".to_owned(),
-            privacy_profile: "redacted".to_owned(),
-            created_at: "2026-04-10T00:10:00Z".to_owned(),
-            source_snapshot_hash_a: Some("hash-123".to_owned()),
-            source_snapshot_hash_b: None,
-            source_ai_artifact_id: Some("artifact-123".to_owned()),
-            provider: Some("dry_run".to_owned()),
-            model: Some("deterministic".to_owned()),
-            prompt_version: Some("review_prompt_v1".to_owned()),
-            output_schema_version: Some("ringmaster.ai.review.v1".to_owned()),
-            export_status: "written".to_owned(),
-            last_verified_exists: true,
-            last_verified_at: "2026-04-10T00:10:01Z".to_owned(),
-        };
+        let report = make_report_export("report-123", "hash-123", "artifact-123");
         store
             .analysis()
             .upsert_report_export(&report)
-            .unwrap_or_else(|error| panic!("report export should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("report export should persist: {error}"));
 
-        let eval = AiEvalRunRecord {
-            eval_run_id: "eval-123".to_owned(),
-            task_family: "mixed".to_owned(),
-            fixture_dir: "tests/fixtures/ai".to_owned(),
-            candidate_label: "candidate".to_owned(),
-            baseline_label: Some("baseline".to_owned()),
-            provider: "fixture".to_owned(),
-            model: "mixed".to_owned(),
-            prompt_version: "mixed".to_owned(),
-            output_schema_version: "mixed".to_owned(),
-            created_at: "2026-04-10T00:11:00Z".to_owned(),
-            total_cases: 2,
-            passed_cases: 2,
-            failed_cases: 0,
-            schema_validity_score: 1.0,
-            completeness_score: 1.0,
-            overclaiming_score: 1.0,
-            medical_safety_score: 1.0,
-            privacy_score: 1.0,
-            evidence_score: 1.0,
-            honesty_score: 1.0,
-            regression_summary: "Improvements: compare:evidence; regressions: none.".to_owned(),
-            details_json: r#"{"fixture_dir":"tests/fixtures/ai","fixture_schema_version":"ringmaster.ai.eval.fixtures.v1","candidate_label":"candidate","baseline_label":"baseline","total_cases":2,"passed_cases":2,"failed_cases":0,"scores":{"schema_validity":1.0,"completeness":1.0,"overclaiming":1.0,"medical_safety":1.0,"privacy":1.0,"evidence":1.0,"honesty":1.0},"regression_summary":"Improvements: compare:evidence; regressions: none.","improvements":["compare:evidence"],"regressions":[],"cases":[]}"#.to_owned(),
-        };
+        let eval = make_ai_eval_run("eval-123");
         store
             .analysis()
             .upsert_ai_eval_run(&eval)
-            .unwrap_or_else(|error| panic!("ai eval run should persist: {error}"));
+            .unwrap_or_else(|error| unreachable!("ai eval run should persist: {error}"));
 
         let loaded_reports = store
             .analysis()
             .report_exports_for_snapshot("hash-123")
-            .unwrap_or_else(|error| panic!("report exports should load: {error}"));
+            .unwrap_or_else(|error| unreachable!("report exports should load: {error}"));
         assert_eq!(loaded_reports.len(), 1);
         assert_eq!(loaded_reports[0].report_id, "report-123");
     }
 
     #[test]
     fn rest_mode_periods_between_days_include_open_periods_started_before_window() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         store
             .imports()
             .upsert_rest_mode_period(&RestModePeriodRecord {
@@ -5624,12 +5607,12 @@ mod tests {
                 raw_cache_key: None,
                 updated_at: "2026-04-01T00:00:00Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("rest mode period should seed: {error}"));
+            .unwrap_or_else(|error| unreachable!("rest mode period should seed: {error}"));
 
         let periods = store
             .views()
             .rest_mode_periods_between_days("2026-04-03", "2026-04-04")
-            .unwrap_or_else(|error| panic!("rest mode periods should load: {error}"));
+            .unwrap_or_else(|error| unreachable!("rest mode periods should load: {error}"));
 
         assert_eq!(periods.len(), 1);
         assert_eq!(periods[0].period_id, "rest-open");
@@ -5637,8 +5620,8 @@ mod tests {
 
     #[test]
     fn vo2_max_queries_preserve_multiple_measurements_per_day() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
 
         for (oura_id, recorded_at, vo2_max) in [
             ("vo2-1", "2026-04-08T08:00:00Z", 41.5),
@@ -5654,13 +5637,13 @@ mod tests {
                     raw_cache_key: None,
                     updated_at: recorded_at.to_owned(),
                 })
-                .unwrap_or_else(|error| panic!("vo2 max row should seed: {error}"));
+                .unwrap_or_else(|error| unreachable!("vo2 max row should seed: {error}"));
         }
 
         let records = store
             .views()
             .vo2_max_between_days("2026-04-08", "2026-04-08")
-            .unwrap_or_else(|error| panic!("vo2 max rows should load: {error}"));
+            .unwrap_or_else(|error| unreachable!("vo2 max rows should load: {error}"));
 
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].recorded_at, "2026-04-08T08:00:00Z");
@@ -5669,8 +5652,8 @@ mod tests {
 
     #[test]
     fn context_events_for_day_respects_offset_timestamps() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         store
             .derived()
             .replace_context_events(&[ContextEventRecord {
@@ -5688,12 +5671,12 @@ mod tests {
                 metadata_json: "{}".to_owned(),
                 updated_at: "2026-04-09T07:00:00Z".to_owned(),
             }])
-            .unwrap_or_else(|error| panic!("context event should seed: {error}"));
+            .unwrap_or_else(|error| unreachable!("context event should seed: {error}"));
 
         let events = store
             .views()
             .context_events_for_day("2026-04-08")
-            .unwrap_or_else(|error| panic!("context events should load: {error}"));
+            .unwrap_or_else(|error| unreachable!("context events should load: {error}"));
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].context_event_id, "workout:late-offset");
@@ -5701,8 +5684,8 @@ mod tests {
 
     #[test]
     fn daily_delete_accepts_object_id_suffix_for_legacy_rows() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         store
             .imports()
             .upsert_daily_sleep(&DailySleepRecord {
@@ -5712,18 +5695,20 @@ mod tests {
                 raw_cache_key: None,
                 updated_at: "2026-04-08T00:00:00Z".to_owned(),
             })
-            .unwrap_or_else(|error| panic!("legacy daily sleep row should seed: {error}"));
+            .unwrap_or_else(|error| unreachable!("legacy daily sleep row should seed: {error}"));
 
         store
             .imports()
             .delete_daily_sleep("daily_sleep_2026-04-08")
-            .unwrap_or_else(|error| panic!("legacy delete should resolve by day suffix: {error}"));
+            .unwrap_or_else(|error| {
+                unreachable!("legacy delete should resolve by day suffix: {error}")
+            });
 
         assert_eq!(
             store
                 .views()
                 .record_counts()
-                .unwrap_or_else(|error| panic!("counts should load: {error}"))
+                .unwrap_or_else(|error| unreachable!("counts should load: {error}"))
                 .daily_sleep,
             0
         );

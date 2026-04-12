@@ -22,9 +22,12 @@ pub struct Store {
     plan: StorePlan,
     connection: Connection,
     migration_report: MigrationReport,
+    #[cfg(test)]
+    _temp_dir: Option<tempfile::TempDir>,
 }
 
 impl StorePlan {
+    #[must_use]
     pub fn from_config(config: &Config) -> Self {
         Self {
             data_dir: config.paths.state_dir.clone(),
@@ -32,6 +35,11 @@ impl StorePlan {
         }
     }
 
+    /// Ensures the parent directory for the store database exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the on-disk data directory cannot be created.
     pub fn ensure_directories(&self) -> Result<()> {
         if self.db_path.as_os_str() == ":memory:" {
             return Ok(());
@@ -43,81 +51,122 @@ impl StorePlan {
 }
 
 impl Store {
+    /// Opens the configured store, applies migrations, and records bootstrap metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database cannot be opened, configured, migrated,
+    /// or seeded with the application metadata.
     pub fn open(config: &Config) -> Result<Self> {
-        let plan = StorePlan::from_config(config);
+        Self::open_with_plan(StorePlan::from_config(config), config.app_name)
+    }
+
+    /// Opens a store from an already computed plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database cannot be opened, configured, migrated,
+    /// or seeded with the application metadata.
+    pub(crate) fn open_with_plan(plan: StorePlan, app_name: &str) -> Result<Self> {
         plan.ensure_directories()?;
         let mut connection = Connection::open(&plan.db_path)?;
-        configure_connection(&mut connection)?;
+        configure_connection(&connection)?;
         let migration_report = run_migrations(&mut connection)?;
 
         let store = Self {
             plan,
             connection,
             migration_report,
+            #[cfg(test)]
+            _temp_dir: None,
         };
-        store.metadata().upsert("app_name", config.app_name)?;
+        store.metadata().upsert("app_name", app_name)?;
 
         Ok(store)
     }
 
     #[cfg(test)]
-    pub fn open_in_memory() -> Result<Self> {
-        let mut connection = Connection::open_in_memory()?;
-        configure_connection(&mut connection)?;
+    /// Opens an isolated temporary on-disk store for tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the temporary database cannot be opened,
+    /// configured, or migrated.
+    pub fn open_test_store() -> Result<Self> {
+        let temp_dir = tempfile::tempdir()
+            .map_err(|error| RingmasterError::io("creating isolated test store", error))?;
+        let plan = StorePlan {
+            data_dir: temp_dir.path().to_path_buf(),
+            db_path: temp_dir.path().join("ringmaster-test.db"),
+        };
+        plan.ensure_directories()?;
+        let mut connection = Connection::open(&plan.db_path)?;
+        configure_connection(&connection)?;
         let migration_report = run_migrations(&mut connection)?;
 
-        Ok(Self {
-            plan: StorePlan {
-                data_dir: PathBuf::from("."),
-                db_path: PathBuf::from(":memory:"),
-            },
+        let store = Self {
+            plan,
             connection,
             migration_report,
-        })
+            _temp_dir: Some(temp_dir),
+        };
+        store.metadata().upsert("app_name", "ringmaster")?;
+
+        Ok(store)
     }
 
-    pub fn plan(&self) -> &StorePlan {
+    #[must_use]
+    pub const fn plan(&self) -> &StorePlan {
         &self.plan
     }
 
-    pub fn migration_report(&self) -> &MigrationReport {
+    #[must_use]
+    pub const fn migration_report(&self) -> &MigrationReport {
         &self.migration_report
     }
 
-    pub fn metadata(&self) -> MetadataStore<'_> {
+    #[must_use]
+    pub const fn metadata(&self) -> MetadataStore<'_> {
         MetadataStore::new(&self.connection)
     }
 
-    pub fn sync_state(&self) -> SyncStateStore<'_> {
+    #[must_use]
+    pub const fn sync_state(&self) -> SyncStateStore<'_> {
         SyncStateStore::new(&self.connection)
     }
 
-    pub fn auth(&self) -> AuthStore<'_> {
+    #[must_use]
+    pub const fn auth(&self) -> AuthStore<'_> {
         AuthStore::new(&self.connection)
     }
 
-    pub fn imports(&self) -> ImportStore<'_> {
+    #[must_use]
+    pub const fn imports(&self) -> ImportStore<'_> {
         ImportStore::new(&self.connection)
     }
 
-    pub fn derived(&self) -> DerivedStore<'_> {
+    #[must_use]
+    pub const fn derived(&self) -> DerivedStore<'_> {
         DerivedStore::new(&self.connection)
     }
 
-    pub fn analysis(&self) -> AnalysisStore<'_> {
+    #[must_use]
+    pub const fn analysis(&self) -> AnalysisStore<'_> {
         AnalysisStore::new(&self.connection)
     }
 
-    pub fn views(&self) -> ViewStore<'_> {
+    #[must_use]
+    pub const fn views(&self) -> ViewStore<'_> {
         ViewStore::new(&self.connection)
     }
 
-    pub fn webhook(&self) -> WebhookStore<'_> {
+    #[must_use]
+    pub const fn webhook(&self) -> WebhookStore<'_> {
         WebhookStore::new(&self.connection)
     }
 }
 
-fn configure_connection(connection: &mut Connection) -> Result<()> {
+fn configure_connection(connection: &Connection) -> Result<()> {
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.execute_batch(
         "PRAGMA foreign_keys = ON;
@@ -129,14 +178,13 @@ fn configure_connection(connection: &mut Connection) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use crate::store::db::Store;
+    use crate::test_support::ok;
 
     #[test]
-    fn opens_in_memory_store() {
-        let store =
-            Store::open_in_memory().unwrap_or_else(|error| panic!("store should open: {error}"));
+    fn opens_isolated_test_store() {
+        let store = ok(Store::open_test_store(), "store should open");
 
         assert_eq!(store.migration_report().current_version, 16);
     }

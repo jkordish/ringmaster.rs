@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document describes the implemented architecture for `ringmaster.rs` as of `2026-04-10`. It reflects the code that exists in the repository today, including the snapshot library, AI run registry, report export workflow, the in-app eval lab/regression console, and the top-level AI workbench in the TUI, not the eventual end-state product.
+This document describes the implemented architecture for `ringmaster.rs` as of `2026-04-11`. It reflects the code that exists in the repository today, including the snapshot library, AI run registry, report export workflow, the in-app eval lab/regression console, and the navigation/focus/keybinding standardization that now anchors the TUI shell.
 
 ## Design goals
 
@@ -207,14 +207,23 @@ Important implemented state concepts:
 - `selected_day_index`: shared by Dashboard, Timeline, Explain, and Review
 - selected-day continuity preserves the exact selected day when possible, then the nearest earlier available day, then the next later day, before falling back to the newest day
 - `selected_event_id`: shared by Timeline and Explain
+- `focused_region`: the currently focused major region for the active screen
+- `screen_focus_memory`: per-screen region restoration memory used when returning to a screen from `Views`
+- `focused_top_nav_screen`: the currently focused item in the visible top-level `Views` tab row
+- `help_open`: scoped help-overlay state
+- `search`: current-context search state, including query, match counts, and prior region for focus restore
 - `overlay_filters`: shared family toggles for workouts, tags, and sessions
+- `selected_overlay_toggle_index`: shared focused overlay-selector state for Timeline, Explain, and Patterns
+- `window_hours`: selected Timeline chart window preset
 - `PatternMetricFilter`: shared pattern metric filtering for the Patterns screen
 - `review_mode`: Today, Week, or Investigate within the Review screen
 - `review_focus`: readiness, sleep, recovery, stress, or activity within Investigate mode
 - `selected_review_card_index`: selected ranked card within Review
 - `ai_preflight`: explicit in-app send gate state for AI launches
+- `ai_preflight_control`: focused preflight control inside the transient confirm/privacy/cancel row
 - `ai_browser_tab`: shared browser state for saved `runs`, `snapshots`, `reports`, and `evals`
-- `selected_ai_run_index`, `selected_snapshot_catalog_index`, `selected_report_export_index`, `selected_ai_eval_run_index`: stable list/detail selection state inside the AI workbench
+- `selected_ai_run_index`, `selected_snapshot_catalog_index`, `selected_report_export_index`, `selected_ai_eval_run_index`: stable saved-artifact list selection state inside the AI workbench
+- `selected_ai_artifact_action_index`: focused action inside the visible AI artifact-action pane
 - `ai_artifacts_by_day`: preloaded day-keyed summaries derived from `ai_artifacts` joined through `snapshot_exports`, used for Review provenance display
 
 ### `src/tui.rs`
@@ -223,11 +232,12 @@ Responsibilities:
 
 - interactive Ratatui event loop
 - terminal session lifecycle
-- keyboard-to-action mapping
+- key-event routing through the centralized binding registry
 - live background refresh worker wiring
 - AI preflight preparation, launch orchestration, cancellation, report-export side effects, and local evidence jump routing
 - deterministic snapshot rendering via `TestBackend`
 - shared frame chrome driven by semantic theme and viewport context
+- visible orientation strip plus scoped help/search overlays
 
 Why snapshot rendering exists:
 
@@ -239,9 +249,12 @@ Why snapshot rendering exists:
 The shared frame now owns the design-system-driven shell:
 
 - semantic header and active-screen treatment
-- consistent footer/help strip
+- visible `Views` tabs on wide layouts
+- orientation strip with focused-region cues
+- contextual footer generated from the binding registry
 - centralized compact/medium/wide viewport context
 - shared panel/badge/divider language used by all screens
+- region-ordered back-out so reducer-level `Esc` handling always unwinds the previous major region on the active screen before returning to `Views`
 
 How background refresh works:
 
@@ -273,6 +286,49 @@ Implemented screen set:
 
 There is intentionally no freeform AI chat screen in this pass. The `AI` screen is a guided workbench for snapshot-bounded review, compare, follow-up, and report flows, and the TUI remains a pure consumer of persisted local state plus explicit user-triggered side effects.
 
+### `src/navigation.rs`
+
+Responsibilities:
+
+- canonical major-region ordering per screen
+- typed navigation movement semantics
+- pane-type semantics for selectors, lists, chart/pager regions, and detail panes
+- truthful region labels for promoted controls such as Timeline window presets, overlay selectors, and AI artifact actions
+- honest focus-stop definitions so read-only subpanels stay inside a screen body region instead of becoming fake keyboard regions
+- search-scope definitions
+- transient-layer definitions
+- focused-control labels used by chrome and reducer logic
+
+Boundary rules:
+
+- this module is pure and state-free
+- it does not know about rendering, database handles, network work, or provider state
+
+### `src/keybindings.rs`
+
+Responsibilities:
+
+- centralized keybinding registry
+- scope-aware binding lookup
+- standard vs expert alias separation
+- footer/help generation support
+- collision detection coverage through tests
+
+Implemented scopes:
+
+- `Global`
+- `Screen`
+- `Region`
+- `ScreenRegion`
+- `Transient`
+
+Implemented behavior:
+
+- transients override region and screen bindings
+- `Tab` / `Shift+Tab` are reserved for major-region traversal
+- arrows, `Home`, `End`, and paging keys are used inside composites
+- function keys are intentionally excluded from the standard model
+
 ### `src/components/ai.rs`
 
 Responsibilities:
@@ -280,7 +336,8 @@ Responsibilities:
 - render the dedicated AI workbench surface
 - render the unified list/detail browser for snapshots, AI runs, and reports
 - render launch points and trust defaults
-- render the preflight overlay as a compact, legible confirmation gate
+- render the visible AI artifact-action pane
+- render the preflight overlay as a compact, legible confirmation gate with a visible control row
 
 Non-responsibilities:
 
@@ -406,7 +463,7 @@ Implemented modules:
 
 The snapshot writer now supports two naming modes:
 
-- legacy/demo mode: `screen-size.txt`
+- single-source/demo mode: `screen-size.txt`
 - scenario mode: `screen-scenario-size.txt`
 
 Boundary rule:

@@ -30,6 +30,7 @@ pub struct Theme {
 }
 
 impl Theme {
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             background: Color::Black,
@@ -48,7 +49,8 @@ impl Theme {
         }
     }
 
-    pub fn tone(self, tone: Tone) -> Color {
+    #[must_use]
+    pub const fn tone(self, tone: Tone) -> Color {
         match tone {
             Tone::Default => self.text,
             Tone::Accent => self.accent,
@@ -61,46 +63,55 @@ impl Theme {
         }
     }
 
+    #[must_use]
     pub fn screen(self) -> Style {
         Style::default().bg(self.background).fg(self.text)
     }
 
+    #[must_use]
     pub fn hero(self) -> Style {
         Style::default()
             .fg(self.text_strong)
             .add_modifier(Modifier::BOLD)
     }
 
+    #[must_use]
     pub fn section_title(self, tone: Tone) -> Style {
         Style::default()
             .fg(self.tone(tone))
             .add_modifier(Modifier::BOLD)
     }
 
+    #[must_use]
     pub fn body(self) -> Style {
         Style::default().fg(self.text)
     }
 
+    #[must_use]
     pub fn annotation(self) -> Style {
         Style::default().fg(self.text_muted)
     }
 
+    #[must_use]
     pub fn badge(self, tone: Tone) -> Style {
         Style::default()
             .fg(self.tone(tone))
             .add_modifier(Modifier::BOLD)
     }
 
+    #[must_use]
     pub fn emphasis(self, tone: Tone) -> Style {
         Style::default()
             .fg(self.tone(tone))
             .add_modifier(Modifier::BOLD)
     }
 
+    #[must_use]
     pub fn border(self, tone: Tone) -> Style {
         Style::default().fg(self.tone(tone))
     }
 
+    #[must_use]
     pub fn muted_border(self) -> Style {
         Style::default().fg(self.surface_3)
     }

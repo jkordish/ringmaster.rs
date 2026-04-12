@@ -1,6 +1,6 @@
 use ratatui::{
-    prelude::{Line, Span, Style},
-    widgets::{Block, Borders, Paragraph},
+    prelude::{Line, Span},
+    widgets::{Block, Borders},
 };
 
 use super::theme::{Theme, Tone};
@@ -13,6 +13,7 @@ pub enum PanelKind {
     Diagnostic,
 }
 
+#[must_use]
 pub fn panel<'a>(theme: &Theme, title: impl Into<Line<'a>>, kind: PanelKind) -> Block<'a> {
     let tone = match kind {
         PanelKind::Hero => Tone::Accent,
@@ -33,6 +34,7 @@ pub fn panel<'a>(theme: &Theme, title: impl Into<Line<'a>>, kind: PanelKind) -> 
         .style(theme.body())
 }
 
+#[must_use]
 pub fn title_with_badge<'a>(theme: &Theme, title: &str, badge: &str, badge_tone: Tone) -> Line<'a> {
     Line::from(vec![
         Span::styled(title.to_owned(), theme.section_title(Tone::Default)),
@@ -41,21 +43,12 @@ pub fn title_with_badge<'a>(theme: &Theme, title: &str, badge: &str, badge_tone:
     ])
 }
 
-pub fn hero_paragraph<'a>(
-    theme: &Theme,
-    title: impl Into<Line<'a>>,
-    body: impl Into<String>,
-    kind: PanelKind,
-) -> Paragraph<'a> {
-    Paragraph::new(body.into())
-        .style(theme.hero())
-        .block(panel(theme, title, kind))
-}
-
+#[must_use]
 pub fn badge_label(prefix: &str, text: &str) -> String {
     format!("[{prefix}] {text}")
 }
 
+#[must_use]
 pub fn tone_for_text(text: &str) -> Tone {
     let lower = text.to_ascii_lowercase();
     if lower.contains("error") || lower.contains("failed") || lower.contains("missing heartbeat") {
@@ -77,22 +70,9 @@ pub fn tone_for_text(text: &str) -> Tone {
     }
 }
 
-pub fn focus_prefix(selected: bool) -> &'static str {
+#[must_use]
+pub const fn focus_prefix(selected: bool) -> &'static str {
     if selected { ">" } else { " " }
-}
-
-pub fn emphasis_style(theme: &Theme, selected: bool, tone: Tone) -> Style {
-    let base = if selected {
-        theme.emphasis(Tone::Focus)
-    } else {
-        theme.body()
-    };
-
-    if selected {
-        base
-    } else {
-        base.fg(theme.tone(tone))
-    }
 }
 
 #[cfg(test)]

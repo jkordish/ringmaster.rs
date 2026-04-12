@@ -236,6 +236,11 @@ struct FileWebhookSubscription {
 }
 
 impl Config {
+    /// Loads configuration from disk and environment variables.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when path discovery, config parsing, or config validation fails.
     pub fn load() -> Result<Self> {
         let paths = AppPaths::detect()?;
         let file_config = load_file_config(&paths.config_file)?;
@@ -650,6 +655,7 @@ impl Config {
         Ok(config)
     }
 
+    #[must_use]
     pub fn webhook_receiver_configured(&self) -> bool {
         self.webhook.receiver_configured() && self.oura.client_secret.is_some()
     }
@@ -688,29 +694,36 @@ impl RefreshConfig {
 }
 
 impl AppPaths {
+    /// Discovers XDG-style application paths for the current user.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the required home directory environment is missing.
     pub fn detect() -> Result<Self> {
         let home_dir = env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or_else(|| RingmasterError::Config("HOME is not set".to_owned()))?;
 
-        let config_root = env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home_dir.join(".config"));
+        let config_root =
+            env::var_os("XDG_CONFIG_HOME").map_or_else(|| home_dir.join(".config"), PathBuf::from);
         let state_root = env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home_dir.join(".local").join("state"));
-        let cache_root = env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home_dir.join(".cache"));
+            .map_or_else(|| home_dir.join(".local").join("state"), PathBuf::from);
+        let cache_root =
+            env::var_os("XDG_CACHE_HOME").map_or_else(|| home_dir.join(".cache"), PathBuf::from);
 
         Self::from_roots(home_dir, config_root, state_root, cache_root)
     }
 
+    /// Builds application paths from explicit XDG roots.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any resolved root path is empty.
     pub fn from_roots(
         home_dir: PathBuf,
-        config_root: PathBuf,
-        state_root: PathBuf,
-        cache_root: PathBuf,
+        mut config_root: PathBuf,
+        mut state_root: PathBuf,
+        mut cache_root: PathBuf,
     ) -> Result<Self> {
         if is_empty_path(&config_root) || is_empty_path(&state_root) || is_empty_path(&cache_root) {
             return Err(RingmasterError::Config(
@@ -718,9 +731,13 @@ impl AppPaths {
             ));
         }
 
-        let config_dir = config_root.join(APP_NAME);
-        let state_dir = state_root.join(APP_NAME);
-        let cache_dir = cache_root.join(APP_NAME);
+        config_root.push(APP_NAME);
+        state_root.push(APP_NAME);
+        cache_root.push(APP_NAME);
+
+        let config_dir = config_root;
+        let state_dir = state_root;
+        let cache_dir = cache_root;
         let log_dir = state_dir.join("logs");
 
         Ok(Self {
@@ -734,6 +751,11 @@ impl AppPaths {
         })
     }
 
+    /// Creates the runtime directories used by the application.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any required directory cannot be created.
     pub fn ensure_runtime_dirs(&self) -> Result<()> {
         for path in [
             &self.config_dir,
@@ -747,20 +769,24 @@ impl AppPaths {
         Ok(())
     }
 
+    #[must_use]
     pub fn config_file_present(&self) -> bool {
         self.config_file.is_file()
     }
 
+    #[must_use]
     pub fn database_present(&self) -> bool {
         self.database_file.is_file()
     }
 }
 
 impl OuraConfig {
+    #[must_use]
     pub fn callback_url(&self) -> String {
         self.callback_url_for_bind_address(self.callback_bind)
     }
 
+    #[must_use]
     pub fn callback_url_for_bind_address(&self, bind_address: SocketAddr) -> String {
         let host = if bind_address.ip().is_loopback() {
             format!("localhost:{}", bind_address.port())
@@ -770,10 +796,12 @@ impl OuraConfig {
         format!("http://{}{}", host, self.callback_path)
     }
 
-    pub fn client_configured(&self) -> bool {
+    #[must_use]
+    pub const fn client_configured(&self) -> bool {
         self.client_id.is_some() && self.client_secret.is_some()
     }
 
+    #[must_use]
     pub fn missing_fields(&self) -> Vec<&'static str> {
         let mut fields = Vec::new();
 
@@ -799,7 +827,8 @@ impl OuraSecretBackend {
         }
     }
 
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Keyring => "keyring",
             Self::File => "file",
@@ -808,6 +837,11 @@ impl OuraSecretBackend {
 }
 
 impl WebhookConfig {
+    /// Validates the webhook receiver and subscription configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the webhook path, public URL, or subscription set is invalid.
     pub fn validate(&self) -> Result<()> {
         if !self.path.starts_with('/') {
             return Err(RingmasterError::Config(
@@ -864,6 +898,7 @@ impl WebhookConfig {
         Ok(())
     }
 
+    #[must_use]
     pub fn callback_url(&self) -> Option<String> {
         self.public_base_url.as_ref().map(|base_url| {
             let trimmed = base_url.trim_end_matches('/');
@@ -871,6 +906,7 @@ impl WebhookConfig {
         })
     }
 
+    #[must_use]
     pub fn receiver_configured(&self) -> bool {
         self.verification_token.is_some() && self.callback_url().is_some()
     }
@@ -886,7 +922,8 @@ impl AiProviderKind {
         }
     }
 
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::OpenAi => "openai",
         }
@@ -904,7 +941,8 @@ impl AiRequestMode {
         }
     }
 
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Stateless => "stateless",
             Self::Stateful => "stateful",
@@ -923,7 +961,8 @@ impl AiInputTransport {
         }
     }
 
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Inline => "inline",
             Self::FileUpload => "file_upload",
@@ -942,7 +981,8 @@ impl PromptCacheMode {
         }
     }
 
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
             Self::Auto => "auto",
@@ -1127,7 +1167,6 @@ fn is_empty_path(path: &Path) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use std::path::PathBuf;
 
@@ -1137,17 +1176,20 @@ mod tests {
         OuraSecretBackend, PromptCacheMode, RefreshConfig, WebhookConfig, default_requested_scopes,
         parse_webhook_subscription_env,
     };
+    use crate::test_support::ok;
     use crate::webhook::{WebhookEventType, default_desired_subscriptions};
 
     #[test]
     fn builds_xdg_paths_from_roots() {
-        let paths = AppPaths::from_roots(
-            PathBuf::from("/home/tester"),
-            PathBuf::from("/tmp/config"),
-            PathBuf::from("/tmp/state"),
-            PathBuf::from("/tmp/cache"),
-        )
-        .unwrap_or_else(|error| panic!("expected path resolution to succeed: {error}"));
+        let paths = ok(
+            AppPaths::from_roots(
+                PathBuf::from("/home/tester"),
+                PathBuf::from("/tmp/config"),
+                PathBuf::from("/tmp/state"),
+                PathBuf::from("/tmp/cache"),
+            ),
+            "expected path resolution to succeed",
+        );
 
         assert_eq!(
             paths.config_file,

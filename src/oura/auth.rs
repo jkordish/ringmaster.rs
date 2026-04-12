@@ -25,8 +25,8 @@ use tokio::sync::oneshot;
 use crate::config::{Config, OuraSecretBackend};
 use crate::error::{AuthError, OuraProblem, Result, SecretStoreError};
 use crate::oura::models::{AuthStatus, CapabilityReport, normalize_scopes};
-use crate::store::Store;
 use crate::store::queries::{AuthSessionRecord, OURA_PROVIDER};
+use crate::store::{Store, StorePlan};
 
 const SECRET_SERVICE_NAME: &str = "ringmaster.rs";
 const SECRET_USER_NAME: &str = "oura";
@@ -141,13 +141,13 @@ struct FileSecretStore {
 }
 
 impl FileSecretStore {
-    fn new(path: PathBuf) -> Self {
+    const fn new(path: PathBuf) -> Self {
         Self { path }
     }
 }
 
 #[cfg(target_os = "linux")]
-fn secure_storage_backend_hint() -> &'static str {
+const fn secure_storage_backend_hint() -> &'static str {
     " On Linux, make sure a Secret Service provider such as gnome-keyring or KeePassXC is running and unlocked, or opt into local file storage with `RINGMASTER_OURA_SECRET_BACKEND=file`."
 }
 
@@ -397,22 +397,61 @@ fn sync_directory(_path: &Path) -> std::result::Result<(), SecretStoreError> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns an error if local auth metadata cannot be loaded from the store.
 pub fn inspect_auth(config: &Config, store: &Store) -> Result<AuthStatus> {
     let secret_store = RuntimeSecretStore::from_config(config);
     inspect_auth_with_secret_store(config, store, &secret_store)
 }
 
-pub async fn login(config: &Config, store: &Store) -> Result<LoginReport> {
+/// # Errors
+///
+/// Returns an error if the OAuth loopback flow, token exchange, or token persistence fails.
+pub fn login<'a>(
+    config: &'a Config,
+    store: &'a Store,
+) -> impl std::future::Future<Output = Result<LoginReport>> + Send + 'a {
     let secret_store = RuntimeSecretStore::from_config(config);
-    login_with_secret_store(config, store, &secret_store).await
+    let prepared = inspect_auth_with_secret_store(config, store, &secret_store)
+        .map(|auth_status| (store.plan().clone(), auth_status));
+    async move {
+        let (store_plan, auth_status) = prepared?;
+        login_with_secret_store(config, store_plan, auth_status, &secret_store).await
+    }
 }
 
-pub async fn ensure_authorized_session(
-    config: &Config,
-    store: &Store,
-) -> Result<AuthorizedSession> {
+/// # Errors
+///
+/// Returns an error if the stored session cannot be inspected, refreshed, or rebuilt through login.
+pub fn ensure_authorized_session<'a>(
+    config: &'a Config,
+    store: &'a Store,
+) -> impl std::future::Future<Output = Result<AuthorizedSession>> + Send + 'a {
     let secret_store = RuntimeSecretStore::from_config(config);
-    ensure_authorized_session_with_secret_store(config, store, &secret_store).await
+    let prepared = store.auth().get(OURA_PROVIDER).and_then(|maybe_session| {
+        maybe_session
+            .ok_or_else(|| {
+                AuthError::OAuthFlow("no persisted Oura auth session is available".to_owned())
+                    .into()
+            })
+            .and_then(|session| {
+                let stored_tokens = secret_store.read_tokens().map_err(AuthError::from)?;
+                let tokens = stored_tokens.ok_or(AuthError::MissingAccessToken)?;
+                Ok((store.plan().clone(), session, tokens))
+            })
+    });
+    async move {
+        let (store_plan, session, tokens) = prepared?;
+        ensure_authorized_session_with_secret_store(
+            config,
+            store_plan,
+            session,
+            tokens,
+            &secret_store,
+        )
+        .await
+    }
 }
 
 fn inspect_auth_with_secret_store(
@@ -478,10 +517,10 @@ fn inspect_auth_with_secret_store(
 
 async fn login_with_secret_store(
     config: &Config,
-    store: &Store,
+    store_plan: StorePlan,
+    auth_status: AuthStatus,
     secret_store: &dyn SecretStore,
 ) -> Result<LoginReport> {
-    let auth_status = inspect_auth_with_secret_store(config, store, secret_store)?;
     let listener_plan = LoopbackListenerPlan {
         bind_address: config.oura.callback_bind,
         callback_path: config.oura.callback_path.clone(),
@@ -489,18 +528,7 @@ async fn login_with_secret_store(
     };
 
     if !config.oura.client_configured() {
-        return Ok(LoginReport {
-            status: LoginStatus::ConfigMissing,
-            auth_status,
-            authorization_url: None,
-            listener_plan,
-            notes: vec![
-                "Set `RINGMASTER_OURA_CLIENT_ID` and `RINGMASTER_OURA_CLIENT_SECRET` before starting OAuth."
-                    .to_owned(),
-                "The client secret is intentionally env-only so it does not need to live in plaintext config."
-                    .to_owned(),
-            ],
-        });
+        return Ok(config_missing_login_report(auth_status, listener_plan));
     }
 
     let listener = TcpListener::bind(config.oura.callback_bind)
@@ -522,11 +550,9 @@ async fn login_with_secret_store(
         .add_scopes(config.oura.requested_scopes.iter().cloned().map(Scope::new))
         .set_pkce_challenge(pkce_challenge)
         .url();
+    let authorization_url_text = authorization_url.to_string();
 
-    println!(
-        "Open this URL in your browser to authorize ringmaster:\n{}\n",
-        authorization_url
-    );
+    println!("Open this URL in your browser to authorize ringmaster:\n{authorization_url}\n");
 
     let callback = wait_for_callback(listener, &listener_plan).await?;
     let http_client = oauth_http_client()?;
@@ -534,18 +560,15 @@ async fn login_with_secret_store(
 
     match outcome {
         CallbackOutcome::Denied(problem) => {
-            persist_problem(store, problem.clone())?;
-            let auth_status = inspect_auth_with_secret_store(config, store, secret_store)?;
-            Ok(LoginReport {
-                status: LoginStatus::Denied,
+            let store = reopen_store(config, &store_plan)?;
+            persist_problem(&store, problem.clone())?;
+            let auth_status = inspect_auth_with_secret_store(config, &store, secret_store)?;
+            Ok(denied_login_report(
                 auth_status,
-                authorization_url: Some(authorization_url.to_string()),
+                authorization_url_text,
                 listener_plan,
-                notes: vec![
-                    "Authorization was denied, so the local session was left unchanged.".to_owned(),
-                    format!("{problem}"),
-                ],
-            })
+                &problem,
+            ))
         }
         CallbackOutcome::AuthorizedCode(code) => {
             let exchanged = exchange_authorization_code(
@@ -556,56 +579,101 @@ async fn login_with_secret_store(
                 &config.oura.requested_scopes,
             )
             .await?;
-            persist_authorized_session(store, secret_store, &exchanged, None, false)?;
-            let auth_status = inspect_auth_with_secret_store(config, store, secret_store)?;
-            let missing_scopes = auth_status.capability_report.missing_scope_names();
-            let status = if missing_scopes.is_empty() {
-                LoginStatus::Authorized
-            } else {
-                LoginStatus::PartialGrant
-            };
-            let mut notes = vec![
-                "OAuth code exchange completed and the session metadata was persisted locally."
-                    .to_owned(),
-                format!(
-                    "Secure token storage backend: {}",
-                    auth_status.secret_backend
-                ),
-            ];
-            if let Some(location) = secret_store.backend_location() {
-                notes.push(format!("Secure token file: {location}"));
-            }
-            if missing_scopes.is_empty() {
-                notes.push("All requested scopes were granted.".to_owned());
-            } else {
-                notes.push(format!(
-                    "Some requested scopes were not granted: {}.",
-                    missing_scopes.join(", ")
-                ));
-            }
-
-            Ok(LoginReport {
-                status,
+            let store = reopen_store(config, &store_plan)?;
+            persist_authorized_session(&store, secret_store, &exchanged, None, false)?;
+            let auth_status = inspect_auth_with_secret_store(config, &store, secret_store)?;
+            Ok(authorize_login_report(
                 auth_status,
-                authorization_url: Some(authorization_url.to_string()),
+                authorization_url_text,
                 listener_plan,
-                notes,
-            })
+                secret_store.backend_location(),
+            ))
         }
+    }
+}
+
+fn config_missing_login_report(
+    auth_status: AuthStatus,
+    listener_plan: LoopbackListenerPlan,
+) -> LoginReport {
+    LoginReport {
+        status: LoginStatus::ConfigMissing,
+        auth_status,
+        authorization_url: None,
+        listener_plan,
+        notes: vec![
+            "Set `RINGMASTER_OURA_CLIENT_ID` and `RINGMASTER_OURA_CLIENT_SECRET` before starting OAuth."
+                .to_owned(),
+            "The client secret is intentionally env-only so it does not need to live in plaintext config."
+                .to_owned(),
+        ],
+    }
+}
+
+fn denied_login_report(
+    auth_status: AuthStatus,
+    authorization_url: String,
+    listener_plan: LoopbackListenerPlan,
+    problem: &OuraProblem,
+) -> LoginReport {
+    LoginReport {
+        status: LoginStatus::Denied,
+        auth_status,
+        authorization_url: Some(authorization_url),
+        listener_plan,
+        notes: vec![
+            "Authorization was denied, so the local session was left unchanged.".to_owned(),
+            problem.to_string(),
+        ],
+    }
+}
+
+fn authorize_login_report(
+    auth_status: AuthStatus,
+    authorization_url: String,
+    listener_plan: LoopbackListenerPlan,
+    backend_location: Option<String>,
+) -> LoginReport {
+    let missing_scopes = auth_status.capability_report.missing_scope_names();
+    let mut notes = vec![
+        "OAuth code exchange completed and the session metadata was persisted locally.".to_owned(),
+        format!(
+            "Secure token storage backend: {}",
+            auth_status.secret_backend
+        ),
+    ];
+    if let Some(location) = backend_location {
+        notes.push(format!("Secure token file: {location}"));
+    }
+    if missing_scopes.is_empty() {
+        notes.push("All requested scopes were granted.".to_owned());
+    } else {
+        notes.push(format!(
+            "Some requested scopes were not granted: {}.",
+            missing_scopes.join(", ")
+        ));
+    }
+
+    LoginReport {
+        status: if missing_scopes.is_empty() {
+            LoginStatus::Authorized
+        } else {
+            LoginStatus::PartialGrant
+        },
+        auth_status,
+        authorization_url: Some(authorization_url),
+        listener_plan,
+        notes,
     }
 }
 
 async fn ensure_authorized_session_with_secret_store(
     config: &Config,
-    store: &Store,
+    store_plan: StorePlan,
+    session: AuthSessionRecord,
+    mut tokens: StoredTokens,
     secret_store: &dyn SecretStore,
 ) -> Result<AuthorizedSession> {
-    let session = store.auth().get(OURA_PROVIDER)?.ok_or_else(|| {
-        AuthError::OAuthFlow("no persisted Oura auth session is available".to_owned())
-    })?;
-    let stored_tokens = secret_store.read_tokens().map_err(AuthError::from)?;
-    let mut tokens = stored_tokens.ok_or(AuthError::MissingAccessToken)?;
-
     let should_refresh = tokens.refresh_token.is_some()
         && (tokens.access_token.trim().is_empty()
             || access_token_is_stale(session.access_token_expires_at.as_deref())?);
@@ -618,8 +686,9 @@ async fn ensure_authorized_session_with_secret_store(
         let oauth_client = build_oauth_client(config, &config.oura.callback_url())?;
         let http_client = oauth_http_client()?;
         let refreshed = refresh_access_token(&oauth_client, &http_client, refresh_token).await?;
+        let store = reopen_store(config, &store_plan)?;
         persist_authorized_session(
-            store,
+            &store,
             secret_store,
             &refreshed,
             session.account_email.clone(),
@@ -643,6 +712,10 @@ async fn ensure_authorized_session_with_secret_store(
         account_id: session.account_id,
         account_email: session.account_email,
     })
+}
+
+fn reopen_store(config: &Config, store_plan: &StorePlan) -> Result<Store> {
+    Store::open_with_plan(store_plan.clone(), config.app_name)
 }
 
 fn build_oauth_client(config: &Config, callback_url: &str) -> Result<OAuthClient> {
@@ -793,7 +866,7 @@ async fn exchange_authorization_code(
         .await
         .map_err(map_oauth_exchange_error)?;
 
-    exchanged_token_set(token_response, requested_scopes)
+    exchanged_token_set(&token_response, requested_scopes)
 }
 
 async fn refresh_access_token(
@@ -808,7 +881,7 @@ async fn refresh_access_token(
         .await
         .map_err(map_oauth_exchange_error)?;
 
-    let exchanged = exchanged_token_set(token_response, &requested_scopes)?;
+    let exchanged = exchanged_token_set(&token_response, &requested_scopes)?;
     if exchanged.refresh_token.is_none() {
         return Err(AuthError::OAuthFlow(
             "refresh response did not include a replacement refresh token".to_owned(),
@@ -820,18 +893,18 @@ async fn refresh_access_token(
 }
 
 fn exchanged_token_set(
-    token_response: oauth2::basic::BasicTokenResponse,
+    token_response: &oauth2::basic::BasicTokenResponse,
     requested_scopes: &[String],
 ) -> Result<ExchangedTokenSet> {
-    let granted_scopes = token_response
-        .scopes()
-        .map(|scopes| {
+    let granted_scopes = token_response.scopes().map_or_else(
+        || requested_scopes.to_vec(),
+        |scopes| {
             scopes
                 .iter()
                 .map(|scope| scope.as_ref().to_owned())
                 .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|| requested_scopes.to_vec());
+        },
+    );
     let granted_scopes = normalize_scopes(&granted_scopes);
 
     Ok(ExchangedTokenSet {
@@ -993,7 +1066,6 @@ fn map_oauth_exchange_error(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use std::collections::VecDeque;
     use std::fs;
@@ -1012,6 +1084,7 @@ mod tests {
         AppPaths, DEFAULT_OURA_API_BASE_URL, DEFAULT_OURA_AUTHORIZE_URL, LoggingConfig, OuraConfig,
         RefreshConfig, WebhookConfig,
     };
+    use crate::test_support::{ok, some};
     use crate::webhook::default_desired_subscriptions;
 
     #[derive(Debug, Default)]
@@ -1045,15 +1118,18 @@ mod tests {
     }
 
     fn test_config(token_url: String) -> Config {
-        Config {
-            app_name: "ringmaster",
-            paths: AppPaths::from_roots(
+        let paths = ok(
+            AppPaths::from_roots(
                 PathBuf::from("/home/tester"),
                 PathBuf::from("/tmp/config"),
                 PathBuf::from("/tmp/state"),
                 PathBuf::from("/tmp/cache"),
-            )
-            .unwrap(),
+            ),
+            "paths should resolve",
+        );
+        Config {
+            app_name: "ringmaster",
+            paths,
             logging: LoggingConfig {
                 filter: "ringmaster=debug".to_owned(),
             },
@@ -1065,7 +1141,7 @@ mod tests {
                 api_base_url: DEFAULT_OURA_API_BASE_URL.to_owned(),
                 secret_backend: crate::config::OuraSecretBackend::Keyring,
                 secret_file: PathBuf::from("/tmp/state/ringmaster/secrets/oura-tokens.json"),
-                callback_bind: "127.0.0.1:0".parse().unwrap(),
+                callback_bind: ok("127.0.0.1:0".parse(), "callback bind should parse"),
                 callback_path: "/callback".to_owned(),
                 requested_scopes: vec![
                     "personal".to_owned(),
@@ -1104,7 +1180,7 @@ mod tests {
                 demo_fixture_dir: None,
             },
             webhook: WebhookConfig {
-                bind: "127.0.0.1:8799".parse().unwrap(),
+                bind: ok("127.0.0.1:8799".parse(), "webhook bind should parse"),
                 path: "/webhooks/oura".to_owned(),
                 public_base_url: Some("https://example.test".to_owned()),
                 verification_token: Some("verify-me".to_owned()),
@@ -1127,8 +1203,8 @@ mod tests {
                 error_description: Some("user clicked cancel".to_owned()),
             },
             "abc",
-        )
-        .unwrap();
+        );
+        let result = ok(result, "callback denial should parse");
 
         assert_eq!(
             result,
@@ -1144,7 +1220,7 @@ mod tests {
 
     #[test]
     fn callback_state_mismatch_is_rejected() {
-        let error = evaluate_callback(
+        let Err(error) = evaluate_callback(
             &OAuthCallbackQuery {
                 code: Some("auth-code".to_owned()),
                 state: Some("wrong".to_owned()),
@@ -1152,8 +1228,9 @@ mod tests {
                 error_description: None,
             },
             "expected",
-        )
-        .expect_err("mismatched state should fail");
+        ) else {
+            unreachable!("mismatched state should fail");
+        };
 
         assert!(matches!(
             error,
@@ -1163,8 +1240,11 @@ mod tests {
 
     #[tokio::test]
     async fn authorization_code_exchange_persists_session_metadata() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = ok(
+            TcpListener::bind("127.0.0.1:0").await,
+            "listener should bind",
+        );
+        let address = ok(listener.local_addr(), "listener address should resolve");
         let server = tokio::spawn(async move {
             let app = Router::new().route(
                 "/token",
@@ -1178,29 +1258,40 @@ mod tests {
                     }))
                 }),
             );
-            axum::serve(listener, app).await.unwrap();
+            ok(
+                axum::serve(listener, app).await,
+                "auth test server should run",
+            );
         });
 
         let config = test_config(format!("http://{address}/token"));
-        let oauth_client =
-            build_oauth_client(&config, "http://127.0.0.1:8788/callback").expect("oauth client");
-        let http_client = oauth_http_client().expect("http client");
-        let exchanged = exchange_authorization_code(
-            &oauth_client,
-            &http_client,
-            "code-1".to_owned(),
-            PkceCodeVerifier::new("verifier".to_owned()),
-            &config.oura.requested_scopes,
-        )
-        .await
-        .expect("code exchange should succeed");
+        let oauth_client = ok(
+            build_oauth_client(&config, "http://127.0.0.1:8788/callback"),
+            "oauth client should build",
+        );
+        let http_client = ok(oauth_http_client(), "http client should build");
+        let exchanged = ok(
+            exchange_authorization_code(
+                &oauth_client,
+                &http_client,
+                "code-1".to_owned(),
+                PkceCodeVerifier::new("verifier".to_owned()),
+                &config.oura.requested_scopes,
+            )
+            .await,
+            "code exchange should succeed",
+        );
 
-        let store = Store::open_in_memory().expect("store should open");
+        let store = ok(Store::open_test_store(), "store should open");
         let secrets = MemorySecretStore::default();
-        persist_authorized_session(&store, &secrets, &exchanged, None, false)
-            .expect("session should persist");
-        let auth_status =
-            inspect_auth_with_secret_store(&config, &store, &secrets).expect("inspect auth");
+        ok(
+            persist_authorized_session(&store, &secrets, &exchanged, None, false),
+            "session should persist",
+        );
+        let auth_status = ok(
+            inspect_auth_with_secret_store(&config, &store, &secrets),
+            "inspect auth should succeed",
+        );
 
         assert!(auth_status.access_token_stored);
         assert!(auth_status.refresh_token_stored);
@@ -1219,7 +1310,7 @@ mod tests {
     #[test]
     fn inspect_auth_normalizes_prefixed_session_scopes() {
         let config = test_config("http://127.0.0.1:9999/token".to_owned());
-        let store = Store::open_in_memory().expect("store should open");
+        let store = ok(Store::open_test_store(), "store should open");
         let secrets = MemorySecretStore::default();
         store
             .auth()
@@ -1239,10 +1330,12 @@ mod tests {
                 last_error: None,
                 updated_at: "2026-04-11T00:26:50Z".to_owned(),
             })
-            .expect("seed auth session");
+            .map_or_else(|error| unreachable!("seed auth session: {error}"), |()| ());
 
-        let auth_status =
-            inspect_auth_with_secret_store(&config, &store, &secrets).expect("inspect auth");
+        let auth_status = ok(
+            inspect_auth_with_secret_store(&config, &store, &secrets),
+            "inspect auth should succeed",
+        );
 
         assert_eq!(
             auth_status.granted_scopes,
@@ -1271,8 +1364,11 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_rotation_replaces_stored_tokens() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = ok(
+            TcpListener::bind("127.0.0.1:0").await,
+            "listener should bind",
+        );
+        let address = ok(listener.local_addr(), "listener address should resolve");
         let grants = Arc::new(Mutex::new(VecDeque::from([json!({
             "access_token": "access-2",
             "refresh_token": "refresh-2",
@@ -1287,28 +1383,32 @@ mod tests {
                     move |Form(_): Form<std::collections::HashMap<String, String>>| {
                         let grants_clone = Arc::clone(&grants_clone);
                         async move {
-                            let payload = grants_clone
-                                .lock()
-                                .unwrap()
-                                .pop_front()
-                                .expect("refresh response should exist");
+                            let payload = {
+                                let mut queued_grants = grants_clone.lock().unwrap_or_else(|_| {
+                                    unreachable!("refresh grant lock should succeed")
+                                });
+                                some(queued_grants.pop_front(), "refresh response should exist")
+                            };
                             Json(payload)
                         }
                     },
                 ),
             );
-            axum::serve(listener, app).await.unwrap();
+            ok(
+                axum::serve(listener, app).await,
+                "refresh test server should run",
+            );
         });
 
         let config = test_config(format!("http://{address}/token"));
-        let store = Store::open_in_memory().expect("store should open");
+        let store = ok(Store::open_test_store(), "store should open");
         let secrets = MemorySecretStore::default();
         secrets
             .write_tokens(&StoredTokens {
                 access_token: "expired-access".to_owned(),
                 refresh_token: Some("refresh-1".to_owned()),
             })
-            .expect("seed tokens");
+            .map_or_else(|error| unreachable!("seed tokens: {error}"), |()| ());
         store
             .auth()
             .upsert(&AuthSessionRecord {
@@ -1323,22 +1423,40 @@ mod tests {
                 last_error: None,
                 updated_at: "2020-01-01T00:00:00Z".to_owned(),
             })
-            .expect("seed auth session");
-        let session = ensure_authorized_session_with_secret_store(&config, &store, &secrets)
-            .await
-            .expect("refresh should succeed");
+            .map_or_else(|error| unreachable!("seed auth session: {error}"), |()| ());
+        let seeded_session = some(
+            ok(
+                store.auth().get(OURA_PROVIDER),
+                "seeded session should load",
+            ),
+            "seeded session present",
+        );
+        let seeded_tokens = some(
+            ok(secrets.read_tokens(), "seeded tokens should read"),
+            "seeded tokens present",
+        );
+        let session = ok(
+            ensure_authorized_session_with_secret_store(
+                &config,
+                store.plan().clone(),
+                seeded_session,
+                seeded_tokens,
+                &secrets,
+            )
+            .await,
+            "refresh should succeed",
+        );
 
         assert_eq!(session.access_token, "access-2");
-        let stored = secrets
-            .read_tokens()
-            .expect("tokens should read")
-            .expect("tokens stored");
+        let stored = some(
+            ok(secrets.read_tokens(), "tokens should read"),
+            "tokens stored",
+        );
         assert_eq!(stored.refresh_token.as_deref(), Some("refresh-2"));
-        let auth = store
-            .auth()
-            .get(OURA_PROVIDER)
-            .expect("session read")
-            .expect("session present");
+        let auth = some(
+            ok(store.auth().get(OURA_PROVIDER), "session read"),
+            "session present",
+        );
         assert!(auth.last_refresh_at.is_some());
 
         server.abort();
@@ -1352,7 +1470,7 @@ mod tests {
             SecretStoreError::BackendUnavailable(detail) => {
                 assert!(detail.contains("could not create the token entry"));
             }
-            other => panic!("expected backend unavailable error, got {other}"),
+            other => unreachable!("expected backend unavailable error, got {other}"),
         }
     }
 
@@ -1366,14 +1484,15 @@ mod tests {
             SecretStoreError::BackendUnavailable(detail) => {
                 assert!(detail.contains("locked or unavailable"));
             }
-            other => panic!("expected backend unavailable error, got {other}"),
+            other => unreachable!("expected backend unavailable error, got {other}"),
         }
     }
 
     #[test]
     fn file_secret_store_round_trips_tokens_with_private_permissions() {
-        let tempdir = tempdir()
-            .unwrap_or_else(|error| panic!("tempdir should succeed for file backend: {error}"));
+        let tempdir = tempdir().unwrap_or_else(|error| {
+            unreachable!("tempdir should succeed for file backend: {error}")
+        });
         let path = tempdir.path().join("secrets").join("oura-tokens.json");
         let store = FileSecretStore::new(path.clone());
         let tokens = StoredTokens {
@@ -1383,18 +1502,18 @@ mod tests {
 
         store
             .write_tokens(&tokens)
-            .unwrap_or_else(|error| panic!("writing token file should succeed: {error}"));
+            .unwrap_or_else(|error| unreachable!("writing token file should succeed: {error}"));
 
         let loaded = store
             .read_tokens()
-            .unwrap_or_else(|error| panic!("reading token file should succeed: {error}"))
-            .unwrap_or_else(|| panic!("token file should contain a payload"));
+            .unwrap_or_else(|error| unreachable!("reading token file should succeed: {error}"))
+            .unwrap_or_else(|| unreachable!("token file should contain a payload"));
         assert_eq!(loaded, tokens);
 
         #[cfg(unix)]
         {
             let file_mode = fs::metadata(&path)
-                .unwrap_or_else(|error| panic!("metadata should be readable: {error}"))
+                .unwrap_or_else(|error| unreachable!("metadata should be readable: {error}"))
                 .permissions()
                 .mode()
                 & 0o777;
@@ -1405,9 +1524,11 @@ mod tests {
         {
             let parent_mode = fs::metadata(
                 path.parent()
-                    .unwrap_or_else(|| panic!("token file should have a parent directory")),
+                    .unwrap_or_else(|| unreachable!("token file should have a parent directory")),
             )
-            .unwrap_or_else(|error| panic!("parent directory metadata should be readable: {error}"))
+            .unwrap_or_else(|error| {
+                unreachable!("parent directory metadata should be readable: {error}")
+            })
             .permissions()
             .mode()
                 & 0o777;
@@ -1417,8 +1538,9 @@ mod tests {
 
     #[test]
     fn file_secret_store_replaces_existing_payload_without_leaking_temp_files() {
-        let tempdir = tempdir()
-            .unwrap_or_else(|error| panic!("tempdir should succeed for file backend: {error}"));
+        let tempdir = tempdir().unwrap_or_else(|error| {
+            unreachable!("tempdir should succeed for file backend: {error}")
+        });
         let path = tempdir.path().join("secrets").join("oura-tokens.json");
         let store = FileSecretStore::new(path.clone());
 
@@ -1427,18 +1549,18 @@ mod tests {
                 access_token: "first-access-token".to_owned(),
                 refresh_token: Some("first-refresh-token".to_owned()),
             })
-            .unwrap_or_else(|error| panic!("first token write should succeed: {error}"));
+            .unwrap_or_else(|error| unreachable!("first token write should succeed: {error}"));
         store
             .write_tokens(&StoredTokens {
                 access_token: "second-access-token".to_owned(),
                 refresh_token: Some("second-refresh-token".to_owned()),
             })
-            .unwrap_or_else(|error| panic!("second token write should succeed: {error}"));
+            .unwrap_or_else(|error| unreachable!("second token write should succeed: {error}"));
 
         let loaded = store
             .read_tokens()
-            .unwrap_or_else(|error| panic!("reading token file should succeed: {error}"))
-            .unwrap_or_else(|| panic!("token file should contain a payload"));
+            .unwrap_or_else(|error| unreachable!("reading token file should succeed: {error}"))
+            .unwrap_or_else(|| unreachable!("token file should contain a payload"));
         assert_eq!(loaded.access_token, "second-access-token");
         assert_eq!(
             loaded.refresh_token.as_deref(),
@@ -1447,9 +1569,9 @@ mod tests {
 
         let leaked_temp = path
             .parent()
-            .unwrap_or_else(|| panic!("token file should have a parent directory"))
+            .unwrap_or_else(|| unreachable!("token file should have a parent directory"))
             .read_dir()
-            .unwrap_or_else(|error| panic!("token directory should be readable: {error}"))
+            .unwrap_or_else(|error| unreachable!("token directory should be readable: {error}"))
             .filter_map(std::result::Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .filter(|name| name.contains(".tmp-"))

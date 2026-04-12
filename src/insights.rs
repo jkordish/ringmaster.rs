@@ -34,6 +34,7 @@ pub struct MetricInsight {
     pub confidence_note: Option<String>,
 }
 
+#[must_use]
 pub fn build_metric_insight(label: &'static str, history: &[MetricPoint]) -> MetricInsight {
     let today = history.last().cloned();
     let previous_day = history.iter().rev().nth(1).cloned();
@@ -145,7 +146,7 @@ fn build_summary(
     )
 }
 
-fn classify_confidence(sample_count: usize) -> InsightConfidence {
+const fn classify_confidence(sample_count: usize) -> InsightConfidence {
     if sample_count >= 21 {
         InsightConfidence::Strong
     } else if sample_count >= 7 {
@@ -176,7 +177,7 @@ fn mean(values: &[f64]) -> Option<f64> {
         return None;
     }
 
-    Some(values.iter().sum::<f64>() / values.len() as f64)
+    Some(values.iter().sum::<f64>() / crate::numeric::usize_to_f64(values.len()))
 }
 
 fn standard_deviation(values: &[f64], mean: Option<f64>) -> Option<f64> {
@@ -192,7 +193,7 @@ fn standard_deviation(values: &[f64], mean: Option<f64>) -> Option<f64> {
             delta * delta
         })
         .sum::<f64>()
-        / values.len() as f64;
+        / crate::numeric::usize_to_f64(values.len());
 
     Some(variance.sqrt())
 }

@@ -494,6 +494,11 @@ pub struct WebhookSubscriptionsSyncArgs {
 }
 
 impl Cli {
+    /// Parses command-line arguments into the typed CLI model.
+    ///
+    /// # Errors
+    ///
+    /// Returns a CLI error string when clap rejects the provided argument list.
     pub fn parse_from<I, T>(args: I) -> Result<Self>
     where
         I: IntoIterator<Item = T>,
@@ -502,6 +507,7 @@ impl Cli {
         Self::try_parse_from(args).map_err(|error| RingmasterError::Cli(error.to_string()))
     }
 
+    #[must_use]
     pub fn help_text() -> String {
         let mut command = Self::command();
         let mut buffer = Vec::new();
@@ -513,7 +519,6 @@ impl Cli {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use std::path::PathBuf;
 
@@ -526,26 +531,29 @@ mod tests {
         SyncCommand, SyncOnceArgs, SyncWatchArgs, UiCommand, UiSnapshotArgs, WebhookCommand,
         WebhookReplayArgs, WebhookSubscriptionCommand, WebhookSubscriptionsSyncArgs,
     };
+    use crate::test_support::ok;
 
     #[test]
     fn parses_nested_subcommands() {
-        let cli = Cli::parse_from(["ringmaster", "auth", "login"]).unwrap_or_else(|error| {
-            panic!("expected clap parsing to succeed in test: {error}");
-        });
+        let cli = ok(
+            Cli::parse_from(["ringmaster", "auth", "login"]),
+            "expected clap parsing to succeed in test",
+        );
 
         match cli.command {
             Some(Command::Auth {
                 command: AuthCommand::Login,
             }) => {}
-            other => panic!("unexpected command: {other:?}"),
+            other => unreachable!("unexpected command: {other:?}"),
         }
     }
 
     #[test]
     fn parses_sync_once() {
-        let cli = Cli::parse_from(["ringmaster", "sync", "once"]).unwrap_or_else(|error| {
-            panic!("expected clap parsing to succeed in test: {error}");
-        });
+        let cli = ok(
+            Cli::parse_from(["ringmaster", "sync", "once"]),
+            "expected clap parsing to succeed in test",
+        );
 
         match cli.command {
             Some(Command::Sync {
