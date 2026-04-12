@@ -45,7 +45,9 @@ tempfile = "3.27.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["async-secret-service", "async-io", "crypto-rust"] }
-# Pinned to v4 until keyring moves its Secret Service backend to the newer major.
+# Pinned to v4 while the Linux keyring path is still on stable `keyring 3.x`;
+# the newer `keyring 4.x` line is pre-release-only today, so taking
+# `secret-service 5` would create a duplicate runtime stack with little value.
 secret-service = { version = "4", features = ["rt-async-io-crypto-rust"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
