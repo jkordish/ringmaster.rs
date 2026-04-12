@@ -1,0 +1,7 @@
+[advisories]
+# `oauth2 5.0.0` is the newest released line today and still depends on
+# `rand 0.8.5`. Keep this exception local and explicit until upstream ships a
+# non-advisory release we can adopt.
+ignore = [
+  "RUSTSEC-2026-0097",
+]

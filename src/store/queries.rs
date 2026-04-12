@@ -1,22 +1,15 @@
 use std::fmt::{Display, Formatter};
 
 use rusqlite::{Connection, OptionalExtension, params};
-use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::error::{OuraProblem, Result, RingmasterError};
 use crate::oura::models::{TagRecord, TagSource};
 use crate::review::features::ReviewSufficiency;
 use crate::store::migrations;
+use crate::time_utils::current_local_day_string;
 
 pub const OURA_PROVIDER: &str = "oura";
-
-fn current_local_day_string() -> String {
-    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-    OffsetDateTime::now_utc()
-        .to_offset(local_offset)
-        .date()
-        .to_string()
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncRunStatus {
@@ -74,6 +67,7 @@ pub struct DailySleepRecord {
     pub oura_id: Option<String>,
     pub day: String,
     pub sleep_score: Option<u8>,
+    pub sleep_duration_seconds: Option<i64>,
     pub raw_cache_key: Option<String>,
     pub updated_at: String,
 }
@@ -351,6 +345,7 @@ pub struct RecordCounts {
 pub struct DailyOverviewRow {
     pub day: String,
     pub sleep_score: Option<u8>,
+    pub sleep_duration_seconds: Option<i64>,
     pub readiness_score: Option<u8>,
     pub activity_score: Option<u8>,
     pub updated_at: String,
@@ -1083,17 +1078,26 @@ impl<'connection> ImportStore<'connection> {
 
     pub fn upsert_daily_sleep(&self, record: &DailySleepRecord) -> Result<()> {
         self.connection.execute(
-            "INSERT INTO daily_sleep (oura_id, day, sleep_score, raw_cache_key, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO daily_sleep (
+                oura_id,
+                day,
+                sleep_score,
+                sleep_duration_seconds,
+                raw_cache_key,
+                updated_at
+            )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(day) DO UPDATE SET
                 oura_id = excluded.oura_id,
                 sleep_score = excluded.sleep_score,
+                sleep_duration_seconds = excluded.sleep_duration_seconds,
                 raw_cache_key = excluded.raw_cache_key,
                 updated_at = excluded.updated_at",
             params![
                 record.oura_id,
                 record.day,
                 record.sleep_score.map(i64::from),
+                record.sleep_duration_seconds,
                 record.raw_cache_key,
                 record.updated_at,
             ],
@@ -3418,6 +3422,7 @@ impl<'connection> ViewStore<'connection> {
                 SELECT
                     latest_day.day,
                     (SELECT sleep_score FROM daily_sleep WHERE day = latest_day.day),
+                    (SELECT sleep_duration_seconds FROM daily_sleep WHERE day = latest_day.day),
                     (SELECT readiness_score FROM daily_readiness WHERE day = latest_day.day),
                     (SELECT activity_score FROM daily_activity WHERE day = latest_day.day),
                     COALESCE(
@@ -3434,9 +3439,10 @@ impl<'connection> ViewStore<'connection> {
                         Some(day) => Ok(Some(DailyOverviewRow {
                             day,
                             sleep_score: parse_optional_score(row.get::<_, Option<i64>>(1)?),
-                            readiness_score: parse_optional_score(row.get::<_, Option<i64>>(2)?),
-                            activity_score: parse_optional_score(row.get::<_, Option<i64>>(3)?),
-                            updated_at: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                            sleep_duration_seconds: row.get(2)?,
+                            readiness_score: parse_optional_score(row.get::<_, Option<i64>>(3)?),
+                            activity_score: parse_optional_score(row.get::<_, Option<i64>>(4)?),
+                            updated_at: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
                         })),
                         None => Ok(None),
                     }
@@ -3461,6 +3467,7 @@ impl<'connection> ViewStore<'connection> {
             SELECT
                 days.day,
                 daily_sleep.sleep_score,
+                daily_sleep.sleep_duration_seconds,
                 daily_readiness.readiness_score,
                 daily_activity.activity_score,
                 MAX(
@@ -3482,9 +3489,10 @@ impl<'connection> ViewStore<'connection> {
                 Ok(DailyOverviewRow {
                     day: row.get(0)?,
                     sleep_score: parse_optional_score(row.get::<_, Option<i64>>(1)?),
-                    readiness_score: parse_optional_score(row.get::<_, Option<i64>>(2)?),
-                    activity_score: parse_optional_score(row.get::<_, Option<i64>>(3)?),
-                    updated_at: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    sleep_duration_seconds: row.get(2)?,
+                    readiness_score: parse_optional_score(row.get::<_, Option<i64>>(3)?),
+                    activity_score: parse_optional_score(row.get::<_, Option<i64>>(4)?),
+                    updated_at: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
                 })
             },
         )?;
@@ -3510,6 +3518,7 @@ impl<'connection> ViewStore<'connection> {
             SELECT
                 days.day,
                 daily_sleep.sleep_score,
+                daily_sleep.sleep_duration_seconds,
                 daily_readiness.readiness_score,
                 daily_activity.activity_score,
                 MAX(
@@ -3527,9 +3536,10 @@ impl<'connection> ViewStore<'connection> {
             Ok(DailyOverviewRow {
                 day: row.get(0)?,
                 sleep_score: parse_optional_score(row.get::<_, Option<i64>>(1)?),
-                readiness_score: parse_optional_score(row.get::<_, Option<i64>>(2)?),
-                activity_score: parse_optional_score(row.get::<_, Option<i64>>(3)?),
-                updated_at: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                sleep_duration_seconds: row.get(2)?,
+                readiness_score: parse_optional_score(row.get::<_, Option<i64>>(3)?),
+                activity_score: parse_optional_score(row.get::<_, Option<i64>>(4)?),
+                updated_at: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
             })
         })?;
 
@@ -3557,6 +3567,7 @@ impl<'connection> ViewStore<'connection> {
             SELECT
                 days.day,
                 daily_sleep.sleep_score,
+                daily_sleep.sleep_duration_seconds,
                 daily_readiness.readiness_score,
                 daily_activity.activity_score,
                 MAX(
@@ -3575,9 +3586,10 @@ impl<'connection> ViewStore<'connection> {
             Ok(DailyOverviewRow {
                 day: row.get(0)?,
                 sleep_score: parse_optional_score(row.get::<_, Option<i64>>(1)?),
-                readiness_score: parse_optional_score(row.get::<_, Option<i64>>(2)?),
-                activity_score: parse_optional_score(row.get::<_, Option<i64>>(3)?),
-                updated_at: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                sleep_duration_seconds: row.get(2)?,
+                readiness_score: parse_optional_score(row.get::<_, Option<i64>>(3)?),
+                activity_score: parse_optional_score(row.get::<_, Option<i64>>(4)?),
+                updated_at: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
             })
         })?;
 
@@ -4657,6 +4669,7 @@ mod tests {
                     oura_id: None,
                     day: day.to_owned(),
                     sleep_score: Some(sleep),
+                    sleep_duration_seconds: Some(27_000),
                     raw_cache_key: None,
                     updated_at: format!("{day}T06:00:00Z"),
                 })
@@ -4692,7 +4705,7 @@ mod tests {
     fn make_snapshot_export(snapshot_hash: &str, anchor_day: &str) -> SnapshotExportRecord {
         SnapshotExportRecord {
             snapshot_hash: snapshot_hash.to_owned(),
-            schema_version: "ringmaster.snapshot.v1".to_owned(),
+            schema_version: "ringmaster.snapshot.v2".to_owned(),
             app_version: "0.1.0".to_owned(),
             generated_at: format!("{anchor_day}T00:00:00Z"),
             scope: "today".to_owned(),
@@ -4711,7 +4724,7 @@ mod tests {
             trust_summary: "review_signals=1 strong=1 stale=0 follow_up_targets=1".to_owned(),
             capability_summary: "granted=1 missing=0 requested=1".to_owned(),
             provenance_summary: "refs=0 local_kinds=0".to_owned(),
-            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v1\"}".to_owned(),
+            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v2\"}".to_owned(),
             created_at: format!("{anchor_day}T00:00:01Z"),
         }
     }
@@ -4726,8 +4739,13 @@ mod tests {
         AiArtifactRecord {
             artifact_id: artifact_id.to_owned(),
             artifact_kind: artifact_kind.to_owned(),
-            output_schema_version: format!("ringmaster.ai.{artifact_kind}.v1"),
-            prompt_version: format!("{artifact_kind}_prompt_v1"),
+            output_schema_version: format!("ringmaster.ai.{artifact_kind}.v2"),
+            prompt_version: match artifact_kind {
+                "review" => "review_prompt_v3".to_owned(),
+                "compare" => "compare_prompt_v2".to_owned(),
+                "follow_up" => "follow_up_prompt_v2".to_owned(),
+                other => format!("{other}_prompt_v2"),
+            },
             provider: "dry_run".to_owned(),
             model: "deterministic".to_owned(),
             reasoning_effort: None,
@@ -4764,8 +4782,13 @@ mod tests {
             request_mode: "stateless".to_owned(),
             input_transport: "inline".to_owned(),
             run_mode: "real".to_owned(),
-            prompt_version: format!("{run_kind}_prompt_v1"),
-            output_schema_version: format!("ringmaster.ai.{run_kind}.v1"),
+            prompt_version: match run_kind {
+                "review" => "review_prompt_v3".to_owned(),
+                "compare" => "compare_prompt_v2".to_owned(),
+                "follow_up" => "follow_up_prompt_v2".to_owned(),
+                other => format!("{other}_prompt_v2"),
+            },
+            output_schema_version: format!("ringmaster.ai.{run_kind}.v2"),
             privacy_profile: "redacted".to_owned(),
             snapshot_scope: "today".to_owned(),
             snapshot_hash_a: snapshot_hash_a.to_owned(),
@@ -4802,8 +4825,8 @@ mod tests {
             source_ai_artifact_id: Some(artifact_id.to_owned()),
             provider: Some("dry_run".to_owned()),
             model: Some("deterministic".to_owned()),
-            prompt_version: Some("review_prompt_v1".to_owned()),
-            output_schema_version: Some("ringmaster.ai.review.v1".to_owned()),
+            prompt_version: Some("review_prompt_v3".to_owned()),
+            output_schema_version: Some("ringmaster.ai.review.v2".to_owned()),
             export_status: "written".to_owned(),
             last_verified_exists: true,
             last_verified_at: "2026-04-10T00:10:01Z".to_owned(),
@@ -4972,7 +4995,7 @@ mod tests {
     fn latest_source_day_treats_open_rest_mode_as_current() {
         let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
-        let current_day = super::current_local_day_string();
+        let current_day = crate::time_utils::current_local_day_string();
         store
             .imports()
             .upsert_rest_mode_period(&RestModePeriodRecord {
@@ -5050,7 +5073,7 @@ mod tests {
     fn latest_review_day_treats_open_rest_mode_as_current() {
         let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
-        let current_day = super::current_local_day_string();
+        let current_day = crate::time_utils::current_local_day_string();
         store
             .imports()
             .upsert_rest_mode_period(&RestModePeriodRecord {
@@ -5082,7 +5105,7 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let record = SnapshotExportRecord {
             snapshot_hash: "hash-123".to_owned(),
-            schema_version: "ringmaster.snapshot.v1".to_owned(),
+            schema_version: "ringmaster.snapshot.v2".to_owned(),
             app_version: "0.1.0".to_owned(),
             generated_at: "2026-04-10T00:00:00Z".to_owned(),
             scope: "today".to_owned(),
@@ -5100,7 +5123,7 @@ mod tests {
             trust_summary: "review_signals=1 strong=1 stale=0 follow_up_targets=1".to_owned(),
             capability_summary: "granted=3 missing=0 requested=3".to_owned(),
             provenance_summary: "refs=1 local_kinds=1".to_owned(),
-            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v1\"}".to_owned(),
+            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v2\"}".to_owned(),
             created_at: "2026-04-10T00:00:01Z".to_owned(),
         };
         let provenance = vec![SnapshotProvenanceRefRecord {
@@ -5138,7 +5161,7 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let record = SnapshotExportRecord {
             snapshot_hash: "hash-keep".to_owned(),
-            schema_version: "ringmaster.snapshot.v1".to_owned(),
+            schema_version: "ringmaster.snapshot.v2".to_owned(),
             app_version: "0.1.0".to_owned(),
             generated_at: "2026-04-10T00:00:00Z".to_owned(),
             scope: "today".to_owned(),
@@ -5156,7 +5179,7 @@ mod tests {
             trust_summary: "review_signals=1 strong=1 stale=0 follow_up_targets=1".to_owned(),
             capability_summary: "granted=3 missing=0 requested=3".to_owned(),
             provenance_summary: "refs=1 local_kinds=1".to_owned(),
-            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v1\"}".to_owned(),
+            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v2\"}".to_owned(),
             created_at: "2026-04-10T00:00:01Z".to_owned(),
         };
         let provenance = vec![SnapshotProvenanceRefRecord {
@@ -5211,7 +5234,7 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
         let original = SnapshotExportRecord {
             snapshot_hash: "hash-created-at".to_owned(),
-            schema_version: "ringmaster.snapshot.v1".to_owned(),
+            schema_version: "ringmaster.snapshot.v2".to_owned(),
             app_version: "0.1.0".to_owned(),
             generated_at: "2026-04-10T00:00:00Z".to_owned(),
             scope: "today".to_owned(),
@@ -5229,7 +5252,7 @@ mod tests {
             trust_summary: "review_signals=1 strong=1 stale=0 follow_up_targets=1".to_owned(),
             capability_summary: "granted=3 missing=0 requested=3".to_owned(),
             provenance_summary: "refs=0 local_kinds=0".to_owned(),
-            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v1\"}".to_owned(),
+            snapshot_json: "{\"schema_version\":\"ringmaster.snapshot.v2\"}".to_owned(),
             created_at: "2026-04-10T00:00:01Z".to_owned(),
         };
 
@@ -5267,8 +5290,8 @@ mod tests {
         let artifact = AiArtifactRecord {
             artifact_id: "artifact-123".to_owned(),
             artifact_kind: "review".to_owned(),
-            output_schema_version: "ringmaster.ai.review.v1".to_owned(),
-            prompt_version: "review_prompt_v1".to_owned(),
+            output_schema_version: "ringmaster.ai.review.v2".to_owned(),
+            prompt_version: "review_prompt_v3".to_owned(),
             provider: "dry_run".to_owned(),
             model: "deterministic".to_owned(),
             reasoning_effort: None,
@@ -5491,8 +5514,8 @@ mod tests {
                 created_at: "2026-04-10T00:06:00Z".to_owned(),
                 provider: "dry_run".to_owned(),
                 model: "deterministic".to_owned(),
-                prompt_version: "review_prompt_v1".to_owned(),
-                output_schema_version: "ringmaster.ai.review.v1".to_owned(),
+                prompt_version: "review_prompt_v3".to_owned(),
+                output_schema_version: "ringmaster.ai.review.v2".to_owned(),
                 privacy_profile: "redacted".to_owned(),
                 summary_cache: "review summary".to_owned(),
                 overview: "review overview".to_owned(),
@@ -5692,6 +5715,7 @@ mod tests {
                 oura_id: None,
                 day: "2026-04-08".to_owned(),
                 sleep_score: Some(88),
+                sleep_duration_seconds: Some(28_200),
                 raw_cache_key: None,
                 updated_at: "2026-04-08T00:00:00Z".to_owned(),
             })

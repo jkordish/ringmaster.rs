@@ -773,29 +773,31 @@ async fn wait_for_callback(
             .await
     });
 
-    let callback =
+    let callback_result =
         tokio::time::timeout(StdDuration::from_secs(plan.timeout_secs), callback_receiver)
             .await
-            .map_err(|_| AuthError::CallbackTimeout(plan.timeout_secs))?
-            .map_err(|_| {
-                AuthError::CallbackListener(
-                    "loopback callback channel closed unexpectedly".to_owned(),
-                )
-            })?;
+            .map_err(|_| AuthError::CallbackTimeout(plan.timeout_secs))
+            .and_then(|callback| {
+                callback.map_err(|_| {
+                    AuthError::CallbackListener(
+                        "loopback callback channel closed unexpectedly".to_owned(),
+                    )
+                })
+            });
 
     let _ = shutdown_sender.send(());
-    match server.await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => return Err(AuthError::CallbackListener(error.to_string()).into()),
-        Err(error) => {
-            return Err(AuthError::CallbackListener(format!(
-                "loopback callback server join failed: {error}"
-            ))
-            .into());
-        }
+    let server_result = match server.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(AuthError::CallbackListener(error.to_string())),
+        Err(error) => Err(AuthError::CallbackListener(format!(
+            "loopback callback server join failed: {error}"
+        ))),
+    };
+    if let Err(error) = server_result {
+        return Err(error.into());
     }
 
-    Ok(callback)
+    callback_result.map_err(Into::into)
 }
 
 async fn callback_handler(
@@ -1189,6 +1191,7 @@ mod tests {
                 renewal_lead_secs: 7 * 24 * 60 * 60,
                 subscriptions: default_desired_subscriptions(),
             },
+            guidance: crate::config::GuidanceConfig::default(),
             ai: crate::config::AiConfig::default(),
         }
     }
@@ -1236,6 +1239,33 @@ mod tests {
             error,
             crate::error::RingmasterError::Auth(AuthError::StateMismatch)
         ));
+    }
+
+    #[tokio::test]
+    async fn callback_timeout_cleans_up_the_loopback_listener() {
+        let listener = ok(
+            TcpListener::bind("127.0.0.1:0").await,
+            "listener should bind",
+        );
+        let bound_address = ok(listener.local_addr(), "listener address should resolve");
+        let plan = LoopbackListenerPlan {
+            bind_address: bound_address,
+            callback_path: "/callback".to_owned(),
+            timeout_secs: 0,
+        };
+
+        let error = wait_for_callback(listener, &plan)
+            .await
+            .expect_err("callback wait should time out without a browser callback");
+        assert!(matches!(
+            error,
+            crate::error::RingmasterError::Auth(AuthError::CallbackTimeout(0))
+        ));
+
+        ok(
+            TcpListener::bind(bound_address).await,
+            "callback listener should be released after timeout cleanup",
+        );
     }
 
     #[tokio::test]
