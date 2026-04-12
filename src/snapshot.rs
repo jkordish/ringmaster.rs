@@ -1342,10 +1342,51 @@ fn legacy_snapshot_json_for_bundle(bundle: &SnapshotBundleV1) -> Result<String> 
         record_counts: &bundle.record_counts,
         metrics,
         baselines: &bundle.baselines,
-        trend_summaries: &bundle.trend_summaries,
+        trend_summaries: bundle
+            .trend_summaries
+            .iter()
+            .map(|trend| LegacySnapshotTrendSummaryHashView {
+                metric_key: &trend.metric_key,
+                label: &trend.label,
+                direction: &trend.direction,
+                summary: &trend.summary,
+                current_average: trend.current_average,
+                previous_average: trend.previous_average,
+            })
+            .collect(),
         context_events: &bundle.context_events,
-        pattern_summaries: &bundle.pattern_summaries,
-        review_signals: &bundle.review_signals,
+        pattern_summaries: bundle
+            .pattern_summaries
+            .iter()
+            .map(|pattern| LegacySnapshotPatternSummaryHashView {
+                export_ref: &pattern.export_ref,
+                family: &pattern.family,
+                label: &pattern.label,
+                metric: &pattern.metric,
+                relation_window: &pattern.relation_window,
+                sample_count: pattern.sample_count,
+                median_delta: pattern.median_delta,
+                effect_direction: &pattern.effect_direction,
+                confidence: &pattern.confidence,
+                summary: &pattern.summary,
+            })
+            .collect(),
+        review_signals: bundle
+            .review_signals
+            .iter()
+            .map(|signal| LegacySnapshotReviewSignalHashView {
+                export_ref: &signal.export_ref,
+                day: &signal.day,
+                signal_key: &signal.signal_key,
+                numeric_value: signal.numeric_value,
+                text_value: signal.text_value.as_deref(),
+                delta: signal.delta,
+                z_score: signal.z_score,
+                persistence_days: signal.persistence_days,
+                sufficiency: &signal.sufficiency,
+                stale_days: signal.stale_days,
+            })
+            .collect(),
         follow_up_targets: &bundle.follow_up_targets,
     };
     serde_json::to_string(&view).map_err(Into::into)
@@ -1360,10 +1401,10 @@ struct LegacySnapshotBundleHashView<'a> {
     record_counts: &'a SnapshotRecordCounts,
     metrics: LegacySnapshotMetricsHashView<'a>,
     baselines: &'a [SnapshotBaseline],
-    trend_summaries: &'a [SnapshotTrendSummary],
+    trend_summaries: Vec<LegacySnapshotTrendSummaryHashView<'a>>,
     context_events: &'a [SnapshotContextEvent],
-    pattern_summaries: &'a [SnapshotPatternSummary],
-    review_signals: &'a [SnapshotReviewSignal],
+    pattern_summaries: Vec<LegacySnapshotPatternSummaryHashView<'a>>,
+    review_signals: Vec<LegacySnapshotReviewSignalHashView<'a>>,
     follow_up_targets: &'a [SnapshotFollowUpTarget],
 }
 
@@ -1392,6 +1433,44 @@ struct LegacySnapshotMetricsHashView<'a> {
     cardiovascular_age: &'a [SnapshotMetricPoint],
     vo2_max: &'a [SnapshotMetricPoint],
     rest_mode_periods: &'a [SnapshotRestModePeriod],
+}
+
+#[derive(Serialize)]
+struct LegacySnapshotTrendSummaryHashView<'a> {
+    metric_key: &'a str,
+    label: &'a str,
+    direction: &'a str,
+    summary: &'a str,
+    current_average: Option<f64>,
+    previous_average: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct LegacySnapshotPatternSummaryHashView<'a> {
+    export_ref: &'a str,
+    family: &'a str,
+    label: &'a str,
+    metric: &'a str,
+    relation_window: &'a str,
+    sample_count: u32,
+    median_delta: f64,
+    effect_direction: &'a str,
+    confidence: &'a str,
+    summary: &'a str,
+}
+
+#[derive(Serialize)]
+struct LegacySnapshotReviewSignalHashView<'a> {
+    export_ref: &'a str,
+    day: &'a str,
+    signal_key: &'a str,
+    numeric_value: Option<f64>,
+    text_value: Option<&'a str>,
+    delta: Option<f64>,
+    z_score: Option<f64>,
+    persistence_days: u32,
+    sufficiency: &'a str,
+    stale_days: u32,
 }
 
 #[derive(Serialize)]
@@ -2715,12 +2794,13 @@ mod tests {
     use super::{
         PrivacyProfile, ResolvedSnapshotScope, SNAPSHOT_SCHEMA_VERSION, SnapshotBaseline,
         SnapshotBundleV1, SnapshotCapabilities, SnapshotDailyScore, SnapshotFollowUpTarget,
-        SnapshotFreshness, SnapshotMetadata, SnapshotMetrics, SnapshotRecordCounts,
-        SnapshotReviewSignal, SnapshotSourceMode, SnapshotTrendSummary, build_follow_up_targets,
-        canonicalize_snapshot_bundle, deserialize_snapshot_bundle, legacy_snapshot_json_for_bundle,
-        resolve_scope, snapshot_hash_for_bundle,
+        SnapshotFreshness, SnapshotMetadata, SnapshotMetrics, SnapshotPatternSummary,
+        SnapshotRecordCounts, SnapshotReviewSignal, SnapshotSourceMode, SnapshotTrendSummary,
+        build_follow_up_targets, canonicalize_snapshot_bundle, deserialize_snapshot_bundle,
+        legacy_snapshot_json_for_bundle, resolve_scope, snapshot_hash_for_bundle,
     };
     use crate::config::Config;
+    use crate::evidence::registry::resolve_evidence_descriptor;
     use crate::oura::models::{AuthStatus, CapabilityReport};
     use crate::store::Store;
     use crate::store::queries::{
@@ -3019,10 +3099,51 @@ mod tests {
                 rest_mode_periods: Vec::new(),
             },
             baselines: Vec::new(),
-            trend_summaries: Vec::new(),
+            trend_summaries: vec![SnapshotTrendSummary {
+                metric_key: "sleep_score".to_owned(),
+                label: "Sleep score".to_owned(),
+                direction: "higher".to_owned(),
+                summary: "Sleep score improved week over week.".to_owned(),
+                current_average: Some(86.0),
+                previous_average: Some(80.0),
+                evidence: resolve_evidence_descriptor(
+                    "sleep_score",
+                    crate::evidence::PopulationProfile::GeneralAdult,
+                ),
+            }],
             context_events: Vec::new(),
-            pattern_summaries: Vec::new(),
-            review_signals: Vec::new(),
+            pattern_summaries: vec![SnapshotPatternSummary {
+                export_ref: "pattern:2026-04-10:sleep".to_owned(),
+                family: "sleep".to_owned(),
+                label: "Sleep regularity".to_owned(),
+                metric: "sleep_score".to_owned(),
+                relation_window: "daily".to_owned(),
+                sample_count: 3,
+                median_delta: 4.0,
+                effect_direction: "positive".to_owned(),
+                confidence: "medium".to_owned(),
+                summary: "Sleep score tends to rise after consistent bedtimes.".to_owned(),
+                evidence: resolve_evidence_descriptor(
+                    "pattern_association",
+                    crate::evidence::PopulationProfile::GeneralAdult,
+                ),
+            }],
+            review_signals: vec![SnapshotReviewSignal {
+                export_ref: "review_signal:2026-04-10:sleep_score".to_owned(),
+                day: "2026-04-10".to_owned(),
+                signal_key: "sleep_score".to_owned(),
+                numeric_value: Some(86.0),
+                text_value: None,
+                delta: Some(6.0),
+                z_score: Some(1.2),
+                persistence_days: 2,
+                sufficiency: "medium".to_owned(),
+                stale_days: 0,
+                evidence: resolve_evidence_descriptor(
+                    "sleep_score",
+                    crate::evidence::PopulationProfile::GeneralAdult,
+                ),
+            }],
             follow_up_targets: Vec::new(),
         };
         bundle.metadata.snapshot_hash = ok(
