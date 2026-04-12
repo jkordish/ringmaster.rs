@@ -811,6 +811,43 @@ pub const MIGRATIONS: &[Migration] = &[
         ALTER TABLE daily_sleep ADD COLUMN sleep_duration_seconds INTEGER;
         ",
     },
+    Migration {
+        version: 18,
+        name: "phase12_sleep_periods_and_daily_spo2",
+        sql: r"
+        CREATE TABLE IF NOT EXISTS sleep_periods (
+            oura_id TEXT PRIMARY KEY,
+            day TEXT NOT NULL,
+            bedtime_start TEXT,
+            bedtime_end TEXT,
+            sleep_type TEXT,
+            average_heart_rate REAL,
+            average_hrv REAL,
+            average_breath REAL,
+            total_sleep_duration INTEGER,
+            raw_cache_key TEXT,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS daily_spo2 (
+            day TEXT PRIMARY KEY,
+            oura_id TEXT,
+            average_spo2 REAL,
+            breathing_disturbance_index REAL,
+            raw_cache_key TEXT,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sleep_periods_day
+            ON sleep_periods(day);
+        CREATE INDEX IF NOT EXISTS idx_sleep_periods_bedtime_start
+            ON sleep_periods(bedtime_start);
+        CREATE INDEX IF NOT EXISTS idx_daily_spo2_oura_id
+            ON daily_spo2(oura_id);
+        CREATE INDEX IF NOT EXISTS idx_daily_spo2_day
+            ON daily_spo2(day);
+        ",
+    },
 ];
 
 pub fn run_migrations(connection: &mut rusqlite::Connection) -> Result<MigrationReport> {
@@ -960,7 +997,9 @@ mod tests {
         assert_eq!(report.current_version, current_version());
         assert_eq!(
             report.applied_versions,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+            vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+            ]
         );
     }
 
@@ -1041,7 +1080,7 @@ mod tests {
         );
         assert_eq!(
             report.applied_versions,
-            vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+            vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
         );
 
         let (workout_day, workout_title): (String, String) = connection
@@ -1118,7 +1157,7 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("phase4 migrations should succeed: {error}"));
         assert_eq!(
             report.applied_versions,
-            vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+            vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
         );
 
         let row: (String, String, String) = connection
@@ -1167,7 +1206,7 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("phase4 migration should succeed: {error}"));
         assert_eq!(
             report.applied_versions,
-            vec![9, 10, 11, 12, 13, 14, 15, 16, 17]
+            vec![9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
         );
 
         let daily_sleep_columns: Vec<String> = {
@@ -1218,7 +1257,7 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("phase5 migration should succeed: {error}"));
         assert_eq!(
             report.applied_versions,
-            vec![10, 11, 12, 13, 14, 15, 16, 17]
+            vec![10, 11, 12, 13, 14, 15, 16, 17, 18]
         );
 
         let table_names: Vec<String> = {
@@ -1328,7 +1367,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| unreachable!("phase8 sleep migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![17]);
+        assert_eq!(report.applied_versions, vec![17, 18]);
 
         let duration = connection
             .query_row(
@@ -1371,7 +1410,10 @@ mod tests {
         let report = run_migrations(&mut connection).unwrap_or_else(|error| {
             unreachable!("review signal migration should succeed: {error}")
         });
-        assert_eq!(report.applied_versions, vec![11, 12, 13, 14, 15, 16, 17]);
+        assert_eq!(
+            report.applied_versions,
+            vec![11, 12, 13, 14, 15, 16, 17, 18]
+        );
 
         let table_names: Vec<String> = {
             let mut statement = connection
@@ -1443,7 +1485,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| unreachable!("vo2 history migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![12, 13, 14, 15, 16, 17]);
+        assert_eq!(report.applied_versions, vec![12, 13, 14, 15, 16, 17, 18]);
 
         let primary_key_columns: Vec<String> = {
             let mut statement = connection

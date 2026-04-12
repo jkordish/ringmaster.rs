@@ -31,11 +31,12 @@ use crate::snapshot::PrivacyProfile;
 use crate::store::Store;
 use crate::store::queries::{
     AiArtifactDaySummaryRecord, AiArtifactRecord, AiEvalRunRecord, AiRunRecord, ContextEventFamily,
-    ContextEventRecord, DailyActivityRecord, DailyOverviewRow, DailyReadinessRecord,
-    DailyStressRecord, EffectDirection, HeartRatePoint, PatternMetric, PatternRelationWindow,
-    PatternSummaryRecord, PersonalInfoRecord, RecordCounts, ReportExportRecord,
-    RestModePeriodRecord, ReviewSignalDayRecord, SleepTimeRecord, SnapshotCatalogEntry,
-    SyncRunStatus, SyncStateRecord, TimeSemantics,
+    ContextEventRecord, DailyActivityRecord, DailyCardiovascularAgeRecord, DailyOverviewRow,
+    DailyReadinessRecord, DailyResilienceRecord, DailySpO2Record, DailyStressRecord,
+    EffectDirection, HeartRatePoint, PatternMetric, PatternRelationWindow, PatternSummaryRecord,
+    PersonalInfoRecord, RecordCounts, ReportExportRecord, RestModePeriodRecord,
+    ReviewSignalDayRecord, SleepPeriodRecord, SleepTimeRecord, SnapshotCatalogEntry, SyncRunStatus,
+    SyncStateRecord, TimeSemantics, Vo2MaxRecord,
 };
 use crate::store::webhook_store::{
     AcceptedWebhookDeliveryRecord, DesiredWebhookSubscriptionRecord, InvalidationRecord,
@@ -111,6 +112,8 @@ pub struct LiveSnapshot {
     pub daily_activity: Vec<DailyActivityRecord>,
     pub daily_readiness: Vec<DailyReadinessRecord>,
     pub daily_stress: Vec<DailyStressRecord>,
+    pub sleep_periods: Vec<SleepPeriodRecord>,
+    pub daily_spo2: Vec<DailySpO2Record>,
     pub heartrate_days: Vec<HeartRateDay>,
     pub heartrate_daily_averages: Vec<MetricPoint>,
     pub context_events: Vec<ContextEventRecord>,
@@ -118,6 +121,9 @@ pub struct LiveSnapshot {
     pub review_signal_days: Vec<ReviewSignalDayRecord>,
     pub sleep_time: Vec<SleepTimeRecord>,
     pub rest_mode_periods: Vec<RestModePeriodRecord>,
+    pub daily_resilience: Vec<DailyResilienceRecord>,
+    pub daily_cardiovascular_age: Vec<DailyCardiovascularAgeRecord>,
+    pub vo2_max: Vec<Vo2MaxRecord>,
     pub ai_artifacts_by_day: BTreeMap<String, AiArtifactDaySummaryRecord>,
     pub snapshot_catalog: Vec<SnapshotCatalogEntry>,
     pub ai_runs: Vec<AiRunRecord>,
@@ -342,6 +348,7 @@ pub struct DashboardModel {
     pub hrv: DashboardTrendPanel,
     pub body_temp: DashboardThermometerPanel,
     pub heart_rate: DashboardTrendPanel,
+    pub spo2: DashboardTrendPanel,
     pub respiratory_rate: DashboardHistogramPanel,
     pub breakdown: DashboardBreakdownPanel,
     pub weekly: DashboardWeeklyHeatmap,
@@ -384,12 +391,18 @@ pub struct ExplainModel {
     pub headline: String,
     pub overlay_toggles: Vec<OverlayToggleView>,
     pub selected_overlay_toggle_index: usize,
+    pub claim_availability: TelemetryAvailability,
     pub summary_lines: Vec<String>,
+    pub measurements_availability: TelemetryAvailability,
     pub evidence_badges: Vec<String>,
     pub measurement_lines: Vec<String>,
+    pub evidence_availability: TelemetryAvailability,
     pub evidence_lines: Vec<String>,
+    pub uncertainty_availability: TelemetryAvailability,
     pub caveat_lines: Vec<String>,
+    pub context_availability: TelemetryAvailability,
     pub context_lines: Vec<String>,
+    pub ai_availability: TelemetryAvailability,
     pub ai_actions: Vec<String>,
 }
 
@@ -401,8 +414,11 @@ pub struct PatternsModel {
     pub overlay_toggles: Vec<OverlayToggleView>,
     pub selected_overlay_toggle_index: usize,
     pub filter_summary: String,
+    pub findings_availability: TelemetryAvailability,
     pub rows: Vec<PatternRowView>,
+    pub guide_availability: TelemetryAvailability,
     pub notes: Vec<String>,
+    pub interpretation_availability: TelemetryAvailability,
     pub empty_message: String,
     pub ai_actions: Vec<String>,
 }
@@ -541,10 +557,13 @@ pub struct ReviewModel {
     pub selected_mode_index: usize,
     pub focus_tabs: Vec<ReviewTab>,
     pub selected_focus_index: usize,
+    pub cards_availability: TelemetryAvailability,
     pub cards: Vec<ReviewCardView>,
     pub selected_card_index: Option<usize>,
     pub ai_artifact: AiArtifactSummaryView,
+    pub detail_availability: TelemetryAvailability,
     pub detail_lines: Vec<String>,
+    pub warnings_availability: TelemetryAvailability,
     pub warning_lines: Vec<String>,
     pub empty_message: String,
     pub ai_actions: Vec<String>,
@@ -648,6 +667,7 @@ pub struct ReviewCardView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AiArtifactSummaryView {
+    pub availability: TelemetryAvailability,
     pub status_label: String,
     pub metadata_lines: Vec<String>,
     pub summary_text: String,
@@ -1469,6 +1489,15 @@ impl AppState {
                     self.model.dashboard.heart_rate.range_label
                 ),
                 self.dashboard_freshness(self.model.dashboard.heart_rate.availability),
+            ),
+            (Screen::Dashboard, FocusRegion::DashboardSpo2) => (
+                label,
+                self.model.dashboard.spo2.primary_label.clone(),
+                format!(
+                    "{} | {}",
+                    self.model.dashboard.spo2.baseline_label, self.model.dashboard.spo2.range_label
+                ),
+                self.dashboard_freshness(self.model.dashboard.spo2.availability),
             ),
             (Screen::Dashboard, FocusRegion::DashboardRespRate) => (
                 label,
@@ -3529,22 +3558,52 @@ pub fn load_live_snapshot(
         .first()
         .zip(daily_history.last())
         .map(|(start, end)| (start.day.clone(), end.day.clone()));
-    let (daily_activity, daily_readiness, daily_stress) =
-        if let Some((start_day, end_day)) = daily_bounds {
-            (
-                store
-                    .views()
-                    .daily_activity_between_days(&start_day, &end_day)?,
-                store
-                    .views()
-                    .daily_readiness_between_days(&start_day, &end_day)?,
-                store
-                    .views()
-                    .daily_stress_between_days(&start_day, &end_day)?,
-            )
-        } else {
-            (Vec::new(), Vec::new(), Vec::new())
-        };
+    let (
+        daily_activity,
+        daily_readiness,
+        daily_stress,
+        sleep_periods,
+        daily_spo2,
+        daily_resilience,
+        daily_cardiovascular_age,
+        vo2_max,
+    ) = if let Some((start_day, end_day)) = daily_bounds {
+        (
+            store
+                .views()
+                .daily_activity_between_days(&start_day, &end_day)?,
+            store
+                .views()
+                .daily_readiness_between_days(&start_day, &end_day)?,
+            store
+                .views()
+                .daily_stress_between_days(&start_day, &end_day)?,
+            store
+                .views()
+                .sleep_periods_between_days(&start_day, &end_day)?,
+            store
+                .views()
+                .daily_spo2_between_days(&start_day, &end_day)?,
+            store
+                .views()
+                .daily_resilience_between_days(&start_day, &end_day)?,
+            store
+                .views()
+                .daily_cardiovascular_age_between_days(&start_day, &end_day)?,
+            store.views().vo2_max_between_days(&start_day, &end_day)?,
+        )
+    } else {
+        (
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    };
     let heartrate_days = load_heartrate_days(store, 14)?;
     let heartrate_daily_averages = load_heartrate_daily_averages(store, 90)?;
     let pattern_summaries = store.views().pattern_summaries(None, None)?;
@@ -3634,6 +3693,8 @@ pub fn load_live_snapshot(
         daily_activity,
         daily_readiness,
         daily_stress,
+        sleep_periods,
+        daily_spo2,
         heartrate_days,
         heartrate_daily_averages,
         context_events,
@@ -3641,6 +3702,9 @@ pub fn load_live_snapshot(
         review_signal_days,
         sleep_time,
         rest_mode_periods,
+        daily_resilience,
+        daily_cardiovascular_age,
+        vo2_max,
         ai_artifacts_by_day,
         snapshot_catalog,
         ai_runs,
@@ -3823,6 +3887,8 @@ fn build_dashboard_model(
     let selected_activity = selected_daily_activity(snapshot, &selected_day);
     let selected_readiness = selected_daily_readiness(snapshot, &selected_day);
     let selected_stress = selected_daily_stress(snapshot, &selected_day);
+    let selected_sleep_period = selected_primary_sleep_period(snapshot, &selected_day);
+    let selected_spo2 = selected_daily_spo2(snapshot, &selected_day);
     let sleep_insight = build_day_metric_insight(snapshot, &selected_day, "sleep", |row| {
         row.sleep_score.map(f64::from)
     });
@@ -3834,6 +3900,15 @@ fn build_dashboard_model(
         &metric_points_from_activity(&snapshot.daily_activity),
     );
     let heartrate_insight = build_metric_insight("heartrate", &snapshot.heartrate_daily_averages);
+    let hrv_points =
+        metric_points_from_sleep_periods(&snapshot.sleep_periods, |record| record.average_hrv);
+    let hrv_insight = build_metric_insight_from_points(&hrv_points, &selected_day, "hrv");
+    let respiratory_points =
+        metric_points_from_sleep_periods(&snapshot.sleep_periods, |record| record.average_breath);
+    let respiratory_insight =
+        build_metric_insight_from_points(&respiratory_points, &selected_day, "respiratory rate");
+    let spo2_points = metric_points_from_daily_spo2(&snapshot.daily_spo2);
+    let spo2_insight = build_metric_insight_from_points(&spo2_points, &selected_day, "spo2");
     let daily_availability =
         availability_from_freshness(&family_freshness(snapshot, DataFamily::Daily));
     let heartrate_availability =
@@ -3856,6 +3931,21 @@ fn build_dashboard_model(
     } else {
         TelemetryAvailability::NoData
     };
+    let hrv_availability = telemetry_availability_for_daily_metric(
+        snapshot,
+        CapabilityKind::Daily,
+        !hrv_points.is_empty(),
+    );
+    let respiratory_availability = telemetry_availability_for_daily_metric(
+        snapshot,
+        CapabilityKind::Daily,
+        !respiratory_points.is_empty(),
+    );
+    let spo2_availability = telemetry_availability_for_daily_metric(
+        snapshot,
+        CapabilityKind::Spo2,
+        !spo2_points.is_empty(),
+    );
     let capability_summary = dashboard_capability_summary(snapshot);
     let coverage = coverage_cell_views(snapshot);
 
@@ -3950,12 +4040,21 @@ fn build_dashboard_model(
             note: selected_day_baseline_sentence("Activity", &selected_day, &activity_insight),
         },
         hrv: DashboardTrendPanel {
-            availability: TelemetryAvailability::Unsupported,
-            primary_label: "--".to_owned(),
-            baseline_label: "baseline unavailable".to_owned(),
-            range_label: "HRV scope not wired".to_owned(),
-            values: Vec::new(),
-            note: "Stable shell until HRV history is available in the local snapshot.".to_owned(),
+            availability: hrv_availability,
+            primary_label: selected_sleep_period
+                .and_then(|record| record.average_hrv)
+                .map_or_else(|| "--".to_owned(), |value| format!("{value:.0} ms")),
+            baseline_label: metric_delta_label(&hrv_insight),
+            range_label: metric_range_label(&hrv_points),
+            values: values_from_metric_points(&hrv_points),
+            note: selected_metric_note(
+                "HRV",
+                &selected_day,
+                selected_sleep_period
+                    .and_then(|record| record.average_hrv)
+                    .is_some(),
+                &hrv_insight,
+            ),
         },
         body_temp: DashboardThermometerPanel {
             availability: if selected_readiness
@@ -3997,12 +4096,44 @@ fn build_dashboard_model(
             values: values_from_metric_points(&snapshot.heartrate_daily_averages),
             note: heartrate_insight.summary.clone(),
         },
+        spo2: DashboardTrendPanel {
+            availability: spo2_availability,
+            primary_label: selected_spo2
+                .and_then(|record| record.average_spo2)
+                .map_or_else(|| "--".to_owned(), |value| format!("{value:.1}%")),
+            baseline_label: metric_delta_label(&spo2_insight),
+            range_label: metric_range_label(&spo2_points),
+            values: values_from_metric_points(&spo2_points),
+            note: selected_spo2
+                .and_then(|record| record.breathing_disturbance_index)
+                .map_or_else(
+                    || {
+                        selected_metric_note(
+                            "SpO2",
+                            &selected_day,
+                            selected_spo2
+                                .and_then(|record| record.average_spo2)
+                                .is_some(),
+                            &spo2_insight,
+                        )
+                    },
+                    |value| format!("BDI {value:.1} | {}", spo2_insight.summary),
+                ),
+        },
         respiratory_rate: DashboardHistogramPanel {
-            availability: coverage_availability(snapshot, CoverageFamily::Spo2),
-            primary_label: "--".to_owned(),
-            bars: Vec::new(),
-            note: "Respiratory-rate history is not available in the current local model."
-                .to_owned(),
+            availability: respiratory_availability,
+            primary_label: selected_sleep_period
+                .and_then(|record| record.average_breath)
+                .map_or_else(|| "--".to_owned(), |value| format!("{value:.1} br/min")),
+            bars: values_from_metric_points(&respiratory_points),
+            note: selected_metric_note(
+                "respiratory-rate",
+                &selected_day,
+                selected_sleep_period
+                    .and_then(|record| record.average_breath)
+                    .is_some(),
+                &respiratory_insight,
+            ),
         },
         breakdown: DashboardBreakdownPanel {
             availability: readiness_availability,
@@ -4436,6 +4567,25 @@ fn build_explain_model(
     let heartrate = selected_heartrate_day(snapshot, &selected_day);
     let supporting_events =
         supporting_events_for_explain(snapshot, &selected_day, overlay_filters, selected_event_id);
+    let summary_lines = explain_summary_lines(
+        snapshot,
+        &selected_day,
+        selected_daily,
+        [&sleep_insight, &readiness_insight, &activity_insight],
+    );
+    let evidence_badges = explain_evidence_badges(snapshot, selected_daily);
+    let measurement_lines = measurement_lines_for_day(selected_daily, heartrate);
+    let evidence_lines = explain_evidence_lines(&supporting_events);
+    let caveat_lines = explain_caveat_lines(
+        snapshot,
+        &selected_day,
+        [&sleep_insight, &readiness_insight, &activity_insight],
+        selected_daily,
+        heartrate,
+        &supporting_events,
+        today_review,
+    );
+    let context_lines = explain_context_lines(&supporting_events);
 
     ExplainModel {
         selected_day_label: selected_day.clone(),
@@ -4443,29 +4593,99 @@ fn build_explain_model(
         headline: format!("Day story for {selected_day}"),
         overlay_toggles: overlay_toggle_views(overlay_filters, selected_overlay_toggle_index),
         selected_overlay_toggle_index,
-        summary_lines: explain_summary_lines(
+        claim_availability: telemetry_availability_for_daily_metric(
             snapshot,
-            &selected_day,
-            selected_daily,
-            [&sleep_insight, &readiness_insight, &activity_insight],
+            CapabilityKind::Daily,
+            selected_daily.is_some(),
         ),
-        evidence_badges: explain_evidence_badges(snapshot, selected_daily),
-        measurement_lines: measurement_lines_for_day(selected_daily, heartrate),
-        evidence_lines: explain_evidence_lines(&supporting_events),
-        caveat_lines: explain_caveat_lines(
+        summary_lines,
+        measurements_availability: explain_measurements_availability(
             snapshot,
-            &selected_day,
-            [&sleep_insight, &readiness_insight, &activity_insight],
             selected_daily,
             heartrate,
-            &supporting_events,
-            today_review,
         ),
-        context_lines: explain_context_lines(&supporting_events),
+        evidence_badges,
+        measurement_lines,
+        evidence_availability: availability_for_items(&supporting_events),
+        evidence_lines,
+        uncertainty_availability: availability_for_lines(&caveat_lines),
+        caveat_lines,
+        context_availability: availability_for_items(&supporting_events),
+        context_lines,
+        ai_availability: ai_launch_availability(snapshot),
         ai_actions: vec![
             "[ai] Review this day from the AI launch region.".to_owned(),
             "[ai] Open the AI workbench from Views for saved runs and reports.".to_owned(),
         ],
+    }
+}
+
+const fn availability_for_lines(lines: &[String]) -> TelemetryAvailability {
+    if lines.is_empty() {
+        TelemetryAvailability::NoData
+    } else {
+        TelemetryAvailability::Fresh
+    }
+}
+
+const fn availability_for_items<T>(items: &[T]) -> TelemetryAvailability {
+    if items.is_empty() {
+        TelemetryAvailability::NoData
+    } else {
+        TelemetryAvailability::Fresh
+    }
+}
+
+const fn ai_launch_availability(snapshot: &LiveSnapshot) -> TelemetryAvailability {
+    if snapshot.ai_ops.enabled {
+        TelemetryAvailability::Fresh
+    } else {
+        TelemetryAvailability::NoData
+    }
+}
+
+fn explain_measurements_availability(
+    snapshot: &LiveSnapshot,
+    selected_daily: Option<&DailyOverviewRow>,
+    heartrate: Option<&HeartRateDay>,
+) -> TelemetryAvailability {
+    let daily = telemetry_availability_for_daily_metric(
+        snapshot,
+        CapabilityKind::Daily,
+        selected_daily.is_some(),
+    );
+    let heartrate = telemetry_availability_for_daily_metric(
+        snapshot,
+        CapabilityKind::Daily,
+        heartrate.is_some(),
+    );
+    combine_availability(daily, heartrate)
+}
+
+const fn combine_availability(
+    primary: TelemetryAvailability,
+    secondary: TelemetryAvailability,
+) -> TelemetryAvailability {
+    match (primary, secondary) {
+        (TelemetryAvailability::Fresh, _) | (_, TelemetryAvailability::Fresh) => {
+            TelemetryAvailability::Fresh
+        }
+        (TelemetryAvailability::Stale, _) | (_, TelemetryAvailability::Stale) => {
+            TelemetryAvailability::Stale
+        }
+        (TelemetryAvailability::RateLimited, _) | (_, TelemetryAvailability::RateLimited) => {
+            TelemetryAvailability::RateLimited
+        }
+        (TelemetryAvailability::Error, _) | (_, TelemetryAvailability::Error) => {
+            TelemetryAvailability::Error
+        }
+        (TelemetryAvailability::MissingScope, _) | (_, TelemetryAvailability::MissingScope) => {
+            TelemetryAvailability::MissingScope
+        }
+        (TelemetryAvailability::Unsupported, _) | (_, TelemetryAvailability::Unsupported) => {
+            TelemetryAvailability::Unsupported
+        }
+        _ => TelemetryAvailability::NoData,
     }
 }
 
@@ -4692,12 +4912,15 @@ fn build_patterns_model(
             overlay_filters.summary(),
             metric_filter.label()
         ),
+        findings_availability: availability_for_items(&rows),
         rows,
+        guide_availability: TelemetryAvailability::Fresh,
         notes: vec![
             "Patterns are descriptive associations, not causal claims.".to_owned(),
             "Every row on this screen is exploratory and trend-only by design.".to_owned(),
             "Rows appear after at least 3 comparable days; same-night sleep refers to the following closeout day.".to_owned(),
         ],
+        interpretation_availability: TelemetryAvailability::Fresh,
         empty_message:
             "Not enough data yet. Patterns appear after at least 3 comparable days.".to_owned(),
         ai_actions: vec![
@@ -5186,6 +5409,18 @@ fn build_review_model(
             selected: selected_card_index == Some(index),
         })
         .collect::<Vec<_>>();
+    let detail_lines = review_detail_lines(
+        context.review_mode,
+        selected_card_index.and_then(|index| cards.get(index).copied()),
+        investigation,
+        snapshot.active_population_profile,
+    );
+    let warning_lines = review_warning_lines(
+        context.review_mode,
+        today_review,
+        week_review,
+        investigation,
+    );
 
     ReviewModel {
         selected_day_label: context.selected_day.to_owned(),
@@ -5218,21 +5453,14 @@ fn build_review_model(
             .iter()
             .position(|focus| *focus == context.review_focus)
             .unwrap_or_default(),
+        cards_availability: availability_for_items(&card_views),
         cards: card_views,
         selected_card_index,
         ai_artifact: context.ai_artifact.clone(),
-        detail_lines: review_detail_lines(
-            context.review_mode,
-            selected_card_index.and_then(|index| cards.get(index).copied()),
-            investigation,
-            snapshot.active_population_profile,
-        ),
-        warning_lines: review_warning_lines(
-            context.review_mode,
-            today_review,
-            week_review,
-            investigation,
-        ),
+        detail_availability: availability_for_lines(&detail_lines),
+        detail_lines,
+        warnings_availability: availability_for_lines(&warning_lines),
+        warning_lines,
         empty_message: review_empty_message(context.review_mode, context.review_focus),
         ai_actions: vec![
             "[ai] Review this day from the AI launch region.".to_owned(),
@@ -6805,6 +7033,7 @@ fn push_review_badge(badges: &mut Vec<String>, badge: String) {
 
 fn empty_ai_artifact_summary_view() -> AiArtifactSummaryView {
     AiArtifactSummaryView {
+        availability: TelemetryAvailability::NoData,
         status_label: "none".to_owned(),
         metadata_lines: Vec::new(),
         summary_text: "No saved AI artifact is linked to this day yet.".to_owned(),
@@ -6840,6 +7069,7 @@ fn build_ai_artifact_summary_view(record: &AiArtifactDaySummaryRecord) -> AiArti
     }
 
     AiArtifactSummaryView {
+        availability: TelemetryAvailability::Fresh,
         status_label: "available".to_owned(),
         metadata_lines: vec![
             format!(
@@ -7912,6 +8142,32 @@ fn selected_daily_stress<'a>(
     snapshot.daily_stress.iter().find(|row| row.day == day)
 }
 
+fn selected_primary_sleep_period<'a>(
+    snapshot: &'a LiveSnapshot,
+    day: &str,
+) -> Option<&'a SleepPeriodRecord> {
+    snapshot
+        .sleep_periods
+        .iter()
+        .filter(|record| record.day == day)
+        .max_by(|left, right| {
+            let left_rank = primary_sleep_rank(left.sleep_type.as_deref());
+            let right_rank = primary_sleep_rank(right.sleep_type.as_deref());
+            left_rank
+                .cmp(&right_rank)
+                .then_with(|| {
+                    left.total_sleep_duration
+                        .unwrap_or_default()
+                        .cmp(&right.total_sleep_duration.unwrap_or_default())
+                })
+                .then_with(|| right.bedtime_start.cmp(&left.bedtime_start))
+        })
+}
+
+fn selected_daily_spo2<'a>(snapshot: &'a LiveSnapshot, day: &str) -> Option<&'a DailySpO2Record> {
+    snapshot.daily_spo2.iter().find(|row| row.day == day)
+}
+
 fn selected_heartrate_day<'a>(snapshot: &'a LiveSnapshot, day: &str) -> Option<&'a HeartRateDay> {
     snapshot.heartrate_days.iter().find(|row| row.day == day)
 }
@@ -7924,6 +8180,50 @@ fn metric_points_from_activity(history: &[DailyActivityRecord]) -> Vec<MetricPoi
             value: crate::numeric::i64_to_f64(row.steps),
         })
         .collect()
+}
+
+fn metric_points_from_sleep_periods<F>(
+    history: &[SleepPeriodRecord],
+    mut mapper: F,
+) -> Vec<MetricPoint>
+where
+    F: FnMut(&SleepPeriodRecord) -> Option<f64>,
+{
+    history
+        .iter()
+        .filter(|record| is_primary_sleep_type(record.sleep_type.as_deref()))
+        .filter_map(|record| {
+            mapper(record).map(|value| MetricPoint {
+                day: record.day.clone(),
+                value,
+            })
+        })
+        .collect()
+}
+
+fn metric_points_from_daily_spo2(history: &[DailySpO2Record]) -> Vec<MetricPoint> {
+    history
+        .iter()
+        .filter_map(|record| {
+            record.average_spo2.map(|value| MetricPoint {
+                day: record.day.clone(),
+                value,
+            })
+        })
+        .collect()
+}
+
+fn build_metric_insight_from_points(
+    history: &[MetricPoint],
+    selected_day: &str,
+    label: &'static str,
+) -> MetricInsight {
+    let filtered = history
+        .iter()
+        .filter(|point| point.day.as_str() <= selected_day)
+        .cloned()
+        .collect::<Vec<_>>();
+    build_metric_insight(label, &filtered)
 }
 
 fn metric_points_from_readiness_temperature(history: &[DailyReadinessRecord]) -> Vec<MetricPoint> {
@@ -7974,6 +8274,41 @@ fn availability_from_freshness(freshness: &FreshnessState) -> TelemetryAvailabil
         | FreshnessKind::StaleUnsupportedWebhook
         | FreshnessKind::StaleReceiverDown
         | FreshnessKind::StaleSubscriptionMissing => TelemetryAvailability::Stale,
+    }
+}
+
+fn telemetry_availability_for_daily_metric(
+    snapshot: &LiveSnapshot,
+    capability: CapabilityKind,
+    has_records: bool,
+) -> TelemetryAvailability {
+    let status = snapshot
+        .auth_status
+        .capability_report
+        .status_for(capability);
+    match status {
+        Some(entry) if entry.granted => {
+            if has_records {
+                availability_from_freshness(&family_freshness(snapshot, DataFamily::Daily))
+            } else {
+                TelemetryAvailability::NoData
+            }
+        }
+        Some(entry) if entry.requested => TelemetryAvailability::MissingScope,
+        _ => TelemetryAvailability::Unsupported,
+    }
+}
+
+fn selected_metric_note(
+    label: &str,
+    selected_day: &str,
+    value_present: bool,
+    insight: &MetricInsight,
+) -> String {
+    if value_present {
+        insight.summary.clone()
+    } else {
+        format!("No {label} reading is available for {selected_day}.")
     }
 }
 
@@ -8037,6 +8372,19 @@ fn metric_range_label(history: &[MetricPoint]) -> String {
         (min_value.min(value), max_value.max(value))
     });
     format!("{}-{}", format_float(min_value), format_float(max_value))
+}
+
+fn primary_sleep_rank(sleep_type: Option<&str>) -> u8 {
+    match sleep_type {
+        Some("long_sleep") => 3,
+        Some("sleep") => 2,
+        Some("rest") => 1,
+        _ => 0,
+    }
+}
+
+fn is_primary_sleep_type(sleep_type: Option<&str>) -> bool {
+    primary_sleep_rank(sleep_type) > 0
 }
 
 fn activity_ring_fill_from_steps(steps: i64) -> u16 {
@@ -8162,17 +8510,11 @@ fn coverage_availability(snapshot: &LiveSnapshot, family: CoverageFamily) -> Tel
                 TelemetryAvailability::Unsupported
             }
         }
-        CoverageFamily::Spo2 => {
-            let status = snapshot
-                .auth_status
-                .capability_report
-                .status_for(CapabilityKind::Spo2);
-            match status {
-                Some(entry) if entry.granted => TelemetryAvailability::Unsupported,
-                Some(entry) if entry.requested => TelemetryAvailability::MissingScope,
-                _ => TelemetryAvailability::Unsupported,
-            }
-        }
+        CoverageFamily::Spo2 => telemetry_availability_for_daily_metric(
+            snapshot,
+            CapabilityKind::Spo2,
+            !snapshot.daily_spo2.is_empty(),
+        ),
     }
 }
 
@@ -8208,8 +8550,12 @@ fn coverage_detail(snapshot: &LiveSnapshot, family: CoverageFamily) -> String {
                 || "SpO2 is not configured in the current local model.".to_owned(),
                 |entry| {
                     if entry.granted {
-                        "SpO2 scope is granted, but this release does not persist local SpO2 records yet."
-                            .to_owned()
+                        if snapshot.daily_spo2.is_empty() {
+                            "SpO2 scope is granted, but there are no cached SpO2 readings yet."
+                                .to_owned()
+                        } else {
+                            family_freshness(snapshot, DataFamily::Daily).detail
+                        }
                     } else {
                         entry.note.clone()
                     }
@@ -9289,6 +9635,14 @@ const fn empty_dashboard_model() -> DashboardModel {
             bars: Vec::new(),
             note: String::new(),
         },
+        spo2: DashboardTrendPanel {
+            availability: TelemetryAvailability::NoData,
+            primary_label: String::new(),
+            baseline_label: String::new(),
+            range_label: String::new(),
+            values: Vec::new(),
+            note: String::new(),
+        },
         breakdown: DashboardBreakdownPanel {
             availability: TelemetryAvailability::NoData,
             rails: Vec::new(),
@@ -9345,12 +9699,18 @@ const fn empty_explain_model() -> ExplainModel {
         headline: String::new(),
         overlay_toggles: Vec::new(),
         selected_overlay_toggle_index: 0,
+        claim_availability: TelemetryAvailability::NoData,
         summary_lines: Vec::new(),
+        measurements_availability: TelemetryAvailability::NoData,
         evidence_badges: Vec::new(),
         measurement_lines: Vec::new(),
+        evidence_availability: TelemetryAvailability::NoData,
         evidence_lines: Vec::new(),
+        uncertainty_availability: TelemetryAvailability::NoData,
         caveat_lines: Vec::new(),
+        context_availability: TelemetryAvailability::NoData,
         context_lines: Vec::new(),
+        ai_availability: TelemetryAvailability::NoData,
         ai_actions: Vec::new(),
     }
 }
@@ -9363,8 +9723,11 @@ const fn empty_patterns_model() -> PatternsModel {
         overlay_toggles: Vec::new(),
         selected_overlay_toggle_index: 0,
         filter_summary: String::new(),
+        findings_availability: TelemetryAvailability::NoData,
         rows: Vec::new(),
+        guide_availability: TelemetryAvailability::NoData,
         notes: Vec::new(),
+        interpretation_availability: TelemetryAvailability::NoData,
         empty_message: String::new(),
         ai_actions: Vec::new(),
     }
@@ -9389,10 +9752,13 @@ fn empty_review_model() -> ReviewModel {
         selected_mode_index: 0,
         focus_tabs: Vec::new(),
         selected_focus_index: 0,
+        cards_availability: TelemetryAvailability::NoData,
         cards: Vec::new(),
         selected_card_index: None,
         ai_artifact: empty_ai_artifact_summary_view(),
+        detail_availability: TelemetryAvailability::NoData,
         detail_lines: Vec::new(),
+        warnings_availability: TelemetryAvailability::NoData,
         warning_lines: Vec::new(),
         empty_message: String::new(),
         ai_actions: Vec::new(),
@@ -9444,6 +9810,8 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
         daily_activity: demo_daily_activity_records(),
         daily_readiness: demo_daily_readiness_records(),
         daily_stress: demo_daily_stress_records(),
+        sleep_periods: demo_sleep_period_records(),
+        daily_spo2: demo_daily_spo2_records(),
         heartrate_days: demo_heartrate_days(),
         heartrate_daily_averages: demo_heartrate_daily_averages(),
         context_events: demo_context_events(),
@@ -9451,6 +9819,9 @@ fn demo_snapshot(config: &Config) -> LiveSnapshot {
         review_signal_days: demo_review_signal_days(),
         sleep_time: demo_sleep_time_records(),
         rest_mode_periods: demo_rest_mode_periods(),
+        daily_resilience: demo_daily_resilience_records(),
+        daily_cardiovascular_age: demo_daily_cardiovascular_age_records(),
+        vo2_max: demo_vo2_max_records(),
         ai_artifacts_by_day: demo_ai_artifacts_by_day(),
         snapshot_catalog: ai_fixture.snapshot_catalog,
         ai_runs: ai_fixture.ai_runs,
@@ -9900,6 +10271,133 @@ fn demo_sleep_time_records() -> Vec<SleepTimeRecord> {
     }]
 }
 
+fn demo_sleep_period_records() -> Vec<SleepPeriodRecord> {
+    vec![
+        SleepPeriodRecord {
+            oura_id: "demo-sleep-20260405".to_owned(),
+            day: "2026-04-05".to_owned(),
+            bedtime_start: Some("2026-04-04T23:12:00Z".to_owned()),
+            bedtime_end: Some("2026-04-05T06:48:00Z".to_owned()),
+            sleep_type: Some("long_sleep".to_owned()),
+            average_heart_rate: Some(56.0),
+            average_hrv: Some(39.0),
+            average_breath: Some(14.3),
+            total_sleep_duration: Some(27_360),
+            raw_cache_key: None,
+            updated_at: "2026-04-05T07:10:00Z".to_owned(),
+        },
+        SleepPeriodRecord {
+            oura_id: "demo-sleep-20260406".to_owned(),
+            day: "2026-04-06".to_owned(),
+            bedtime_start: Some("2026-04-05T23:25:00Z".to_owned()),
+            bedtime_end: Some("2026-04-06T06:41:00Z".to_owned()),
+            sleep_type: Some("long_sleep".to_owned()),
+            average_heart_rate: Some(57.0),
+            average_hrv: Some(41.0),
+            average_breath: Some(14.0),
+            total_sleep_duration: Some(26_160),
+            raw_cache_key: None,
+            updated_at: "2026-04-06T07:05:00Z".to_owned(),
+        },
+        SleepPeriodRecord {
+            oura_id: "demo-sleep-20260407".to_owned(),
+            day: "2026-04-07".to_owned(),
+            bedtime_start: Some("2026-04-06T23:58:00Z".to_owned()),
+            bedtime_end: Some("2026-04-07T06:35:00Z".to_owned()),
+            sleep_type: Some("long_sleep".to_owned()),
+            average_heart_rate: Some(58.0),
+            average_hrv: Some(37.0),
+            average_breath: Some(14.6),
+            total_sleep_duration: Some(23_820),
+            raw_cache_key: None,
+            updated_at: "2026-04-07T06:58:00Z".to_owned(),
+        },
+        SleepPeriodRecord {
+            oura_id: "demo-sleep-20260408".to_owned(),
+            day: "2026-04-08".to_owned(),
+            bedtime_start: Some("2026-04-07T23:47:00Z".to_owned()),
+            bedtime_end: Some("2026-04-08T06:19:00Z".to_owned()),
+            sleep_type: Some("long_sleep".to_owned()),
+            average_heart_rate: Some(59.0),
+            average_hrv: Some(34.0),
+            average_breath: Some(15.1),
+            total_sleep_duration: Some(23_520),
+            raw_cache_key: None,
+            updated_at: "2026-04-08T06:44:00Z".to_owned(),
+        },
+    ]
+}
+
+fn demo_daily_spo2_records() -> Vec<DailySpO2Record> {
+    vec![
+        DailySpO2Record {
+            oura_id: Some("demo-spo2-20260405".to_owned()),
+            day: "2026-04-05".to_owned(),
+            average_spo2: Some(97.8),
+            breathing_disturbance_index: Some(0.4),
+            raw_cache_key: None,
+            updated_at: "2026-04-05T07:10:00Z".to_owned(),
+        },
+        DailySpO2Record {
+            oura_id: Some("demo-spo2-20260406".to_owned()),
+            day: "2026-04-06".to_owned(),
+            average_spo2: Some(98.0),
+            breathing_disturbance_index: Some(0.3),
+            raw_cache_key: None,
+            updated_at: "2026-04-06T07:05:00Z".to_owned(),
+        },
+        DailySpO2Record {
+            oura_id: Some("demo-spo2-20260407".to_owned()),
+            day: "2026-04-07".to_owned(),
+            average_spo2: Some(97.4),
+            breathing_disturbance_index: Some(0.6),
+            raw_cache_key: None,
+            updated_at: "2026-04-07T06:58:00Z".to_owned(),
+        },
+        DailySpO2Record {
+            oura_id: Some("demo-spo2-20260408".to_owned()),
+            day: "2026-04-08".to_owned(),
+            average_spo2: Some(97.1),
+            breathing_disturbance_index: Some(0.8),
+            raw_cache_key: None,
+            updated_at: "2026-04-08T06:44:00Z".to_owned(),
+        },
+    ]
+}
+
+fn demo_daily_resilience_records() -> Vec<DailyResilienceRecord> {
+    vec![DailyResilienceRecord {
+        oura_id: Some("demo-resilience-20260408".to_owned()),
+        day: "2026-04-08".to_owned(),
+        level: "adequate".to_owned(),
+        sleep_recovery: 0.61,
+        daytime_recovery: 0.58,
+        stress: 0.44,
+        raw_cache_key: None,
+        updated_at: "2026-04-08T22:00:00Z".to_owned(),
+    }]
+}
+
+fn demo_daily_cardiovascular_age_records() -> Vec<DailyCardiovascularAgeRecord> {
+    vec![DailyCardiovascularAgeRecord {
+        day: "2026-04-08".to_owned(),
+        vascular_age: Some(32),
+        raw_cache_key: None,
+        updated_at: "2026-04-08T22:00:00Z".to_owned(),
+    }]
+}
+
+fn demo_vo2_max_records() -> Vec<Vo2MaxRecord> {
+    vec![Vo2MaxRecord {
+        oura_id: Some("demo-vo2max-20260408".to_owned()),
+        day: "2026-04-08".to_owned(),
+        recorded_at: "2026-04-08T22:00:00Z".to_owned(),
+        vo2_max: Some(44.2),
+        raw_cache_key: None,
+        updated_at: "2026-04-08T22:00:00Z".to_owned(),
+    }]
+}
+
 fn demo_rest_mode_periods() -> Vec<RestModePeriodRecord> {
     vec![RestModePeriodRecord {
         period_id: "demo-rest-mode".to_owned(),
@@ -10004,13 +10502,15 @@ fn demo_sync_states() -> Vec<SyncStateRecord> {
     ]
 }
 
-fn demo_record_counts() -> RecordCounts {
+const fn demo_record_counts() -> RecordCounts {
     RecordCounts {
         raw_payloads: 12,
         personal_info: 1,
         daily_sleep: 4,
+        sleep_periods: 4,
         daily_readiness: 4,
         daily_activity: 4,
+        daily_spo2: 4,
         heartrate_samples: 9,
         workouts: 1,
         tags: 0,
@@ -10020,9 +10520,11 @@ fn demo_record_counts() -> RecordCounts {
         derived_pattern_summaries: 2,
         sleep_time: 1,
         daily_stress: 1,
+        daily_resilience: 1,
+        daily_cardiovascular_age: 1,
+        vo2_max: 1,
         rest_mode_periods: 1,
         derived_review_signal_days: 4,
-        ..RecordCounts::default()
     }
 }
 
@@ -10620,10 +11122,10 @@ mod tests {
     use crate::snapshot::PrivacyProfile;
     use crate::store::queries::{
         AiArtifactDaySummaryRecord, AiArtifactRecord, AiEvalRunRecord, AiRunRecord,
-        ContextEventFamily, ContextEventRecord, DataSufficiency, EffectDirection, HeartRatePoint,
-        PatternMetric, PatternRelationWindow, PatternSummaryRecord, RecordCounts,
-        ReportExportRecord, RestModePeriodRecord, ReviewSignalDayRecord, SleepTimeRecord,
-        SnapshotCatalogEntry, TimeSemantics,
+        ContextEventFamily, ContextEventRecord, DailySpO2Record, DataSufficiency, EffectDirection,
+        HeartRatePoint, PatternMetric, PatternRelationWindow, PatternSummaryRecord, RecordCounts,
+        ReportExportRecord, RestModePeriodRecord, ReviewSignalDayRecord, SleepPeriodRecord,
+        SleepTimeRecord, SnapshotCatalogEntry, TimeSemantics,
     };
     use crate::test_support::{ok, some};
 
@@ -10778,6 +11280,45 @@ mod tests {
             daily_activity: super::demo_daily_activity_records(),
             daily_readiness: super::demo_daily_readiness_records(),
             daily_stress: super::demo_daily_stress_records(),
+            sleep_periods: days
+                .iter()
+                .enumerate()
+                .map(|(index, day)| {
+                    let offset = u32::try_from(index).unwrap_or(0);
+                    let offset_f64 = f64::from(offset);
+                    SleepPeriodRecord {
+                        oura_id: format!("test-sleep-{day}"),
+                        day: (*day).to_owned(),
+                        bedtime_start: Some(format!("{day}T23:{:02}:00Z", 10 + index)),
+                        bedtime_end: Some(format!("{day}T06:{:02}:00Z", 30 + index)),
+                        sleep_type: Some("long_sleep".to_owned()),
+                        average_heart_rate: Some(56.0 + offset_f64),
+                        average_hrv: Some(40.0 - offset_f64),
+                        average_breath: Some(offset_f64.mul_add(0.2, 14.0)),
+                        total_sleep_duration: Some(
+                            27_000 - i64::try_from(index).unwrap_or(0) * 900,
+                        ),
+                        raw_cache_key: None,
+                        updated_at: format!("{day}T07:00:00Z"),
+                    }
+                })
+                .collect(),
+            daily_spo2: days
+                .iter()
+                .enumerate()
+                .map(|(index, day)| {
+                    let offset = u32::try_from(index).unwrap_or(0);
+                    let offset_f64 = f64::from(offset);
+                    DailySpO2Record {
+                        oura_id: Some(format!("test-spo2-{day}")),
+                        day: (*day).to_owned(),
+                        average_spo2: Some(offset_f64.mul_add(-0.2, 97.5)),
+                        breathing_disturbance_index: Some(offset_f64.mul_add(0.1, 0.4)),
+                        raw_cache_key: None,
+                        updated_at: format!("{day}T07:00:00Z"),
+                    }
+                })
+                .collect(),
             heartrate_days,
             heartrate_daily_averages: days
                 .iter()
@@ -10791,6 +11332,9 @@ mod tests {
             review_signal_days: Vec::new(),
             sleep_time: Vec::new(),
             rest_mode_periods: Vec::new(),
+            daily_resilience: Vec::new(),
+            daily_cardiovascular_age: Vec::new(),
+            vo2_max: Vec::new(),
             ai_artifacts_by_day: BTreeMap::new(),
             snapshot_catalog: Vec::new(),
             ai_runs: Vec::new(),

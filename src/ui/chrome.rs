@@ -43,6 +43,7 @@ pub fn title_with_badge<'a>(theme: &Theme, title: &str, badge: &str, badge_tone:
     ])
 }
 
+#[cfg(test)]
 #[must_use]
 pub fn badge_label(prefix: &str, text: &str) -> String {
     format!("[{prefix}] {text}")

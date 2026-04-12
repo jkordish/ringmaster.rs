@@ -514,14 +514,14 @@ Boundary rule:
 
 Component responsibilities today:
 
-- Dashboard renders the editorial front page: “what matters now,” the daily metric band, freshness/capability framing, and drill-down cues
+- Dashboard renders the editorial front page: “what matters now,” the daily metric band, freshness/capability framing, and drill-down cues, including locally persisted HRV, respiratory-rate, and `spo2` physiology panels
 - Timeline renders the chart-first temporal composition, overlay lanes, selected detail, and selected-day event list
 - Trends renders the comparative scanning matrix with windows, deltas, spark hints, and baseline readouts
-- Explain renders a deliberate evidence flow: claim, measured inputs, supporting evidence, context, and uncertainty
+- Explain renders a telemetry-first evidence flow: claim, measured inputs, supporting evidence, context, and uncertainty
 - Timeline, Explain, and Review include lightweight breadcrumbs only when they keep shared day or event context visible
-- Patterns renders grouped associations and interpretive notes distinct from Explain
+- Patterns renders grouped associations, reading guidance, and interpretation through the same telemetry-first panel vocabulary while remaining distinct from Explain
 - Status renders the utilitarian operator console with summary, family status, diagnostics, and warnings without reaching back into the store
-- Review renders ranked briefing cards, bounded investigation detail, and a small read-only AI artifact panel without making network or database calls
+- Review renders ranked briefing cards, bounded investigation detail, warnings, and a small read-only AI artifact panel through the shared telemetry panel language without making network or database calls
 
 ### `src/refresh.rs`
 
@@ -656,7 +656,7 @@ Current live sync behavior:
 
 - `auth login` prints an authorization URL, listens on the configured loopback callback, validates CSRF state, exchanges the code server-side, and persists auth/session metadata
 - token secrets live behind the `SecretStore` seam; production defaults to the keyring-backed backend, Linux expects a desktop Secret Service provider, headless users can explicitly opt into a file-backed token store, and tests use in-memory or temp-file stores
-- the capability model now tracks Oura's broader scope surface, including `email`, `spo2`, `ring_configuration`, `stress`, and `heart_health`, so auth and ops surfaces can distinguish between granted, missing, and future-ready access
+- the capability model now tracks Oura's broader scope surface, including `email`, `spo2`, `ring_configuration`, `stress`, and `heart_health`, so auth and ops surfaces can distinguish between granted, missing, and wired local access
 - `ensure_authorized_session` is the single owner for access-token refresh
 - `ReqwestOuraClient` and `FixtureOuraClient` share the same typed fetch surface
 - the webhook admin client uses app credentials for subscription list/create/update/renew/delete flows
@@ -668,7 +668,9 @@ Current live sync behavior:
   - `/v2/usercollection/heartrate`
   - `/v2/usercollection/daily_stress`
   - `/v2/usercollection/daily_resilience`
+  - `/v2/usercollection/sleep`
   - `/v2/usercollection/sleep_time`
+  - `/v2/usercollection/daily_spo2`
   - `/v2/usercollection/daily_cardiovascular_age`
   - `/v2/usercollection/vO2_max`
   - `/v2/usercollection/rest_mode_period`

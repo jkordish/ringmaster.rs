@@ -57,7 +57,7 @@ The default auth request now tracks Oura's broader current scope surface:
 - `stress`
 - `heart_health`
 
-Today the local product fully uses the baseline sync scopes plus the currently wired stress and heart-health reads. `spo2`, `ring_configuration`, and `email` are surfaced in auth/doctor/status as future-ready capability slots rather than hidden or silently ignored.
+Today the local product fully uses the baseline sync scopes plus the currently wired stress, heart-health, sleep-physiology, and `spo2` reads. `ring_configuration` and `email` are still surfaced in auth/doctor/status as future-ready capability slots rather than hidden or silently ignored.
 
 ## Common workflows
 
@@ -74,6 +74,7 @@ cargo run -- review week --demo
 
 ```bash
 cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots
+cargo run -- ui snapshot --screen explain --screen patterns --screen review --demo --out-dir /tmp/ringmaster-telemetry-ui
 cargo run -- ui snapshot --screen ai --demo --out-dir /tmp/ringmaster-ai-ui
 cargo run -- ui snapshot --screen status --demo --out-dir /tmp/ringmaster-status-ui
 ```

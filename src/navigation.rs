@@ -9,6 +9,7 @@ pub enum FocusRegion {
     DashboardHrv,
     DashboardTemp,
     DashboardHeartRate,
+    DashboardSpo2,
     DashboardRespRate,
     DashboardBreakdown,
     DashboardHeatmap,
@@ -101,7 +102,7 @@ impl PreflightControl {
     }
 }
 
-const DASHBOARD_REGIONS: [FocusRegion; 10] = [
+const DASHBOARD_REGIONS: [FocusRegion; 11] = [
     FocusRegion::TopNav,
     FocusRegion::DashboardReadiness,
     FocusRegion::DashboardSleep,
@@ -109,6 +110,7 @@ const DASHBOARD_REGIONS: [FocusRegion; 10] = [
     FocusRegion::DashboardHrv,
     FocusRegion::DashboardTemp,
     FocusRegion::DashboardHeartRate,
+    FocusRegion::DashboardSpo2,
     FocusRegion::DashboardRespRate,
     FocusRegion::DashboardBreakdown,
     FocusRegion::DashboardHeatmap,
@@ -196,6 +198,7 @@ pub const fn region_label(screen: Screen, region: FocusRegion) -> Option<&'stati
         (Screen::Dashboard, FocusRegion::DashboardHrv) => Some("HRV trend"),
         (Screen::Dashboard, FocusRegion::DashboardTemp) => Some("Body temperature"),
         (Screen::Dashboard, FocusRegion::DashboardHeartRate) => Some("Heart rate"),
+        (Screen::Dashboard, FocusRegion::DashboardSpo2) => Some("SpO2"),
         (Screen::Dashboard, FocusRegion::DashboardRespRate) => Some("Respiratory rate"),
         (Screen::Dashboard, FocusRegion::DashboardBreakdown) => Some("Readiness breakdown"),
         (Screen::Dashboard, FocusRegion::DashboardHeatmap) => Some("Weekly trends"),

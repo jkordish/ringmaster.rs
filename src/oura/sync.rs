@@ -9,15 +9,17 @@ use crate::oura::auth;
 use crate::oura::client::{FixtureOuraClient, OuraClient, PageFetch, ReqwestOuraClient};
 use crate::oura::models::{
     CapabilityKind, CapabilityReport, DailyActivityDocument, DailyCardiovascularAgeDocument,
-    DailyReadinessDocument, DailyResilienceDocument, DailySleepDocument, DailyStressDocument,
-    RestModePeriodDocument, SleepTimeDocument, Vo2MaxDocument, WorkoutDocument,
+    DailyReadinessDocument, DailyResilienceDocument, DailySleepDocument, DailySpO2Document,
+    DailyStressDocument, RestModePeriodDocument, SleepDocument, SleepTimeDocument, Vo2MaxDocument,
+    WorkoutDocument,
 };
 use crate::refresh::SyncFamily;
 use crate::store::queries::{
     AuthSessionRecord, DailyActivityRecord, DailyCardiovascularAgeRecord, DailyReadinessRecord,
-    DailyResilienceRecord, DailySleepRecord, DailyStressRecord, EnhancedTagRecord,
+    DailyResilienceRecord, DailySleepRecord, DailySpO2Record, DailyStressRecord, EnhancedTagRecord,
     HeartrateSampleRecord, OURA_PROVIDER, PersonalInfoRecord, RestModePeriodRecord, SessionRecord,
-    SleepTimeRecord, SyncRunStatus, SyncStateRecord, Vo2MaxRecord, WorkoutRecord,
+    SleepPeriodRecord, SleepTimeRecord, SyncRunStatus, SyncStateRecord, Vo2MaxRecord,
+    WorkoutRecord,
 };
 use crate::store::{Store, StorePlan};
 
@@ -600,9 +602,11 @@ struct DailySyncWindow {
 }
 
 struct DailyPageFetches {
-    sleep_pages: Vec<PageFetch<DailySleepDocument>>,
+    daily_sleep_pages: Vec<PageFetch<DailySleepDocument>>,
+    sleep_period_pages: Vec<PageFetch<SleepDocument>>,
     readiness_pages: Vec<PageFetch<DailyReadinessDocument>>,
     activity_pages: Vec<PageFetch<DailyActivityDocument>>,
+    daily_spo2_pages: Vec<PageFetch<DailySpO2Document>>,
     sleep_time_pages: Vec<PageFetch<SleepTimeDocument>>,
     rest_mode_period_pages: Vec<PageFetch<RestModePeriodDocument>>,
     daily_stress_pages: Vec<PageFetch<DailyStressDocument>>,
@@ -634,7 +638,7 @@ async fn sync_daily(
     }
 
     let window = resolve_daily_sync_window(config, &store_plan, options)?;
-    let pages = fetch_daily_pages(client, &window).await?;
+    let pages = fetch_daily_pages(client, capability_report, &window).await?;
     let imported_at = now_rfc3339()?;
     let persist_store = reopen_store(config, &store_plan)?;
     persist_daily_pages(&persist_store, &pages, &imported_at, options)?;
@@ -681,12 +685,15 @@ fn resolve_daily_sync_window(
 
 async fn fetch_daily_pages(
     client: &dyn OuraClient,
+    capability_report: &CapabilityReport,
     window: &DailySyncWindow,
 ) -> Result<DailyPageFetches> {
     let (
-        sleep_pages_result,
+        daily_sleep_pages_result,
+        sleep_period_pages_result,
         readiness_pages_result,
         activity_pages_result,
+        daily_spo2_pages_result,
         sleep_time_pages_result,
         rest_mode_period_pages_result,
         daily_stress_pages_result,
@@ -695,21 +702,92 @@ async fn fetch_daily_pages(
         vo2_max_pages_result,
     ) = tokio::join!(
         client.fetch_daily_sleep(window.start_date.clone(), window.end_date.clone()),
+        client.fetch_sleep(window.start_date.clone(), window.end_date.clone()),
         client.fetch_daily_readiness(window.start_date.clone(), window.end_date.clone()),
         client.fetch_daily_activity(window.start_date.clone(), window.end_date.clone()),
-        client.fetch_sleep_time(window.start_date.clone(), window.end_date.clone()),
-        client.fetch_rest_mode_periods(window.start_date.clone(), window.end_date.clone()),
-        client.fetch_daily_stress(window.start_date.clone(), window.end_date.clone()),
-        client.fetch_daily_resilience(window.start_date.clone(), window.end_date.clone()),
-        client.fetch_daily_cardiovascular_age(window.start_date.clone(), window.end_date.clone()),
-        client.fetch_vo2_max(window.start_date.clone(), window.end_date.clone()),
+        async {
+            if capability_report.is_granted(CapabilityKind::Spo2) {
+                client
+                    .fetch_daily_spo2(window.start_date.clone(), window.end_date.clone())
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if capability_report.is_granted(CapabilityKind::Stress) {
+                client
+                    .fetch_sleep_time(window.start_date.clone(), window.end_date.clone())
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if capability_report.is_granted(CapabilityKind::Stress) {
+                client
+                    .fetch_rest_mode_periods(window.start_date.clone(), window.end_date.clone())
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if capability_report.is_granted(CapabilityKind::Stress) {
+                client
+                    .fetch_daily_stress(window.start_date.clone(), window.end_date.clone())
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if capability_report.is_granted(CapabilityKind::HeartHealth) {
+                client
+                    .fetch_daily_resilience(window.start_date.clone(), window.end_date.clone())
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if capability_report.is_granted(CapabilityKind::HeartHealth) {
+                client
+                    .fetch_daily_cardiovascular_age(
+                        window.start_date.clone(),
+                        window.end_date.clone(),
+                    )
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if capability_report.is_granted(CapabilityKind::HeartHealth) {
+                client
+                    .fetch_vo2_max(window.start_date.clone(), window.end_date.clone())
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
     );
     let mut optional_failures = Vec::new();
 
     Ok(DailyPageFetches {
-        sleep_pages: sleep_pages_result?,
+        daily_sleep_pages: daily_sleep_pages_result?,
+        sleep_period_pages: collect_optional_daily_pages(
+            "sleep",
+            sleep_period_pages_result,
+            &mut optional_failures,
+        ),
         readiness_pages: readiness_pages_result?,
         activity_pages: activity_pages_result?,
+        daily_spo2_pages: collect_optional_daily_pages(
+            "daily_spo2",
+            daily_spo2_pages_result,
+            &mut optional_failures,
+        ),
         sleep_time_pages: collect_optional_daily_pages(
             "sleep_time",
             sleep_time_pages_result,
@@ -754,9 +832,11 @@ fn persist_daily_pages(
         return Ok(());
     }
 
-    persist_daily_sleep_pages(persist_store, &pages.sleep_pages, imported_at)?;
+    persist_daily_sleep_pages(persist_store, &pages.daily_sleep_pages, imported_at)?;
+    persist_sleep_period_pages(persist_store, &pages.sleep_period_pages, imported_at)?;
     persist_daily_readiness_pages(persist_store, &pages.readiness_pages, imported_at)?;
     persist_daily_activity_pages(persist_store, &pages.activity_pages, imported_at)?;
+    persist_daily_spo2_pages(persist_store, &pages.daily_spo2_pages, imported_at)?;
     persist_sleep_time_pages(persist_store, &pages.sleep_time_pages, imported_at)?;
     persist_rest_mode_period_pages(persist_store, &pages.rest_mode_period_pages, imported_at)?;
     persist_daily_stress_pages(persist_store, &pages.daily_stress_pages, imported_at)?;
@@ -784,6 +864,36 @@ fn persist_daily_sleep_pages(
                     day: document.day.clone(),
                     sleep_score: document.score,
                     sleep_duration_seconds: document.sleep_duration_seconds,
+                    raw_cache_key: Some(page.raw_payload.cache_key.clone()),
+                    updated_at: imported_at.to_owned(),
+                })?;
+        }
+    }
+    Ok(())
+}
+
+fn persist_sleep_period_pages(
+    persist_store: &Store,
+    pages: &[PageFetch<SleepDocument>],
+    imported_at: &str,
+) -> Result<()> {
+    for page in pages {
+        persist_store
+            .imports()
+            .upsert_raw_payload(&page.raw_payload)?;
+        for document in &page.documents {
+            persist_store
+                .imports()
+                .upsert_sleep_period(&SleepPeriodRecord {
+                    oura_id: document.id.clone(),
+                    day: document.day.clone(),
+                    bedtime_start: document.bedtime_start.clone(),
+                    bedtime_end: document.bedtime_end.clone(),
+                    sleep_type: document.sleep_type.clone(),
+                    average_heart_rate: document.average_heart_rate,
+                    average_hrv: document.average_hrv,
+                    average_breath: document.average_breath,
+                    total_sleep_duration: document.total_sleep_duration,
                     raw_cache_key: Some(page.raw_payload.cache_key.clone()),
                     updated_at: imported_at.to_owned(),
                 })?;
@@ -837,6 +947,34 @@ fn persist_daily_activity_pages(
                     active_calories: document.active_calories,
                     steps: document.steps,
                     total_calories: document.total_calories,
+                    raw_cache_key: Some(page.raw_payload.cache_key.clone()),
+                    updated_at: imported_at.to_owned(),
+                })?;
+        }
+    }
+    Ok(())
+}
+
+fn persist_daily_spo2_pages(
+    persist_store: &Store,
+    pages: &[PageFetch<DailySpO2Document>],
+    imported_at: &str,
+) -> Result<()> {
+    for page in pages {
+        persist_store
+            .imports()
+            .upsert_raw_payload(&page.raw_payload)?;
+        for document in &page.documents {
+            persist_store
+                .imports()
+                .upsert_daily_spo2(&DailySpO2Record {
+                    oura_id: Some(document.id.clone()),
+                    day: document.day.clone(),
+                    average_spo2: document
+                        .spo2_percentage
+                        .as_ref()
+                        .and_then(|value| value.average),
+                    breathing_disturbance_index: document.breathing_disturbance_index,
                     raw_cache_key: Some(page.raw_payload.cache_key.clone()),
                     updated_at: imported_at.to_owned(),
                 })?;
@@ -1017,9 +1155,11 @@ fn summarize_daily_sync(
     window: &DailySyncWindow,
     pages: &DailyPageFetches,
 ) -> (SyncRunStatus, String, Option<OuraProblem>, usize) {
-    let imported_rows = count_documents(&pages.sleep_pages)
+    let imported_rows = count_documents(&pages.daily_sleep_pages)
+        + count_documents(&pages.sleep_period_pages)
         + count_documents(&pages.readiness_pages)
         + count_documents(&pages.activity_pages)
+        + count_documents(&pages.daily_spo2_pages)
         + count_documents(&pages.sleep_time_pages)
         + count_documents(&pages.rest_mode_period_pages)
         + count_documents(&pages.daily_stress_pages)
@@ -1031,7 +1171,7 @@ fn summarize_daily_sync(
         (
             SyncRunStatus::Success,
             format!(
-                "Imported {imported_rows} daily summary and review-support rows from {} through {}.",
+                "Imported {imported_rows} daily summary, physiology, and review-support rows from {} through {}.",
                 window.start_date, window.end_date
             ),
             None,
@@ -1047,7 +1187,7 @@ fn summarize_daily_sync(
         (
             SyncRunStatus::Partial,
             format!(
-                "Imported {imported_rows} core daily rows from {} through {}; optional review-support endpoints degraded independently: {failure_summary}.",
+                "Imported {imported_rows} core daily and physiology rows from {} through {}; optional review-support endpoints degraded independently: {failure_summary}.",
                 window.start_date, window.end_date
             ),
             pages

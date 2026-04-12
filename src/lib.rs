@@ -1169,6 +1169,7 @@ fn fixture_snapshot_granted_scopes(fixture_dir: &std::path::Path) -> Vec<String>
     }
     let daily_files = [
         fixture_dir.join("daily_sleep.json"),
+        fixture_dir.join("sleep.json"),
         fixture_dir.join("daily_readiness.json"),
         fixture_dir.join("daily_activity.json"),
         fixture_dir.join("sleep_time.json"),
@@ -1196,6 +1197,9 @@ fn fixture_snapshot_granted_scopes(fixture_dir: &std::path::Path) -> Vec<String>
     ];
     if heart_health_files.iter().any(|path| path.is_file()) {
         scopes.push("heart_health".to_owned());
+    }
+    if fixture_dir.join("daily_spo2.json").is_file() {
+        scopes.push("spo2".to_owned());
     }
     if fixture_dir.join("heartrate.json").is_file() {
         scopes.push("heartrate".to_owned());

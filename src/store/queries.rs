@@ -73,6 +73,31 @@ pub struct DailySleepRecord {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct SleepPeriodRecord {
+    pub oura_id: String,
+    pub day: String,
+    pub bedtime_start: Option<String>,
+    pub bedtime_end: Option<String>,
+    pub sleep_type: Option<String>,
+    pub average_heart_rate: Option<f64>,
+    pub average_hrv: Option<f64>,
+    pub average_breath: Option<f64>,
+    pub total_sleep_duration: Option<i64>,
+    pub raw_cache_key: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DailySpO2Record {
+    pub oura_id: Option<String>,
+    pub day: String,
+    pub average_spo2: Option<f64>,
+    pub breathing_disturbance_index: Option<f64>,
+    pub raw_cache_key: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct DailyReadinessRecord {
     pub oura_id: Option<String>,
     pub day: String,
@@ -323,8 +348,10 @@ pub struct RecordCounts {
     pub raw_payloads: u64,
     pub personal_info: u64,
     pub daily_sleep: u64,
+    pub sleep_periods: u64,
     pub daily_readiness: u64,
     pub daily_activity: u64,
+    pub daily_spo2: u64,
     pub sleep_time: u64,
     pub daily_stress: u64,
     pub daily_resilience: u64,
@@ -1106,6 +1133,50 @@ impl<'connection> ImportStore<'connection> {
         Ok(())
     }
 
+    pub fn upsert_sleep_period(&self, record: &SleepPeriodRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO sleep_periods (
+                oura_id,
+                day,
+                bedtime_start,
+                bedtime_end,
+                sleep_type,
+                average_heart_rate,
+                average_hrv,
+                average_breath,
+                total_sleep_duration,
+                raw_cache_key,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            ON CONFLICT(oura_id) DO UPDATE SET
+                day = excluded.day,
+                bedtime_start = excluded.bedtime_start,
+                bedtime_end = excluded.bedtime_end,
+                sleep_type = excluded.sleep_type,
+                average_heart_rate = excluded.average_heart_rate,
+                average_hrv = excluded.average_hrv,
+                average_breath = excluded.average_breath,
+                total_sleep_duration = excluded.total_sleep_duration,
+                raw_cache_key = excluded.raw_cache_key,
+                updated_at = excluded.updated_at",
+            params![
+                record.oura_id,
+                record.day,
+                record.bedtime_start,
+                record.bedtime_end,
+                record.sleep_type,
+                record.average_heart_rate,
+                record.average_hrv,
+                record.average_breath,
+                record.total_sleep_duration,
+                record.raw_cache_key,
+                record.updated_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
     pub fn delete_daily_sleep(&self, day: &str) -> Result<()> {
         if let Some(day_candidate) = extract_day_suffix(day) {
             self.connection.execute(
@@ -1121,6 +1192,35 @@ impl<'connection> ImportStore<'connection> {
                 params![day],
             )?;
         }
+        Ok(())
+    }
+
+    pub fn upsert_daily_spo2(&self, record: &DailySpO2Record) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO daily_spo2 (
+                day,
+                oura_id,
+                average_spo2,
+                breathing_disturbance_index,
+                raw_cache_key,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(day) DO UPDATE SET
+                oura_id = excluded.oura_id,
+                average_spo2 = excluded.average_spo2,
+                breathing_disturbance_index = excluded.breathing_disturbance_index,
+                raw_cache_key = excluded.raw_cache_key,
+                updated_at = excluded.updated_at",
+            params![
+                record.day,
+                record.oura_id,
+                record.average_spo2,
+                record.breathing_disturbance_index,
+                record.raw_cache_key,
+                record.updated_at,
+            ],
+        )?;
+
         Ok(())
     }
 
@@ -3847,6 +3947,86 @@ impl<'connection> ViewStore<'connection> {
         Ok(records)
     }
 
+    pub fn sleep_periods_between_days(
+        &self,
+        start_day: &str,
+        end_day: &str,
+    ) -> Result<Vec<SleepPeriodRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                oura_id,
+                day,
+                bedtime_start,
+                bedtime_end,
+                sleep_type,
+                average_heart_rate,
+                average_hrv,
+                average_breath,
+                total_sleep_duration,
+                raw_cache_key,
+                updated_at
+             FROM sleep_periods
+             WHERE day >= ?1 AND day <= ?2
+             ORDER BY day ASC, COALESCE(bedtime_start, day) ASC, oura_id ASC",
+        )?;
+        let rows = statement.query_map(params![start_day, end_day], |row| {
+            Ok(SleepPeriodRecord {
+                oura_id: row.get(0)?,
+                day: row.get(1)?,
+                bedtime_start: row.get(2)?,
+                bedtime_end: row.get(3)?,
+                sleep_type: row.get(4)?,
+                average_heart_rate: row.get(5)?,
+                average_hrv: row.get(6)?,
+                average_breath: row.get(7)?,
+                total_sleep_duration: row.get(8)?,
+                raw_cache_key: row.get(9)?,
+                updated_at: row.get(10)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
+    pub fn daily_spo2_between_days(
+        &self,
+        start_day: &str,
+        end_day: &str,
+    ) -> Result<Vec<DailySpO2Record>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                day,
+                oura_id,
+                average_spo2,
+                breathing_disturbance_index,
+                raw_cache_key,
+                updated_at
+             FROM daily_spo2
+             WHERE day >= ?1 AND day <= ?2
+             ORDER BY day ASC",
+        )?;
+        let rows = statement.query_map(params![start_day, end_day], |row| {
+            Ok(DailySpO2Record {
+                day: row.get(0)?,
+                oura_id: row.get(1)?,
+                average_spo2: row.get(2)?,
+                breathing_disturbance_index: row.get(3)?,
+                raw_cache_key: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
     pub fn daily_readiness_between_days(
         &self,
         start_day: &str,
@@ -4344,8 +4524,10 @@ impl<'connection> ViewStore<'connection> {
             raw_payloads: row_count(self.connection, "raw_payload_cache")?,
             personal_info: row_count(self.connection, "personal_info")?,
             daily_sleep: row_count(self.connection, "daily_sleep")?,
+            sleep_periods: row_count(self.connection, "sleep_periods")?,
             daily_readiness: row_count(self.connection, "daily_readiness")?,
             daily_activity: row_count(self.connection, "daily_activity")?,
+            daily_spo2: row_count(self.connection, "daily_spo2")?,
             sleep_time: row_count(self.connection, "sleep_time")?,
             daily_stress: row_count(self.connection, "daily_stress")?,
             daily_resilience: row_count(self.connection, "daily_resilience")?,

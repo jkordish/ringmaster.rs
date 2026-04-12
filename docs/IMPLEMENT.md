@@ -42,7 +42,7 @@ cargo run -- webhook subscriptions list --fixture-dir tests/fixtures/webhooks
 cargo run -- webhook subscriptions sync --dry-run --fixture-dir tests/fixtures/webhooks
 ```
 
-`auth login` now requests the broader current Oura scope set by default and the product surfaces the result explicitly in `doctor`, auth status, and the TUI ops/auth readouts. Scopes that are granted but not yet wired into local sync, such as `spo2` and `ring_configuration`, are shown as future-ready instead of being silently ignored.
+`auth login` now requests the broader current Oura scope set by default and the product surfaces the result explicitly in `doctor`, auth status, and the TUI ops/auth readouts. `spo2` is now wired into local sync and dashboard/status telemetry, while scopes such as `ring_configuration` are still shown as future-ready instead of being silently ignored.
 
 ## TUI navigation runtime
 
@@ -92,6 +92,8 @@ Canonical promoted controls now include:
 - AI preflight `Controls`
 
 Navigation regression coverage now lives in the app, keybinding, and TUI test suites plus the deterministic `ui snapshot --demo` artifact pass.
+
+Dashboard, Explain, Patterns, and Review now all use the shared telemetry panel language. Explain and Patterns remain mostly read-oriented, but they no longer use one-off prose shells: the screens render claim/evidence/context, grouped findings, and review detail through the same availability-aware panel contract as the dashboard physiology surfaces.
 
 ## Snapshot library runtime
 

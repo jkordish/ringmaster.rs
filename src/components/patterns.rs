@@ -2,16 +2,22 @@ use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
     prelude::Rect,
-    text::Line,
-    widgets::{List, ListItem, Paragraph, Tabs},
+    widgets::{Paragraph, Tabs, Wrap},
 };
 
 use crate::app::{OverlayToggleView, PatternsModel};
+use crate::navigation::FocusRegion;
 use crate::ui::{
-    chrome::{self, PanelKind},
     layout::UiContext,
+    telemetry::panel_block,
     theme::{Theme, Tone},
 };
+
+#[derive(Debug, Clone, Copy)]
+struct PanelState {
+    focused: bool,
+    expanded: bool,
+}
 
 pub fn draw(
     frame: &mut Frame<'_>,
@@ -19,6 +25,8 @@ pub fn draw(
     model: &PatternsModel,
     ui: &UiContext,
     theme: &Theme,
+    focused_region: FocusRegion,
+    expanded_region: Option<FocusRegion>,
 ) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -27,7 +35,7 @@ pub fn draw(
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Min(if ui.viewport.is_compact() { 10 } else { 14 }),
-            Constraint::Length(if ui.viewport.is_compact() { 4 } else { 6 }),
+            Constraint::Length(if ui.viewport.is_compact() { 5 } else { 6 }),
         ])
         .split(area);
 
@@ -38,22 +46,35 @@ pub fn draw(
     };
     frame.render_widget(
         Paragraph::new(headline)
+            .wrap(Wrap { trim: true })
             .style(theme.hero())
-            .block(chrome::panel(
+            .block(panel_block(
                 theme,
-                chrome::title_with_badge(
-                    theme,
-                    "Patterns browser",
-                    "cross-day associations",
-                    Tone::Accent,
-                ),
-                PanelKind::Hero,
+                "Patterns / Browser",
+                "LOCAL",
+                Tone::Info,
+                false,
+                false,
             )),
         layout[0],
     );
 
-    draw_metric_tabs(frame, layout[1], model, theme);
-    draw_overlay_tabs(frame, layout[2], &model.overlay_toggles, theme);
+    draw_metric_tabs(
+        frame,
+        layout[1],
+        model,
+        theme,
+        focused_region == FocusRegion::ContextPrimary,
+        expanded_region == Some(FocusRegion::ContextPrimary),
+    );
+    draw_overlay_tabs(
+        frame,
+        layout[2],
+        &model.overlay_toggles,
+        theme,
+        focused_region == FocusRegion::ContextSecondary,
+        expanded_region == Some(FocusRegion::ContextSecondary),
+    );
 
     let body = Layout::default()
         .direction(if ui.viewport.is_compact() {
@@ -62,93 +83,87 @@ pub fn draw(
             Direction::Horizontal
         })
         .constraints(if ui.viewport.is_compact() {
-            vec![Constraint::Min(6), Constraint::Length(4)]
+            vec![Constraint::Percentage(62), Constraint::Percentage(38)]
         } else {
             vec![Constraint::Percentage(64), Constraint::Percentage(36)]
         })
         .split(layout[3]);
 
-    let associations = if model.rows.is_empty() {
-        vec![ListItem::new(chrome::badge_label(
-            "WAIT",
-            &model.empty_message,
-        ))]
-    } else {
-        model
-            .rows
-            .iter()
-            .enumerate()
-            .map(|(index, row)| {
-                let prefix = if index == 0 { "[lead]" } else { "[scan]" };
-                let badge_line = if row.badges.is_empty() {
-                    String::new()
-                } else {
-                    format!("\n      {}", row.badges.join(" / "))
-                };
-                ListItem::new(format!(
-                    "{prefix} {}\n      {}{}",
-                    row.headline, row.detail, badge_line
-                ))
-            })
-            .collect::<Vec<_>>()
-    };
-    frame.render_widget(
-        List::new(associations).block(chrome::panel(
-            theme,
-            chrome::title_with_badge(theme, "Grouped findings", "compare across days", Tone::Info),
-            PanelKind::Section,
-        )),
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .split(body[1]);
+
+    render_lines_panel(
+        frame,
         body[0],
+        theme,
+        "Grouped Findings",
+        model.findings_availability,
+        &pattern_lines(model),
+        PanelState {
+            focused: focused_region == FocusRegion::Primary,
+            expanded: expanded_region == Some(FocusRegion::Primary),
+        },
+    );
+    render_lines_panel(
+        frame,
+        right[0],
+        theme,
+        "Reading Guide",
+        model.guide_availability,
+        &guide_lines(model),
+        PanelState {
+            focused: false,
+            expanded: false,
+        },
+    );
+    render_lines_panel(
+        frame,
+        right[1],
+        theme,
+        "Interpretation",
+        model.interpretation_availability,
+        &[String::from(
+            "Patterns stay descriptive on purpose. Scan recurring pairings here, then pivot into Explain or Timeline when a row suggests a story worth validating.",
+        )],
+        PanelState {
+            focused: false,
+            expanded: false,
+        },
     );
 
-    let notes = model
-        .notes
-        .iter()
-        .map(|note| ListItem::new(format!("[note] {note}")))
-        .chain(std::iter::once(ListItem::new(
-            "[guide] Use the filter strip to narrow families, then switch views to validate a finding.",
-        )))
-        .chain(model.ai_actions.iter().cloned().map(ListItem::new))
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        List::new(notes).block(chrome::panel(
-            theme,
-            Line::from("Reading guide"),
-            PanelKind::Subtle,
-        )),
-        body[1],
-    );
-
-    frame.render_widget(
-        Paragraph::new(
-            "Patterns stay descriptive on purpose. Use this screen to scan recurring pairings, then \
-             pivot into Explain or Timeline when a row suggests a story worth validating.",
-        )
-        .style(theme.annotation())
-        .block(chrome::panel(
-            theme,
-            Line::from("Interpretation"),
-            PanelKind::Subtle,
-        )),
+    render_lines_panel(
+        frame,
         layout[4],
+        theme,
+        "Next Step",
+        ai_panel_availability(model),
+        &model.ai_actions,
+        PanelState {
+            focused: false,
+            expanded: false,
+        },
     );
 }
 
-fn draw_metric_tabs(frame: &mut Frame<'_>, area: Rect, model: &PatternsModel, theme: &Theme) {
+fn draw_metric_tabs(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &PatternsModel,
+    theme: &Theme,
+    focused: bool,
+    expanded: bool,
+) {
     frame.render_widget(
         Tabs::new(model.metric_filters.iter().map(|tab| tab.label))
-            .block(chrome::panel(
+            .block(panel_block(
                 theme,
-                chrome::title_with_badge(
-                    theme,
-                    "Metric filter",
-                    model
-                        .metric_filters
-                        .get(model.selected_filter_index)
-                        .map_or("All", |tab| tab.label),
-                    Tone::Focus,
-                ),
-                PanelKind::Section,
+                "Metric Filter",
+                "FILTER",
+                Tone::Focus,
+                focused,
+                expanded,
             ))
             .style(theme.annotation())
             .highlight_style(theme.emphasis(Tone::Focus))
@@ -163,6 +178,8 @@ fn draw_overlay_tabs(
     area: Rect,
     toggles: &[OverlayToggleView],
     theme: &Theme,
+    focused: bool,
+    expanded: bool,
 ) {
     let selected_index = toggles
         .iter()
@@ -170,17 +187,13 @@ fn draw_overlay_tabs(
         .unwrap_or(0);
     frame.render_widget(
         Tabs::new(toggles.iter().map(overlay_tab_label))
-            .block(chrome::panel(
+            .block(panel_block(
                 theme,
-                chrome::title_with_badge(
-                    theme,
-                    "Family filter",
-                    toggles
-                        .get(selected_index)
-                        .map_or("Workouts", |toggle| toggle.label),
-                    Tone::Info,
-                ),
-                PanelKind::Subtle,
+                "Family Filter",
+                "FILTER",
+                Tone::Info,
+                focused,
+                expanded,
             ))
             .style(theme.annotation())
             .highlight_style(theme.emphasis(Tone::Focus))
@@ -196,4 +209,74 @@ fn overlay_tab_label(toggle: &OverlayToggleView) -> String {
         toggle.label,
         if toggle.enabled { "on" } else { "off" }
     )
+}
+
+fn pattern_lines(model: &PatternsModel) -> Vec<String> {
+    if model.rows.is_empty() {
+        vec!["Patterns browser".to_owned(), model.empty_message.clone()]
+    } else {
+        std::iter::once("Patterns browser".to_owned())
+            .chain(model.rows.iter().enumerate().map(|(index, row)| {
+                let rank = index + 1;
+                let badge_suffix = if row.badges.is_empty() {
+                    String::new()
+                } else {
+                    format!(" | {}", row.badges.join(" / "))
+                };
+                format!("#{rank} {} | {}{}", row.headline, row.detail, badge_suffix)
+            }))
+            .collect()
+    }
+}
+
+fn guide_lines(model: &PatternsModel) -> Vec<String> {
+    let mut lines = model
+        .notes
+        .iter()
+        .map(|note| format!("[note] {note}"))
+        .collect::<Vec<_>>();
+    lines.push(
+        "[guide] Use the filter strip to narrow families, then switch views to validate a finding."
+            .to_owned(),
+    );
+    lines
+}
+
+const fn ai_panel_availability(
+    model: &PatternsModel,
+) -> crate::ui::telemetry::TelemetryAvailability {
+    if model.ai_actions.is_empty() {
+        crate::ui::telemetry::TelemetryAvailability::NoData
+    } else {
+        crate::ui::telemetry::TelemetryAvailability::Fresh
+    }
+}
+
+fn render_lines_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: &Theme,
+    title: &str,
+    availability: crate::ui::telemetry::TelemetryAvailability,
+    lines: &[String],
+    panel_state: PanelState,
+) {
+    let body = if lines.is_empty() {
+        "No local entries yet.".to_owned()
+    } else {
+        lines.join("\n")
+    };
+    frame.render_widget(
+        Paragraph::new(body)
+            .wrap(Wrap { trim: true })
+            .block(panel_block(
+                theme,
+                title,
+                availability.label(),
+                availability.tone(),
+                panel_state.focused,
+                panel_state.expanded,
+            )),
+        area,
+    );
 }

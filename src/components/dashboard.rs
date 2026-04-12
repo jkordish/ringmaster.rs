@@ -75,7 +75,11 @@ fn draw_wide(
         .split(top[1]);
     let center_lower = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(33), Constraint::Percentage(67)])
+        .constraints([
+            Constraint::Percentage(24),
+            Constraint::Percentage(43),
+            Constraint::Percentage(33),
+        ])
         .split(center[1]);
     let right = Layout::default()
         .direction(Direction::Vertical)
@@ -128,6 +132,15 @@ fn draw_wide(
         theme,
         focused_region == FocusRegion::DashboardHeartRate,
         expanded_region == Some(FocusRegion::DashboardHeartRate),
+    );
+    render_trend_panel(
+        frame,
+        center_lower[2],
+        "SpO2",
+        &model.spo2,
+        theme,
+        focused_region == FocusRegion::DashboardSpo2,
+        expanded_region == Some(FocusRegion::DashboardSpo2),
     );
     render_score_tile(
         frame,
@@ -195,9 +208,10 @@ fn draw_medium(
     let row2 = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(42),
-            Constraint::Percentage(24),
-            Constraint::Percentage(34),
+            Constraint::Percentage(26),
+            Constraint::Percentage(18),
+            Constraint::Percentage(30),
+            Constraint::Percentage(26),
         ])
         .split(layout[2]);
     let row3 = Layout::default()
@@ -260,6 +274,15 @@ fn draw_medium(
         theme,
         focused_region == FocusRegion::DashboardHeartRate,
         expanded_region == Some(FocusRegion::DashboardHeartRate),
+    );
+    render_trend_panel(
+        frame,
+        row2[3],
+        "SpO2",
+        &model.spo2,
+        theme,
+        focused_region == FocusRegion::DashboardSpo2,
+        expanded_region == Some(FocusRegion::DashboardSpo2),
     );
     render_breakdown_panel(
         frame,
@@ -336,7 +359,11 @@ fn draw_compact(
 
     let phys1 = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
         .split(layout[3]);
     let phys2 = Layout::default()
         .direction(Direction::Horizontal)
@@ -358,6 +385,15 @@ fn draw_compact(
         theme,
         focused_region == FocusRegion::DashboardTemp,
         expanded_region == Some(FocusRegion::DashboardTemp),
+    );
+    render_trend_panel(
+        frame,
+        phys1[2],
+        "SpO2",
+        &model.spo2,
+        theme,
+        focused_region == FocusRegion::DashboardSpo2,
+        expanded_region == Some(FocusRegion::DashboardSpo2),
     );
     render_trend_panel(
         frame,

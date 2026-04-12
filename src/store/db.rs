@@ -186,6 +186,6 @@ mod tests {
     fn opens_isolated_test_store() {
         let store = ok(Store::open_test_store(), "store should open");
 
-        assert_eq!(store.migration_report().current_version, 17);
+        assert_eq!(store.migration_report().current_version, 18);
     }
 }

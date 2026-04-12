@@ -143,6 +143,46 @@ async fn ui_snapshot_ai_demo_writes_ai_workbench_artifacts() {
 }
 
 #[tokio::test]
+async fn ui_snapshot_demo_writes_telemetry_screen_artifacts() {
+    let out_dir = ok(tempdir(), "tempdir should build");
+    let out_path = out_dir.path().join("telemetry-snapshots");
+    let out_arg = out_path.to_string_lossy().into_owned();
+
+    let result = ringmaster::run_from([
+        "ringmaster",
+        "ui",
+        "snapshot",
+        "--demo",
+        "--screen",
+        "explain",
+        "--screen",
+        "patterns",
+        "--screen",
+        "review",
+        "--size",
+        "compact",
+        "--size",
+        "wide",
+        "--out-dir",
+        &out_arg,
+    ])
+    .await;
+    assert!(result.is_ok(), "telemetry ui snapshot should run");
+
+    let output = some(
+        ok(result, "unexpected telemetry ui snapshot failure"),
+        "telemetry ui snapshot should render command output",
+    );
+
+    assert!(output.contains("explain"));
+    assert!(output.contains("patterns"));
+    assert!(output.contains("review"));
+    assert!(out_path.join("explain-compact.txt").exists());
+    assert!(out_path.join("patterns-wide.txt").exists());
+    assert!(out_path.join("review-compact.txt").exists());
+}
+
+#[tokio::test]
 async fn ui_snapshot_scenario_fixture_root_writes_scenario_tagged_artifacts() {
     let out_dir = ok(tempdir(), "tempdir should build");
     let out_path = out_dir.path().join("phase7");

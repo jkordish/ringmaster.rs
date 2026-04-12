@@ -11,10 +11,10 @@ use crate::config::Config;
 use crate::error::{OuraApiError, OuraProblem, Result, RingmasterError};
 use crate::oura::models::{
     CapabilityKind, CapabilityReport, DailyActivityDocument, DailyCardiovascularAgeDocument,
-    DailyReadinessDocument, DailyResilienceDocument, DailySleepDocument, DailyStressDocument,
-    EnhancedTagDocument, HeartRateDocument, PagedCollection, PersonalInfoDocument,
-    RestModePeriodDocument, SessionDocument, SleepTimeDocument, TimeSeriesCollection,
-    Vo2MaxDocument, WorkoutDocument,
+    DailyReadinessDocument, DailyResilienceDocument, DailySleepDocument, DailySpO2Document,
+    DailyStressDocument, EnhancedTagDocument, HeartRateDocument, PagedCollection,
+    PersonalInfoDocument, RestModePeriodDocument, SessionDocument, SleepDocument,
+    SleepTimeDocument, TimeSeriesCollection, Vo2MaxDocument, WorkoutDocument,
 };
 use crate::store::queries::RawPayloadRecord;
 
@@ -43,6 +43,16 @@ pub trait OuraClient: Send + Sync {
         start_date: String,
         end_date: String,
     ) -> ClientFuture<'_, Vec<PageFetch<DailySleepDocument>>>;
+    fn fetch_sleep(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<SleepDocument>>>;
+    fn fetch_daily_spo2(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<DailySpO2Document>>>;
     fn fetch_daily_readiness(
         &self,
         start_date: String,
@@ -315,6 +325,36 @@ impl OuraClient for ReqwestOuraClient {
             self.fetch_paged_collection(
                 "daily_sleep",
                 "daily",
+                vec![("start_date", start_date), ("end_date", end_date)],
+            )
+            .await
+        })
+    }
+
+    fn fetch_sleep(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<SleepDocument>>> {
+        Box::pin(async move {
+            self.fetch_paged_collection(
+                "sleep",
+                "daily",
+                vec![("start_date", start_date), ("end_date", end_date)],
+            )
+            .await
+        })
+    }
+
+    fn fetch_daily_spo2(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<DailySpO2Document>>> {
+        Box::pin(async move {
+            self.fetch_paged_collection(
+                "daily_spo2",
+                "spo2",
                 vec![("start_date", start_date), ("end_date", end_date)],
             )
             .await
@@ -705,6 +745,40 @@ impl OuraClient for FixtureOuraClient {
         })
     }
 
+    fn fetch_sleep(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<SleepDocument>>> {
+        Box::pin(async move {
+            self.load_paged(
+                "sleep.json",
+                "sleep",
+                "daily",
+                "day",
+                &start_date,
+                &end_date,
+            )
+        })
+    }
+
+    fn fetch_daily_spo2(
+        &self,
+        start_date: String,
+        end_date: String,
+    ) -> ClientFuture<'_, Vec<PageFetch<DailySpO2Document>>> {
+        Box::pin(async move {
+            self.load_paged(
+                "daily_spo2.json",
+                "daily_spo2",
+                "spo2",
+                "day",
+                &start_date,
+                &end_date,
+            )
+        })
+    }
+
     fn fetch_daily_readiness(
         &self,
         start_date: String,
@@ -924,6 +998,25 @@ impl SerializeableDocument for DailySleepDocument {
     }
 }
 
+impl SerializeableDocument for SleepDocument {
+    fn field_value(&self, field_name: &str) -> Option<&str> {
+        match field_name {
+            "day" => Some(self.day.as_str()),
+            "timestamp" => self.bedtime_start.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+impl SerializeableDocument for DailySpO2Document {
+    fn field_value(&self, field_name: &str) -> Option<&str> {
+        match field_name {
+            "day" => Some(self.day.as_str()),
+            _ => None,
+        }
+    }
+}
+
 impl SerializeableDocument for DailyReadinessDocument {
     fn field_value(&self, field_name: &str) -> Option<&str> {
         match field_name {
@@ -1046,6 +1139,7 @@ fn available_fixture_scopes(fixture_dir: &Path) -> Vec<String> {
     }
     let daily_files = [
         fixture_dir.join("daily_sleep.json"),
+        fixture_dir.join("sleep.json"),
         fixture_dir.join("daily_readiness.json"),
         fixture_dir.join("daily_activity.json"),
         fixture_dir.join("sleep_time.json"),
@@ -1073,6 +1167,9 @@ fn available_fixture_scopes(fixture_dir: &Path) -> Vec<String> {
     ];
     if heart_health_files.iter().any(|path| path.is_file()) {
         scopes.push(CapabilityKind::HeartHealth.scope_name().to_owned());
+    }
+    if fixture_dir.join("daily_spo2.json").is_file() {
+        scopes.push(CapabilityKind::Spo2.scope_name().to_owned());
     }
     if fixture_dir.join("heartrate.json").is_file() {
         scopes.push(CapabilityKind::Heartrate.scope_name().to_owned());
