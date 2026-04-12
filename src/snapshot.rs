@@ -1272,13 +1272,60 @@ fn build_snapshot_raw_tables(record_counts: &RecordCounts) -> BTreeMap<String, u
 }
 
 fn snapshot_hash_for_bundle(bundle: &SnapshotBundleV1) -> Result<String> {
-    let serialized_without_hash = serde_json::to_string(bundle)?;
-    let round_tripped_without_hash =
-        serde_json::from_str::<SnapshotBundleV1>(&serialized_without_hash)?;
-    let canonical_without_hash = serde_json::to_string(&round_tripped_without_hash)?;
+    let mut without_hash = bundle.clone();
+    without_hash.metadata.snapshot_hash.clear();
+    let serialized_without_hash = serde_json::to_string(&without_hash)?;
+    let mut canonical_value = serde_json::from_str::<serde_json::Value>(&serialized_without_hash)?;
+    canonicalize_snapshot_hash_value(&mut canonical_value, bundle.schema_version.as_str());
+    let canonical_without_hash = serde_json::to_string(&canonical_value)?;
     Ok(hex::encode(Sha256::digest(
         canonical_without_hash.as_bytes(),
     )))
+}
+
+fn canonicalize_snapshot_hash_value(value: &mut serde_json::Value, schema_version: &str) {
+    if !matches!(
+        schema_version,
+        "ringmaster.snapshot.v1" | "ringmaster.snapshot.v2"
+    ) {
+        return;
+    }
+
+    let Some(bundle) = value.as_object_mut() else {
+        return;
+    };
+    if let Some(metadata) = bundle
+        .get_mut("metadata")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        metadata.remove("evidence_registry_version");
+        metadata.remove("active_population_profile");
+    }
+    if let Some(metrics) = bundle
+        .get_mut("metrics")
+        .and_then(serde_json::Value::as_object_mut)
+        && let Some(daily_scores) = metrics
+            .get_mut("daily_scores")
+            .and_then(serde_json::Value::as_array_mut)
+    {
+        for score in daily_scores {
+            if let Some(score_object) = score.as_object_mut() {
+                score_object.remove("sleep_duration_seconds");
+            }
+        }
+    }
+    for field in ["trend_summaries", "pattern_summaries", "review_signals"] {
+        if let Some(entries) = bundle
+            .get_mut(field)
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for entry in entries {
+                if let Some(entry_object) = entry.as_object_mut() {
+                    entry_object.remove("evidence");
+                }
+            }
+        }
+    }
 }
 
 fn round_trip_snapshot_bundle(bundle: &SnapshotBundleV1) -> Result<SnapshotBundleV1> {
@@ -1442,16 +1489,14 @@ pub fn validate_snapshot_bundle(bundle: &SnapshotBundleV1) -> Result<()> {
         )));
     }
 
-    let mut without_hash = bundle.clone();
+    let without_hash = bundle.clone();
     let observed_hash = without_hash.metadata.snapshot_hash.clone();
     if observed_hash.trim().is_empty() {
         return Err(RingmasterError::Config(
             "snapshot artifact is missing metadata.snapshot_hash".to_owned(),
         ));
     }
-    without_hash.metadata.snapshot_hash.clear();
-    let canonical_without_hash = serde_json::to_string(&without_hash)?;
-    let expected_hash = hex::encode(Sha256::digest(canonical_without_hash.as_bytes()));
+    let expected_hash = snapshot_hash_for_bundle(&without_hash)?;
     if observed_hash != expected_hash {
         return Err(RingmasterError::Config(format!(
             "snapshot hash mismatch: expected `{expected_hash}` but found `{observed_hash}`"
@@ -2481,6 +2526,7 @@ mod tests {
         DailyActivityRecord, DailyReadinessRecord, DailySleepRecord, WorkoutRecord,
     };
     use crate::test_support::{ok, some};
+    use sha2::{Digest, Sha256};
 
     fn seed_history(store: &Store) {
         for (day, sleep, readiness, activity) in [
@@ -2797,6 +2843,16 @@ mod tests {
             .as_object_mut()
             .unwrap_or_else(|| panic!("daily score object should exist"))
             .remove("sleep_duration_seconds");
+        let mut hashed_legacy_json = legacy_json.clone();
+        hashed_legacy_json["metadata"]["snapshot_hash"] = serde_json::Value::String(String::new());
+        let legacy_hash = hex::encode(Sha256::digest(
+            ok(
+                serde_json::to_string(&hashed_legacy_json),
+                "legacy snapshot json should serialize for hashing",
+            )
+            .as_bytes(),
+        ));
+        legacy_json["metadata"]["snapshot_hash"] = serde_json::Value::String(legacy_hash);
 
         let loaded = ok(
             deserialize_snapshot_bundle(&ok(

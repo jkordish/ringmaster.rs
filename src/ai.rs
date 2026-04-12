@@ -2594,6 +2594,11 @@ mod tests {
         };
         let canonical_without_hash = serde_json::to_string(&bundle)
             .unwrap_or_else(|error| unreachable!("bundle should encode: {error}"));
+        let canonical_without_hash = serde_json::to_string(
+            &serde_json::from_str::<serde_json::Value>(&canonical_without_hash)
+                .unwrap_or_else(|error| unreachable!("bundle json should normalize: {error}")),
+        )
+        .unwrap_or_else(|error| unreachable!("bundle json should re-encode: {error}"));
         bundle.metadata.snapshot_hash =
             hex::encode(sha2::Sha256::digest(canonical_without_hash.as_bytes()));
         bundle
