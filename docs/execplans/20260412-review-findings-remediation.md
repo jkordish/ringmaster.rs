@@ -6,7 +6,7 @@ Resolve the material findings from the workspace review without widening scope b
 
 ## Why
 
-The current tree has two runtime correctness bugs, one cross-cutting date/window reliability issue, and a release-hygiene gap in dependency/policy checks.
+The current tree has two runtime correctness bugs, one cross-cutting date/window reliability issue, a release-hygiene gap in dependency/policy checks, and a second review round that surfaced snapshot compatibility plus data-quality regressions in the new guidance features.
 
 ## Current state
 
@@ -41,7 +41,9 @@ The current tree has two runtime correctness bugs, one cross-cutting date/window
 - `src/app.rs`
 - `src/lib.rs`
 - `src/snapshot.rs`
+- `src/store/migrations.rs`
 - `src/store/queries.rs`
+- `src/review/features.rs`
 - `src/oura/models.rs`
 - `src/tui.rs` if tests need adjustment
 - `Cargo.lock` and possibly `Cargo.toml`
@@ -54,6 +56,9 @@ The current tree has two runtime correctness bugs, one cross-cutting date/window
 - [x] Split mutating and non-mutating live-state builders and cover snapshot/read-only paths
 - [x] Centralize local-day logic and update affected tests
 - [x] Resolve audit/deny gaps and rerun verification
+- [x] Restore backward compatibility for previously exported snapshot artifacts
+- [x] Load enough comparison-window signal history for weekly activity snapshot trends
+- [x] Backfill `daily_sleep.sleep_duration_seconds` during version 17 migration and tighten workout guidance handling
 
 ## Verification
 

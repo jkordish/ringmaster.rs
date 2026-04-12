@@ -9,7 +9,7 @@ use crate::review::registry::{SignalDirectionality, signal_definitions};
 use crate::store::queries::{
     DailyActivityRecord, DailyCardiovascularAgeRecord, DailyOverviewRow, DailyReadinessRecord,
     DailyResilienceRecord, DailyStressRecord, RestModePeriodRecord, ReviewSignalDayRecord,
-    SleepTimeRecord, Vo2MaxRecord,
+    SleepTimeRecord, Vo2MaxRecord, WorkoutRecord,
 };
 
 const COMPARABLE_MEDIUM_DAYS: usize = 7;
@@ -31,6 +31,7 @@ pub enum ReviewSufficiency {
 pub struct FeatureInputs<'a> {
     pub daily_history: &'a [DailyOverviewRow],
     pub daily_activity: &'a [DailyActivityRecord],
+    pub workouts: &'a [WorkoutRecord],
     pub daily_readiness: &'a [DailyReadinessRecord],
     pub daily_stress: &'a [DailyStressRecord],
     pub daily_resilience: &'a [DailyResilienceRecord],
@@ -129,6 +130,15 @@ pub fn build_review_signal_days(inputs: &FeatureInputs<'_>) -> Result<Vec<Review
     for row in inputs.daily_history {
         insert_numeric_seed(
             &mut series,
+            "sleep_duration",
+            &row.day,
+            row.sleep_duration_seconds
+                .map(crate::numeric::i64_to_f64)
+                .map(|seconds| seconds / 3600.0),
+            &json!({ "source_family": "daily_sleep" }),
+        )?;
+        insert_numeric_seed(
+            &mut series,
             "sleep_score",
             &row.day,
             row.sleep_score.map(f64::from),
@@ -164,6 +174,34 @@ pub fn build_review_signal_days(inputs: &FeatureInputs<'_>) -> Result<Vec<Review
             &row.day,
             Some(crate::numeric::i64_to_f64(row.steps)),
             &json!({ "source_family": "daily_activity" }),
+        )?;
+    }
+
+    let weekly_activity = workout_activity_days(inputs.workouts)?;
+    for (day, summary) in weekly_activity {
+        insert_numeric_seed(
+            &mut series,
+            "weekly_activity_minutes",
+            &day,
+            Some(summary.moderate_or_higher_minutes),
+            &json!({
+                "source_family": "workout",
+                "distribution_day": summary.active_distribution_day,
+            }),
+        )?;
+        insert_numeric_seed(
+            &mut series,
+            "weekly_activity_distribution",
+            &day,
+            Some(if summary.active_distribution_day {
+                1.0
+            } else {
+                0.0
+            }),
+            &json!({
+                "source_family": "workout",
+                "moderate_or_higher_minutes": summary.moderate_or_higher_minutes,
+            }),
         )?;
     }
 
@@ -619,6 +657,64 @@ fn captured_day(timestamp: &str) -> Result<String> {
     Ok(parsed.date().to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct WorkoutActivityDaySummary {
+    moderate_or_higher_minutes: f64,
+    active_distribution_day: bool,
+}
+
+fn workout_activity_days(
+    workouts: &[WorkoutRecord],
+) -> Result<BTreeMap<String, WorkoutActivityDaySummary>> {
+    let mut summaries = BTreeMap::<String, WorkoutActivityDaySummary>::new();
+
+    for workout in workouts {
+        let Some(duration_minutes) = workout_duration_minutes(workout)? else {
+            continue;
+        };
+        if duration_minutes <= 0.0 || !counts_toward_guidance(workout.intensity.as_deref()) {
+            continue;
+        }
+
+        let entry = summaries.entry(workout.day.clone()).or_default();
+        entry.moderate_or_higher_minutes += duration_minutes;
+        entry.active_distribution_day = true;
+    }
+
+    Ok(summaries)
+}
+
+fn workout_duration_minutes(workout: &WorkoutRecord) -> Result<Option<f64>> {
+    let Some(end_time) = workout.ended_at.as_deref() else {
+        return Ok(None);
+    };
+    let started_at = OffsetDateTime::parse(&workout.started_at, &Rfc3339).map_err(|error| {
+        RingmasterError::Config(format!(
+            "failed to parse workout start `{}` for review features: {error}",
+            workout.started_at
+        ))
+    })?;
+    let ended_at = OffsetDateTime::parse(end_time, &Rfc3339).map_err(|error| {
+        RingmasterError::Config(format!(
+            "failed to parse workout end `{end_time}` for review features: {error}"
+        ))
+    })?;
+    let duration_seconds = (ended_at - started_at).whole_seconds();
+    if duration_seconds <= 0 {
+        return Ok(None);
+    }
+    Ok(Some(crate::numeric::i64_to_f64(duration_seconds) / 60.0))
+}
+
+fn counts_toward_guidance(intensity: Option<&str>) -> bool {
+    intensity.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "medium" | "moderate" | "high" | "vigorous" | "hard"
+        )
+    })
+}
+
 fn parse_day(day: &str) -> Result<Date> {
     Date::parse(
         day,
@@ -642,7 +738,7 @@ mod tests {
     use crate::store::queries::{
         DailyActivityRecord, DailyCardiovascularAgeRecord, DailyOverviewRow, DailyReadinessRecord,
         DailyResilienceRecord, DailyStressRecord, RestModePeriodRecord, SleepTimeRecord,
-        Vo2MaxRecord,
+        Vo2MaxRecord, WorkoutRecord,
     };
 
     #[test]
@@ -690,6 +786,7 @@ mod tests {
         DailyOverviewRow {
             day: day.to_owned(),
             sleep_score: Some(sleep_score),
+            sleep_duration_seconds: Some(27_000),
             readiness_score: Some(readiness_score),
             activity_score: Some(activity_score),
             updated_at: format!("{day}T08:00:00Z"),
@@ -718,6 +815,29 @@ mod tests {
             temperature_trend_deviation: Some(0.2),
             raw_cache_key: None,
             updated_at: "2026-04-02T08:00:00Z".to_owned(),
+        }
+    }
+
+    fn make_workout_record(
+        day: &str,
+        intensity: &str,
+        started_at: &str,
+        ended_at: &str,
+    ) -> WorkoutRecord {
+        WorkoutRecord {
+            workout_id: format!("workout-{day}-{intensity}"),
+            day: day.to_owned(),
+            started_at: started_at.to_owned(),
+            ended_at: Some(ended_at.to_owned()),
+            timezone: Some("UTC".to_owned()),
+            sport: Some("run".to_owned()),
+            activity: Some("running".to_owned()),
+            intensity: Some(intensity.to_owned()),
+            title: "Test workout".to_owned(),
+            notes: None,
+            source: Some("test".to_owned()),
+            raw_cache_key: None,
+            updated_at: ended_at.to_owned(),
         }
     }
 
@@ -804,6 +924,20 @@ mod tests {
         let rows = build_review_signal_days(&FeatureInputs {
             daily_history: &daily_history,
             daily_activity: &[make_daily_activity_record()],
+            workouts: &[
+                make_workout_record(
+                    "2026-04-01",
+                    "moderate",
+                    "2026-04-01T17:00:00Z",
+                    "2026-04-01T17:30:00Z",
+                ),
+                make_workout_record(
+                    "2026-04-02",
+                    "vigorous",
+                    "2026-04-02T17:00:00Z",
+                    "2026-04-02T17:45:00Z",
+                ),
+            ],
             daily_readiness: &[make_daily_readiness_record()],
             daily_stress: &[make_daily_stress_record()],
             daily_resilience: &[make_daily_resilience_record()],
@@ -816,12 +950,15 @@ mod tests {
         .unwrap_or_else(|error| panic!("feature build should succeed: {error}"));
 
         for key in [
+            "sleep_duration",
             "sleep_score",
             "readiness_score",
             "stress_high",
             "resilience_level",
             "cardiovascular_age",
             "vo2_max",
+            "weekly_activity_minutes",
+            "weekly_activity_distribution",
             "sleep_time_status",
             "rest_mode_active",
         ] {
@@ -841,6 +978,7 @@ mod tests {
         let rows = build_review_signal_days(&FeatureInputs {
             daily_history: &[],
             daily_activity: &[],
+            workouts: &[],
             daily_readiness: &[],
             daily_stress: &[],
             daily_resilience: &[],
@@ -883,6 +1021,7 @@ mod tests {
         let rows = build_review_signal_days(&FeatureInputs {
             daily_history: &[],
             daily_activity: &[],
+            workouts: &[],
             daily_readiness: &[],
             daily_stress: &[],
             daily_resilience: &[],
@@ -992,5 +1131,70 @@ mod tests {
 
         assert_eq!(comparable_stats.count, 1);
         assert_eq!(comparable_stats.mean, Some(100.0));
+    }
+
+    #[test]
+    fn feature_builder_derives_guideline_activity_signals_from_workouts() {
+        let rows = build_review_signal_days(&FeatureInputs {
+            daily_history: &[],
+            daily_activity: &[],
+            workouts: &[
+                make_workout_record(
+                    "2026-04-02",
+                    "moderate",
+                    "2026-04-02T17:00:00Z",
+                    "2026-04-02T17:45:00Z",
+                ),
+                make_workout_record(
+                    "2026-04-02",
+                    "light",
+                    "2026-04-02T19:00:00Z",
+                    "2026-04-02T19:20:00Z",
+                ),
+                make_workout_record(
+                    "2026-04-03",
+                    "vigorous",
+                    "2026-04-03T17:00:00Z",
+                    "2026-04-03T17:30:00Z",
+                ),
+                make_workout_record(
+                    "2026-04-04",
+                    "",
+                    "2026-04-04T17:00:00Z",
+                    "2026-04-04T17:30:00Z",
+                ),
+            ],
+            daily_readiness: &[],
+            daily_stress: &[],
+            daily_resilience: &[],
+            daily_cardiovascular_age: &[],
+            vo2_max: &[],
+            sleep_time: &[],
+            rest_mode_periods: &[],
+            captured_at: "2026-04-04T10:00:00Z",
+        })
+        .unwrap_or_else(|error| panic!("feature build should succeed: {error}"));
+
+        let activity_minutes = rows
+            .iter()
+            .find(|row| row.signal_key == "weekly_activity_minutes" && row.day == "2026-04-02")
+            .and_then(|row| row.numeric_value);
+        let active_day = rows
+            .iter()
+            .find(|row| row.signal_key == "weekly_activity_distribution" && row.day == "2026-04-03")
+            .and_then(|row| row.numeric_value);
+
+        assert_eq!(activity_minutes, Some(45.0));
+        assert_eq!(active_day, Some(1.0));
+        assert!(
+            rows.iter()
+                .all(|row| !(row.signal_key == "weekly_activity_minutes"
+                    && row.day == "2026-04-02"
+                    && row.numeric_value == Some(65.0)))
+        );
+        assert!(
+            rows.iter().all(|row| row.day != "2026-04-04"),
+            "unknown workout intensity should not count toward guidance signals"
+        );
     }
 }

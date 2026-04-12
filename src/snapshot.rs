@@ -26,6 +26,11 @@ use crate::store::queries::{
 use crate::time_utils::current_local_day_string;
 
 pub const SNAPSHOT_SCHEMA_VERSION: &str = "ringmaster.snapshot.v3";
+const SUPPORTED_SNAPSHOT_SCHEMA_VERSIONS: &[&str] = &[
+    "ringmaster.snapshot.v1",
+    "ringmaster.snapshot.v2",
+    SNAPSHOT_SCHEMA_VERSION,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -131,6 +136,7 @@ struct SnapshotSourceData {
     context_events: Vec<ContextEventRecord>,
     pattern_summaries: Vec<PatternSummaryRecord>,
     review_signals: Vec<ReviewSignalDayRecord>,
+    trend_review_signals: Vec<ReviewSignalDayRecord>,
     heartrate_daily_averages: Vec<DayValuePoint>,
     latest_source_day: Option<String>,
     latest_review_day: Option<String>,
@@ -589,6 +595,17 @@ fn load_snapshot_source_data(
         &scope.start_day,
         &scope.end_day,
     )?;
+    let review_signal_start_day = comparison_window_start_day(scope)?;
+    let trend_review_signals = if review_signal_start_day == scope.start_day {
+        derived.review_signal_days.clone()
+    } else {
+        crate::derive::derive_review_artifacts_between_days(
+            store,
+            &review_signal_start_day,
+            &scope.end_day,
+        )?
+        .review_signal_days
+    };
     let heartrate_daily_averages =
         load_heartrate_daily_averages(store, &scope.start_day, &scope.end_day)?;
     let latest_source_day = store.views().latest_source_day()?;
@@ -625,6 +642,7 @@ fn load_snapshot_source_data(
         context_events: derived.context_events,
         pattern_summaries: derived.pattern_summaries,
         review_signals: derived.review_signal_days,
+        trend_review_signals,
         heartrate_daily_averages,
         latest_source_day,
         latest_review_day,
@@ -729,7 +747,7 @@ fn build_snapshot_bundle(
     let trend_summaries = build_trend_summaries(
         &source.daily_history_all,
         &exports.heartrate_daily_averages,
-        &exports.review_signals,
+        &source.trend_review_signals,
         scope,
         active_population,
     )?;
@@ -1417,7 +1435,7 @@ pub fn write_snapshot_artifact(path: &Path, compact_json: &str) -> Result<()> {
 ///
 /// Returns an error if the bundle schema version or content hash is invalid.
 pub fn validate_snapshot_bundle(bundle: &SnapshotBundleV1) -> Result<()> {
-    if bundle.schema_version != SNAPSHOT_SCHEMA_VERSION {
+    if !SUPPORTED_SNAPSHOT_SCHEMA_VERSIONS.contains(&bundle.schema_version.as_str()) {
         return Err(RingmasterError::Config(format!(
             "unsupported snapshot schema version `{}`",
             bundle.schema_version
@@ -1531,6 +1549,14 @@ fn resolved_scope_from_dates(
         anchor_day: end.to_string(),
         day_count,
     })
+}
+
+fn comparison_window_start_day(scope: &ResolvedSnapshotScope) -> Result<String> {
+    let previous_end = parse_day(&scope.start_day)? - Duration::days(1);
+    let comparison_days = i64::try_from(scope.day_count.max(1)).map_err(|error| {
+        RingmasterError::Config(format!("snapshot day count is too large: {error}"))
+    })?;
+    Ok((previous_end - Duration::days(comparison_days - 1)).to_string())
 }
 
 fn parse_day(value: &str) -> Result<Date> {
@@ -1773,7 +1799,7 @@ where
 fn build_trend_summaries(
     daily_history_all: &[DailyOverviewRow],
     heartrate_daily_averages: &[SnapshotMetricPoint],
-    review_signals: &[SnapshotReviewSignal],
+    review_signals: &[ReviewSignalDayRecord],
     scope: &ResolvedSnapshotScope,
     active_population: PopulationProfile,
 ) -> Result<Vec<SnapshotTrendSummary>> {
@@ -1933,7 +1959,7 @@ fn build_metric_trend(
 }
 
 fn build_signal_trend_from_review_signals(
-    review_signals: &[SnapshotReviewSignal],
+    review_signals: &[ReviewSignalDayRecord],
     scope: &ResolvedSnapshotScope,
     signal_key: &str,
     active_population: PopulationProfile,
@@ -2443,8 +2469,10 @@ impl From<PatternMetric> for String {
 mod tests {
     use super::{
         PrivacyProfile, ResolvedSnapshotScope, SNAPSHOT_SCHEMA_VERSION, SnapshotBaseline,
-        SnapshotFollowUpTarget, SnapshotReviewSignal, SnapshotTrendSummary,
-        build_follow_up_targets, resolve_scope,
+        SnapshotBundleV1, SnapshotCapabilities, SnapshotDailyScore, SnapshotFollowUpTarget,
+        SnapshotFreshness, SnapshotMetadata, SnapshotMetrics, SnapshotRecordCounts,
+        SnapshotReviewSignal, SnapshotSourceMode, SnapshotTrendSummary, build_follow_up_targets,
+        deserialize_snapshot_bundle, resolve_scope, snapshot_hash_for_bundle,
     };
     use crate::config::Config;
     use crate::oura::models::{AuthStatus, CapabilityReport};
@@ -2687,6 +2715,110 @@ mod tests {
     }
 
     #[test]
+    fn deserialize_snapshot_bundle_accepts_legacy_v2_artifacts_with_defaulted_fields() {
+        let mut bundle = SnapshotBundleV1 {
+            schema_version: "ringmaster.snapshot.v2".to_owned(),
+            metadata: SnapshotMetadata {
+                app_version: "0.1.0".to_owned(),
+                generated_at: "2026-04-08T00:00:00Z".to_owned(),
+                snapshot_hash: String::new(),
+                scope: "day:2026-04-08".to_owned(),
+                start_day: "2026-04-08".to_owned(),
+                end_day: "2026-04-08".to_owned(),
+                anchor_day: "2026-04-08".to_owned(),
+                privacy_profile: PrivacyProfile::Redacted,
+                source_mode: SnapshotSourceMode::Live,
+                schema_version: 17,
+                evidence_registry_version: crate::evidence::registry::evidence_registry_version()
+                    .to_owned(),
+                active_population_profile:
+                    crate::evidence::registry::PopulationProfile::GeneralAdult,
+            },
+            freshness: SnapshotFreshness {
+                latest_source_day: Some("2026-04-08".to_owned()),
+                latest_review_day: Some("2026-04-08".to_owned()),
+                warnings: Vec::new(),
+                sync_states: Vec::new(),
+            },
+            capabilities: SnapshotCapabilities {
+                requested_scopes: vec!["daily".to_owned()],
+                granted_scopes: vec!["daily".to_owned()],
+                missing_scopes: Vec::new(),
+                entries: Vec::new(),
+            },
+            record_counts: SnapshotRecordCounts {
+                daily_history_days: 1,
+                heartrate_days: 0,
+                context_events: 0,
+                pattern_summaries: 0,
+                review_signals: 0,
+                raw_tables: std::collections::BTreeMap::new(),
+            },
+            metrics: SnapshotMetrics {
+                daily_scores: vec![SnapshotDailyScore {
+                    export_ref: "daily:2026-04-08".to_owned(),
+                    day: "2026-04-08".to_owned(),
+                    sleep_score: Some(84),
+                    sleep_duration_seconds: None,
+                    readiness_score: Some(78),
+                    activity_score: Some(73),
+                }],
+                activity: Vec::new(),
+                heartrate_daily_averages: Vec::new(),
+                sleep_windows: Vec::new(),
+                stress: Vec::new(),
+                resilience: Vec::new(),
+                cardiovascular_age: Vec::new(),
+                vo2_max: Vec::new(),
+                rest_mode_periods: Vec::new(),
+            },
+            baselines: Vec::new(),
+            trend_summaries: Vec::new(),
+            context_events: Vec::new(),
+            pattern_summaries: Vec::new(),
+            review_signals: Vec::new(),
+            follow_up_targets: Vec::new(),
+        };
+        bundle.metadata.snapshot_hash = ok(
+            snapshot_hash_for_bundle(&bundle),
+            "legacy snapshot hash should compute",
+        );
+
+        let mut legacy_json = ok(
+            serde_json::to_value(&bundle),
+            "legacy snapshot bundle should serialize to value",
+        );
+        let metadata = legacy_json["metadata"]
+            .as_object_mut()
+            .unwrap_or_else(|| panic!("metadata object should exist"));
+        metadata.remove("evidence_registry_version");
+        metadata.remove("active_population_profile");
+        legacy_json["metrics"]["daily_scores"][0]
+            .as_object_mut()
+            .unwrap_or_else(|| panic!("daily score object should exist"))
+            .remove("sleep_duration_seconds");
+
+        let loaded = ok(
+            deserialize_snapshot_bundle(&ok(
+                serde_json::to_string(&legacy_json),
+                "legacy snapshot json should serialize",
+            )),
+            "legacy v2 snapshot should deserialize",
+        );
+
+        assert_eq!(loaded.schema_version, "ringmaster.snapshot.v2");
+        assert_eq!(
+            loaded.metadata.evidence_registry_version,
+            crate::evidence::registry::evidence_registry_version()
+        );
+        assert_eq!(
+            loaded.metadata.active_population_profile,
+            crate::evidence::registry::PopulationProfile::GeneralAdult
+        );
+        assert_eq!(loaded.metrics.daily_scores[0].sleep_duration_seconds, None);
+    }
+
+    #[test]
     fn snapshot_export_derives_artifacts_across_requested_range() {
         let store = ok(Store::open_test_store(), "store should open");
         seed_wide_history(&store);
@@ -2728,6 +2860,131 @@ mod tests {
                 .iter()
                 .any(|signal| signal.day == "2026-01-01"),
             "wide-range export should include early review signals from the requested range"
+        );
+    }
+
+    #[test]
+    fn snapshot_export_weekly_activity_trends_include_previous_window_history_without_leaking_it() {
+        let store = ok(Store::open_test_store(), "store should open");
+        let updated_at = "2026-04-08T12:00:00Z";
+        for day in [
+            "2026-03-25",
+            "2026-03-26",
+            "2026-03-27",
+            "2026-03-28",
+            "2026-03-29",
+            "2026-03-30",
+            "2026-03-31",
+            "2026-04-01",
+            "2026-04-02",
+            "2026-04-03",
+            "2026-04-04",
+            "2026-04-05",
+            "2026-04-06",
+            "2026-04-07",
+        ] {
+            ok(
+                store.imports().upsert_daily_sleep(&DailySleepRecord {
+                    oura_id: None,
+                    day: day.to_owned(),
+                    sleep_score: Some(80),
+                    sleep_duration_seconds: Some(27_000),
+                    raw_cache_key: None,
+                    updated_at: updated_at.to_owned(),
+                }),
+                "sleep row should seed",
+            );
+            ok(
+                store
+                    .imports()
+                    .upsert_daily_readiness(&DailyReadinessRecord {
+                        oura_id: None,
+                        day: day.to_owned(),
+                        readiness_score: Some(78),
+                        temperature_deviation: None,
+                        temperature_trend_deviation: None,
+                        raw_cache_key: None,
+                        updated_at: updated_at.to_owned(),
+                    }),
+                "readiness row should seed",
+            );
+            ok(
+                store.imports().upsert_daily_activity(&DailyActivityRecord {
+                    oura_id: None,
+                    day: day.to_owned(),
+                    activity_score: Some(72),
+                    active_calories: 420,
+                    steps: 8_000,
+                    total_calories: 2_250,
+                    raw_cache_key: None,
+                    updated_at: updated_at.to_owned(),
+                }),
+                "activity row should seed",
+            );
+        }
+        for (index, (day, ended_at)) in [
+            ("2026-03-25", "2026-03-25T18:30:00Z"),
+            ("2026-03-27", "2026-03-27T18:30:00Z"),
+            ("2026-04-02", "2026-04-02T18:45:00Z"),
+            ("2026-04-04", "2026-04-04T18:45:00Z"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ok(
+                store.imports().upsert_workout(&WorkoutRecord {
+                    workout_id: format!("trend-workout-{index}"),
+                    day: day.to_owned(),
+                    started_at: format!("{day}T18:00:00Z"),
+                    ended_at: Some(ended_at.to_owned()),
+                    timezone: Some("UTC".to_owned()),
+                    sport: Some("running".to_owned()),
+                    activity: Some("cardio".to_owned()),
+                    intensity: Some("moderate".to_owned()),
+                    title: "Run".to_owned(),
+                    notes: None,
+                    source: Some("manual".to_owned()),
+                    raw_cache_key: None,
+                    updated_at: updated_at.to_owned(),
+                }),
+                "workout row should seed",
+            );
+        }
+
+        let config = ok(Config::load(), "config should load");
+        let scope = ok(
+            resolve_scope(&store, "range:2026-04-01..2026-04-07"),
+            "scope should resolve",
+        );
+        let export = ok(
+            super::export_snapshot(
+                &config,
+                &store,
+                &auth_status(),
+                super::SnapshotSourceMode::Live,
+                None,
+                &scope,
+                PrivacyProfile::Redacted,
+            ),
+            "snapshot export should succeed",
+        );
+
+        let minutes_trend = export
+            .bundle
+            .trend_summaries
+            .iter()
+            .find(|summary| summary.metric_key == "weekly_activity_minutes")
+            .unwrap_or_else(|| panic!("weekly activity minutes trend should exist"));
+
+        assert_eq!(minutes_trend.previous_average, Some(30.0));
+        assert_eq!(minutes_trend.current_average, Some(45.0));
+        assert!(
+            export
+                .bundle
+                .review_signals
+                .iter()
+                .all(|signal| signal.day.as_str() >= "2026-04-01"),
+            "snapshot payload should not leak previous-window review signals"
         );
     }
 
