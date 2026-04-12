@@ -152,38 +152,13 @@ pub fn run(config: &Config, app: &mut AppState) -> Result<()> {
                 .map_err(|error| RingmasterError::io("reading terminal event", error))?;
             let binding_context = app.binding_context();
             if let Some(action) = map_event_with_context(binding_context, &event) {
-                let source_screen = app.active_screen;
-                let selected_day = app.selected_day_label();
-                let current_preflight = app.ai_preflight_state().cloned();
-                let selected_tab = app.selected_ai_browser_tab();
-                let selected_run = app.selected_ai_run_record();
-                let selected_snapshot = app.selected_snapshot_catalog_entry();
-                let selected_report = app.selected_report_export_record();
-                let selected_eval = app.selected_ai_eval_run_record();
-                let request_manual_refresh =
-                    matches!(action, Action::RefreshRequested) && matches!(app.mode, RunMode::Live);
-                app.handle(action.clone());
-                if request_manual_refresh {
-                    send_worker_command(worker_tx.as_ref(), WorkerCommand::ManualRefresh);
-                }
-                handle_ai_side_effect(
+                handle_action_with_side_effects(
+                    app,
                     &action,
-                    AiSideEffectContext {
-                        config,
-                        run_mode: app.mode,
-                        source_screen,
-                        selected_day,
-                        current_preflight,
-                        selected_artifacts: SelectedAiArtifacts {
-                            tab: selected_tab,
-                            run: selected_run,
-                            snapshot: selected_snapshot,
-                            _report: selected_report,
-                            eval: selected_eval,
-                        },
-                        ai_action_tx: &ai_action_tx,
-                        ai_tasks: &mut ai_tasks,
-                    },
+                    config,
+                    worker_tx.as_ref(),
+                    &ai_action_tx,
+                    &mut ai_tasks,
                 )?;
             }
         } else {
@@ -570,6 +545,61 @@ fn drain_worker_actions(worker_actions: &mut UnboundedReceiver<Action>, app: &mu
     while let Ok(action) = worker_actions.try_recv() {
         app.handle(action);
     }
+}
+
+fn handle_action_with_side_effects(
+    app: &mut AppState,
+    action: &Action,
+    config: &Config,
+    worker_tx: Option<&UnboundedSender<WorkerCommand>>,
+    ai_action_tx: &UnboundedSender<Action>,
+    ai_tasks: &mut HashMap<String, AsyncJoinHandle<()>>,
+) -> Result<()> {
+    let run_mode = app.mode;
+    let source_screen = app.active_screen;
+    let selected_day = app.selected_day_label();
+    let current_preflight = app.ai_preflight_state().cloned();
+    let selected_tab = app.selected_ai_browser_tab();
+    let selected_run = app.selected_ai_run_record();
+    let selected_snapshot = app.selected_snapshot_catalog_entry();
+    let selected_report = app.selected_report_export_record();
+    let selected_eval = app.selected_ai_eval_run_record();
+    let request_manual_refresh =
+        matches!(action, Action::RefreshRequested) && matches!(run_mode, RunMode::Live);
+    let emitted_actions = app.handle(action.clone());
+
+    if request_manual_refresh {
+        send_worker_command(worker_tx, WorkerCommand::ManualRefresh);
+    }
+
+    let mut run_side_effect = |side_effect_action: &Action| {
+        handle_ai_side_effect(
+            side_effect_action,
+            AiSideEffectContext {
+                config,
+                run_mode,
+                source_screen,
+                selected_day: selected_day.clone(),
+                current_preflight: current_preflight.clone(),
+                selected_artifacts: SelectedAiArtifacts {
+                    tab: selected_tab,
+                    run: selected_run.clone(),
+                    snapshot: selected_snapshot.clone(),
+                    _report: selected_report.clone(),
+                    eval: selected_eval.clone(),
+                },
+                ai_action_tx,
+                ai_tasks,
+            },
+        )
+    };
+
+    run_side_effect(action)?;
+    for emitted_action in &emitted_actions {
+        run_side_effect(emitted_action)?;
+    }
+
+    Ok(())
 }
 
 fn handle_ai_side_effect(action: &Action, context: AiSideEffectContext<'_>) -> Result<()> {
@@ -4460,6 +4490,62 @@ mod tests {
                 );
             }
             other => unreachable!("expected non-runs-tab guard message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activate_focused_region_runs_side_effects_for_emitted_preflight_actions() {
+        let (_temp_dir, config) = isolated_test_config();
+        let store =
+            Store::open(&config).unwrap_or_else(|error| unreachable!("store should open: {error}"));
+        persist_snapshot_for_run(&store, "demo-snapshot-20260408");
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Ai;
+        app.handle(Action::AiPreflightPrepared {
+            preflight: Box::new(AiPreflightState {
+                intent: AiLaunchIntent::ReviewSelectedDay,
+                source_screen: Screen::Review,
+                snapshot_scope: "day:2026-04-08".to_owned(),
+                snapshot_paths: vec!["/tmp/follow-up-20260408-redacted.json".to_owned()],
+                request_preview: sample_request_preview("demo-snapshot-20260408"),
+                privacy_profile: PrivacyProfile::Redacted,
+                model_override: Some("gpt-5-mini".to_owned()),
+                source_ai_artifact_id: None,
+                follow_up_kind: None,
+                warning_lines: Vec::new(),
+                confirm_enabled: true,
+            }),
+            status_line: "Prepared review preflight.".to_owned(),
+        });
+
+        let (ai_action_tx, mut ai_action_rx) = unbounded_channel();
+        let mut ai_tasks = HashMap::new();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|error| unreachable!("test runtime should build: {error}"));
+
+        runtime.block_on(async {
+            super::handle_action_with_side_effects(
+                &mut app,
+                &Action::ActivateFocusedRegion,
+                &config,
+                None,
+                &ai_action_tx,
+                &mut ai_tasks,
+            )
+            .unwrap_or_else(|error| {
+                unreachable!("emitted preflight activation should run side effects: {error}")
+            });
+            tokio::task::yield_now().await;
+        });
+
+        assert!(app.ai_preflight_state().is_none());
+        assert_eq!(app.status_line, "Queueing AI run from preflight.");
+        assert_eq!(ai_tasks.len(), 1);
+        match ai_action_rx.try_recv() {
+            Ok(Action::LiveSnapshotLoaded { .. } | Action::RefreshFailed { .. }) => {}
+            other => unreachable!("expected queued-run refresh feedback, got {other:?}"),
         }
     }
 

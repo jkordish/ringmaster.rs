@@ -10,11 +10,13 @@ The branch has one functional keybinding bug report plus several API/docs cohere
 
 ## Current state
 
-- PR #8 has five unresolved review threads.
+- PR #8 picked up two follow-up review findings after the first resolution pass.
 - Shifted character key chords are matched exactly as reported by the terminal.
 - The test-store helper still uses the old `open_in_memory` naming even though it reopens an isolated temporary on-disk SQLite database.
 - `lib.rs` still exports `ui` and `store` as public modules while recent changes made their internals crate-private.
 - Numeric conversion helpers use `num_traits::ToPrimitive` with fallback sentinel values that are harder to reason about than principled saturation.
+- Focus activation now emits nested AI actions from the reducer, but the TUI loop still needs to propagate those emitted actions into the async side-effect runner.
+- The repo-wide clippy baseline still relies on temporary `multiple_crate_versions` and `too_many_lines` allowances while the dedicated cleanup plans stay open.
 
 ## Desired state
 
@@ -22,6 +24,8 @@ The branch has one functional keybinding bug report plus several API/docs cohere
 - Test-store helpers describe their actual semantics clearly.
 - The public crate surface is explicit and coherent for `store` and `ui`.
 - Numeric conversion helpers use predictable saturation behavior and are covered by tests.
+- Keyboard activation of AI launch points, preflight controls, and artifact actions triggers the same async work as their direct expert shortcuts.
+- `cargo clippy --all-targets --all-features -- -D warnings` stays green for this branch by preserving the documented temporary lint baseline.
 
 ## Constraints
 
@@ -39,6 +43,8 @@ The branch has one functional keybinding bug report plus several API/docs cohere
 ## File plan
 
 - `docs/execplans/20260411-pr-review-comment-resolution.md`
+- `src/app.rs`
+- `src/tui.rs`
 - `src/keybindings.rs`
 - `src/lib.rs`
 - `src/store/db.rs`
@@ -61,4 +67,4 @@ The branch has one functional keybinding bug report plus several API/docs cohere
 ## Follow-up work
 
 - If PR #8 picks up additional comments during the pass, either fold them into this plan or record them explicitly as a separate follow-up.
-- Full `cargo clippy --all-targets --all-features -- -D warnings` still fails on the repo's pre-existing `multiple_crate_versions` and `too_many_lines` backlog outside this patch.
+- The temporary crate-level clippy allowances remain until the dedicated dependency-alignment and oversized-function cleanup plans land.

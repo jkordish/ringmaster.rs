@@ -6,6 +6,7 @@
     clippy::cargo,
     clippy::perf
 )]
+#![allow(clippy::multiple_crate_versions, clippy::too_many_lines)]
 
 pub mod action;
 pub mod ai;

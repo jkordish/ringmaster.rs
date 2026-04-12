@@ -751,7 +751,8 @@ impl AiArtifactActionKind {
 }
 
 impl AppState {
-    pub fn handle(&mut self, action: Action) {
+    pub fn handle(&mut self, action: Action) -> Vec<Action> {
+        let mut emitted = Vec::new();
         match &action {
             Action::FocusNextRegion
             | Action::FocusPreviousRegion
@@ -764,7 +765,7 @@ impl AppState {
             | Action::SearchAppend(_)
             | Action::SearchBackspace
             | Action::SearchNextResult
-            | Action::SearchPreviousResult => self.handle_focus_action(&action),
+            | Action::SearchPreviousResult => self.handle_focus_action(&action, &mut emitted),
             Action::Tick
             | Action::Quit
             | Action::NextScreen
@@ -795,9 +796,10 @@ impl AppState {
             | Action::NextReviewCard => self.handle_review_action(&action),
             _ => self.handle_ai_action(action),
         }
+        emitted
     }
 
-    fn handle_focus_action(&mut self, action: &Action) {
+    fn handle_focus_action(&mut self, action: &Action, emitted: &mut Vec<Action>) {
         match action {
             Action::FocusNextRegion => {
                 if self.current_transient().is_none() {
@@ -822,7 +824,7 @@ impl AppState {
                 }
             }
             Action::MoveFocusedRegion(movement) => self.move_focused_region(*movement),
-            Action::ActivateFocusedRegion => self.activate_focused_region(),
+            Action::ActivateFocusedRegion => self.activate_focused_region(emitted),
             Action::Back => self.back_out(),
             Action::ToggleHelp => self.toggle_help(),
             Action::OpenSearch => self.open_search(),
@@ -833,6 +835,11 @@ impl AppState {
             Action::SearchPreviousResult => self.advance_search(false),
             _ => unreachable!("focus handler only receives focus/search actions"),
         }
+    }
+
+    fn dispatch_emitted_action(&mut self, action: Action, emitted: &mut Vec<Action>) {
+        emitted.push(action.clone());
+        emitted.extend(self.handle(action));
     }
 
     fn handle_lifecycle_action(&mut self, action: Action) {
@@ -1106,6 +1113,10 @@ impl AppState {
     }
 
     fn switch_screen(&mut self, screen: Screen, status_line: String, rebuild: bool) {
+        if screen != Screen::Ai && self.ai_preflight.is_some() {
+            self.ai_preflight = None;
+            self.ai_preflight_control = PreflightControl::Confirm;
+        }
         self.active_screen = screen;
         self.focused_top_nav_screen = screen;
         self.restore_screen_focus();
@@ -1710,15 +1721,19 @@ impl AppState {
                 }
             }
             (screen, _) if Self::screen_supports_day_paging(screen) => match movement {
-                NavMove::PageBackward => self.handle(Action::PreviousDay),
-                NavMove::PageForward => self.handle(Action::NextDay),
+                NavMove::PageBackward => {
+                    self.handle(Action::PreviousDay);
+                }
+                NavMove::PageForward => {
+                    self.handle(Action::NextDay);
+                }
                 _ => {}
             },
             _ => {}
         }
     }
 
-    fn activate_focused_region(&mut self) {
+    fn activate_focused_region(&mut self, emitted: &mut Vec<Action>) {
         if self.search.is_some() {
             self.advance_search(true);
             return;
@@ -1729,9 +1744,15 @@ impl AppState {
         }
         if self.ai_preflight.is_some() {
             match self.ai_preflight_control {
-                PreflightControl::Confirm => self.handle(Action::ConfirmAiPreflight),
-                PreflightControl::Privacy => self.handle(Action::CycleAiPreflightPrivacyProfile),
-                PreflightControl::Cancel => self.handle(Action::DismissAiPreflight),
+                PreflightControl::Confirm => {
+                    self.dispatch_emitted_action(Action::ConfirmAiPreflight, emitted);
+                }
+                PreflightControl::Privacy => {
+                    self.dispatch_emitted_action(Action::CycleAiPreflightPrivacyProfile, emitted);
+                }
+                PreflightControl::Cancel => {
+                    self.dispatch_emitted_action(Action::DismissAiPreflight, emitted);
+                }
             }
             return;
         }
@@ -1763,8 +1784,14 @@ impl AppState {
                 "Returned to ranked observations.".clone_into(&mut self.status_line);
             }
             (Screen::Ai, FocusRegion::Primary) => match self.selected_ai_launch_index() {
-                0 => self.handle(Action::RequestAiLaunch(AiLaunchIntent::ReviewSelectedDay)),
-                1 => self.handle(Action::RequestAiLaunch(AiLaunchIntent::CompareSelectedWeek)),
+                0 => self.dispatch_emitted_action(
+                    Action::RequestAiLaunch(AiLaunchIntent::ReviewSelectedDay),
+                    emitted,
+                ),
+                1 => self.dispatch_emitted_action(
+                    Action::RequestAiLaunch(AiLaunchIntent::CompareSelectedWeek),
+                    emitted,
+                ),
                 _ => {}
             },
             (Screen::Ai, FocusRegion::Secondary) => {
@@ -1774,7 +1801,7 @@ impl AppState {
             }
             (Screen::Ai, FocusRegion::Tertiary) => {
                 if let Some(action) = self.current_ai_artifact_action() {
-                    self.handle(action);
+                    self.dispatch_emitted_action(action, emitted);
                 } else {
                     "No direct actions are available for the selected saved artifact."
                         .clone_into(&mut self.status_line);
@@ -2088,8 +2115,12 @@ impl AppState {
 
     fn move_timeline_chart(&mut self, movement: NavMove) {
         match movement {
-            NavMove::Previous => self.handle(Action::PreviousTimelinePoint),
-            NavMove::Next => self.handle(Action::NextTimelinePoint),
+            NavMove::Previous => {
+                self.handle(Action::PreviousTimelinePoint);
+            }
+            NavMove::Next => {
+                self.handle(Action::NextTimelinePoint);
+            }
             NavMove::First => {
                 self.selected_timeline_point = 0;
                 self.select_nearest_event_for_current_point();
@@ -2103,8 +2134,12 @@ impl AppState {
                 self.rebuild_live_model();
                 "Moved to the last heartrate point.".clone_into(&mut self.status_line);
             }
-            NavMove::PageBackward => self.handle(Action::PreviousDay),
-            NavMove::PageForward => self.handle(Action::NextDay),
+            NavMove::PageBackward => {
+                self.handle(Action::PreviousDay);
+            }
+            NavMove::PageForward => {
+                self.handle(Action::NextDay);
+            }
         }
     }
 
@@ -10292,6 +10327,42 @@ mod tests {
     }
 
     #[test]
+    fn switching_away_from_ai_clears_hidden_preflight_transient() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Ai;
+        app.handle(Action::AiPreflightPrepared {
+            preflight: Box::new(AiPreflightState {
+                intent: AiLaunchIntent::ReviewSelectedDay,
+                source_screen: Screen::Review,
+                snapshot_scope: "day:2026-04-08".to_owned(),
+                snapshot_paths: vec!["/tmp/preflight-snapshot.json".to_owned()],
+                request_preview: make_ai_preview("demo-snapshot-20260408"),
+                privacy_profile: PrivacyProfile::Redacted,
+                model_override: Some("gpt-5-mini".to_owned()),
+                source_ai_artifact_id: Some("run-demo-review-20260408".to_owned()),
+                follow_up_kind: None,
+                warning_lines: Vec::new(),
+                confirm_enabled: true,
+            }),
+            status_line: "Prepared review preflight.".to_owned(),
+        });
+
+        assert_eq!(app.current_transient(), Some(TransientLayer::AiPreflight));
+        assert!(app.binding_context().ai_preflight_open);
+
+        app.handle(Action::ShowScreen(Screen::Review));
+
+        assert_eq!(app.active_screen, Screen::Review);
+        assert!(app.ai_preflight_state().is_none());
+        assert_eq!(app.current_transient(), None);
+        assert!(!app.binding_context().ai_preflight_open);
+    }
+
+    #[test]
     fn open_search_falls_back_to_the_screen_primary_list() {
         let mut timeline = build_state_from_snapshot(
             RunMode::Demo,
@@ -10581,5 +10652,80 @@ mod tests {
 
         app.handle(Action::MoveFocusedRegion(navigation::NavMove::First));
         assert_eq!(app.selected_ai_launch_index(), 0);
+    }
+
+    #[test]
+    fn activating_ai_launch_point_emits_request_ai_launch() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Ai;
+        app.set_focused_region(FocusRegion::Primary);
+
+        let emitted = app.handle(Action::ActivateFocusedRegion);
+
+        assert_eq!(
+            emitted,
+            vec![Action::RequestAiLaunch(AiLaunchIntent::ReviewSelectedDay)]
+        );
+        assert_eq!(
+            app.status_line,
+            "Preparing AI review for the selected day preflight."
+        );
+    }
+
+    #[test]
+    fn activating_ai_preflight_confirm_emits_confirm_action() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Ai;
+        app.ai_preflight = Some(AiPreflightState {
+            intent: AiLaunchIntent::ReviewSelectedDay,
+            source_screen: Screen::Review,
+            snapshot_scope: "day:2026-04-08".to_owned(),
+            snapshot_paths: vec!["/tmp/preflight-snapshot.json".to_owned()],
+            request_preview: make_ai_preview("demo-snapshot-20260408"),
+            privacy_profile: PrivacyProfile::Redacted,
+            model_override: Some("gpt-5-mini".to_owned()),
+            source_ai_artifact_id: Some("run-demo-review-20260408".to_owned()),
+            follow_up_kind: None,
+            warning_lines: Vec::new(),
+            confirm_enabled: true,
+        });
+        app.ai_preflight_control = PreflightControl::Confirm;
+
+        let emitted = app.handle(Action::ActivateFocusedRegion);
+
+        assert_eq!(emitted, vec![Action::ConfirmAiPreflight]);
+        assert_eq!(app.status_line, "Queueing AI run from preflight.");
+        assert!(app.ai_preflight.is_none());
+    }
+
+    #[test]
+    fn activating_ai_artifact_action_emits_selected_action() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.ai_runs = vec![make_ai_run_record(
+            "run-review-queued",
+            "queued",
+            Some("artifact-ai-queued"),
+            None,
+        )];
+        let mut app = build_state_from_snapshot(RunMode::Demo, "Demo mode ready.", snapshot);
+        app.active_screen = Screen::Ai;
+        app.set_focused_region(FocusRegion::Tertiary);
+
+        let emitted = app.handle(Action::ActivateFocusedRegion);
+
+        assert_eq!(
+            app.current_ai_artifact_action(),
+            Some(Action::RequestCancelAiRun)
+        );
+        assert_eq!(emitted, vec![Action::RequestCancelAiRun]);
+        assert_eq!(app.status_line, "Requesting AI run cancellation.");
     }
 }
