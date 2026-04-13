@@ -1,11 +1,6 @@
 use std::fmt::Write as _;
 
-use ratatui::{
-    prelude::{Line, Span},
-    widgets::{Block, Borders},
-};
-
-use crate::ui::theme::{Theme, Tone};
+use crate::ui::theme::Tone;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TelemetryAvailability {
@@ -41,38 +36,6 @@ impl TelemetryAvailability {
             Self::Error => Tone::Error,
         }
     }
-}
-
-#[must_use]
-pub fn panel_block<'a>(
-    theme: &Theme,
-    title: &str,
-    status: &str,
-    status_tone: Tone,
-    focused: bool,
-    expanded: bool,
-) -> Block<'a> {
-    let marker = if focused { ">" } else { " " };
-    let expand = if expanded { " [OPEN]" } else { "" };
-    Block::default()
-        .title(Line::from(vec![
-            Span::styled(
-                format!("{marker} {}", title.to_ascii_uppercase()),
-                theme.section_title(if focused { Tone::Focus } else { Tone::Default }),
-            ),
-            Span::raw(" "),
-            Span::styled(format!("[{status}]"), theme.badge(status_tone)),
-            Span::styled(expand.to_owned(), theme.badge(Tone::Focus)),
-        ]))
-        .borders(Borders::ALL)
-        .border_style(if focused {
-            theme.strong_border(Tone::Focus)
-        } else if matches!(status_tone, Tone::Unavailable | Tone::Muted) {
-            theme.muted_border()
-        } else {
-            theme.border(Tone::Default)
-        })
-        .style(theme.panel_surface(true))
 }
 
 #[must_use]

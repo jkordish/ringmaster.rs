@@ -8,8 +8,9 @@ use ratatui::{
 use crate::app::{OverlayToggleView, PatternsModel};
 use crate::navigation::FocusRegion;
 use crate::ui::{
-    layout::UiContext,
-    telemetry::panel_block,
+    chrome::{PanelKind, PanelShellSpec, render_panel_shell},
+    layout::{DashboardMetrics, UiContext},
+    telemetry::{TelemetryAvailability, TelemetryAvailability::Fresh},
     theme::{Theme, Tone},
 };
 
@@ -28,8 +29,10 @@ pub fn draw(
     focused_region: FocusRegion,
     expanded_region: Option<FocusRegion>,
 ) {
+    let metrics = DashboardMetrics::for_viewport(ui.viewport);
     let layout = Layout::default()
         .direction(Direction::Vertical)
+        .spacing(metrics.panel_gap_y)
         .constraints([
             Constraint::Length(if ui.viewport.is_compact() { 3 } else { 4 }),
             Constraint::Length(3),
@@ -44,19 +47,25 @@ pub fn draw(
     } else {
         format!("{}\n{}", model.header, model.filter_summary)
     };
+    let hero_shell = render_panel_shell(
+        frame,
+        layout[0],
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Patterns / Browser",
+            status: "LOCAL",
+            status_tone: Tone::Info,
+            focused: false,
+            expanded: false,
+            kind: PanelKind::Hero,
+        },
+    );
     frame.render_widget(
         Paragraph::new(headline)
             .wrap(Wrap { trim: true })
-            .style(theme.hero())
-            .block(panel_block(
-                theme,
-                "Patterns / Browser",
-                "LOCAL",
-                Tone::Info,
-                false,
-                false,
-            )),
-        layout[0],
+            .style(theme.hero()),
+        hero_shell.content_area,
     );
 
     draw_metric_tabs(
@@ -64,6 +73,7 @@ pub fn draw(
         layout[1],
         model,
         theme,
+        metrics,
         focused_region == FocusRegion::ContextPrimary,
         expanded_region == Some(FocusRegion::ContextPrimary),
     );
@@ -72,6 +82,7 @@ pub fn draw(
         layout[2],
         &model.overlay_toggles,
         theme,
+        metrics,
         focused_region == FocusRegion::ContextSecondary,
         expanded_region == Some(FocusRegion::ContextSecondary),
     );
@@ -82,6 +93,7 @@ pub fn draw(
         } else {
             Direction::Horizontal
         })
+        .spacing(metrics.panel_gap_x)
         .constraints(if ui.viewport.is_compact() {
             vec![Constraint::Percentage(62), Constraint::Percentage(38)]
         } else {
@@ -91,6 +103,7 @@ pub fn draw(
 
     let right = Layout::default()
         .direction(Direction::Vertical)
+        .spacing(metrics.panel_gap_y)
         .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
         .split(body[1]);
 
@@ -152,24 +165,31 @@ fn draw_metric_tabs(
     area: Rect,
     model: &PatternsModel,
     theme: &Theme,
+    metrics: DashboardMetrics,
     focused: bool,
     expanded: bool,
 ) {
+    let shell = render_panel_shell(
+        frame,
+        area,
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Metric Filter",
+            status: "FILTER",
+            status_tone: Tone::Focus,
+            focused,
+            expanded,
+            kind: PanelKind::Section,
+        },
+    );
     frame.render_widget(
         Tabs::new(model.metric_filters.iter().map(|tab| tab.label))
-            .block(panel_block(
-                theme,
-                "Metric Filter",
-                "FILTER",
-                Tone::Focus,
-                focused,
-                expanded,
-            ))
             .style(theme.annotation())
             .highlight_style(theme.emphasis(Tone::Focus))
             .divider(" ")
             .select(model.selected_filter_index),
-        area,
+        shell.content_area,
     );
 }
 
@@ -178,6 +198,7 @@ fn draw_overlay_tabs(
     area: Rect,
     toggles: &[OverlayToggleView],
     theme: &Theme,
+    metrics: DashboardMetrics,
     focused: bool,
     expanded: bool,
 ) {
@@ -185,21 +206,27 @@ fn draw_overlay_tabs(
         .iter()
         .position(|toggle| toggle.selected)
         .unwrap_or(0);
+    let shell = render_panel_shell(
+        frame,
+        area,
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Family Filter",
+            status: "FILTER",
+            status_tone: Tone::Info,
+            focused,
+            expanded,
+            kind: PanelKind::Section,
+        },
+    );
     frame.render_widget(
         Tabs::new(toggles.iter().map(overlay_tab_label))
-            .block(panel_block(
-                theme,
-                "Family Filter",
-                "FILTER",
-                Tone::Info,
-                focused,
-                expanded,
-            ))
             .style(theme.annotation())
             .highlight_style(theme.emphasis(Tone::Focus))
             .divider(" ")
             .select(selected_index),
-        area,
+        shell.content_area,
     );
 }
 
@@ -242,13 +269,11 @@ fn guide_lines(model: &PatternsModel) -> Vec<String> {
     lines
 }
 
-const fn ai_panel_availability(
-    model: &PatternsModel,
-) -> crate::ui::telemetry::TelemetryAvailability {
+const fn ai_panel_availability(model: &PatternsModel) -> TelemetryAvailability {
     if model.ai_actions.is_empty() {
-        crate::ui::telemetry::TelemetryAvailability::NoData
+        TelemetryAvailability::NoData
     } else {
-        crate::ui::telemetry::TelemetryAvailability::Fresh
+        Fresh
     }
 }
 
@@ -257,7 +282,7 @@ fn render_lines_panel(
     area: Rect,
     theme: &Theme,
     title: &str,
-    availability: crate::ui::telemetry::TelemetryAvailability,
+    availability: TelemetryAvailability,
     lines: &[String],
     panel_state: PanelState,
 ) {
@@ -266,17 +291,22 @@ fn render_lines_panel(
     } else {
         lines.join("\n")
     };
-    frame.render_widget(
-        Paragraph::new(body)
-            .wrap(Wrap { trim: true })
-            .block(panel_block(
-                theme,
-                title,
-                availability.label(),
-                availability.tone(),
-                panel_state.focused,
-                panel_state.expanded,
-            )),
+    let shell = render_panel_shell(
+        frame,
         area,
+        theme,
+        DashboardMetrics::for_viewport(UiContext::new(area).viewport),
+        PanelShellSpec {
+            title,
+            status: availability.label(),
+            status_tone: availability.tone(),
+            focused: panel_state.focused,
+            expanded: panel_state.expanded,
+            kind: PanelKind::Section,
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(body).wrap(Wrap { trim: true }),
+        shell.content_area,
     );
 }

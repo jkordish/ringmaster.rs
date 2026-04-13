@@ -32,6 +32,17 @@ This document defines the canonical keyboard model for `ringmaster.rs`.
 - Use `Left` / `Right` / `Home` / `End` to move across top-level screens.
 - Use `Enter` or `Space` to activate the focused screen.
 
+## Modal overlays
+
+- Help and AI preflight behave as strict modal overlays.
+- Opening a modal keeps the previously focused region as the restore target.
+- While a modal is open:
+  - `Tab` / `Shift+Tab` stay inside the modal
+  - arrow keys move between modal controls when the modal exposes multiple controls
+  - `Esc` closes the modal
+  - background screen shortcuts do not activate
+- Closing a modal restores focus to the region that invoked it.
+
 ## Pane semantics
 
 The app now treats pane movement by pane type instead of by screen-specific shortcut history.
@@ -48,6 +59,10 @@ The app now treats pane movement by pane type instead of by screen-specific shor
   - `PageUp` / `PageDown` move by a larger chunk
   - `Enter` / `Space` inspect, launch, or drill into the selected item
   - examples include Timeline events, Review cards, AI launch points, saved-artifact browsers, and AI artifact actions
+- Focus and selection are intentionally separate:
+  - moving within a composite updates the focused child or preview target
+  - activation happens only where the pane advertises an explicit commit step
+  - selection persists when focus moves to a different major region
 - Chart and pager panes:
   - `Left` / `Right` move within the current series or window
   - `Home` / `End` jump to the first or last point

@@ -11,6 +11,7 @@ const SCREEN_DIGITS: [char; Screen::ALL.len()] = ['1', '2', '3', '4', '5', '6', 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingScope {
+    Always,
     Global,
     Screen(Screen),
     Region(FocusRegion),
@@ -142,7 +143,7 @@ pub fn bindings() -> &'static [Keybinding] {
 
 fn resolve_scopes(context: BindingContext) -> Vec<BindingScope> {
     if let Some(transient) = active_transient_scope(context) {
-        return vec![BindingScope::Transient(transient), BindingScope::Global];
+        return vec![BindingScope::Transient(transient), BindingScope::Always];
     }
 
     vec![
@@ -150,6 +151,7 @@ fn resolve_scopes(context: BindingContext) -> Vec<BindingScope> {
         BindingScope::Region(context.focused_region),
         BindingScope::Screen(context.active_screen),
         BindingScope::Global,
+        BindingScope::Always,
     ]
 }
 
@@ -157,12 +159,15 @@ fn help_scopes(context: BindingContext) -> Vec<BindingScope> {
     let mut scopes = Vec::new();
     if let Some(transient) = active_transient_scope(context) {
         scopes.push(BindingScope::Transient(transient));
+        scopes.push(BindingScope::Always);
+        return scopes;
     }
     scopes.extend([
         BindingScope::ScreenRegion(context.active_screen, context.focused_region),
         BindingScope::Region(context.focused_region),
         BindingScope::Screen(context.active_screen),
         BindingScope::Global,
+        BindingScope::Always,
     ]);
     scopes
 }
@@ -183,15 +188,15 @@ fn build_bindings() -> Vec<Keybinding> {
     use Action::{
         ActivateFocusedRegion, Back, CloseSearch, ConfirmAiPreflight,
         CycleAiPreflightPrivacyProfile, CyclePatternMetric, DismissAiPreflight, FocusNextRegion,
-        FocusPreviousRegion, MoveFocusedRegion, NextTrendWindow, OpenSearch, PreviousTrendWindow,
-        Quit, RefreshRequested, RequestAiComparePreviousSnapshot, RequestAiGenerateReport,
-        RequestAiGuidedFollowUp, RequestAiLaunch, RequestAiRerunNextModel,
+        FocusPreviousRegion, MoveFocusedRegion, MoveTransientFocus, NextTrendWindow, OpenSearch,
+        PreviousTrendWindow, Quit, RefreshRequested, RequestAiComparePreviousSnapshot,
+        RequestAiGenerateReport, RequestAiGuidedFollowUp, RequestAiLaunch, RequestAiRerunNextModel,
         RequestAiRerunNextPrivacy, RequestCancelAiRun, RequestJumpToAiEvidence, SearchBackspace,
         SearchNextResult, SearchPreviousResult, ShowScreen, TimelineZoomIn, TimelineZoomOut,
         ToggleHelp, ToggleSessionFilter, ToggleTagFilter, ToggleWorkoutFilter,
     };
     use BindingKind::{Expert, Standard};
-    use BindingScope::{Global, Region, ScreenRegion, Transient};
+    use BindingScope::{Always, Global, Region, ScreenRegion, Transient};
     use ChordKey::{
         BackTab, Backspace, Char, Down, End, Enter, Esc, Home, Left, PageDown, PageUp, Right, Tab,
         Up,
@@ -239,7 +244,7 @@ fn build_bindings() -> Vec<Keybinding> {
             true,
         ),
         key(
-            Global,
+            Always,
             Standard,
             KeyChord::ctrl(Char('c')),
             Quit,
@@ -287,7 +292,7 @@ fn build_bindings() -> Vec<Keybinding> {
             false,
         ),
         key(
-            Global,
+            Always,
             Expert,
             KeyChord::plain(Char('q')),
             Quit,
@@ -1029,6 +1034,70 @@ fn build_bindings() -> Vec<Keybinding> {
         key(
             Transient(Help),
             Standard,
+            KeyChord::plain(Tab),
+            MoveTransientFocus(crate::navigation::NavMove::Next),
+            "`Tab` next help focus",
+            true,
+        ),
+        key(
+            Transient(Help),
+            Standard,
+            KeyChord::plain(BackTab),
+            MoveTransientFocus(crate::navigation::NavMove::Previous),
+            "`Shift+Tab` previous help focus",
+            true,
+        ),
+        key(
+            Transient(Help),
+            Standard,
+            KeyChord::plain(Left),
+            MoveTransientFocus(crate::navigation::NavMove::Previous),
+            "`Left` previous help focus",
+            false,
+        ),
+        key(
+            Transient(Help),
+            Standard,
+            KeyChord::plain(Right),
+            MoveTransientFocus(crate::navigation::NavMove::Next),
+            "`Right` next help focus",
+            false,
+        ),
+        key(
+            Transient(Help),
+            Standard,
+            KeyChord::plain(Home),
+            MoveTransientFocus(crate::navigation::NavMove::First),
+            "`Home` first help focus",
+            false,
+        ),
+        key(
+            Transient(Help),
+            Standard,
+            KeyChord::plain(End),
+            MoveTransientFocus(crate::navigation::NavMove::Last),
+            "`End` last help focus",
+            false,
+        ),
+        key(
+            Transient(Help),
+            Standard,
+            KeyChord::plain(Up),
+            MoveTransientFocus(crate::navigation::NavMove::Previous),
+            "`Up` previous help focus",
+            false,
+        ),
+        key(
+            Transient(Help),
+            Standard,
+            KeyChord::plain(Down),
+            MoveTransientFocus(crate::navigation::NavMove::Next),
+            "`Down` next help focus",
+            false,
+        ),
+        key(
+            Transient(Help),
+            Standard,
             KeyChord::plain(Esc),
             ToggleHelp,
             "`Esc` close help",
@@ -1046,7 +1115,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Transient(AiPreflight),
             Standard,
             KeyChord::plain(Tab),
-            MoveFocusedRegion(crate::navigation::NavMove::Next),
+            MoveTransientFocus(crate::navigation::NavMove::Next),
             "`Tab` next control",
             true,
         ),
@@ -1054,7 +1123,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Transient(AiPreflight),
             Standard,
             KeyChord::plain(BackTab),
-            MoveFocusedRegion(crate::navigation::NavMove::Previous),
+            MoveTransientFocus(crate::navigation::NavMove::Previous),
             "`Shift+Tab` previous control",
             true,
         ),
@@ -1062,7 +1131,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Transient(AiPreflight),
             Standard,
             KeyChord::plain(Left),
-            MoveFocusedRegion(crate::navigation::NavMove::Previous),
+            MoveTransientFocus(crate::navigation::NavMove::Previous),
             "`Left` previous control",
             false,
         ),
@@ -1070,7 +1139,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Transient(AiPreflight),
             Standard,
             KeyChord::plain(Right),
-            MoveFocusedRegion(crate::navigation::NavMove::Next),
+            MoveTransientFocus(crate::navigation::NavMove::Next),
             "`Right` next control",
             false,
         ),
@@ -1078,7 +1147,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Transient(AiPreflight),
             Standard,
             KeyChord::plain(Home),
-            MoveFocusedRegion(crate::navigation::NavMove::First),
+            MoveTransientFocus(crate::navigation::NavMove::First),
             "`Home` first control",
             false,
         ),
@@ -1086,7 +1155,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Transient(AiPreflight),
             Standard,
             KeyChord::plain(End),
-            MoveFocusedRegion(crate::navigation::NavMove::Last),
+            MoveTransientFocus(crate::navigation::NavMove::Last),
             "`End` last control",
             false,
         ),
@@ -1094,7 +1163,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Transient(AiPreflight),
             Standard,
             KeyChord::plain(Up),
-            MoveFocusedRegion(crate::navigation::NavMove::Previous),
+            MoveTransientFocus(crate::navigation::NavMove::Previous),
             "`Up` previous control",
             false,
         ),
@@ -1102,7 +1171,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Transient(AiPreflight),
             Standard,
             KeyChord::plain(Down),
-            MoveFocusedRegion(crate::navigation::NavMove::Next),
+            MoveTransientFocus(crate::navigation::NavMove::Next),
             "`Down` next control",
             false,
         ),
@@ -1586,6 +1655,62 @@ mod tests {
         );
 
         assert_eq!(action, Some(Action::Quit));
+    }
+
+    #[test]
+    fn help_modal_traps_tab_navigation_inside_the_overlay() {
+        let action = super::resolve(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            BindingContext {
+                active_screen: Screen::Explain,
+                focused_region: FocusRegion::ContextPrimary,
+                search_open: false,
+                help_open: true,
+                ai_preflight_open: false,
+            },
+        );
+
+        assert_eq!(
+            action,
+            Some(Action::MoveTransientFocus(crate::navigation::NavMove::Next))
+        );
+    }
+
+    #[test]
+    fn help_modal_blocks_background_refresh_shortcuts() {
+        let action = super::resolve(
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+            BindingContext {
+                active_screen: Screen::Dashboard,
+                focused_region: FocusRegion::DashboardReadiness,
+                search_open: false,
+                help_open: true,
+                ai_preflight_open: false,
+            },
+        );
+
+        assert_eq!(action, None);
+    }
+
+    #[test]
+    fn ai_preflight_uses_transient_focus_actions_for_tabbing() {
+        let action = super::resolve(
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+            BindingContext {
+                active_screen: Screen::Ai,
+                focused_region: FocusRegion::Tertiary,
+                search_open: false,
+                help_open: false,
+                ai_preflight_open: true,
+            },
+        );
+
+        assert_eq!(
+            action,
+            Some(Action::MoveTransientFocus(
+                crate::navigation::NavMove::Previous
+            ))
+        );
     }
 
     #[test]

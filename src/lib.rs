@@ -19,6 +19,7 @@ pub mod derive;
 pub mod error;
 pub mod eval;
 pub mod evidence;
+pub mod focus;
 pub mod insights;
 pub mod keybindings;
 pub mod navigation;

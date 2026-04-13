@@ -70,6 +70,10 @@ fn draw_medium(
     expanded_region: Option<FocusRegion>,
     metrics: crate::ui::layout::DashboardMetrics,
 ) {
+    let sort_focused =
+        focused_region == FocusRegion::TrendsMatrix && model.focused_subfocus.is_sort_tabs();
+    let matrix_focused =
+        focused_region == FocusRegion::TrendsMatrix && model.focused_subfocus.is_rows();
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .spacing(metrics.panel_gap_y)
@@ -80,15 +84,7 @@ fn draw_medium(
         ])
         .split(area);
 
-    draw_sort_tabs(
-        frame,
-        layout[0],
-        model,
-        theme,
-        metrics,
-        focused_region == FocusRegion::TrendsMatrix,
-        expanded_region == Some(FocusRegion::TrendsMatrix),
-    );
+    draw_sort_tabs(frame, layout[0], model, theme, metrics, sort_focused, false);
 
     let body = model.rows.iter().collect::<Vec<_>>();
     let shell = render_panel_shell(
@@ -100,13 +96,13 @@ fn draw_medium(
             title: "Trend Matrix",
             status: "SORTED",
             status_tone: Tone::Info,
-            focused: focused_region == FocusRegion::TrendsMatrix,
+            focused: matrix_focused,
             expanded: expanded_region == Some(FocusRegion::TrendsMatrix),
             kind: PanelKind::Section,
         },
     );
     frame.render_widget(
-        Paragraph::new(render_medium_matrix(&body)),
+        Paragraph::new(render_matrix(&body, shell.content_area.width as usize)),
         shell.content_area,
     );
 
@@ -130,6 +126,10 @@ fn draw_wide(
     expanded_region: Option<FocusRegion>,
     metrics: crate::ui::layout::DashboardMetrics,
 ) {
+    let sort_focused =
+        focused_region == FocusRegion::TrendsMatrix && model.focused_subfocus.is_sort_tabs();
+    let matrix_focused =
+        focused_region == FocusRegion::TrendsMatrix && model.focused_subfocus.is_rows();
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .spacing(metrics.panel_gap_y)
@@ -140,15 +140,7 @@ fn draw_wide(
         ])
         .split(area);
 
-    draw_sort_tabs(
-        frame,
-        layout[0],
-        model,
-        theme,
-        metrics,
-        focused_region == FocusRegion::TrendsMatrix,
-        expanded_region == Some(FocusRegion::TrendsMatrix),
-    );
+    draw_sort_tabs(frame, layout[0], model, theme, metrics, sort_focused, false);
 
     let shell = render_panel_shell(
         frame,
@@ -159,13 +151,16 @@ fn draw_wide(
             title: "Trend Matrix",
             status: "SORTED",
             status_tone: Tone::Info,
-            focused: focused_region == FocusRegion::TrendsMatrix,
+            focused: matrix_focused,
             expanded: expanded_region == Some(FocusRegion::TrendsMatrix),
             kind: PanelKind::Section,
         },
     );
     frame.render_widget(
-        Paragraph::new(render_wide_matrix(model)),
+        Paragraph::new(render_matrix(
+            model.rows.iter().collect::<Vec<_>>().as_slice(),
+            shell.content_area.width as usize,
+        )),
         shell.content_area,
     );
 
@@ -189,6 +184,10 @@ fn draw_compact(
     expanded_region: Option<FocusRegion>,
     metrics: crate::ui::layout::DashboardMetrics,
 ) {
+    let sort_focused =
+        focused_region == FocusRegion::TrendsMatrix && model.focused_subfocus.is_sort_tabs();
+    let matrix_focused =
+        focused_region == FocusRegion::TrendsMatrix && model.focused_subfocus.is_rows();
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .spacing(metrics.panel_gap_y)
@@ -199,15 +198,7 @@ fn draw_compact(
         ])
         .split(area);
 
-    draw_sort_tabs(
-        frame,
-        layout[0],
-        model,
-        theme,
-        metrics,
-        focused_region == FocusRegion::TrendsMatrix,
-        expanded_region == Some(FocusRegion::TrendsMatrix),
-    );
+    draw_sort_tabs(frame, layout[0], model, theme, metrics, sort_focused, false);
     let rows = model
         .rows
         .iter()
@@ -236,7 +227,7 @@ fn draw_compact(
             title: "Trend Matrix",
             status: "COMPACT",
             status_tone: Tone::Info,
-            focused: focused_region == FocusRegion::TrendsMatrix,
+            focused: matrix_focused,
             expanded: expanded_region == Some(FocusRegion::TrendsMatrix),
             kind: PanelKind::Section,
         },
@@ -298,10 +289,9 @@ fn draw_notes(
     focused: bool,
     expanded: bool,
 ) {
-    let notes = model
-        .notes
-        .iter()
-        .map(|note| ListItem::new(note.clone()))
+    let notes = inspector_lines(model)
+        .into_iter()
+        .map(ListItem::new)
         .collect::<Vec<_>>();
     let shell = render_panel_shell(
         frame,
@@ -320,126 +310,107 @@ fn draw_notes(
     frame.render_widget(List::new(notes), shell.content_area);
 }
 
-fn render_wide_matrix(model: &TrendsModel) -> String {
-    let header = format!(
-        "{} {} {} {} {}",
-        pad(" ", 2, false),
-        pad("metric", 16, false),
-        pad("current", 8, true),
-        pad("concern", 12, false),
-        pad("spark", 14, false),
-    );
-    let subheader = format!(
-        "{} {} {} {}",
-        pad(" ", 2, false),
-        pad("7d", 18, false),
-        pad("30d", 18, false),
-        pad("90d", 18, false),
-    );
+fn render_matrix(rows: &[&TrendMatrixRow], width: usize) -> String {
+    let widths = matrix_widths(width);
+    let mut lines = vec![format!(
+        "{} {} {} {} {} {} {} {}",
+        pad(" ", widths.marker, false),
+        pad("metric", widths.metric, false),
+        pad("current", widths.current, true),
+        pad("7d", widths.window, false),
+        pad("30d", widths.window, false),
+        pad("90d", widths.window, false),
+        pad("cue", widths.cue, false),
+        pad("signature", widths.spark, false),
+    )];
 
-    let mut lines = vec![header, subheader];
-    for row in &model.rows {
-        let (primary, detail) = render_wide_matrix_row(row);
-        lines.push(primary);
-        lines.push(detail);
-    }
-    lines.join("\n")
-}
-
-fn render_medium_matrix(rows: &[&TrendMatrixRow]) -> String {
-    let header = format!(
-        "{} {} {} {} {}",
-        pad(" ", 2, false),
-        pad("metric", 14, false),
-        pad("current", 8, true),
-        pad("concern", 11, false),
-        pad("spark", 10, false),
-    );
-    let subheader = format!(
-        "{} {} {} {}",
-        pad(" ", 2, false),
-        pad("7d", 16, false),
-        pad("30d", 16, false),
-        pad("90d", 16, false),
-    );
-
-    let mut lines = vec![header, subheader];
     for row in rows {
-        let (primary, detail) = render_medium_matrix_row(row);
-        lines.push(primary);
-        lines.push(detail);
+        lines.push(render_matrix_row(row, widths));
     }
+
     lines.join("\n")
 }
 
-fn render_medium_matrix_row(row: &TrendMatrixRow) -> (String, String) {
+fn render_matrix_row(row: &TrendMatrixRow, widths: TrendMatrixWidths) -> String {
     let marker = if row.selected { ">" } else { " " };
-    let spark = spark_strip(&row.sparkline, 10);
-    let primary = format!(
-        "{} {} {} {} {}",
-        pad(marker, 2, false),
-        pad(row.label, 14, false),
-        pad(&row.current_value, 8, true),
-        pad(&row.concern_label, 11, false),
-        spark,
-    );
-    let cells = row
+    let mut cells = row
         .cells
         .iter()
         .take(3)
-        .map(render_medium_matrix_cell)
+        .map(|cell| render_matrix_cell(cell, widths.window))
         .collect::<Vec<_>>();
-    let detail = format!(
-        "{} {} {} {}",
-        pad(" ", 2, false),
-        pad(cells.first().map_or("", String::as_str), 16, false),
-        pad(cells.get(1).map_or("", String::as_str), 16, false),
-        pad(cells.get(2).map_or("", String::as_str), 16, false),
-    );
-    (primary, detail)
-}
+    while cells.len() < 3 {
+        cells.push(String::new());
+    }
 
-fn render_medium_matrix_cell(cell: &TrendMatrixCell) -> String {
     format!(
-        "{} {}",
-        pad(&format!("{} {}", cell.label, cell.delta_label), 9, false),
-        segmented_bar(cell.fill_percent, 4)
+        "{} {} {} {} {} {} {} {}",
+        pad(marker, widths.marker, false),
+        pad(row.label, widths.metric, false),
+        pad(&row.current_value, widths.current, true),
+        pad(&cells[0], widths.window, false),
+        pad(&cells[1], widths.window, false),
+        pad(&cells[2], widths.window, false),
+        pad(&row.concern_label, widths.cue, false),
+        spark_strip(&row.sparkline, widths.spark),
     )
 }
 
-fn render_wide_matrix_row(row: &TrendMatrixRow) -> (String, String) {
-    let marker = if row.selected { ">" } else { " " };
-    let spark = spark_strip(&row.sparkline, 14);
-    let primary = format!(
-        "{} {} {} {} {}",
-        pad(marker, 2, false),
-        pad(row.label, 16, false),
-        pad(&row.current_value, 8, true),
-        pad(&row.concern_label, 12, false),
-        spark,
-    );
-    let cells = row
-        .cells
-        .iter()
-        .take(3)
-        .map(render_wide_matrix_cell)
-        .collect::<Vec<_>>();
-    let detail = format!(
-        "{} {} {} {}",
-        pad(" ", 2, false),
-        pad(cells.first().map_or("", String::as_str), 18, false),
-        pad(cells.get(1).map_or("", String::as_str), 18, false),
-        pad(cells.get(2).map_or("", String::as_str), 18, false),
-    );
-    (primary, detail)
-}
-
-fn render_wide_matrix_cell(cell: &TrendMatrixCell) -> String {
+fn render_matrix_cell(cell: &TrendMatrixCell, width: usize) -> String {
+    let bar_width = width.saturating_sub(6).clamp(3, 6);
     format!(
         "{} {}",
-        pad(&cell.delta_label, 5, false),
-        segmented_bar(cell.fill_percent, 6)
+        pad(
+            &cell.delta_label,
+            width.saturating_sub(bar_width + 1),
+            false
+        ),
+        segmented_bar(cell.fill_percent, bar_width)
     )
+}
+
+fn inspector_lines(model: &TrendsModel) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(selected_row) = model.rows.iter().find(|row| row.selected) {
+        lines.push(format!(
+            "{}: {} | cue {}",
+            selected_row.label, selected_row.detail, selected_row.concern_label
+        ));
+    }
+    lines.extend(model.notes.iter().cloned());
+    lines
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TrendMatrixWidths {
+    marker: usize,
+    metric: usize,
+    current: usize,
+    window: usize,
+    cue: usize,
+    spark: usize,
+}
+
+const fn matrix_widths(total_width: usize) -> TrendMatrixWidths {
+    let marker = 2;
+    let current = 8;
+    let window = 10;
+    let cue = 12;
+    let spacing = 7;
+    let spark_min = 8;
+    let metric_min = 14;
+
+    let fixed_without_metric = marker + current + (window * 3) + cue + spark_min + spacing;
+    let extra = total_width.saturating_sub(fixed_without_metric + metric_min);
+
+    TrendMatrixWidths {
+        marker,
+        metric: metric_min + extra / 2,
+        current,
+        window,
+        cue,
+        spark: spark_min + (extra - (extra / 2)),
+    }
 }
 
 fn pad(value: &str, width: usize, right_align: bool) -> String {

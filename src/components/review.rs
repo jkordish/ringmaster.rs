@@ -8,8 +8,9 @@ use ratatui::{
 use crate::app::{AiArtifactSummaryView, ReviewModel};
 use crate::navigation::FocusRegion;
 use crate::ui::{
-    layout::UiContext,
-    telemetry::{TelemetryAvailability, panel_block},
+    chrome::{PanelKind, PanelShellSpec, render_panel_shell},
+    layout::{DashboardMetrics, UiContext},
+    telemetry::TelemetryAvailability,
     theme::{Theme, Tone},
 };
 
@@ -43,12 +44,15 @@ fn draw_wide(
     focused_region: FocusRegion,
     expanded_region: Option<FocusRegion>,
 ) {
+    let metrics =
+        DashboardMetrics::for_viewport(crate::ui::layout::ViewportClass::from_width(area.width));
     let layout = Layout::default()
         .direction(Direction::Vertical)
+        .spacing(metrics.panel_gap_y)
         .constraints([
-            Constraint::Length(5),
-            Constraint::Length(3),
-            Constraint::Length(3),
+            Constraint::Length(6),
+            Constraint::Length(4),
+            Constraint::Length(4),
             Constraint::Min(14),
             Constraint::Length(7),
         ])
@@ -80,6 +84,7 @@ fn draw_wide(
         .split(layout[3]);
     let right = Layout::default()
         .direction(Direction::Vertical)
+        .spacing(metrics.panel_gap_y)
         .constraints([Constraint::Length(11), Constraint::Min(8)])
         .split(body[1]);
 
@@ -141,10 +146,13 @@ fn draw_compact(
     focused_region: FocusRegion,
     expanded_region: Option<FocusRegion>,
 ) {
+    let metrics =
+        DashboardMetrics::for_viewport(crate::ui::layout::ViewportClass::from_width(area.width));
     let layout = Layout::default()
         .direction(Direction::Vertical)
+        .spacing(metrics.panel_gap_y)
         .constraints([
-            Constraint::Length(4),
+            Constraint::Length(5),
             Constraint::Min(10),
             Constraint::Length(7),
         ])
@@ -215,19 +223,25 @@ fn draw_intro(
             model.selected_day_label, model.breadcrumb, selected_mode, selected_focus
         )
     };
+    let shell = render_panel_shell(
+        frame,
+        area,
+        theme,
+        DashboardMetrics::for_viewport(crate::ui::layout::ViewportClass::from_width(area.width)),
+        PanelShellSpec {
+            title: "Review / Daily Brief",
+            status: "LOCAL",
+            status_tone: Tone::Info,
+            focused: false,
+            expanded: false,
+            kind: PanelKind::Hero,
+        },
+    );
     frame.render_widget(
         Paragraph::new(intro)
             .wrap(Wrap { trim: true })
-            .style(theme.hero())
-            .block(panel_block(
-                theme,
-                "Review / Daily Brief",
-                "LOCAL",
-                Tone::Info,
-                false,
-                false,
-            )),
-        area,
+            .style(theme.hero()),
+        shell.content_area,
     );
 }
 
@@ -251,35 +265,50 @@ fn draw_mode_tabs(
                 .collect::<Vec<_>>()
                 .join("  ")
         );
-        frame.render_widget(
-            Paragraph::new(line)
-                .wrap(Wrap { trim: true })
-                .block(panel_block(
-                    theme,
-                    "Mode",
-                    selected,
-                    Tone::Focus,
-                    focused,
-                    expanded,
-                )),
+        let shell = render_panel_shell(
+            frame,
             area,
+            theme,
+            DashboardMetrics::for_viewport(crate::ui::layout::ViewportClass::from_width(
+                area.width,
+            )),
+            PanelShellSpec {
+                title: "Mode",
+                status: selected,
+                status_tone: Tone::Focus,
+                focused,
+                expanded,
+                kind: PanelKind::Section,
+            },
+        );
+        frame.render_widget(
+            Paragraph::new(line).wrap(Wrap { trim: true }),
+            shell.content_area,
         );
     } else {
+        let shell = render_panel_shell(
+            frame,
+            area,
+            theme,
+            DashboardMetrics::for_viewport(crate::ui::layout::ViewportClass::from_width(
+                area.width,
+            )),
+            PanelShellSpec {
+                title: "Mode",
+                status: "FILTER",
+                status_tone: Tone::Focus,
+                focused,
+                expanded,
+                kind: PanelKind::Section,
+            },
+        );
         frame.render_widget(
             Tabs::new(model.mode_tabs.iter().map(|tab| tab.label.as_str()))
-                .block(panel_block(
-                    theme,
-                    "Mode",
-                    "FILTER",
-                    Tone::Focus,
-                    focused,
-                    expanded,
-                ))
                 .style(theme.annotation())
                 .highlight_style(theme.emphasis(Tone::Focus))
                 .divider(" ")
                 .select(model.selected_mode_index),
-            area,
+            shell.content_area,
         );
     }
 }
@@ -304,35 +333,50 @@ fn draw_focus_tabs(
                 .collect::<Vec<_>>()
                 .join("  ")
         );
-        frame.render_widget(
-            Paragraph::new(line)
-                .wrap(Wrap { trim: true })
-                .block(panel_block(
-                    theme,
-                    "Focus",
-                    selected,
-                    Tone::Info,
-                    focused,
-                    expanded,
-                )),
+        let shell = render_panel_shell(
+            frame,
             area,
+            theme,
+            DashboardMetrics::for_viewport(crate::ui::layout::ViewportClass::from_width(
+                area.width,
+            )),
+            PanelShellSpec {
+                title: "Focus",
+                status: selected,
+                status_tone: Tone::Info,
+                focused,
+                expanded,
+                kind: PanelKind::Section,
+            },
+        );
+        frame.render_widget(
+            Paragraph::new(line).wrap(Wrap { trim: true }),
+            shell.content_area,
         );
     } else {
+        let shell = render_panel_shell(
+            frame,
+            area,
+            theme,
+            DashboardMetrics::for_viewport(crate::ui::layout::ViewportClass::from_width(
+                area.width,
+            )),
+            PanelShellSpec {
+                title: "Focus",
+                status: "FILTER",
+                status_tone: Tone::Info,
+                focused,
+                expanded,
+                kind: PanelKind::Section,
+            },
+        );
         frame.render_widget(
             Tabs::new(model.focus_tabs.iter().map(|tab| tab.label.as_str()))
-                .block(panel_block(
-                    theme,
-                    "Focus",
-                    "FILTER",
-                    Tone::Info,
-                    focused,
-                    expanded,
-                ))
                 .style(theme.annotation())
                 .highlight_style(theme.emphasis(Tone::Focus))
                 .divider(" ")
                 .select(model.selected_focus_index),
-            area,
+            shell.content_area,
         );
     }
 }
@@ -388,8 +432,12 @@ fn ai_artifact_lines(artifact: &AiArtifactSummaryView, ai_actions: &[String]) ->
     lines.extend(artifact.metadata_lines.iter().cloned());
 
     if !artifact.summary_text.is_empty() {
-        lines.push(String::new());
-        lines.push("Saved summary:".to_owned());
+        if artifact.status_label == "available" && !lines.is_empty() {
+            lines.push(String::new());
+        }
+        if artifact.status_label == "available" {
+            lines.push("Saved summary:".to_owned());
+        }
         lines.push(artifact.summary_text.clone());
     }
 
@@ -452,17 +500,22 @@ fn render_lines_panel(
     } else {
         lines.join("\n")
     };
-    frame.render_widget(
-        Paragraph::new(body)
-            .wrap(Wrap { trim: true })
-            .block(panel_block(
-                theme,
-                title,
-                availability.label(),
-                availability.tone(),
-                panel_state.focused,
-                panel_state.expanded,
-            )),
+    let shell = render_panel_shell(
+        frame,
         area,
+        theme,
+        DashboardMetrics::for_viewport(crate::ui::layout::ViewportClass::from_width(area.width)),
+        PanelShellSpec {
+            title,
+            status: availability.label(),
+            status_tone: availability.tone(),
+            focused: panel_state.focused,
+            expanded: panel_state.expanded,
+            kind: PanelKind::Section,
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(body).wrap(Wrap { trim: true }),
+        shell.content_area,
     );
 }

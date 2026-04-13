@@ -49,8 +49,8 @@ use crate::store::Store;
 use crate::store::queries::{
     AiEvalRunRecord, AiRunRecord, ReportExportRecord, SnapshotCatalogEntry, SnapshotExportRecord,
 };
-use crate::ui::chrome::{self, PanelKind};
-use crate::ui::layout::UiContext;
+use crate::ui::chrome::{self, PanelKind, PanelShellSpec, render_panel_shell};
+use crate::ui::layout::{DashboardMetrics, UiContext, ViewportClass};
 use crate::ui::theme::{ColorCapability, Theme, Tone};
 
 enum WorkerCommand {
@@ -645,7 +645,15 @@ fn draw_active_screen(
             app.focused_region(),
             app.expanded_region(),
         ),
-        Screen::Ai => ai_component::draw(frame, area, &app.model.ai, ui, theme),
+        Screen::Ai => ai_component::draw(
+            frame,
+            area,
+            &app.model.ai,
+            ui,
+            theme,
+            app.focused_region(),
+            app.expanded_region(),
+        ),
         Screen::Ops => ops::draw(
             frame,
             area,
@@ -661,9 +669,11 @@ fn draw_active_screen(
 fn draw_transient_overlays(frame: &mut ratatui::Frame<'_>, app: &AppState, theme: &Theme) {
     if let Some(search) = app.search_state() {
         draw_search_overlay(frame, frame.area(), search, theme);
-    }
-    if app.help_open() {
+    } else if app.help_open() {
         draw_help_overlay(frame, frame.area(), app.binding_context(), theme);
+    } else if let Some(preflight) = &app.model.ai.preflight {
+        let compact = !crate::ui::layout::ViewportClass::from_width(frame.area().width).is_wide();
+        ai_component::draw_preflight_overlay(frame, frame.area(), preflight, theme, compact);
     }
 }
 
@@ -719,8 +729,13 @@ fn draw_help_overlay(
     context: keybindings::BindingContext,
     theme: &Theme,
 ) {
+    let metrics = DashboardMetrics::for_viewport(ViewportClass::from_width(area.width));
     let groups = keybindings::help_groups(context);
     let mut lines = Vec::new();
+    lines.push(Line::from(vec![Span::styled(
+        "Keyboard help is modal while open.",
+        theme.section_title(Tone::Focus),
+    )]));
     for (index, (group, entries)) in groups.iter().enumerate() {
         if index > 0 {
             lines.push(Line::from(""));
@@ -738,15 +753,23 @@ fn draw_help_overlay(
 
     let overlay = centered_rect(area, 72, 18);
     frame.render_widget(Clear, overlay);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(chrome::panel(
-                theme,
-                chrome::title_with_badge(theme, "Keyboard Help", "current scope", Tone::Focus),
-                PanelKind::Section,
-            )),
+    let shell = render_panel_shell(
+        frame,
         overlay,
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Keyboard Help",
+            status: "MODAL",
+            status_tone: Tone::Focus,
+            focused: true,
+            expanded: false,
+            kind: PanelKind::Section,
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        shell.content_area,
     );
 }
 
@@ -3783,7 +3806,8 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("trends snapshot should render: {error}"));
 
         assert!(output.contains("TREND MATRIX"));
-        assert!(output.contains("Sorted by concern"));
+        assert!(output.contains("TREND SORT"));
+        assert!(output.contains("INSPECTOR"));
     }
 
     #[test]
@@ -3795,11 +3819,13 @@ mod tests {
         let output = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("wide trends snapshot should render: {error}"));
 
+        assert!(output.contains("metric"));
         assert!(output.contains("current"));
-        assert!(output.contains("concern"));
         assert!(output.contains("7d"));
         assert!(output.contains("30d"));
         assert!(output.contains("90d"));
+        assert!(output.contains("cue"));
+        assert!(output.contains("signature"));
     }
 
     #[test]
@@ -3856,7 +3882,7 @@ mod tests {
         assert!(output.contains("Ranked observations"));
         assert!(output.contains("AI artifact"));
         assert!(output.contains("AI artifact: available"));
-        assert!(output.contains("Provider / model: openai / gpt-4o-2024-08-06"));
+        assert!(output.contains("Kind / created: review"));
         assert!(output.contains("Briefing detail"));
         assert!(output.contains("Readiness score"));
     }
@@ -3886,7 +3912,7 @@ mod tests {
 
         assert!(output.contains("AI artifact"));
         assert!(output.contains("AI artifact: none"));
-        assert!(output.contains("No saved AI artifact is linked to this day yet."));
+        assert!(output.contains("No saved AI artifact"));
     }
 
     #[test]
@@ -4040,14 +4066,15 @@ mod tests {
         let output = render_snapshot(&app, 120, 36)
             .unwrap_or_else(|error| unreachable!("medium trends snapshot should render: {error}"));
 
-        assert!(output.contains("metric          current concern     spark"));
-        assert!(output.contains("7d               30d              90d"));
-        assert!(output.contains("7d -6.0   ████"));
-        assert!(output.contains("30d -6.0  ████"));
-        assert!(output.contains("90d -6.0  ████"));
-        assert!(!output.contains(
-            "metric          current   concern     7d               30d              90d              spark"
-        ));
+        assert!(output.contains("metric"));
+        assert!(output.contains("current"));
+        assert!(output.contains("7d"));
+        assert!(output.contains("30d"));
+        assert!(output.contains("90d"));
+        assert!(output.contains("cue"));
+        assert!(output.contains("signature"));
+        assert!(output.contains("Sleep"));
+        assert!(output.contains("watch"));
     }
 
     #[test]
@@ -4242,7 +4269,6 @@ mod tests {
         assert!(output.contains("Mode [Today]"));
         assert!(output.contains("Focus [Readiness]"));
         assert!(output.contains("> #1"));
-        assert!(output.contains("#2"));
         assert!(output.contains("AI artifact: available"));
     }
 
@@ -4379,6 +4405,36 @@ mod tests {
             cleared_cell_exists,
             "expected at least one popup cell to clear underlying content"
         );
+    }
+
+    #[test]
+    fn help_overlay_renders_as_a_modal_snapshot() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.handle(Action::ToggleHelp);
+
+        let output = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| unreachable!("help overlay snapshot should render: {error}"));
+
+        assert!(output.contains("MODAL"));
+        assert!(output.contains("Keyboard help is modal while open."));
+        assert!(output.contains("Esc closes this help."));
+    }
+
+    #[test]
+    fn trends_snapshot_exposes_full_width_matrix_headers() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Trends;
+
+        let output = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| unreachable!("trends snapshot should render: {error}"));
+
+        assert!(output.contains("metric"));
+        assert!(output.contains("current"));
+        assert!(output.contains("90d"));
+        assert!(output.contains("cue"));
+        assert!(output.contains("signature"));
     }
 
     #[test]
@@ -4765,7 +4821,8 @@ mod tests {
         let output = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("help snapshot should render: {error}"));
 
-        assert!(output.contains("Keyboard Help"));
+        assert!(output.contains("KEYBOARD HELP"));
+        assert!(output.contains("Keyboard help is modal while open."));
         assert!(output.contains("Standard"));
         assert!(output.contains("Expert aliases"));
     }

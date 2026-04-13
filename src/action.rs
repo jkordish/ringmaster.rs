@@ -9,6 +9,7 @@ pub enum Action {
     FocusNextRegion,
     FocusPreviousRegion,
     MoveFocusedRegion(NavMove),
+    MoveTransientFocus(NavMove),
     ActivateFocusedRegion,
     Back,
     ToggleHelp,

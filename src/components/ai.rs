@@ -10,6 +10,7 @@ use crate::app::{
     AiArtifactActionView, AiLaunchPointView, AiPreflightControlView, AiPreflightView,
     AiWorkbenchModel,
 };
+use crate::navigation::FocusRegion;
 use crate::ui::{
     chrome::{self, PanelKind},
     layout::UiContext,
@@ -22,15 +23,13 @@ pub fn draw(
     model: &AiWorkbenchModel,
     ui: &UiContext,
     theme: &Theme,
+    _focused_region: FocusRegion,
+    _expanded_region: Option<FocusRegion>,
 ) {
     if ui.viewport.is_wide() {
         draw_wide(frame, area, model, theme);
     } else {
         draw_narrow(frame, area, model, theme, ui.viewport.is_compact());
-    }
-
-    if let Some(preflight) = &model.preflight {
-        draw_preflight_overlay(frame, area, preflight, theme, !ui.viewport.is_wide());
     }
 }
 
@@ -346,7 +345,7 @@ fn draw_warnings(frame: &mut Frame<'_>, area: Rect, model: &AiWorkbenchModel, th
     );
 }
 
-fn draw_preflight_overlay(
+pub(crate) fn draw_preflight_overlay(
     frame: &mut Frame<'_>,
     area: Rect,
     preflight: &AiPreflightView,

@@ -16,6 +16,9 @@ use crate::evidence::policy::{claim_language_spec, evidence_badges, guidance_com
 use crate::evidence::{
     PopulationProfile, PopulationSupportStatus, evidence_registry_version, stale_evidence_warnings,
 };
+use crate::focus::{
+    HelpOverlayAnchor, TrendsMatrixSubfocus, clamp_roving_index, move_roving_index,
+};
 use crate::insights::{InsightConfidence, MetricInsight, MetricPoint, build_metric_insight};
 use crate::keybindings::BindingContext;
 use crate::navigation::{
@@ -272,6 +275,13 @@ pub struct OverlayFilterState {
     pub sessions: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct OverlayToggleFocusMemory {
+    timeline: usize,
+    explain: usize,
+    patterns: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppState {
     pub mode: RunMode,
@@ -286,14 +296,16 @@ pub struct AppState {
     screen_focus_memory: [FocusRegion; 8],
     focused_top_nav_screen: Screen,
     help_open: bool,
+    help_focus: HelpOverlayAnchor,
     focus_before_help: Option<FocusRegion>,
     search: Option<SearchState>,
     selected_day_index: usize,
     selected_timeline_point: usize,
     timeline_window_hours: u16,
-    selected_overlay_toggle_index: usize,
+    overlay_toggle_focus: OverlayToggleFocusMemory,
     trends_window: TrendWindowKind,
     trend_sort_mode: TrendSortMode,
+    trends_matrix_subfocus: TrendsMatrixSubfocus,
     selected_trend_row_index: usize,
     selected_event_id: Option<String>,
     selected_dashboard_breakdown_index: usize,
@@ -383,6 +395,7 @@ pub struct TimelineModel {
 pub struct TrendsModel {
     pub sort_tabs: Vec<TrendSortTab>,
     pub selected_sort_index: usize,
+    pub focused_subfocus: TrendsMatrixSubfocus,
     pub rows: Vec<TrendMatrixRow>,
     pub notes: Vec<String>,
 }
@@ -882,10 +895,13 @@ struct LiveModelOptions {
     selected_ai_eval_run_index: usize,
     selected_ai_artifact_action_index: usize,
     overlay_filters: OverlayFilterState,
-    selected_overlay_toggle_index: usize,
+    timeline_overlay_toggle_index: usize,
+    explain_overlay_toggle_index: usize,
+    patterns_overlay_toggle_index: usize,
     window_hours: u16,
     trends_window: TrendWindowKind,
     trend_sort_mode: TrendSortMode,
+    trends_matrix_subfocus: TrendsMatrixSubfocus,
     selected_trend_row_index: usize,
     pattern_metric_filter: PatternMetricFilter,
     refresh_in_flight: bool,
@@ -1007,6 +1023,7 @@ impl AppState {
             Action::FocusNextRegion
             | Action::FocusPreviousRegion
             | Action::MoveFocusedRegion(_)
+            | Action::MoveTransientFocus(_)
             | Action::ActivateFocusedRegion
             | Action::Back
             | Action::ToggleHelp
@@ -1073,6 +1090,7 @@ impl AppState {
                     );
                 }
             }
+            Action::MoveTransientFocus(movement) => self.move_transient_focus(*movement),
             Action::MoveFocusedRegion(movement) => self.move_focused_region(*movement),
             Action::ActivateFocusedRegion => self.activate_focused_region(emitted),
             Action::Back => self.back_out(),
@@ -1391,7 +1409,7 @@ impl AppState {
     }
 
     fn select_overlay_toggle_and_toggle(&mut self, index: usize) {
-        self.selected_overlay_toggle_index = index;
+        self.set_overlay_toggle_index_for_screen(self.active_screen, index);
         self.toggle_overlay_filter(index);
     }
 
@@ -1629,11 +1647,14 @@ impl AppState {
                 self.coverage_footer(CoverageFamily::Heartrate),
             ),
             (Screen::Timeline, FocusRegion::TimelineLanes) => {
+                let selected_overlay_index = self
+                    .overlay_toggle_index_for_screen(Screen::Timeline)
+                    .unwrap_or_default();
                 let overlay = self
                     .model
                     .timeline
                     .overlay_toggles
-                    .get(self.selected_overlay_toggle_index)
+                    .get(selected_overlay_index)
                     .map_or_else(
                         || "overlays".to_owned(),
                         |toggle| {
@@ -1854,10 +1875,13 @@ impl AppState {
                     selected_ai_eval_run_index: self.selected_ai_eval_run_index,
                     selected_ai_artifact_action_index: self.selected_ai_artifact_action_index,
                     overlay_filters: self.overlay_filters.clone(),
-                    selected_overlay_toggle_index: self.selected_overlay_toggle_index,
+                    timeline_overlay_toggle_index: self.overlay_toggle_focus.timeline,
+                    explain_overlay_toggle_index: self.overlay_toggle_focus.explain,
+                    patterns_overlay_toggle_index: self.overlay_toggle_focus.patterns,
                     window_hours: self.timeline_window_hours,
                     trends_window: self.trends_window,
                     trend_sort_mode: self.trend_sort_mode,
+                    trends_matrix_subfocus: self.trends_matrix_subfocus,
                     selected_trend_row_index: self.selected_trend_row_index,
                     pattern_metric_filter: self.pattern_metric_filter,
                     refresh_in_flight: self.refresh_in_flight,
@@ -2181,6 +2205,36 @@ impl AppState {
         self.focused_region = region;
     }
 
+    fn move_transient_focus(&mut self, movement: NavMove) {
+        if self.search.is_some() {
+            return;
+        }
+
+        if self.help_open {
+            self.help_focus = HelpOverlayAnchor::BindingList;
+            if matches!(movement, NavMove::Previous | NavMove::Next) {
+                self.status_line = format!(
+                    "Keyboard help focus stays on the {} list.",
+                    self.help_focus.label()
+                );
+            }
+            return;
+        }
+
+        if self.ai_preflight.is_some() {
+            self.ai_preflight_control = match movement {
+                NavMove::Previous => self.ai_preflight_control.previous(),
+                NavMove::Next => self.ai_preflight_control.next(),
+                NavMove::First | NavMove::PageBackward => PreflightControl::Confirm,
+                NavMove::Last | NavMove::PageForward => PreflightControl::Cancel,
+            };
+            self.status_line = format!(
+                "Focused {}.",
+                self.ai_preflight_control.label().to_ascii_lowercase()
+            );
+        }
+    }
+
     fn move_focused_region(&mut self, movement: NavMove) {
         if self.search.is_some() {
             match movement {
@@ -2195,16 +2249,6 @@ impl AppState {
             return;
         }
         if self.ai_preflight.is_some() {
-            self.ai_preflight_control = match movement {
-                NavMove::Previous => self.ai_preflight_control.previous(),
-                NavMove::Next => self.ai_preflight_control.next(),
-                NavMove::First | NavMove::PageBackward => PreflightControl::Confirm,
-                NavMove::Last | NavMove::PageForward => PreflightControl::Cancel,
-            };
-            self.status_line = format!(
-                "Focused {}.",
-                self.ai_preflight_control.label().to_ascii_lowercase()
-            );
             return;
         }
 
@@ -2296,7 +2340,6 @@ impl AppState {
             return;
         }
         if self.help_open {
-            self.toggle_help();
             return;
         }
         if self.ai_preflight.is_some() {
@@ -2425,7 +2468,12 @@ impl AppState {
                 }
             }
             (Screen::Trends, FocusRegion::TrendsMatrix) => {
-                self.toggle_region_expansion(FocusRegion::TrendsMatrix, "Trend matrix");
+                if self.trends_matrix_subfocus == TrendsMatrixSubfocus::SortTabs {
+                    self.status_line =
+                        format!("Trend sort anchored on {}.", self.trend_sort_mode.label());
+                } else {
+                    self.toggle_region_expansion(FocusRegion::TrendsMatrix, "Trend matrix");
+                }
             }
             (Screen::Trends, FocusRegion::TrendsInspector) => {
                 self.toggle_region_expansion(FocusRegion::TrendsInspector, "Trend inspector");
@@ -2459,6 +2507,24 @@ impl AppState {
             self.ai_preflight_control = PreflightControl::Confirm;
             "AI preflight dismissed.".clone_into(&mut self.status_line);
             self.rebuild_live_model();
+            return;
+        }
+
+        if matches!(
+            (
+                self.active_screen,
+                self.focused_region,
+                self.trends_matrix_subfocus
+            ),
+            (
+                Screen::Trends,
+                FocusRegion::TrendsMatrix,
+                TrendsMatrixSubfocus::Rows
+            )
+        ) {
+            self.trends_matrix_subfocus = TrendsMatrixSubfocus::SortTabs;
+            self.rebuild_live_model();
+            "Focused trend sort.".clone_into(&mut self.status_line);
             return;
         }
 
@@ -2503,6 +2569,7 @@ impl AppState {
                 self.set_focused_region(search.previous_region);
             }
             self.focus_before_help = Some(self.focused_region);
+            self.help_focus = HelpOverlayAnchor::BindingList;
             self.help_open = true;
             "Opened keyboard help.".clone_into(&mut self.status_line);
         }
@@ -2714,18 +2781,32 @@ impl AppState {
         self.set_timeline_window_hours(TIMELINE_WINDOW_PRESETS[next]);
     }
 
+    const fn overlay_toggle_index_for_screen(&self, screen: Screen) -> Option<usize> {
+        match screen {
+            Screen::Timeline => Some(self.overlay_toggle_focus.timeline),
+            Screen::Explain => Some(self.overlay_toggle_focus.explain),
+            Screen::Patterns => Some(self.overlay_toggle_focus.patterns),
+            _ => None,
+        }
+    }
+
+    const fn set_overlay_toggle_index_for_screen(&mut self, screen: Screen, index: usize) {
+        let normalized = clamp_roving_index(index, overlay_toggle_count());
+        match screen {
+            Screen::Timeline => self.overlay_toggle_focus.timeline = normalized,
+            Screen::Explain => self.overlay_toggle_focus.explain = normalized,
+            Screen::Patterns => self.overlay_toggle_focus.patterns = normalized,
+            _ => {}
+        }
+    }
+
     fn move_overlay_toggle_selection(&mut self, movement: NavMove) {
-        let current = self
-            .selected_overlay_toggle_index
-            .min(overlay_toggle_count() - 1);
-        let last = overlay_toggle_count().saturating_sub(1);
-        self.selected_overlay_toggle_index = match movement {
-            NavMove::Previous => current.saturating_sub(1),
-            NavMove::Next => usize::min(current + 1, last),
-            NavMove::First | NavMove::PageBackward => 0,
-            NavMove::Last | NavMove::PageForward => last,
+        let Some(current) = self.overlay_toggle_index_for_screen(self.active_screen) else {
+            return;
         };
-        let selected = overlay_toggle_descriptor(self.selected_overlay_toggle_index);
+        let next = move_roving_index(current, overlay_toggle_count(), movement);
+        self.set_overlay_toggle_index_for_screen(self.active_screen, next);
+        let selected = overlay_toggle_descriptor(next);
         self.status_line = format!("Focused {} overlays.", selected.label.to_ascii_lowercase());
         self.rebuild_live_model();
     }
@@ -2738,7 +2819,9 @@ impl AppState {
     }
 
     fn toggle_selected_overlay_filter(&mut self) {
-        self.toggle_overlay_filter(self.selected_overlay_toggle_index);
+        if let Some(index) = self.overlay_toggle_index_for_screen(self.active_screen) {
+            self.toggle_overlay_filter(index);
+        }
     }
 
     fn toggle_overlay_filter(&mut self, index: usize) {
@@ -2757,7 +2840,7 @@ impl AppState {
                 self.overlay_filters.sessions
             }
         };
-        self.selected_overlay_toggle_index = index.min(overlay_toggle_count() - 1);
+        self.set_overlay_toggle_index_for_screen(self.active_screen, index);
         self.normalize_event_selection();
         self.rebuild_live_model();
         self.status_line = format!(
@@ -3167,6 +3250,7 @@ impl AppState {
             NavMove::PageBackward => current.saturating_sub(3),
             NavMove::PageForward => usize::min(current.saturating_add(3), count.saturating_sub(1)),
         };
+        self.trends_matrix_subfocus = TrendsMatrixSubfocus::Rows;
         self.selected_trend_row_index = next;
         if let Some(row) = self.model.trends.rows.get(next) {
             self.status_line = format!("Focused {} trend row.", row.label);
@@ -3177,6 +3261,7 @@ impl AppState {
     fn set_trend_sort_mode(&mut self, mode: TrendSortMode) {
         let selected_label = self.focused_trend_row().map(|row| row.label);
         self.trend_sort_mode = mode;
+        self.trends_matrix_subfocus = TrendsMatrixSubfocus::SortTabs;
         self.status_line = format!("Trend sort changed to {}.", self.trend_sort_mode.label());
         self.rebuild_live_model();
         if let Some(label) = selected_label
@@ -3201,6 +3286,7 @@ impl AppState {
             .iter()
             .position(|row| row.label == label)
         {
+            self.trends_matrix_subfocus = TrendsMatrixSubfocus::Rows;
             self.selected_trend_row_index = index;
             self.rebuild_live_model();
         }
@@ -3530,14 +3616,16 @@ pub fn build_state_from_snapshot(
         screen_focus_memory,
         focused_top_nav_screen: Screen::Dashboard,
         help_open: false,
+        help_focus: HelpOverlayAnchor::BindingList,
         focus_before_help: None,
         search: None,
         selected_day_index,
         selected_timeline_point: 0,
         timeline_window_hours: 24,
-        selected_overlay_toggle_index: 0,
+        overlay_toggle_focus: OverlayToggleFocusMemory::default(),
         trends_window: TrendWindowKind::Days7,
         trend_sort_mode: TrendSortMode::Concern,
+        trends_matrix_subfocus: TrendsMatrixSubfocus::SortTabs,
         selected_trend_row_index: 0,
         selected_event_id: None,
         selected_dashboard_breakdown_index: 0,
@@ -3906,12 +3994,13 @@ fn build_live_model(snapshot: &LiveSnapshot, options: &LiveModelOptions) -> AppM
             options.selected_point_index,
             options.selected_event_id.as_deref(),
             &options.overlay_filters,
-            options.selected_overlay_toggle_index,
+            options.timeline_overlay_toggle_index,
             options.window_hours,
         ),
         trends: build_trends_model(
             snapshot,
             options.trend_sort_mode,
+            options.trends_matrix_subfocus,
             options.selected_trend_row_index,
             &week_review,
         ),
@@ -3920,13 +4009,13 @@ fn build_live_model(snapshot: &LiveSnapshot, options: &LiveModelOptions) -> AppM
             options.selected_day_index,
             options.selected_event_id.as_deref(),
             &options.overlay_filters,
-            options.selected_overlay_toggle_index,
+            options.explain_overlay_toggle_index,
             &today_review,
         ),
         patterns: build_patterns_model(
             snapshot,
             &options.overlay_filters,
-            options.selected_overlay_toggle_index,
+            options.patterns_overlay_toggle_index,
             options.pattern_metric_filter,
         ),
         review: build_review_model(
@@ -4440,6 +4529,7 @@ fn timeline_breadcrumb(
 fn build_trends_model(
     snapshot: &LiveSnapshot,
     trend_sort_mode: TrendSortMode,
+    focused_subfocus: TrendsMatrixSubfocus,
     selected_row_index: usize,
     week_review: &ReviewDeck,
 ) -> TrendsModel {
@@ -4534,6 +4624,7 @@ fn build_trends_model(
             })
             .collect(),
         selected_sort_index: trend_sort_mode.index(),
+        focused_subfocus,
         rows,
         notes,
     }
@@ -9985,6 +10076,7 @@ const fn empty_trends_model() -> TrendsModel {
     TrendsModel {
         sort_tabs: Vec::new(),
         selected_sort_index: 0,
+        focused_subfocus: TrendsMatrixSubfocus::SortTabs,
         rows: Vec::new(),
         notes: Vec::new(),
     }
@@ -11397,9 +11489,9 @@ mod tests {
     use super::{
         AiBrowserTab, AiLaunchIntent, AiOpsSnapshot, AiPreflightState, AppState,
         COMPARE_PROMPT_VERSION, DataFamily, HeartRateDay, LiveModelOptions, LiveSnapshot,
-        OverlayFilterState, PatternMetricFilter, REVIEW_PROMPT_VERSION, RefreshPolicySnapshot,
-        ReviewScreenMode, RunMode, Screen, TrendSortMode, TrendWindowKind, WebhookOpsSnapshot,
-        build_ai_artifact_summary_view, build_live_model, build_ops_model,
+        OverlayFilterState, OverlayToggleFocusMemory, PatternMetricFilter, REVIEW_PROMPT_VERSION,
+        RefreshPolicySnapshot, ReviewScreenMode, RunMode, Screen, TrendSortMode, TrendWindowKind,
+        WebhookOpsSnapshot, build_ai_artifact_summary_view, build_live_model, build_ops_model,
         build_state_from_snapshot, demo_eval_run_details, empty_investigation_report,
         newest_day_index, review_card_badges, review_detail_lines, serialize_json,
     };
@@ -11411,6 +11503,7 @@ mod tests {
     use crate::error::OuraProblem;
     use crate::evidence::policy::evidence_badges;
     use crate::evidence::{PopulationProfile, evidence_registry_version};
+    use crate::focus::{HelpOverlayAnchor, TrendsMatrixSubfocus};
     use crate::insights::{MetricPoint, build_metric_insight};
     use crate::navigation::{self, FocusRegion, PreflightControl, SearchScope, TransientLayer};
     use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
@@ -11670,14 +11763,16 @@ mod tests {
             screen_focus_memory,
             focused_top_nav_screen: Screen::Timeline,
             help_open: false,
+            help_focus: HelpOverlayAnchor::BindingList,
             focus_before_help: None,
             search: None,
             selected_day_index,
             selected_timeline_point: 0,
             timeline_window_hours: 24,
-            selected_overlay_toggle_index: 0,
+            overlay_toggle_focus: OverlayToggleFocusMemory::default(),
             trends_window: TrendWindowKind::Days7,
             trend_sort_mode: TrendSortMode::Concern,
+            trends_matrix_subfocus: TrendsMatrixSubfocus::SortTabs,
             selected_trend_row_index: 0,
             selected_event_id: None,
             selected_dashboard_breakdown_index: 0,
@@ -11931,10 +12026,13 @@ mod tests {
             selected_ai_eval_run_index: 0,
             selected_ai_artifact_action_index: 0,
             overlay_filters: OverlayFilterState::all(),
-            selected_overlay_toggle_index: 0,
+            timeline_overlay_toggle_index: 0,
+            explain_overlay_toggle_index: 0,
+            patterns_overlay_toggle_index: 0,
             window_hours: 24,
             trends_window: TrendWindowKind::Days7,
             trend_sort_mode: TrendSortMode::Concern,
+            trends_matrix_subfocus: TrendsMatrixSubfocus::SortTabs,
             selected_trend_row_index: 0,
             pattern_metric_filter: PatternMetricFilter::All,
             refresh_in_flight: false,
@@ -12630,10 +12728,13 @@ mod tests {
                 selected_ai_eval_run_index: 0,
                 selected_ai_artifact_action_index: 0,
                 overlay_filters: OverlayFilterState::all(),
-                selected_overlay_toggle_index: 0,
+                timeline_overlay_toggle_index: 0,
+                explain_overlay_toggle_index: 0,
+                patterns_overlay_toggle_index: 0,
                 window_hours: 24,
                 trends_window: TrendWindowKind::Days7,
                 trend_sort_mode: TrendSortMode::Concern,
+                trends_matrix_subfocus: TrendsMatrixSubfocus::SortTabs,
                 selected_trend_row_index: 0,
                 pattern_metric_filter: PatternMetricFilter::All,
                 refresh_in_flight: false,
@@ -12696,10 +12797,13 @@ mod tests {
                 selected_ai_eval_run_index: 0,
                 selected_ai_artifact_action_index: 0,
                 overlay_filters: OverlayFilterState::all(),
-                selected_overlay_toggle_index: 0,
+                timeline_overlay_toggle_index: 0,
+                explain_overlay_toggle_index: 0,
+                patterns_overlay_toggle_index: 0,
                 window_hours: 24,
                 trends_window: TrendWindowKind::Days7,
                 trend_sort_mode: TrendSortMode::Concern,
+                trends_matrix_subfocus: TrendsMatrixSubfocus::SortTabs,
                 selected_trend_row_index: 0,
                 pattern_metric_filter: PatternMetricFilter::All,
                 refresh_in_flight: false,
@@ -13022,10 +13126,13 @@ mod tests {
                 selected_ai_eval_run_index: 0,
                 selected_ai_artifact_action_index: 0,
                 overlay_filters: OverlayFilterState::all(),
-                selected_overlay_toggle_index: 0,
+                timeline_overlay_toggle_index: 0,
+                explain_overlay_toggle_index: 0,
+                patterns_overlay_toggle_index: 0,
                 window_hours: 24,
                 trends_window: TrendWindowKind::Days7,
                 trend_sort_mode: TrendSortMode::Concern,
+                trends_matrix_subfocus: TrendsMatrixSubfocus::SortTabs,
                 selected_trend_row_index: 0,
                 pattern_metric_filter: PatternMetricFilter::All,
                 refresh_in_flight: false,
@@ -13487,6 +13594,45 @@ mod tests {
     }
 
     #[test]
+    fn trends_back_unwinds_from_rows_to_sort_tabs_before_leaving_region() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Trends;
+        app.set_focused_region(FocusRegion::TrendsMatrix);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::Next));
+        assert_eq!(app.trends_matrix_subfocus, TrendsMatrixSubfocus::Rows);
+
+        app.handle(Action::Back);
+        assert_eq!(app.focused_region(), FocusRegion::TrendsMatrix);
+        assert_eq!(app.trends_matrix_subfocus, TrendsMatrixSubfocus::SortTabs);
+    }
+
+    #[test]
+    fn help_modal_keeps_underlying_region_stable_during_transient_focus_moves() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Review;
+        app.set_focused_region(FocusRegion::Primary);
+
+        app.handle(Action::ToggleHelp);
+        assert!(app.help_open());
+
+        app.handle(Action::MoveTransientFocus(navigation::NavMove::Next));
+        assert!(app.help_open());
+        assert_eq!(app.focused_region(), FocusRegion::Primary);
+
+        app.handle(Action::ToggleHelp);
+        assert_eq!(app.focused_region(), FocusRegion::Primary);
+    }
+
+    #[test]
     fn pattern_metric_selector_uses_the_shared_selector_contract() {
         let mut app = build_state_from_snapshot(
             RunMode::Demo,
@@ -13567,17 +13713,62 @@ mod tests {
         app.active_screen = Screen::Patterns;
         app.set_focused_region(FocusRegion::ContextSecondary);
 
-        assert_eq!(app.selected_overlay_toggle_index, 0);
+        assert_eq!(
+            app.overlay_toggle_index_for_screen(Screen::Patterns),
+            Some(0)
+        );
         assert!(app.overlay_filters.workouts);
 
         app.handle(Action::MoveFocusedRegion(navigation::NavMove::Last));
-        assert_eq!(app.selected_overlay_toggle_index, 2);
+        assert_eq!(
+            app.overlay_toggle_index_for_screen(Screen::Patterns),
+            Some(2)
+        );
 
         app.handle(Action::ActivateFocusedRegion);
         assert!(!app.overlay_filters.sessions);
 
         app.handle(Action::MoveFocusedRegion(navigation::NavMove::PageBackward));
-        assert_eq!(app.selected_overlay_toggle_index, 0);
+        assert_eq!(
+            app.overlay_toggle_index_for_screen(Screen::Patterns),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn overlay_toggle_focus_memory_is_screen_local() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+
+        app.active_screen = Screen::Patterns;
+        app.set_focused_region(FocusRegion::ContextSecondary);
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::Last));
+        assert_eq!(
+            app.overlay_toggle_index_for_screen(Screen::Patterns),
+            Some(2)
+        );
+
+        app.active_screen = Screen::Explain;
+        app.set_focused_region(FocusRegion::ContextPrimary);
+        assert_eq!(
+            app.overlay_toggle_index_for_screen(Screen::Explain),
+            Some(0)
+        );
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::Next));
+        assert_eq!(
+            app.overlay_toggle_index_for_screen(Screen::Explain),
+            Some(1)
+        );
+
+        app.active_screen = Screen::Patterns;
+        app.set_focused_region(FocusRegion::ContextSecondary);
+        assert_eq!(
+            app.overlay_toggle_index_for_screen(Screen::Patterns),
+            Some(2)
+        );
     }
 
     #[test]

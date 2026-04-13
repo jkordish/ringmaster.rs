@@ -8,8 +8,9 @@ use ratatui::{
 use crate::app::{ExplainModel, OverlayToggleView};
 use crate::navigation::FocusRegion;
 use crate::ui::{
-    layout::UiContext,
-    telemetry::panel_block,
+    chrome::{PanelKind, PanelShellSpec, render_panel_shell},
+    layout::{DashboardMetrics, UiContext},
+    telemetry::TelemetryAvailability,
     theme::{Theme, Tone},
 };
 
@@ -28,8 +29,10 @@ pub fn draw(
     focused_region: FocusRegion,
     expanded_region: Option<FocusRegion>,
 ) {
+    let metrics = DashboardMetrics::for_viewport(ui.viewport);
     let layout = Layout::default()
         .direction(Direction::Vertical)
+        .spacing(metrics.panel_gap_y)
         .constraints([
             Constraint::Length(if ui.viewport.is_compact() { 4 } else { 5 }),
             Constraint::Length(3),
@@ -39,19 +42,25 @@ pub fn draw(
         ])
         .split(area);
 
+    let hero_shell = render_panel_shell(
+        frame,
+        layout[0],
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Explain / Day Story",
+            status: "LOCAL",
+            status_tone: Tone::Info,
+            focused: false,
+            expanded: false,
+            kind: PanelKind::Hero,
+        },
+    );
     frame.render_widget(
         Paragraph::new(explain_headline(model, ui))
             .wrap(Wrap { trim: true })
-            .style(theme.hero())
-            .block(panel_block(
-                theme,
-                "Explain / Day Story",
-                "LOCAL",
-                Tone::Info,
-                false,
-                false,
-            )),
-        layout[0],
+            .style(theme.hero()),
+        hero_shell.content_area,
     );
 
     draw_overlay_tabs(
@@ -59,6 +68,7 @@ pub fn draw(
         layout[1],
         &model.overlay_toggles,
         theme,
+        metrics,
         focused_region == FocusRegion::ContextPrimary,
         expanded_region == Some(FocusRegion::ContextPrimary),
     );
@@ -72,8 +82,8 @@ pub fn draw(
         focused_region == FocusRegion::Primary,
         expanded_region == Some(FocusRegion::Primary),
     );
-    draw_evidence_section(frame, layout[3], model, ui, theme);
-    draw_footer_section(frame, layout[4], model, ui, theme);
+    draw_evidence_section(frame, layout[3], model, ui, theme, metrics);
+    draw_footer_section(frame, layout[4], model, ui, theme, metrics);
 }
 
 fn draw_overlay_tabs(
@@ -81,6 +91,7 @@ fn draw_overlay_tabs(
     area: Rect,
     toggles: &[OverlayToggleView],
     theme: &Theme,
+    metrics: DashboardMetrics,
     focused: bool,
     expanded: bool,
 ) {
@@ -88,21 +99,27 @@ fn draw_overlay_tabs(
         .iter()
         .position(|toggle| toggle.selected)
         .unwrap_or(0);
+    let shell = render_panel_shell(
+        frame,
+        area,
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Overlay Filters",
+            status: "FILTER",
+            status_tone: Tone::Info,
+            focused,
+            expanded,
+            kind: PanelKind::Section,
+        },
+    );
     frame.render_widget(
         Tabs::new(toggles.iter().map(overlay_tab_label))
-            .block(panel_block(
-                theme,
-                "Overlay Filters",
-                "FILTER",
-                Tone::Info,
-                focused,
-                expanded,
-            ))
             .style(theme.annotation())
             .highlight_style(theme.emphasis(Tone::Focus))
             .divider(" ")
             .select(selected_index),
-        area,
+        shell.content_area,
     );
 }
 
@@ -134,12 +151,14 @@ fn draw_summary_section(
     focused: bool,
     expanded: bool,
 ) {
+    let metrics = DashboardMetrics::for_viewport(ui.viewport);
     let summary = Layout::default()
         .direction(if ui.viewport.is_compact() {
             Direction::Vertical
         } else {
             Direction::Horizontal
         })
+        .spacing(metrics.panel_gap_x)
         .constraints(if ui.viewport.is_compact() {
             vec![Constraint::Percentage(55), Constraint::Percentage(45)]
         } else {
@@ -176,6 +195,7 @@ fn draw_evidence_section(
     model: &ExplainModel,
     ui: &UiContext,
     theme: &Theme,
+    metrics: DashboardMetrics,
 ) {
     let middle = Layout::default()
         .direction(if ui.viewport.is_compact() {
@@ -183,6 +203,7 @@ fn draw_evidence_section(
         } else {
             Direction::Horizontal
         })
+        .spacing(metrics.panel_gap_x)
         .constraints([Constraint::Percentage(56), Constraint::Percentage(44)])
         .split(area);
 
@@ -228,6 +249,7 @@ fn draw_footer_section(
     model: &ExplainModel,
     ui: &UiContext,
     theme: &Theme,
+    metrics: DashboardMetrics,
 ) {
     let footer = Layout::default()
         .direction(if ui.viewport.is_compact() {
@@ -235,6 +257,7 @@ fn draw_footer_section(
         } else {
             Direction::Vertical
         })
+        .spacing(metrics.panel_gap_y)
         .constraints(if ui.viewport.is_compact() {
             vec![Constraint::Percentage(60), Constraint::Percentage(40)]
         } else {
@@ -280,7 +303,7 @@ fn render_lines_panel(
     area: Rect,
     theme: &Theme,
     title: &str,
-    availability: crate::ui::telemetry::TelemetryAvailability,
+    availability: TelemetryAvailability,
     lines: &[String],
     panel_state: PanelState,
 ) {
@@ -289,17 +312,22 @@ fn render_lines_panel(
     } else {
         lines.join("\n")
     };
-    frame.render_widget(
-        Paragraph::new(body)
-            .wrap(Wrap { trim: true })
-            .block(panel_block(
-                theme,
-                title,
-                availability.label(),
-                availability.tone(),
-                panel_state.focused,
-                panel_state.expanded,
-            )),
+    let shell = render_panel_shell(
+        frame,
         area,
+        theme,
+        DashboardMetrics::for_viewport(UiContext::new(area).viewport),
+        PanelShellSpec {
+            title,
+            status: availability.label(),
+            status_tone: availability.tone(),
+            focused: panel_state.focused,
+            expanded: panel_state.expanded,
+            kind: PanelKind::Section,
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(body).wrap(Wrap { trim: true }),
+        shell.content_area,
     );
 }
