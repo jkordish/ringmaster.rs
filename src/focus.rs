@@ -15,6 +15,20 @@ impl HelpOverlayAnchor {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchOverlayAnchor {
+    QueryField,
+}
+
+impl SearchOverlayAnchor {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::QueryField => "query",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrendsMatrixSubfocus {
     SortTabs,
     Rows,
@@ -74,7 +88,10 @@ pub const fn clamp_roving_index(index: usize, len: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{HelpOverlayAnchor, TrendsMatrixSubfocus, clamp_roving_index, move_roving_index};
+    use super::{
+        HelpOverlayAnchor, SearchOverlayAnchor, TrendsMatrixSubfocus, clamp_roving_index,
+        move_roving_index,
+    };
     use crate::navigation::NavMove;
 
     #[test]
@@ -94,6 +111,7 @@ mod tests {
     #[test]
     fn focus_labels_are_stable() {
         assert_eq!(HelpOverlayAnchor::BindingList.label(), "bindings");
+        assert_eq!(SearchOverlayAnchor::QueryField.label(), "query");
         assert_eq!(TrendsMatrixSubfocus::SortTabs.label(), "trend sort");
         assert_eq!(TrendsMatrixSubfocus::Rows.label(), "trend rows");
     }

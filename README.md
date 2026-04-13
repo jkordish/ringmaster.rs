@@ -107,6 +107,8 @@ The TUI now follows one standard navigation grammar across Dashboard, Timeline, 
 - `Ctrl+F` opens search in the current searchable context.
 - `?` opens a scoped keyboard-help overlay.
 
+Search, help, and AI preflight now all behave as strict modal overlays: they trap interaction while open, restore the invoking region when closed, and keep background screen shortcuts inactive.
+
 Pane behavior is now consistent by pane type:
 
 - selectors and tabs use `Left` / `Right` plus `Home` / `End`

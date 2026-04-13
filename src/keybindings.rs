@@ -1002,6 +1002,70 @@ fn build_bindings() -> Vec<Keybinding> {
         key(
             Transient(Search),
             Standard,
+            KeyChord::plain(Tab),
+            MoveTransientFocus(crate::navigation::NavMove::Next),
+            "`Tab` next search focus",
+            true,
+        ),
+        key(
+            Transient(Search),
+            Standard,
+            KeyChord::plain(BackTab),
+            MoveTransientFocus(crate::navigation::NavMove::Previous),
+            "`Shift+Tab` previous search focus",
+            true,
+        ),
+        key(
+            Transient(Search),
+            Standard,
+            KeyChord::plain(Left),
+            MoveTransientFocus(crate::navigation::NavMove::Previous),
+            "`Left` previous search focus",
+            false,
+        ),
+        key(
+            Transient(Search),
+            Standard,
+            KeyChord::plain(Right),
+            MoveTransientFocus(crate::navigation::NavMove::Next),
+            "`Right` next search focus",
+            false,
+        ),
+        key(
+            Transient(Search),
+            Standard,
+            KeyChord::plain(Home),
+            MoveTransientFocus(crate::navigation::NavMove::First),
+            "`Home` first search focus",
+            false,
+        ),
+        key(
+            Transient(Search),
+            Standard,
+            KeyChord::plain(End),
+            MoveTransientFocus(crate::navigation::NavMove::Last),
+            "`End` last search focus",
+            false,
+        ),
+        key(
+            Transient(Search),
+            Standard,
+            KeyChord::plain(Up),
+            MoveTransientFocus(crate::navigation::NavMove::Previous),
+            "`Up` previous search focus",
+            false,
+        ),
+        key(
+            Transient(Search),
+            Standard,
+            KeyChord::plain(Down),
+            MoveTransientFocus(crate::navigation::NavMove::Next),
+            "`Down` next search focus",
+            false,
+        ),
+        key(
+            Transient(Search),
+            Standard,
             KeyChord::plain(Enter),
             SearchNextResult,
             "`Enter` next search result",
@@ -1626,6 +1690,25 @@ mod tests {
     }
 
     #[test]
+    fn search_modal_traps_tab_navigation_inside_the_overlay() {
+        let action = super::resolve(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            BindingContext {
+                active_screen: Screen::Review,
+                focused_region: FocusRegion::Primary,
+                search_open: true,
+                help_open: false,
+                ai_preflight_open: false,
+            },
+        );
+
+        assert_eq!(
+            action,
+            Some(Action::MoveTransientFocus(crate::navigation::NavMove::Next))
+        );
+    }
+
+    #[test]
     fn transients_do_not_fall_through_to_screen_shortcuts() {
         let action = super::resolve(
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
@@ -1639,6 +1722,29 @@ mod tests {
         );
 
         assert_eq!(action, None);
+    }
+
+    #[test]
+    fn search_help_groups_follow_the_visible_transient_scope() {
+        let groups = help_groups(BindingContext {
+            active_screen: Screen::Ai,
+            focused_region: FocusRegion::Secondary,
+            search_open: true,
+            help_open: false,
+            ai_preflight_open: false,
+        });
+
+        let standard = groups
+            .get("Standard")
+            .unwrap_or_else(|| panic!("standard help group should exist"));
+
+        assert!(
+            standard
+                .iter()
+                .any(|label| label.contains("next search focus"))
+        );
+        assert!(standard.iter().any(|label| label.contains("close search")));
+        assert!(!standard.iter().any(|label| label.contains("cancel")));
     }
 
     #[test]

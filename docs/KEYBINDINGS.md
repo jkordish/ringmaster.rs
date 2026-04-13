@@ -20,6 +20,9 @@ This document defines the canonical keyboard model for `ringmaster.rs`.
 
 - `Ctrl+F`: open search for the current searchable region or its default screen list
 - While search is active:
+  - search behaves as a strict modal overlay
+  - `Tab` / `Shift+Tab` stay inside search
+  - arrow keys and `Home` / `End` stay inside search even though this pass keeps one active focus anchor
   - `Enter`: move to the next result
   - `Shift+Enter`: move to the previous result
   - `Backspace`: delete one character
@@ -34,7 +37,7 @@ This document defines the canonical keyboard model for `ringmaster.rs`.
 
 ## Modal overlays
 
-- Help and AI preflight behave as strict modal overlays.
+- Search, Help, and AI preflight behave as strict modal overlays.
 - Opening a modal keeps the previously focused region as the restore target.
 - While a modal is open:
   - `Tab` / `Shift+Tab` stay inside the modal

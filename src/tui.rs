@@ -15,7 +15,7 @@ use ratatui::{
     Terminal,
     backend::{CrosstermBackend, TestBackend},
     buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier},
     text::{Line, Span},
     widgets::{Block, Clear, Paragraph, Tabs, Wrap},
@@ -668,7 +668,7 @@ fn draw_active_screen(
 
 fn draw_transient_overlays(frame: &mut ratatui::Frame<'_>, app: &AppState, theme: &Theme) {
     if let Some(search) = app.search_state() {
-        draw_search_overlay(frame, frame.area(), search, theme);
+        draw_search_overlay(frame, frame.area(), search, app.search_focus(), theme);
     } else if app.help_open() {
         draw_help_overlay(frame, frame.area(), app.binding_context(), theme);
     } else if let Some(preflight) = &app.model.ai.preflight {
@@ -681,9 +681,11 @@ fn draw_search_overlay(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     search: &navigation::SearchState,
+    search_focus: crate::focus::SearchOverlayAnchor,
     theme: &Theme,
 ) {
-    let overlay = centered_rect(area, 60, 7);
+    let metrics = DashboardMetrics::for_viewport(ViewportClass::from_width(area.width));
+    let overlay = centered_rect(area, 64, 9);
     let result_summary = if search.total_matches == 0 {
         "No matches yet".to_owned()
     } else {
@@ -694,6 +696,10 @@ fn draw_search_overlay(
         )
     };
     let body = vec![
+        Line::from(vec![Span::styled(
+            "Search is modal while open.",
+            theme.section_title(Tone::Focus),
+        )]),
         Line::from(vec![
             Span::styled("Query: ", theme.section_title(Tone::Focus)),
             Span::raw(if search.query.is_empty() {
@@ -703,23 +709,33 @@ fn draw_search_overlay(
             }),
         ]),
         Line::from(result_summary),
-        Line::from("Enter next  Shift+Enter previous  Esc close"),
+        Line::from(format!(
+            "Search focus stays on the {} field.",
+            search_focus.label()
+        )),
+        Line::from("Tab stays in search  Enter next  Shift+Enter previous"),
+        Line::from("Esc closes search."),
     ];
     frame.render_widget(Clear, overlay);
+    let shell = render_panel_shell(
+        frame,
+        overlay,
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Find in Current Context",
+            status: "MODAL",
+            status_tone: Tone::Focus,
+            focused: true,
+            expanded: false,
+            kind: PanelKind::Section,
+        },
+    );
     frame.render_widget(
         Paragraph::new(body)
             .wrap(Wrap { trim: true })
-            .block(chrome::panel(
-                theme,
-                chrome::title_with_badge(
-                    theme,
-                    "Find in Current Context",
-                    "search focus",
-                    Tone::Focus,
-                ),
-                PanelKind::Section,
-            )),
-        overlay,
+            .alignment(Alignment::Left),
+        shell.content_area,
     );
 }
 
@@ -4806,9 +4822,8 @@ mod tests {
         let output = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("review search snapshot should render: {error}"));
 
-        assert!(output.contains("Find in Current Context"));
+        assert!(output.contains("Search is modal while open."));
         assert!(output.contains("Query: st"));
-        assert!(output.contains("Enter next  Shift+Enter previous  Esc close"));
     }
 
     #[test]

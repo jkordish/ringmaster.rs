@@ -17,7 +17,8 @@ use crate::evidence::{
     PopulationProfile, PopulationSupportStatus, evidence_registry_version, stale_evidence_warnings,
 };
 use crate::focus::{
-    HelpOverlayAnchor, TrendsMatrixSubfocus, clamp_roving_index, move_roving_index,
+    HelpOverlayAnchor, SearchOverlayAnchor, TrendsMatrixSubfocus, clamp_roving_index,
+    move_roving_index,
 };
 use crate::insights::{InsightConfidence, MetricInsight, MetricPoint, build_metric_insight};
 use crate::keybindings::BindingContext;
@@ -299,6 +300,7 @@ pub struct AppState {
     help_focus: HelpOverlayAnchor,
     focus_before_help: Option<FocusRegion>,
     search: Option<SearchState>,
+    search_focus: SearchOverlayAnchor,
     selected_day_index: usize,
     selected_timeline_point: usize,
     timeline_window_hours: u16,
@@ -1504,6 +1506,11 @@ impl AppState {
     }
 
     #[must_use]
+    pub const fn search_focus(&self) -> SearchOverlayAnchor {
+        self.search_focus
+    }
+
+    #[must_use]
     pub const fn ai_preflight_control(&self) -> PreflightControl {
         self.ai_preflight_control
     }
@@ -2207,6 +2214,13 @@ impl AppState {
 
     fn move_transient_focus(&mut self, movement: NavMove) {
         if self.search.is_some() {
+            self.search_focus = SearchOverlayAnchor::QueryField;
+            if matches!(movement, NavMove::Previous | NavMove::Next) {
+                self.status_line = format!(
+                    "Search focus stays on the {} field.",
+                    self.search_focus.label()
+                );
+            }
             return;
         }
 
@@ -2597,11 +2611,13 @@ impl AppState {
             total_matches: 0,
             previous_region,
         });
+        self.search_focus = SearchOverlayAnchor::QueryField;
         "Find opened. Type to search the current list.".clone_into(&mut self.status_line);
     }
 
     fn close_search(&mut self) {
         if let Some(search) = self.search.take() {
+            self.search_focus = SearchOverlayAnchor::QueryField;
             self.set_focused_region(search.previous_region);
             "Closed search.".clone_into(&mut self.status_line);
         }
@@ -3619,6 +3635,7 @@ pub fn build_state_from_snapshot(
         help_focus: HelpOverlayAnchor::BindingList,
         focus_before_help: None,
         search: None,
+        search_focus: SearchOverlayAnchor::QueryField,
         selected_day_index,
         selected_timeline_point: 0,
         timeline_window_hours: 24,
@@ -11503,7 +11520,7 @@ mod tests {
     use crate::error::OuraProblem;
     use crate::evidence::policy::evidence_badges;
     use crate::evidence::{PopulationProfile, evidence_registry_version};
-    use crate::focus::{HelpOverlayAnchor, TrendsMatrixSubfocus};
+    use crate::focus::{HelpOverlayAnchor, SearchOverlayAnchor, TrendsMatrixSubfocus};
     use crate::insights::{MetricPoint, build_metric_insight};
     use crate::navigation::{self, FocusRegion, PreflightControl, SearchScope, TransientLayer};
     use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
@@ -11766,6 +11783,7 @@ mod tests {
             help_focus: HelpOverlayAnchor::BindingList,
             focus_before_help: None,
             search: None,
+            search_focus: SearchOverlayAnchor::QueryField,
             selected_day_index,
             selected_timeline_point: 0,
             timeline_window_hours: 24,
@@ -13629,6 +13647,28 @@ mod tests {
         assert_eq!(app.focused_region(), FocusRegion::Primary);
 
         app.handle(Action::ToggleHelp);
+        assert_eq!(app.focused_region(), FocusRegion::Primary);
+    }
+
+    #[test]
+    fn search_modal_keeps_underlying_region_stable_during_transient_focus_moves() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Review;
+        app.set_focused_region(FocusRegion::Primary);
+
+        app.handle(Action::OpenSearch);
+        assert!(app.search_state().is_some());
+
+        app.handle(Action::MoveTransientFocus(navigation::NavMove::Next));
+        assert!(app.search_state().is_some());
+        assert_eq!(app.focused_region(), FocusRegion::Primary);
+        assert_eq!(app.search_focus(), SearchOverlayAnchor::QueryField);
+
+        app.handle(Action::CloseSearch);
         assert_eq!(app.focused_region(), FocusRegion::Primary);
     }
 
