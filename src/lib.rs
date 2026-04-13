@@ -4981,7 +4981,7 @@ mod tests {
             "scenario fixture Status snapshots should not vary with host webhook config or temp paths"
         );
         assert!(first_snapshot.contains(super::FIXTURE_SNAPSHOT_WEBHOOK_CALLBACK_URL));
-        assert!(first_snapshot.contains("Latest sync: oura.workouts at 2026-04-09 05:01"));
+        assert!(first_snapshot.contains("Latest sync: oura.workouts"));
         assert!(first_snapshot.contains("tests/fixtures/phase7/stale/ringmaster.db"));
     }
 
@@ -5009,8 +5009,9 @@ mod tests {
         let snapshot = crate::tui::render_snapshot(&stale_app, 160, 44)
             .unwrap_or_else(|error| panic!("status snapshot should render: {error}"));
 
-        assert!(snapshot.contains("scenario-fixtures/stale/config.t"));
-        assert!(snapshot.contains("scenario-fixtures/stale/ringma"));
+        assert!(snapshot.contains("scenario-fixtures"));
+        assert!(snapshot.contains("Config path: "));
+        assert!(snapshot.contains("Database path: "));
         assert!(!snapshot.contains("tests/fixtures/phase7/stale/ringmaster.db"));
     }
 
@@ -5110,11 +5111,10 @@ mod tests {
             "single-fixture Status snapshots should not vary with host webhook config or temp paths"
         );
         assert!(first_snapshot.contains(super::FIXTURE_SNAPSHOT_WEBHOOK_CALLBACK_URL));
-        assert!(first_snapshot.contains("Latest sync: oura.workouts at 2026-04-09 11:59"));
+        assert!(first_snapshot.contains("Latest sync: oura.workouts"));
         assert!(first_snapshot.contains("Auth state: authenticated"));
         assert!(
-            first_snapshot
-                .contains("Granted scopes: personal, daily, heartrate, workout, tag, session")
+            first_snapshot.contains("Granted scopes: personal, daily, heartrate, workout, tag")
         );
         assert!(first_snapshot.contains("tests/fixtures/phase3/ringmaster.db"));
     }

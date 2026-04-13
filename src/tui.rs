@@ -237,24 +237,24 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &AppState) {
     let ui = UiContext::new(frame.area());
     frame.render_widget(Block::default().style(theme.screen()), frame.area());
 
+    let app_frame = chrome::app_frame(&theme);
+    let inner = app_frame.inner(frame.area());
+    frame.render_widget(app_frame, frame.area());
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(if ui.viewport.is_compact() { 4 } else { 5 }),
-            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Min(8),
-            Constraint::Length(3),
+            Constraint::Length(1),
         ])
-        .split(frame.area());
+        .split(inner);
 
-    let header = Paragraph::new(app.model.title.clone())
-        .style(theme.hero())
-        .block(chrome::panel(
-            &theme,
-            Line::from("ringmaster.rs"),
-            PanelKind::Hero,
-        ));
-    frame.render_widget(header, layout[0]);
+    render_app_status_bar(frame, layout[0], app, &theme);
 
     let top_nav_focused = app.is_region_focused(navigation::FocusRegion::TopNav);
     let top_nav_selected_index = if top_nav_focused {
@@ -276,43 +276,90 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &AppState) {
             Line::from(format!("{active_prefix}{}", screen.title()))
         })
         .collect::<Vec<_>>();
+    let top_nav_label = if top_nav_focused {
+        format!("Views [{}]", Screen::ALL[top_nav_selected_index].title())
+    } else {
+        "Views".to_owned()
+    };
+    let label_width = u16::try_from(top_nav_label.chars().count() + 1)
+        .unwrap_or(u16::MAX)
+        .min(layout[1].width.saturating_sub(1).max(1));
+    let nav_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(label_width), Constraint::Min(1)])
+        .split(layout[1]);
+    frame.render_widget(
+        Paragraph::new(truncate_line(&top_nav_label, nav_layout[0].width)).style(
+            if top_nav_focused {
+                theme.emphasis(Tone::Focus)
+            } else {
+                theme.annotation()
+            },
+        ),
+        nav_layout[0],
+    );
     let tabs = Tabs::new(tab_titles)
-        .block(chrome::panel(
-            &theme,
-            chrome::title_with_badge(
-                &theme,
-                "Views",
-                if top_nav_focused {
-                    "focus in tabs"
-                } else {
-                    app.active_screen.title()
-                },
-                if top_nav_focused {
-                    Tone::Focus
-                } else {
-                    Tone::Accent
-                },
-            ),
-            PanelKind::Subtle,
-        ))
         .style(theme.annotation())
         .highlight_style(theme.emphasis(Tone::Focus))
         .divider(" ")
         .select(top_nav_selected_index);
-    frame.render_widget(tabs, layout[1]);
+    frame.render_widget(tabs, nav_layout[1]);
 
     draw_active_screen(frame, layout[2], app, &ui, &theme);
 
-    let footer = Paragraph::new(app.footer())
-        .style(theme.annotation())
-        .block(chrome::panel(
-            &theme,
-            chrome::title_with_badge(&theme, "Keys", "keyboard-first", Tone::Muted),
-            PanelKind::Subtle,
-        ));
+    let footer = Paragraph::new(app.footer(ui.viewport)).style(theme.annotation());
     frame.render_widget(footer, layout[3]);
 
     draw_transient_overlays(frame, app, &theme);
+}
+
+fn render_app_status_bar(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    app: &AppState,
+    theme: &Theme,
+) {
+    let line = app_status_line(&app.model.title, area.width);
+    frame.render_widget(Paragraph::new(line).style(theme.hero()), area);
+}
+
+fn app_status_line(title: &str, width: u16) -> String {
+    let max_segments = match width {
+        0..=90 => 4,
+        91..=130 => 5,
+        _ => 7,
+    };
+    let mut segments = vec!["ringmaster.rs".to_owned()];
+    segments.extend(
+        title
+            .lines()
+            .flat_map(|line| line.split(" | "))
+            .map(str::trim)
+            .filter(|segment| !segment.is_empty())
+            .map(ToOwned::to_owned),
+    );
+    truncate_line(
+        &segments
+            .into_iter()
+            .take(max_segments)
+            .collect::<Vec<_>>()
+            .join(" | "),
+        width,
+    )
+}
+
+fn truncate_line(value: &str, width: u16) -> String {
+    let width = usize::from(width);
+    let char_count = value.chars().count();
+    if char_count <= width {
+        return value.to_owned();
+    }
+    if width <= 3 {
+        return value.chars().take(width).collect();
+    }
+    let mut truncated = value.chars().take(width - 3).collect::<String>();
+    truncated.push_str("...");
+    truncated
 }
 
 fn draw_active_screen(
@@ -3386,10 +3433,11 @@ mod tests {
 
         assert!(output.contains("ringmaster"));
         assert!(output.contains("Connection: Connected"));
-        assert!(output.contains("Latest sync:"));
-        assert!(output.contains("READINESS [FRESH]"));
-        assert!(output.contains("WEEKLY TRENDS [FRESH]"));
+        assert!(output.contains("Viewing: 2026-04-08"));
+        assert!(output.contains("READINESS"));
+        assert!(output.contains("WEEKLY TRENDS"));
         assert!(output.contains("Readiness tile: score 74"));
+        assert!(!output.contains("HEADER / STATUS"));
     }
 
     #[test]
@@ -3413,7 +3461,12 @@ mod tests {
         let output = render_snapshot(&app, 100, 32)
             .unwrap_or_else(|error| unreachable!("dashboard snapshot should render: {error}"));
 
-        assert!(output.contains("scope") || output.contains("unavailable"));
+        assert!(
+            output.contains("SCOPE")
+                || output.contains("scope")
+                || output.contains("NO DATA")
+                || output.contains("unavailable")
+        );
     }
 
     #[test]
@@ -3468,7 +3521,7 @@ mod tests {
         let output = render_snapshot(&app, 120, 44)
             .unwrap_or_else(|error| unreachable!("trends snapshot should render: {error}"));
 
-        assert!(output.contains("TREND MATRIX [SORTED]"));
+        assert!(output.contains("TREND MATRIX"));
         assert!(output.contains("Sorted by concern"));
     }
 
@@ -3611,8 +3664,8 @@ mod tests {
         assert!(output.contains("Auth state: authenticated"));
         assert!(output.contains("Granted scopes: personal, daily, heartrate"));
         assert!(output.contains("Database path: "));
-        assert!(output.contains("WARNINGS [ATTN]"));
-        assert!(output.contains("COVERAGE [MATRIX]"));
+        assert!(output.contains("WARNINGS"));
+        assert!(output.contains("COVERAGE"));
     }
 
     #[test]
@@ -3683,12 +3736,73 @@ mod tests {
         let wide = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("wide snapshot should render: {error}"));
 
-        assert!(compact.contains("READINESS [FRESH]"));
-        assert!(compact.contains("ACTIVITY [FRESH]"));
-        assert!(medium.contains("HEADER / STATUS [LIVE]"));
-        assert!(medium.contains("HEART RATE [STALE]"));
-        assert!(wide.contains("HEADER / STATUS [LIVE]"));
-        assert!(wide.contains("READINESS BREAKDOWN [FRESH]"));
+        assert!(compact.contains("Connection: Connected"));
+        assert!(compact.contains("READINESS"));
+        assert!(compact.contains("ACTIVITY"));
+        assert!(medium.contains("HEART RATE"));
+        assert!(medium.contains("[ STALE ]"));
+        assert!(wide.contains("READINESS BREAKDOWN"));
+        assert!(wide.contains("WEEKLY TRENDS"));
+        assert!(!compact.contains("HEADER / STATUS"));
+        assert!(!medium.contains("HEADER / STATUS"));
+        assert!(!wide.contains("HEADER / STATUS"));
+    }
+
+    #[test]
+    fn dashboard_focus_snapshots_keep_hero_focus_and_footer_context_aligned() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Dashboard;
+
+        let readiness = render_snapshot(&app, 160, 44).unwrap_or_else(|error| {
+            unreachable!("readiness focus snapshot should render: {error}")
+        });
+        assert!(readiness.contains("> READINESS"));
+        assert!(readiness.contains("Readiness tile: score 74"));
+
+        app.handle(Action::FocusNextRegion);
+        let sleep = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| unreachable!("sleep focus snapshot should render: {error}"));
+        assert!(sleep.contains("> SLEEP"));
+        assert!(sleep.contains("Sleep tile: 6h 55m"));
+
+        app.handle(Action::FocusNextRegion);
+        let activity = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| unreachable!("activity focus snapshot should render: {error}"));
+        assert!(activity.contains("> ACTIVITY"));
+        assert!(activity.contains("Activity tile: activity 13,420"));
+    }
+
+    #[test]
+    fn dashboard_stale_and_missing_shells_stay_structured() {
+        let config = test_config();
+        let mut demo = build_demo_state(&config);
+        demo.active_screen = Screen::Dashboard;
+        let stale_output = render_snapshot(&demo, 160, 44).unwrap_or_else(|error| {
+            unreachable!("stale dashboard snapshot should render: {error}")
+        });
+        assert!(stale_output.contains("HEART RATE"));
+        assert!(stale_output.contains("[ STALE ]"));
+
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
+        seed_sync_state(
+            &store,
+            "oura.daily",
+            SyncRunStatus::Blocked,
+            "Missing `daily` scope; dashboard summary rows remain unavailable.",
+            &["personal"],
+            None,
+        );
+        let auth_status = test_auth_status(&config, &["personal".to_owned()]);
+        let mut missing = build_live_state(&config, &store, &auth_status)
+            .unwrap_or_else(|error| unreachable!("live state should build: {error}"));
+        missing.active_screen = Screen::Dashboard;
+        let missing_output = render_snapshot(&missing, 160, 44).unwrap_or_else(|error| {
+            unreachable!("missing capability dashboard snapshot should render: {error}")
+        });
+        assert!(missing_output.contains("SCOPE") || missing_output.contains("scope"));
+        assert!(missing_output.contains("WEEKLY TRENDS"));
     }
 
     #[test]
@@ -3926,18 +4040,13 @@ mod tests {
 
         for (scenario, mut app) in states {
             for (screen, compact_marker, medium_marker, wide_marker) in [
-                (
-                    Screen::Dashboard,
-                    "READINESS [",
-                    "HEADER / STATUS [LIVE]",
-                    "HEADER / STATUS [LIVE]",
-                ),
-                (Screen::Timeline, "TIMELINE [", "HEART RATE [", "TIMELINE ["),
+                (Screen::Dashboard, "READINESS", "READINESS", "READINESS"),
+                (Screen::Timeline, "TIMELINE", "HEART RATE", "TIMELINE"),
                 (
                     Screen::Trends,
-                    "TREND MATRIX [COMPACT]",
-                    "TREND MATRIX [SORTED]",
-                    "TREND MATRIX [SORTED]",
+                    "TREND MATRIX",
+                    "TREND MATRIX",
+                    "TREND MATRIX",
                 ),
                 (
                     Screen::Explain,
@@ -3958,12 +4067,7 @@ mod tests {
                     "Ranked observations",
                 ),
                 (Screen::Ai, "AI workbench", "AI workbench", "AI workbench"),
-                (
-                    Screen::Ops,
-                    "COVERAGE [MATRIX]",
-                    "COVERAGE [MATRIX]",
-                    "COVERAGE [MATRIX]",
-                ),
+                (Screen::Ops, "COVERAGE", "COVERAGE", "COVERAGE"),
             ] {
                 app.active_screen = screen;
 

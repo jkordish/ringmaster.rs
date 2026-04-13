@@ -109,7 +109,7 @@ pub fn footer_hints(context: BindingContext) -> Vec<&'static str> {
                 None
             }
         })
-        .take(5)
+        .take(3)
         .collect()
 }
 

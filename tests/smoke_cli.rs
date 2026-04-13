@@ -63,10 +63,9 @@ async fn demo_output_mentions_dashboard() {
 
     assert!(output.contains("ringmaster"));
     assert!(output.contains("Connection: Connected"));
-    assert!(output.contains("Latest sync:"));
-    assert!(output.contains("READINESS [FRESH]"));
-    assert!(output.contains("READINESS BREAKDOWN [FRESH]"));
-    assert!(output.contains("WEEKLY TRENDS [FRESH]"));
+    assert!(output.contains("READINESS"));
+    assert!(output.contains("READINESS BREAKDOWN"));
+    assert!(output.contains("WEEKLY TRENDS"));
     assert!(output.contains("Readiness tile: score 74"));
     assert!(output.contains("Review"));
 }

@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use ratatui::{
     prelude::{Line, Span},
     widgets::{Block, Borders},
@@ -135,18 +137,16 @@ pub fn score_ring_lines(
     trend: &str,
     subtitle: Option<&str>,
 ) -> Vec<String> {
-    let ring = segmented_bar(fill_percent, 10);
-    let glyphs = ring.chars().collect::<Vec<_>>();
-    let left = glyphs.iter().take(5).collect::<String>();
-    let right = glyphs.iter().skip(5).collect::<String>();
+    let ring = segmented_bar(fill_percent, 12);
+    let lower = segmented_bar(fill_percent.saturating_sub(18), 8);
     let delta_text = delta.unwrap_or("Δ --");
     vec![
-        format!("    ╭{}╮", left),
-        format!("  ╭{}  {}╮", left, right),
-        format!(" │   {:^8} │", value),
-        format!(" │ {:^12} │", delta_text),
-        format!("  ╰{}  {}╯", right, left),
-        format!("    ╰{}╯", right),
+        format!("    {ring:^12}"),
+        "   ╭────────────╮".to_owned(),
+        format!("   │{:^12}│", value),
+        format!("   │{:^12}│", delta_text),
+        "   ╰────────────╯".to_owned(),
+        format!("     {lower:^8}"),
         subtitle.map_or_else(
             || trend.to_owned(),
             |subtitle| format!("{subtitle} | {trend}"),
@@ -174,22 +174,49 @@ pub fn thermometer_lines(value: Option<f64>, label: &str) -> Vec<String> {
 }
 
 #[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeeklyHeatmapMode {
+    Standard,
+    DenseHistory,
+}
+
+#[must_use]
 pub fn weekly_heatmap_rows(
     day_labels: &[String],
     row_labels: &[&str],
     rows: &[Vec<Option<u8>>],
     selected: Option<(usize, usize)>,
+    mode: WeeklyHeatmapMode,
+    cell_width: usize,
 ) -> Vec<String> {
     let levels = ['·', '░', '▒', '▓', '█'];
+    let cell_width = cell_width.max(1);
+    let label_width = match mode {
+        WeeklyHeatmapMode::Standard => 8,
+        WeeklyHeatmapMode::DenseHistory => 6,
+    };
+    let header_prefix = " ".repeat(label_width);
     let mut output = Vec::new();
-    output.push(format!(
-        "      {}",
-        day_labels
-            .iter()
-            .map(|day| day.chars().next().unwrap_or('?').to_string())
-            .collect::<Vec<_>>()
-            .join(" ")
-    ));
+    let mut header_cells = String::new();
+    for day in day_labels {
+        let label = match mode {
+            WeeklyHeatmapMode::Standard => day.chars().next().unwrap_or('?').to_string(),
+            WeeklyHeatmapMode::DenseHistory => day.split_once('-').map_or_else(
+                || day.chars().take(2).collect::<String>(),
+                |(month, day)| {
+                    let month_digit = month
+                        .trim_start_matches('0')
+                        .chars()
+                        .next()
+                        .unwrap_or_else(|| month.chars().last().unwrap_or('?'));
+                    format!("{month_digit}{day}")
+                },
+            ),
+        };
+        let slot_width = cell_width + 2;
+        let _ = write!(header_cells, "{label:^slot_width$}");
+    }
+    output.push(format!("{header_prefix}{header_cells}"));
     for (row_index, label) in row_labels.iter().enumerate() {
         let cells = rows
             .get(row_index)
@@ -202,16 +229,17 @@ pub fn weekly_heatmap_rows(
                             let band = usize::from(score.min(100)) * (levels.len() - 1) / 100;
                             levels[band]
                         });
+                        let fill = glyph.to_string().repeat(cell_width);
                         if selected == Some((row_index, column_index)) {
-                            format!("[{glyph}]")
+                            format!("[{fill}]")
                         } else {
-                            format!(" {glyph} ")
+                            format!(" {fill} ")
                         }
                     })
                     .collect::<String>()
             })
             .unwrap_or_default();
-        output.push(format!("{label:<5} {cells}"));
+        output.push(format!("{label:<label_width$}{cells}"));
     }
     output
 }
@@ -232,7 +260,48 @@ pub fn footer_inspector(
     freshness: &str,
     hint: &str,
 ) -> String {
-    format!("{label}: {exact} | {delta} | {freshness} | {hint}")
+    let summary = if delta.is_empty() || delta == "Δ --" {
+        exact.to_owned()
+    } else {
+        format!("{exact} ({delta})")
+    };
+    format!("{label}: {summary} | {freshness} | {hint}")
+}
+
+#[must_use]
+pub fn concise_text(value: &str, width: usize) -> String {
+    value.chars().take(width.max(1)).collect()
+}
+
+#[must_use]
+pub fn concise_detail(note: &str, width: usize) -> String {
+    concise_text(note.trim_end_matches('.'), width)
+}
+
+#[must_use]
+pub fn placeholder_rule(width: usize) -> String {
+    "·".repeat(width.max(4))
+}
+
+#[must_use]
+pub fn availability_scaffold(
+    availability: TelemetryAvailability,
+    reason: &str,
+    width: usize,
+) -> Vec<String> {
+    let width = width.max(8);
+    vec![
+        format!("{:^width$}", availability.label()),
+        placeholder_rule(width),
+        concise_detail(reason, width),
+    ]
+}
+
+#[must_use]
+pub fn primary_secondary_line(primary: &str, secondary: &str, width: usize) -> String {
+    let width = width.max(primary.len() + secondary.len() + 1);
+    let gap = width.saturating_sub(primary.len() + secondary.len());
+    format!("{primary}{}{secondary}", " ".repeat(gap))
 }
 
 fn resample(values: &[u64], width: usize) -> Vec<u64> {
@@ -255,7 +324,10 @@ fn resample(values: &[u64], width: usize) -> Vec<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TelemetryAvailability, micro_histogram, segmented_bar, spark_strip};
+    use super::{
+        TelemetryAvailability, WeeklyHeatmapMode, availability_scaffold, footer_inspector,
+        micro_histogram, segmented_bar, spark_strip, weekly_heatmap_rows,
+    };
 
     #[test]
     fn segmented_bar_keeps_density_when_partially_filled() {
@@ -277,5 +349,62 @@ mod tests {
     fn availability_labels_are_explicit() {
         assert_eq!(TelemetryAvailability::MissingScope.label(), "SCOPE");
         assert_eq!(TelemetryAvailability::RateLimited.label(), "429");
+    }
+
+    #[test]
+    fn footer_inspector_front_loads_summary_and_tucks_hints_last() {
+        let footer = footer_inspector(
+            "Readiness tile",
+            "score 74",
+            "vs 7d -5.7",
+            "FRESH | FRESH",
+            "`Tab` next | `?` help",
+        );
+
+        assert!(footer.starts_with("Readiness tile: score 74 (vs 7d -5.7)"));
+        assert!(footer.ends_with("`Tab` next | `?` help"));
+    }
+
+    #[test]
+    fn weekly_heatmap_rows_scale_cells_without_losing_alignment() {
+        let rows = weekly_heatmap_rows(
+            &["Mon".to_owned(), "Tue".to_owned()],
+            &["Sleep"],
+            &[vec![Some(30), Some(80)]],
+            Some((0, 1)),
+            WeeklyHeatmapMode::Standard,
+            2,
+        );
+
+        assert!(rows[0].contains('M'));
+        assert!(rows[1].contains("[▓▓]"));
+    }
+
+    #[test]
+    fn weekly_heatmap_dense_history_keeps_headers_compact() {
+        let rows = weekly_heatmap_rows(
+            &["04-01".to_owned(), "04-02".to_owned(), "04-03".to_owned()],
+            &["Sleep"],
+            &[vec![Some(30), Some(80), Some(55)]],
+            Some((0, 2)),
+            WeeklyHeatmapMode::DenseHistory,
+            1,
+        );
+
+        assert!(rows[0].contains("401"));
+        assert!(rows[0].contains("402"));
+        assert!(rows[1].contains("[▒]") || rows[1].contains("[▓]"));
+    }
+
+    #[test]
+    fn availability_scaffolds_keep_missing_states_structured() {
+        let lines = availability_scaffold(
+            TelemetryAvailability::MissingScope,
+            "daily scope missing",
+            12,
+        );
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("SCOPE"));
     }
 }

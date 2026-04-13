@@ -2,18 +2,24 @@ use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
     prelude::Rect,
-    text::Line,
     widgets::{Cell, List, ListItem, Paragraph, Row, Table},
 };
 
 use crate::app::{OpsItem, OpsModel};
 use crate::navigation::FocusRegion;
 use crate::ui::{
-    chrome::{self, PanelKind},
-    layout::UiContext,
-    telemetry::{coverage_rows, panel_block},
+    chrome::{PanelKind, PanelShellSpec, render_panel_shell},
+    layout::{DashboardMetrics, UiContext},
+    telemetry::coverage_rows,
     theme::{Theme, Tone},
 };
+
+#[derive(Debug, Clone, Copy)]
+struct OpsPanelState {
+    metrics: DashboardMetrics,
+    focused: bool,
+    expanded: bool,
+}
 
 pub fn draw(
     frame: &mut Frame<'_>,
@@ -24,10 +30,27 @@ pub fn draw(
     focused_region: FocusRegion,
     expanded_region: Option<FocusRegion>,
 ) {
+    let metrics = DashboardMetrics::for_viewport(ui.viewport);
     if ui.viewport.is_compact() {
-        draw_compact(frame, area, model, theme, focused_region, expanded_region);
+        draw_compact(
+            frame,
+            area,
+            model,
+            theme,
+            focused_region,
+            expanded_region,
+            metrics,
+        );
     } else {
-        draw_wide(frame, area, model, theme, focused_region, expanded_region);
+        draw_wide(
+            frame,
+            area,
+            model,
+            theme,
+            focused_region,
+            expanded_region,
+            metrics,
+        );
     }
 }
 
@@ -38,9 +61,11 @@ fn draw_wide(
     theme: &Theme,
     focused_region: FocusRegion,
     expanded_region: Option<FocusRegion>,
+    metrics: DashboardMetrics,
 ) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
+        .spacing(metrics.panel_gap_y)
         .constraints([
             Constraint::Length(5),
             Constraint::Min(16),
@@ -54,12 +79,16 @@ fn draw_wide(
         model,
         theme,
         false,
-        focused_region == FocusRegion::OpsSummary,
-        expanded_region == Some(FocusRegion::OpsSummary),
+        OpsPanelState {
+            metrics,
+            focused: focused_region == FocusRegion::OpsSummary,
+            expanded: expanded_region == Some(FocusRegion::OpsSummary),
+        },
     );
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
+        .spacing(metrics.panel_gap_x)
         .constraints([
             Constraint::Percentage(26),
             Constraint::Percentage(32),
@@ -72,10 +101,13 @@ fn draw_wide(
         body[0],
         model,
         theme,
-        focused_region == FocusRegion::OpsCoverage,
-        expanded_region == Some(FocusRegion::OpsCoverage),
+        OpsPanelState {
+            metrics,
+            focused: focused_region == FocusRegion::OpsCoverage,
+            expanded: expanded_region == Some(FocusRegion::OpsCoverage),
+        },
     );
-    draw_family_table(frame, body[1], model, theme);
+    draw_family_table(frame, body[1], model, theme, metrics);
     let diagnostics = prioritized_diagnostic_items(model);
     draw_diagnostics_list(
         frame,
@@ -83,16 +115,22 @@ fn draw_wide(
         &diagnostics,
         theme,
         None,
-        focused_region == FocusRegion::OpsDiagnostics,
-        expanded_region == Some(FocusRegion::OpsDiagnostics),
+        OpsPanelState {
+            metrics,
+            focused: focused_region == FocusRegion::OpsDiagnostics,
+            expanded: expanded_region == Some(FocusRegion::OpsDiagnostics),
+        },
     );
     draw_warnings(
         frame,
         layout[2],
         model,
         theme,
-        focused_region == FocusRegion::OpsWarnings,
-        expanded_region == Some(FocusRegion::OpsWarnings),
+        OpsPanelState {
+            metrics,
+            focused: focused_region == FocusRegion::OpsWarnings,
+            expanded: expanded_region == Some(FocusRegion::OpsWarnings),
+        },
     );
 }
 
@@ -103,9 +141,11 @@ fn draw_compact(
     theme: &Theme,
     focused_region: FocusRegion,
     expanded_region: Option<FocusRegion>,
+    metrics: DashboardMetrics,
 ) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
+        .spacing(metrics.panel_gap_y)
         .constraints([
             Constraint::Length(4),
             Constraint::Length(5),
@@ -120,20 +160,27 @@ fn draw_compact(
         model,
         theme,
         true,
-        focused_region == FocusRegion::OpsSummary,
-        expanded_region == Some(FocusRegion::OpsSummary),
+        OpsPanelState {
+            metrics,
+            focused: focused_region == FocusRegion::OpsSummary,
+            expanded: expanded_region == Some(FocusRegion::OpsSummary),
+        },
     );
     draw_coverage_panel(
         frame,
         layout[1],
         model,
         theme,
-        focused_region == FocusRegion::OpsCoverage,
-        expanded_region == Some(FocusRegion::OpsCoverage),
+        OpsPanelState {
+            metrics,
+            focused: focused_region == FocusRegion::OpsCoverage,
+            expanded: expanded_region == Some(FocusRegion::OpsCoverage),
+        },
     );
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
+        .spacing(metrics.panel_gap_x)
         .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
         .split(layout[2]);
 
@@ -142,14 +189,21 @@ fn draw_compact(
         .iter()
         .map(|status| ListItem::new(format!("[{}] {}", status.state_label, status.label)))
         .collect::<Vec<_>>();
-    frame.render_widget(
-        List::new(family_items).block(chrome::panel(
-            theme,
-            Line::from("Family status"),
-            PanelKind::Diagnostic,
-        )),
+    let family_shell = render_panel_shell(
+        frame,
         body[0],
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Family status",
+            status: "SYNC",
+            status_tone: Tone::Info,
+            focused: false,
+            expanded: false,
+            kind: PanelKind::Diagnostic,
+        },
     );
+    frame.render_widget(List::new(family_items), family_shell.content_area);
 
     let diagnostics = prioritized_diagnostic_items(model);
     draw_diagnostics_list(
@@ -158,16 +212,22 @@ fn draw_compact(
         &diagnostics,
         theme,
         None,
-        focused_region == FocusRegion::OpsDiagnostics,
-        expanded_region == Some(FocusRegion::OpsDiagnostics),
+        OpsPanelState {
+            metrics,
+            focused: focused_region == FocusRegion::OpsDiagnostics,
+            expanded: expanded_region == Some(FocusRegion::OpsDiagnostics),
+        },
     );
     draw_warnings(
         frame,
         layout[3],
         model,
         theme,
-        focused_region == FocusRegion::OpsWarnings,
-        expanded_region == Some(FocusRegion::OpsWarnings),
+        OpsPanelState {
+            metrics,
+            focused: focused_region == FocusRegion::OpsWarnings,
+            expanded: expanded_region == Some(FocusRegion::OpsWarnings),
+        },
     );
 }
 
@@ -177,8 +237,7 @@ fn draw_summary(
     model: &OpsModel,
     theme: &Theme,
     compact: bool,
-    focused: bool,
-    expanded: bool,
+    panel_state: OpsPanelState,
 ) {
     let summary = if compact {
         model
@@ -193,18 +252,23 @@ fn draw_summary(
     } else {
         model.summary_lines.join("\n")
     };
-    frame.render_widget(
-        Paragraph::new(summary)
-            .style(theme.hero())
-            .block(panel_block(
-                theme,
-                "Status",
-                &model.mode_label,
-                Tone::Info,
-                focused,
-                expanded,
-            )),
+    let shell = render_panel_shell(
+        frame,
         area,
+        theme,
+        panel_state.metrics,
+        PanelShellSpec {
+            title: "Status",
+            status: "MODE",
+            status_tone: Tone::Info,
+            focused: panel_state.focused,
+            expanded: panel_state.expanded,
+            kind: PanelKind::Hero,
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(summary).style(theme.hero()),
+        shell.content_area,
     );
 }
 
@@ -213,8 +277,7 @@ fn draw_coverage_panel(
     area: Rect,
     model: &OpsModel,
     theme: &Theme,
-    focused: bool,
-    expanded: bool,
+    panel_state: OpsPanelState,
 ) {
     let coverage = model
         .coverage
@@ -225,20 +288,44 @@ fn draw_coverage_panel(
         .into_iter()
         .collect::<Vec<_>>()
         .join("\n");
-    frame.render_widget(
-        Paragraph::new(body).block(panel_block(
-            theme,
-            "Coverage",
-            "MATRIX",
-            Tone::Info,
-            focused,
-            expanded,
-        )),
+    let shell = render_panel_shell(
+        frame,
         area,
+        theme,
+        panel_state.metrics,
+        PanelShellSpec {
+            title: "Coverage",
+            status: "MATRIX",
+            status_tone: Tone::Info,
+            focused: panel_state.focused,
+            expanded: panel_state.expanded,
+            kind: PanelKind::Section,
+        },
     );
+    frame.render_widget(Paragraph::new(body), shell.content_area);
 }
 
-fn draw_family_table(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme: &Theme) {
+fn draw_family_table(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &OpsModel,
+    theme: &Theme,
+    metrics: DashboardMetrics,
+) {
+    let shell = render_panel_shell(
+        frame,
+        area,
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Family status",
+            status: "SYNC",
+            status_tone: Tone::Info,
+            focused: false,
+            expanded: false,
+            kind: PanelKind::Diagnostic,
+        },
+    );
     let family_rows = model.family_statuses.iter().map(|status| {
         Row::new(vec![
             Cell::from(status.label),
@@ -260,16 +347,8 @@ fn draw_family_table(frame: &mut Frame<'_>, area: Rect, model: &OpsModel, theme:
         .header(
             Row::new(vec!["Family", "State", "Scope", "Last sync"])
                 .style(theme.section_title(Tone::Info)),
-        )
-        .block(panel_block(
-            theme,
-            "Family status",
-            "SYNC",
-            Tone::Info,
-            false,
-            false,
-        )),
-        area,
+        ),
+        shell.content_area,
     );
 }
 
@@ -279,25 +358,28 @@ fn draw_diagnostics_list(
     items: &[OpsItem],
     theme: &Theme,
     max_items: Option<usize>,
-    focused: bool,
-    expanded: bool,
+    panel_state: OpsPanelState,
 ) {
     let diagnostics = items
         .iter()
         .take(max_items.unwrap_or(items.len()))
         .map(|item| ListItem::new(format!("{}: {}", item.label, item.value)))
         .collect::<Vec<_>>();
-    frame.render_widget(
-        List::new(diagnostics).block(panel_block(
-            theme,
-            "Diagnostics",
-            "DETAIL",
-            Tone::Muted,
-            focused,
-            expanded,
-        )),
+    let shell = render_panel_shell(
+        frame,
         area,
+        theme,
+        panel_state.metrics,
+        PanelShellSpec {
+            title: "Diagnostics",
+            status: "DETAIL",
+            status_tone: Tone::Muted,
+            focused: panel_state.focused,
+            expanded: panel_state.expanded,
+            kind: PanelKind::Diagnostic,
+        },
     );
+    frame.render_widget(List::new(diagnostics), shell.content_area);
 }
 
 fn prioritized_diagnostic_items(model: &OpsModel) -> Vec<OpsItem> {
@@ -337,8 +419,7 @@ fn draw_warnings(
     area: Rect,
     model: &OpsModel,
     theme: &Theme,
-    focused: bool,
-    expanded: bool,
+    panel_state: OpsPanelState,
 ) {
     let warnings = if model.warnings.is_empty() {
         vec![ListItem::new("[quiet] No warnings.")]
@@ -349,19 +430,23 @@ fn draw_warnings(
             .map(|warning| ListItem::new(format!("[warn] {warning}")))
             .collect::<Vec<_>>()
     };
-    frame.render_widget(
-        List::new(warnings).block(panel_block(
-            theme,
-            "Warnings",
-            if model.warnings.is_empty() {
+    let shell = render_panel_shell(
+        frame,
+        area,
+        theme,
+        panel_state.metrics,
+        PanelShellSpec {
+            title: "Warnings",
+            status: if model.warnings.is_empty() {
                 "CLEAR"
             } else {
                 "ATTN"
             },
-            Tone::Warning,
-            focused,
-            expanded,
-        )),
-        area,
+            status_tone: Tone::Warning,
+            focused: panel_state.focused,
+            expanded: panel_state.expanded,
+            kind: PanelKind::Section,
+        },
     );
+    frame.render_widget(List::new(warnings), shell.content_area);
 }

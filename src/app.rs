@@ -44,7 +44,10 @@ use crate::store::webhook_store::{
     RuntimeHeartbeatRecord,
 };
 use crate::time_utils::current_local_day_string;
-use crate::ui::telemetry::{TelemetryAvailability, footer_inspector};
+use crate::ui::{
+    layout::ViewportClass,
+    telemetry::{TelemetryAvailability, footer_inspector},
+};
 use serde::Serialize;
 use time::{Date, OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -515,13 +518,44 @@ pub struct DashboardBreakdownRail {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DashboardWeeklyHeatmap {
-    pub availability: TelemetryAvailability,
+pub struct DashboardHeatmapGrid {
     pub day_labels: Vec<String>,
-    pub row_labels: Vec<String>,
     pub rows: Vec<Vec<Option<u8>>>,
     pub selected_cell: Option<(usize, usize)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardWeeklyHeatmap {
+    pub availability: TelemetryAvailability,
+    pub row_labels: Vec<String>,
+    pub recent: DashboardHeatmapGrid,
+    pub history: DashboardHeatmapGrid,
     pub note: String,
+}
+
+impl DashboardWeeklyHeatmap {
+    #[must_use]
+    pub const fn grid_for_viewport(&self, viewport: ViewportClass) -> &DashboardHeatmapGrid {
+        if viewport.is_wide() && self.history.day_labels.len() > self.recent.day_labels.len() {
+            &self.history
+        } else {
+            &self.recent
+        }
+    }
+
+    #[must_use]
+    pub fn selected_summary_for_viewport(&self, viewport: ViewportClass) -> String {
+        let grid = self.grid_for_viewport(viewport);
+        grid.selected_cell
+            .and_then(|(row_index, column_index)| {
+                let row = grid.rows.get(row_index)?;
+                let value = row.get(column_index).copied().flatten()?;
+                let row_label = self.row_labels.get(row_index)?;
+                let day_label = grid.day_labels.get(column_index)?;
+                Some(format!("{row_label} {value} on {day_label}"))
+            })
+            .unwrap_or_else(|| self.note.clone())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1369,14 +1403,14 @@ impl AppState {
     }
 
     #[must_use]
-    pub fn footer(&self) -> String {
+    pub fn footer(&self, viewport: ViewportClass) -> String {
         let hints = crate::keybindings::footer_hints(self.binding_context());
         let hint_text = if hints.is_empty() {
             "No contextual keys".to_owned()
         } else {
             hints.join(" | ")
         };
-        let (label, exact, delta, freshness) = self.focused_footer_details();
+        let (label, exact, delta, freshness) = self.focused_footer_details(viewport);
         footer_inspector(&label, &exact, &delta, &freshness, &hint_text)
     }
 
@@ -1426,7 +1460,7 @@ impl AppState {
         }
     }
 
-    fn focused_footer_details(&self) -> (String, String, String, String) {
+    fn focused_footer_details(&self, viewport: ViewportClass) -> (String, String, String, String) {
         let label = navigation::region_label(self.active_screen, self.focused_region)
             .unwrap_or_else(|| self.active_screen.title())
             .to_owned();
@@ -1530,15 +1564,7 @@ impl AppState {
                     .model
                     .dashboard
                     .weekly
-                    .selected_cell
-                    .and_then(|(row_index, column_index)| {
-                        let row = self.model.dashboard.weekly.rows.get(row_index)?;
-                        let value = row.get(column_index).copied().flatten()?;
-                        let row_label = self.model.dashboard.weekly.row_labels.get(row_index)?;
-                        let day_label = self.model.dashboard.weekly.day_labels.get(column_index)?;
-                        Some(format!("{row_label} {value} on {day_label}"))
-                    })
-                    .unwrap_or_else(|| self.model.dashboard.weekly.note.clone());
+                    .selected_summary_for_viewport(viewport);
                 (
                     label,
                     exact,
@@ -8680,41 +8706,56 @@ fn build_dashboard_weekly_heatmap(
     snapshot: &LiveSnapshot,
     selected_day: &str,
 ) -> DashboardWeeklyHeatmap {
-    let rows = snapshot
+    let recent_rows = latest_daily_rows(snapshot, 7);
+    let history_rows = latest_daily_rows(snapshot, 14);
+
+    DashboardWeeklyHeatmap {
+        availability: if recent_rows.is_empty() {
+            TelemetryAvailability::NoData
+        } else {
+            availability_from_freshness(&family_freshness(snapshot, DataFamily::Daily))
+        },
+        row_labels: vec![
+            "Sleep".to_owned(),
+            "Readiness".to_owned(),
+            "Activity".to_owned(),
+        ],
+        recent: build_dashboard_heatmap_grid(&recent_rows, selected_day),
+        history: build_dashboard_heatmap_grid(&history_rows, selected_day),
+        note: "Recent score bands for sleep, readiness, and activity.".to_owned(),
+    }
+}
+
+fn latest_daily_rows(snapshot: &LiveSnapshot, limit: usize) -> Vec<&DailyOverviewRow> {
+    snapshot
         .daily_history
         .iter()
         .rev()
-        .take(7)
+        .take(limit)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
-        .collect::<Vec<_>>();
+        .collect()
+}
 
+fn build_dashboard_heatmap_grid(
+    rows: &[&DailyOverviewRow],
+    selected_day: &str,
+) -> DashboardHeatmapGrid {
     let day_labels = rows
         .iter()
         .map(|row| row.day.get(5..10).unwrap_or(row.day.as_str()).to_owned())
         .collect::<Vec<_>>();
     let selected_col = rows.iter().position(|row| row.day == selected_day);
 
-    DashboardWeeklyHeatmap {
-        availability: if rows.is_empty() {
-            TelemetryAvailability::NoData
-        } else {
-            availability_from_freshness(&family_freshness(snapshot, DataFamily::Daily))
-        },
+    DashboardHeatmapGrid {
         day_labels,
-        row_labels: vec![
-            "Sleep".to_owned(),
-            "Readiness".to_owned(),
-            "Activity".to_owned(),
-        ],
         rows: vec![
             rows.iter().map(|row| row.sleep_score).collect(),
             rows.iter().map(|row| row.readiness_score).collect(),
             rows.iter().map(|row| row.activity_score).collect(),
         ],
         selected_cell: selected_col.map(|column| (0, column)),
-        note: "Recent score bands for sleep, readiness, and activity.".to_owned(),
     }
 }
 
@@ -9651,10 +9692,17 @@ const fn empty_dashboard_model() -> DashboardModel {
         },
         weekly: DashboardWeeklyHeatmap {
             availability: TelemetryAvailability::NoData,
-            day_labels: Vec::new(),
             row_labels: Vec::new(),
-            rows: Vec::new(),
-            selected_cell: None,
+            recent: DashboardHeatmapGrid {
+                day_labels: Vec::new(),
+                rows: Vec::new(),
+                selected_cell: None,
+            },
+            history: DashboardHeatmapGrid {
+                day_labels: Vec::new(),
+                rows: Vec::new(),
+                selected_cell: None,
+            },
             note: String::new(),
         },
     }
@@ -11128,6 +11176,7 @@ mod tests {
         SleepTimeRecord, SnapshotCatalogEntry, TimeSemantics,
     };
     use crate::test_support::{ok, some};
+    use crate::ui::layout::ViewportClass;
 
     fn make_review_card(id: &str, signal_key: &str, score: i32) -> ReviewCard {
         ReviewCard {
@@ -13114,19 +13163,48 @@ mod tests {
         app.active_screen = Screen::Dashboard;
 
         app.set_focused_region(FocusRegion::DashboardReadiness);
-        let readiness_footer = app.footer();
+        let readiness_footer = app.footer(ViewportClass::Wide);
         assert!(readiness_footer.contains("Readiness tile"));
 
         app.set_focused_region(FocusRegion::DashboardSleep);
-        let sleep_footer = app.footer();
+        let sleep_footer = app.footer(ViewportClass::Wide);
         assert!(sleep_footer.contains("Sleep tile"));
         assert_ne!(sleep_footer, readiness_footer);
 
         app.set_focused_region(FocusRegion::DashboardHeartRate);
-        let heart_rate_footer = app.footer();
+        let heart_rate_footer = app.footer(ViewportClass::Wide);
         assert_ne!(heart_rate_footer, sleep_footer);
         assert!(!heart_rate_footer.contains("Sleep tile"));
         assert!(heart_rate_footer.contains("bpm"));
+    }
+
+    #[test]
+    fn dashboard_weekly_heatmap_uses_recent_and_history_windows_by_viewport() {
+        let mut days = Vec::new();
+        for day in 1..=14 {
+            days.push(format!("2026-04-{day:02}"));
+        }
+        let day_refs = days.iter().map(String::as_str).collect::<Vec<_>>();
+        let app =
+            build_state_from_snapshot(RunMode::Demo, "Demo mode ready.", make_snapshot(&day_refs));
+
+        let weekly = &app.model.dashboard.weekly;
+        assert_eq!(weekly.recent.day_labels.len(), 7);
+        assert_eq!(weekly.history.day_labels.len(), 14);
+        assert_eq!(
+            weekly
+                .grid_for_viewport(ViewportClass::Medium)
+                .day_labels
+                .len(),
+            7
+        );
+        assert_eq!(
+            weekly
+                .grid_for_viewport(ViewportClass::Wide)
+                .day_labels
+                .len(),
+            14
+        );
     }
 
     #[test]

@@ -8,8 +8,9 @@ use ratatui::{
 use crate::app::{TrendMatrixCell, TrendMatrixRow, TrendsModel};
 use crate::navigation::FocusRegion;
 use crate::ui::{
+    chrome::{PanelKind, PanelShellSpec, render_panel_shell},
     layout::{UiContext, ViewportClass},
-    telemetry::{panel_block, segmented_bar, spark_strip},
+    telemetry::{segmented_bar, spark_strip},
     theme::{Theme, Tone},
 };
 
@@ -22,12 +23,29 @@ pub fn draw(
     focused_region: FocusRegion,
     expanded_region: Option<FocusRegion>,
 ) {
+    let metrics = crate::ui::layout::DashboardMetrics::for_viewport(ui.viewport);
     match ui.viewport {
         ViewportClass::Compact => {
-            draw_compact(frame, area, model, theme, focused_region, expanded_region);
+            draw_compact(
+                frame,
+                area,
+                model,
+                theme,
+                focused_region,
+                expanded_region,
+                metrics,
+            );
         }
         ViewportClass::Medium | ViewportClass::Wide => {
-            draw_wide(frame, area, model, theme, focused_region, expanded_region);
+            draw_wide(
+                frame,
+                area,
+                model,
+                theme,
+                focused_region,
+                expanded_region,
+                metrics,
+            );
         }
     }
 }
@@ -39,9 +57,11 @@ fn draw_wide(
     theme: &Theme,
     focused_region: FocusRegion,
     expanded_region: Option<FocusRegion>,
+    metrics: crate::ui::layout::DashboardMetrics,
 ) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
+        .spacing(metrics.panel_gap_y)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(10),
@@ -54,6 +74,7 @@ fn draw_wide(
         layout[0],
         model,
         theme,
+        metrics,
         focused_region == FocusRegion::TrendsMatrix,
         expanded_region == Some(FocusRegion::TrendsMatrix),
     );
@@ -64,19 +85,25 @@ fn draw_wide(
         .map(render_matrix_row)
         .collect::<Vec<_>>()
         .join("\n");
+    let shell = render_panel_shell(
+        frame,
+        layout[1],
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Trend Matrix",
+            status: "SORTED",
+            status_tone: Tone::Info,
+            focused: focused_region == FocusRegion::TrendsMatrix,
+            expanded: expanded_region == Some(FocusRegion::TrendsMatrix),
+            kind: PanelKind::Section,
+        },
+    );
     frame.render_widget(
         Paragraph::new(format!(
             "metric          current   concern     7d               30d              90d              spark\n{body}"
-        ))
-        .block(panel_block(
-            theme,
-            "Trend Matrix",
-            "SORTED",
-            Tone::Info,
-            focused_region == FocusRegion::TrendsMatrix,
-            expanded_region == Some(FocusRegion::TrendsMatrix),
         )),
-        layout[1],
+        shell.content_area,
     );
 
     draw_notes(
@@ -84,6 +111,7 @@ fn draw_wide(
         layout[2],
         model,
         theme,
+        metrics,
         focused_region == FocusRegion::TrendsInspector,
         expanded_region == Some(FocusRegion::TrendsInspector),
     );
@@ -96,9 +124,11 @@ fn draw_compact(
     theme: &Theme,
     focused_region: FocusRegion,
     expanded_region: Option<FocusRegion>,
+    metrics: crate::ui::layout::DashboardMetrics,
 ) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
+        .spacing(metrics.panel_gap_y)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(8),
@@ -111,6 +141,7 @@ fn draw_compact(
         layout[0],
         model,
         theme,
+        metrics,
         focused_region == FocusRegion::TrendsMatrix,
         expanded_region == Some(FocusRegion::TrendsMatrix),
     );
@@ -133,22 +164,27 @@ fn draw_compact(
             ))
         })
         .collect::<Vec<_>>();
-    frame.render_widget(
-        List::new(rows).block(panel_block(
-            theme,
-            "Trend Matrix",
-            "COMPACT",
-            Tone::Info,
-            focused_region == FocusRegion::TrendsMatrix,
-            expanded_region == Some(FocusRegion::TrendsMatrix),
-        )),
+    let shell = render_panel_shell(
+        frame,
         layout[1],
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Trend Matrix",
+            status: "COMPACT",
+            status_tone: Tone::Info,
+            focused: focused_region == FocusRegion::TrendsMatrix,
+            expanded: expanded_region == Some(FocusRegion::TrendsMatrix),
+            kind: PanelKind::Section,
+        },
     );
+    frame.render_widget(List::new(rows), shell.content_area);
     draw_notes(
         frame,
         layout[2],
         model,
         theme,
+        metrics,
         focused_region == FocusRegion::TrendsInspector,
         expanded_region == Some(FocusRegion::TrendsInspector),
     );
@@ -159,27 +195,34 @@ fn draw_sort_tabs(
     area: Rect,
     model: &TrendsModel,
     theme: &Theme,
+    metrics: crate::ui::layout::DashboardMetrics,
     focused: bool,
     expanded: bool,
 ) {
+    let shell = render_panel_shell(
+        frame,
+        area,
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Trend Sort",
+            status: model
+                .sort_tabs
+                .get(model.selected_sort_index)
+                .map_or("SORT", |tab| tab.label),
+            status_tone: Tone::Accent,
+            focused,
+            expanded,
+            kind: PanelKind::Section,
+        },
+    );
     frame.render_widget(
         Tabs::new(model.sort_tabs.iter().map(|tab| tab.label))
-            .block(panel_block(
-                theme,
-                "Trend Sort",
-                model
-                    .sort_tabs
-                    .get(model.selected_sort_index)
-                    .map_or("Concern", |tab| tab.label),
-                Tone::Accent,
-                focused,
-                expanded,
-            ))
             .style(theme.annotation())
             .highlight_style(theme.emphasis(Tone::Focus))
             .divider(" ")
             .select(model.selected_sort_index),
-        area,
+        shell.content_area,
     );
 }
 
@@ -188,6 +231,7 @@ fn draw_notes(
     area: Rect,
     model: &TrendsModel,
     theme: &Theme,
+    metrics: crate::ui::layout::DashboardMetrics,
     focused: bool,
     expanded: bool,
 ) {
@@ -196,17 +240,21 @@ fn draw_notes(
         .iter()
         .map(|note| ListItem::new(note.clone()))
         .collect::<Vec<_>>();
-    frame.render_widget(
-        List::new(notes).block(panel_block(
-            theme,
-            "Inspector",
-            "DETAIL",
-            Tone::Muted,
+    let shell = render_panel_shell(
+        frame,
+        area,
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Inspector",
+            status: "DETAIL",
+            status_tone: Tone::Muted,
             focused,
             expanded,
-        )),
-        area,
+            kind: PanelKind::Diagnostic,
+        },
     );
+    frame.render_widget(List::new(notes), shell.content_area);
 }
 
 fn render_matrix_row(row: &TrendMatrixRow) -> String {

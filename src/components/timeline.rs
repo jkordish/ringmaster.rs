@@ -9,10 +9,11 @@ use ratatui::{
 
 use crate::app::{OverlayFamilyGroup, OverlayToggleView, TimelineModel};
 use crate::navigation::FocusRegion;
+use crate::ui::chrome::{PanelKind, PanelShellSpec, render_panel_shell};
 use crate::ui::{
     charts, chrome,
-    layout::UiContext,
-    telemetry::{TelemetryAvailability, panel_block},
+    layout::{DashboardMetrics, UiContext},
+    telemetry::TelemetryAvailability,
     theme::{Theme, Tone},
 };
 
@@ -25,8 +26,10 @@ pub fn draw(
     focused_region: FocusRegion,
     expanded_region: Option<FocusRegion>,
 ) {
+    let metrics = DashboardMetrics::for_viewport(ui.viewport);
     let layout = Layout::default()
         .direction(Direction::Vertical)
+        .spacing(metrics.panel_gap_y)
         .constraints([
             Constraint::Length(if ui.viewport.is_compact() { 4 } else { 5 }),
             Constraint::Length(3),
@@ -44,18 +47,23 @@ pub fn draw(
             model.summary, model.breadcrumb, model.day_selector
         )
     };
-    frame.render_widget(
-        Paragraph::new(summary)
-            .style(theme.body())
-            .block(panel_block(
-                theme,
-                "Timeline",
-                &model.selected_day_label,
-                Tone::Accent,
-                false,
-                false,
-            )),
+    let summary_shell = render_panel_shell(
+        frame,
         layout[0],
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Timeline",
+            status: "DAY",
+            status_tone: Tone::Accent,
+            focused: false,
+            expanded: false,
+            kind: PanelKind::Hero,
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(summary).style(theme.body()),
+        summary_shell.content_area,
     );
 
     draw_controls(
@@ -63,6 +71,7 @@ pub fn draw(
         layout[1],
         model,
         theme,
+        metrics,
         focused_region == FocusRegion::TimelineControls,
         expanded_region == Some(FocusRegion::TimelineControls),
     );
@@ -71,6 +80,7 @@ pub fn draw(
         layout[2],
         model,
         theme,
+        metrics,
         focused_region == FocusRegion::TimelineChart,
         expanded_region == Some(FocusRegion::TimelineChart),
     );
@@ -79,6 +89,7 @@ pub fn draw(
         layout[3],
         model,
         theme,
+        metrics,
         focused_region == FocusRegion::TimelineLanes,
         expanded_region == Some(FocusRegion::TimelineLanes),
     );
@@ -86,34 +97,42 @@ pub fn draw(
     let bottom = if ui.viewport.is_compact() {
         Layout::default()
             .direction(Direction::Vertical)
+            .spacing(metrics.panel_gap_y)
             .constraints([Constraint::Length(3), Constraint::Min(2)])
             .split(layout[4])
     } else {
         Layout::default()
             .direction(Direction::Horizontal)
+            .spacing(metrics.panel_gap_x)
             .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
             .split(layout[4])
     };
 
+    let inspector_shell = render_panel_shell(
+        frame,
+        bottom[0],
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Inspector",
+            status: if model.selected_event_index.is_some() {
+                "LINKED"
+            } else {
+                "CURSOR"
+            },
+            status_tone: Tone::Focus,
+            focused: focused_region == FocusRegion::TimelineInspector,
+            expanded: expanded_region == Some(FocusRegion::TimelineInspector),
+            kind: PanelKind::Diagnostic,
+        },
+    );
     frame.render_widget(
         List::new(
             std::iter::once(model.selected_detail.clone())
                 .chain(model.event_detail_lines.iter().cloned())
                 .map(ListItem::new),
-        )
-        .block(panel_block(
-            theme,
-            "Inspector",
-            if model.selected_event_index.is_some() {
-                "LINKED"
-            } else {
-                "CURSOR"
-            },
-            Tone::Focus,
-            focused_region == FocusRegion::TimelineInspector,
-            expanded_region == Some(FocusRegion::TimelineInspector),
-        )),
-        bottom[0],
+        ),
+        inspector_shell.content_area,
     );
 
     let events = if model.events.is_empty() {
@@ -138,21 +157,25 @@ pub fn draw(
             })
             .collect::<Vec<_>>()
     };
-    frame.render_widget(
-        List::new(events).block(panel_block(
-            theme,
-            "Event feed",
-            if model.events.is_empty() {
+    let event_shell = render_panel_shell(
+        frame,
+        bottom[1],
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Event feed",
+            status: if model.events.is_empty() {
                 "EMPTY"
             } else {
                 "LIVE"
             },
-            Tone::Info,
-            focused_region == FocusRegion::TimelineEvents,
-            expanded_region == Some(FocusRegion::TimelineEvents),
-        )),
-        bottom[1],
+            status_tone: Tone::Info,
+            focused: focused_region == FocusRegion::TimelineEvents,
+            expanded: expanded_region == Some(FocusRegion::TimelineEvents),
+            kind: PanelKind::Section,
+        },
     );
+    frame.render_widget(List::new(events), event_shell.content_area);
 }
 
 fn draw_controls(
@@ -160,32 +183,40 @@ fn draw_controls(
     area: Rect,
     model: &TimelineModel,
     theme: &Theme,
+    metrics: DashboardMetrics,
     focused: bool,
     expanded: bool,
 ) {
     let controls = Layout::default()
         .direction(Direction::Horizontal)
+        .spacing(metrics.panel_gap_x)
         .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
         .split(area);
 
+    let window_shell = render_panel_shell(
+        frame,
+        controls[0],
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Window",
+            status: model
+                .window_presets
+                .get(model.selected_window_preset_index)
+                .map_or("24H", |preset| preset.label),
+            status_tone: Tone::Focus,
+            focused,
+            expanded,
+            kind: PanelKind::Section,
+        },
+    );
     frame.render_widget(
         Tabs::new(model.window_presets.iter().map(|preset| preset.label))
-            .block(panel_block(
-                theme,
-                "Window",
-                model
-                    .window_presets
-                    .get(model.selected_window_preset_index)
-                    .map_or("24H", |preset| preset.label),
-                Tone::Focus,
-                focused,
-                expanded,
-            ))
             .style(theme.annotation())
             .highlight_style(theme.emphasis(Tone::Focus))
             .divider(" ")
             .select(model.selected_window_preset_index),
-        controls[0],
+        window_shell.content_area,
     );
 
     draw_overlay_tabs(
@@ -193,6 +224,7 @@ fn draw_controls(
         controls[1],
         &model.overlay_toggles,
         theme,
+        metrics,
         focused,
         expanded,
     );
@@ -203,20 +235,28 @@ fn draw_chart(
     area: Rect,
     model: &TimelineModel,
     theme: &Theme,
+    metrics: DashboardMetrics,
     focused: bool,
     expanded: bool,
 ) {
     if model.heart_rate.is_empty() {
-        frame.render_widget(
-            Paragraph::new(model.selected_detail.clone()).block(panel_block(
-                theme,
-                "Heart rate",
-                TelemetryAvailability::NoData.label(),
-                Tone::Warning,
+        let shell = render_panel_shell(
+            frame,
+            area,
+            theme,
+            metrics,
+            PanelShellSpec {
+                title: "Heart rate",
+                status: TelemetryAvailability::NoData.label(),
+                status_tone: Tone::Warning,
                 focused,
                 expanded,
-            )),
-            area,
+                kind: PanelKind::Section,
+            },
+        );
+        frame.render_widget(
+            Paragraph::new(model.selected_detail.clone()),
+            shell.content_area,
         );
         return;
     }
@@ -278,16 +318,22 @@ fn draw_chart(
         .max()
         .map_or(120.0, |value| f64::from(value.saturating_add(5)));
 
+    let shell = render_panel_shell(
+        frame,
+        area,
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Heart rate",
+            status: &format!("{}H", model.window_hours),
+            status_tone: Tone::Accent,
+            focused,
+            expanded,
+            kind: PanelKind::Section,
+        },
+    );
     frame.render_widget(
         Chart::new(datasets)
-            .block(panel_block(
-                theme,
-                "Heart rate",
-                &format!("{}H", model.window_hours),
-                Tone::Accent,
-                focused,
-                expanded,
-            ))
             .x_axis(
                 Axis::default()
                     .title("time")
@@ -313,7 +359,7 @@ fn draw_chart(
                         Span::raw(format!("{y_max:.0}")),
                     ]),
             ),
-        area,
+        shell.content_area,
     );
 }
 
@@ -322,6 +368,7 @@ fn draw_overlay_lane(
     area: Rect,
     model: &TimelineModel,
     theme: &Theme,
+    metrics: DashboardMetrics,
     focused: bool,
     expanded: bool,
 ) {
@@ -340,21 +387,25 @@ fn draw_overlay_lane(
         .map(ListItem::new)
         .collect()
     };
-    frame.render_widget(
-        List::new(overlay_lines).block(panel_block(
-            theme,
-            "Overlay lanes",
-            if model.overlay_groups.is_empty() {
+    let shell = render_panel_shell(
+        frame,
+        area,
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Overlay lanes",
+            status: if model.overlay_groups.is_empty() {
                 TelemetryAvailability::NoData.label()
             } else {
                 "ACTIVE"
             },
-            Tone::Info,
+            status_tone: Tone::Info,
             focused,
             expanded,
-        )),
-        area,
+            kind: PanelKind::Section,
+        },
     );
+    frame.render_widget(List::new(overlay_lines), shell.content_area);
 }
 
 fn draw_overlay_tabs(
@@ -362,6 +413,7 @@ fn draw_overlay_tabs(
     area: Rect,
     toggles: &[OverlayToggleView],
     theme: &Theme,
+    metrics: DashboardMetrics,
     focused: bool,
     expanded: bool,
 ) {
@@ -369,23 +421,27 @@ fn draw_overlay_tabs(
         .iter()
         .position(|toggle| toggle.selected)
         .unwrap_or(0);
+    let shell = render_panel_shell(
+        frame,
+        area,
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Overlay filters",
+            status: "FILTER",
+            status_tone: Tone::Info,
+            focused,
+            expanded,
+            kind: PanelKind::Section,
+        },
+    );
     frame.render_widget(
         Tabs::new(toggles.iter().map(overlay_tab_label))
-            .block(panel_block(
-                theme,
-                "Overlay filters",
-                toggles
-                    .get(selected_index)
-                    .map_or("WORKOUTS", |toggle| toggle.label),
-                Tone::Info,
-                focused,
-                expanded,
-            ))
             .style(theme.annotation())
             .highlight_style(theme.emphasis(Tone::Focus))
             .divider(" ")
             .select(selected_index),
-        area,
+        shell.content_area,
     );
 }
 
