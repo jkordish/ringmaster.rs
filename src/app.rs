@@ -3726,10 +3726,7 @@ pub fn load_live_snapshot(
     let daily_history = store
         .views()
         .daily_history(usize::from(config.refresh.daily_history_days))?;
-    let daily_bounds = daily_history
-        .first()
-        .zip(daily_history.last())
-        .map(|(start, end)| (start.day.clone(), end.day.clone()));
+    let daily_bounds = ordered_day_bounds(&daily_history);
     let (
         daily_activity,
         daily_readiness,
@@ -3889,6 +3886,12 @@ pub fn load_live_snapshot(
         database_path: store.plan().db_path.display().to_string(),
         config_path: config.paths.config_file.display().to_string(),
     })
+}
+
+fn ordered_day_bounds(daily_history: &[DailyOverviewRow]) -> Option<(String, String)> {
+    let start_day = daily_history.iter().map(|row| row.day.as_str()).min()?;
+    let end_day = daily_history.iter().map(|row| row.day.as_str()).max()?;
+    Some((start_day.to_owned(), end_day.to_owned()))
 }
 
 #[must_use]
@@ -13333,6 +13336,43 @@ mod tests {
         assert_eq!(weekly.availability, TelemetryAvailability::RateLimited);
         assert!(weekly.recent.day_labels.is_empty());
         assert!(weekly.history.day_labels.is_empty());
+    }
+
+    #[test]
+    fn ordered_day_bounds_normalizes_newest_first_history() {
+        let daily_history = vec![
+            crate::store::queries::DailyOverviewRow {
+                day: "2026-04-10".to_owned(),
+                sleep_score: Some(82),
+                sleep_duration_seconds: Some(28_000),
+                readiness_score: Some(78),
+                activity_score: Some(74),
+                updated_at: "2026-04-10T08:00:00Z".to_owned(),
+            },
+            crate::store::queries::DailyOverviewRow {
+                day: "2026-04-08".to_owned(),
+                sleep_score: Some(79),
+                sleep_duration_seconds: Some(27_000),
+                readiness_score: Some(76),
+                activity_score: Some(70),
+                updated_at: "2026-04-08T08:00:00Z".to_owned(),
+            },
+            crate::store::queries::DailyOverviewRow {
+                day: "2026-04-09".to_owned(),
+                sleep_score: Some(80),
+                sleep_duration_seconds: Some(27_500),
+                readiness_score: Some(77),
+                activity_score: Some(72),
+                updated_at: "2026-04-09T08:00:00Z".to_owned(),
+            },
+        ];
+
+        let bounds = super::ordered_day_bounds(&daily_history);
+
+        assert_eq!(
+            bounds,
+            Some(("2026-04-08".to_owned(), "2026-04-10".to_owned()))
+        );
     }
 
     #[test]
