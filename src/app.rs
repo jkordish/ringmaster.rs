@@ -9076,6 +9076,30 @@ fn build_dashboard_breakdown_rails(
             hrv_has_records,
         )
     };
+    let sleep_has_records = inputs.sleep_insight.today.is_some();
+    let sleep_base_availability = telemetry_availability_for_metric(
+        inputs.snapshot,
+        CapabilityKind::Daily,
+        DataFamily::Daily,
+        sleep_has_records,
+    );
+    let sleep_availability = availability_with_record_presence(
+        sync_failure_availability(inputs.snapshot, DataFamily::Daily)
+            .unwrap_or(sleep_base_availability),
+        sleep_has_records,
+    );
+    let recovery_has_records = inputs.readiness_insight.today.is_some();
+    let recovery_base_availability = telemetry_availability_for_metric(
+        inputs.snapshot,
+        CapabilityKind::Daily,
+        DataFamily::Daily,
+        recovery_has_records,
+    );
+    let recovery_availability = availability_with_record_presence(
+        sync_failure_availability(inputs.snapshot, DataFamily::Daily)
+            .unwrap_or(recovery_base_availability),
+        recovery_has_records,
+    );
 
     let mut rails = vec![
         DashboardBreakdownRail {
@@ -9108,11 +9132,7 @@ fn build_dashboard_breakdown_rails(
         },
         DashboardBreakdownRail {
             label: "Sleep Balance".to_owned(),
-            availability: if inputs.sleep_insight.today.is_some() {
-                availability_from_freshness(&family_freshness(inputs.snapshot, DataFamily::Daily))
-            } else {
-                TelemetryAvailability::NoData
-            },
+            availability: sleep_availability,
             fill_percent: sleep_fill,
             delta_label: metric_delta_label(inputs.sleep_insight),
             delta_state: dashboard_delta_state_for_insight(inputs.sleep_insight),
@@ -9134,11 +9154,7 @@ fn build_dashboard_breakdown_rails(
         },
         DashboardBreakdownRail {
             label: "Recovery Index".to_owned(),
-            availability: if inputs.readiness_insight.today.is_some() {
-                availability_from_freshness(&family_freshness(inputs.snapshot, DataFamily::Daily))
-            } else {
-                TelemetryAvailability::NoData
-            },
+            availability: recovery_availability,
             fill_percent: recovery_fill.max(temp_fill),
             delta_label: metric_delta_label(inputs.readiness_insight),
             delta_state: dashboard_delta_state_for_insight(inputs.readiness_insight),
@@ -13261,6 +13277,47 @@ mod tests {
             .unwrap_or_else(|| panic!("resting hr rail should exist"));
 
         assert_eq!(rail.availability, TelemetryAvailability::RateLimited);
+    }
+
+    #[test]
+    fn dashboard_daily_breakdown_rails_preserve_sync_failures_without_cached_rows() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.daily_history.clear();
+        snapshot.daily_readiness.clear();
+        snapshot.daily_stress.clear();
+        snapshot.auth_status.capability_report =
+            CapabilityReport::from_scopes(&["daily".to_owned()], &["daily".to_owned()]);
+        snapshot.sync_states = vec![SyncStateRecord {
+            sync_key: "oura.daily".to_owned(),
+            status: SyncRunStatus::Failed,
+            cursor: None,
+            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
+            last_completed_at: None,
+            message: Some("daily sync failed".to_owned()),
+            granted_scopes: vec!["daily".to_owned()],
+            last_error: Some(OuraProblem::new(
+                Some(429),
+                "Too Many Requests",
+                Some("daily sync failed".to_owned()),
+            )),
+            failure_count: 1,
+            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
+            last_trigger_source: Some("manual".to_owned()),
+            last_trigger_detail: None,
+        }];
+
+        let model = super::build_live_model(&snapshot, &base_live_model_options());
+
+        for label in ["Sleep Balance", "Recovery Index"] {
+            let rail = model
+                .dashboard
+                .breakdown
+                .rails
+                .iter()
+                .find(|rail| rail.label == label)
+                .unwrap_or_else(|| panic!("{label} rail should exist"));
+            assert_eq!(rail.availability, TelemetryAvailability::RateLimited);
+        }
     }
 
     #[test]
