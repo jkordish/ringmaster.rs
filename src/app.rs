@@ -4337,6 +4337,8 @@ fn build_dashboard_model(
                 sleep_insight: &sleep_insight,
                 readiness_insight: &readiness_insight,
                 heartrate_insight: &heartrate_insight,
+                hrv_insight: &hrv_insight,
+                selected_sleep_period,
                 selected_readiness,
                 selected_stress,
                 selected_breakdown_index,
@@ -9002,6 +9004,8 @@ struct DashboardBreakdownInputs<'a> {
     sleep_insight: &'a MetricInsight,
     readiness_insight: &'a MetricInsight,
     heartrate_insight: &'a MetricInsight,
+    hrv_insight: &'a MetricInsight,
+    selected_sleep_period: Option<&'a SleepPeriodRecord>,
     selected_readiness: Option<&'a DailyReadinessRecord>,
     selected_stress: Option<&'a DailyStressRecord>,
     selected_breakdown_index: usize,
@@ -9023,6 +9027,9 @@ fn build_dashboard_breakdown_rails(
         .map_or(0, |delta| {
             crate::numeric::rounded_clamped_f64_to_u16(delta.abs().mul_add(-8.0, 100.0), 0.0, 100.0)
         });
+    let hrv_fill = inputs.hrv_insight.today.as_ref().map_or(0, |point| {
+        crate::numeric::rounded_clamped_f64_to_u16(point.value, 0.0, 100.0)
+    });
     let temp_fill = inputs
         .selected_readiness
         .and_then(|row| row.temperature_deviation)
@@ -9046,16 +9053,44 @@ fn build_dashboard_breakdown_rails(
             heartrate_has_records,
         )
     };
+    let hrv_has_records = inputs.hrv_insight.today.is_some();
+    let hrv_base_availability = telemetry_availability_for_metric(
+        inputs.snapshot,
+        CapabilityKind::Daily,
+        DataFamily::Daily,
+        hrv_has_records,
+    );
+    let hrv_availability = if hrv_has_records
+        || matches!(
+            hrv_base_availability,
+            TelemetryAvailability::MissingScope | TelemetryAvailability::Unsupported
+        ) {
+        hrv_base_availability
+    } else {
+        availability_with_record_presence(
+            sync_failure_availability(inputs.snapshot, DataFamily::Daily)
+                .unwrap_or(hrv_base_availability),
+            hrv_has_records,
+        )
+    };
 
     let mut rails = vec![
         DashboardBreakdownRail {
             label: "HRV Balance".to_owned(),
-            availability: TelemetryAvailability::Unsupported,
-            fill_percent: 0,
-            delta_label: "scope pending".to_owned(),
-            delta_state: DashboardDeltaState::Neutral,
+            availability: hrv_availability,
+            fill_percent: hrv_fill,
+            delta_label: metric_delta_label(inputs.hrv_insight),
+            delta_state: dashboard_delta_state_for_insight(inputs.hrv_insight),
             judged_state: None,
-            note: "HRV balance is reserved until HRV history is stored locally.".to_owned(),
+            note: selected_metric_note(
+                "hrv",
+                inputs.selected_day,
+                inputs
+                    .selected_sleep_period
+                    .and_then(|record| record.average_hrv)
+                    .is_some(),
+                inputs.hrv_insight,
+            ),
             selected: false,
         },
         DashboardBreakdownRail {
@@ -9151,13 +9186,15 @@ fn build_dashboard_weekly_heatmap(
 ) -> DashboardWeeklyHeatmap {
     let recent_rows = latest_daily_rows(snapshot, 7);
     let history_rows = latest_daily_rows(snapshot, 14);
+    let daily_availability = availability_with_record_presence(
+        sync_failure_availability(snapshot, DataFamily::Daily).unwrap_or_else(|| {
+            availability_from_freshness(&family_freshness(snapshot, DataFamily::Daily))
+        }),
+        !recent_rows.is_empty(),
+    );
 
     DashboardWeeklyHeatmap {
-        availability: if recent_rows.is_empty() {
-            TelemetryAvailability::NoData
-        } else {
-            availability_from_freshness(&family_freshness(snapshot, DataFamily::Daily))
-        },
+        availability: daily_availability,
         row_labels: vec![
             "Sleep".to_owned(),
             "Readiness".to_owned(),
@@ -13221,6 +13258,81 @@ mod tests {
             .unwrap_or_else(|| panic!("resting hr rail should exist"));
 
         assert_eq!(rail.availability, TelemetryAvailability::RateLimited);
+    }
+
+    #[test]
+    fn dashboard_hrv_rail_uses_daily_telemetry_state() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.sleep_periods.clear();
+        snapshot.auth_status.capability_report =
+            CapabilityReport::from_scopes(&["daily".to_owned()], &["daily".to_owned()]);
+        snapshot.sync_states = vec![SyncStateRecord {
+            sync_key: "oura.daily".to_owned(),
+            status: SyncRunStatus::Failed,
+            cursor: None,
+            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
+            last_completed_at: None,
+            message: Some("daily sync failed".to_owned()),
+            granted_scopes: vec!["daily".to_owned()],
+            last_error: Some(OuraProblem::new(
+                Some(429),
+                "Too Many Requests",
+                Some("daily sync failed".to_owned()),
+            )),
+            failure_count: 1,
+            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
+            last_trigger_source: Some("manual".to_owned()),
+            last_trigger_detail: None,
+        }];
+
+        let model = super::build_live_model(&snapshot, &base_live_model_options());
+        let rail = model
+            .dashboard
+            .breakdown
+            .rails
+            .iter()
+            .find(|rail| rail.label == "HRV Balance")
+            .unwrap_or_else(|| panic!("hrv balance rail should exist"));
+
+        assert_eq!(rail.availability, TelemetryAvailability::RateLimited);
+        assert_ne!(rail.delta_label, "scope pending");
+        assert!(
+            rail.note
+                .to_ascii_lowercase()
+                .contains("no hrv reading is available")
+        );
+    }
+
+    #[test]
+    fn dashboard_weekly_heatmap_preserves_sync_failures_without_recent_rows() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.daily_history.clear();
+        snapshot.auth_status.capability_report =
+            CapabilityReport::from_scopes(&["daily".to_owned()], &["daily".to_owned()]);
+        snapshot.sync_states = vec![SyncStateRecord {
+            sync_key: "oura.daily".to_owned(),
+            status: SyncRunStatus::Failed,
+            cursor: None,
+            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
+            last_completed_at: None,
+            message: Some("daily sync failed".to_owned()),
+            granted_scopes: vec!["daily".to_owned()],
+            last_error: Some(OuraProblem::new(
+                Some(429),
+                "Too Many Requests",
+                Some("daily sync failed".to_owned()),
+            )),
+            failure_count: 1,
+            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
+            last_trigger_source: Some("manual".to_owned()),
+            last_trigger_detail: None,
+        }];
+
+        let weekly = super::build_dashboard_weekly_heatmap(&snapshot, "2026-04-08");
+
+        assert_eq!(weekly.availability, TelemetryAvailability::RateLimited);
+        assert!(weekly.recent.day_labels.is_empty());
+        assert!(weekly.history.day_labels.is_empty());
     }
 
     #[test]

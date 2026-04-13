@@ -3883,7 +3883,8 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("patterns snapshot should render: {error}"));
 
         assert!(output.contains("Not enough data yet"));
-        assert!(output.contains("Patterns stay descriptive on purpose."));
+        assert!(output.contains("Patterns stay descriptive"), "{output}");
+        assert!(output.contains("Use Explain or Timeline"), "{output}");
     }
 
     #[test]

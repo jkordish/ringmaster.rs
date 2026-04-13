@@ -4,7 +4,7 @@ use ratatui::{
     prelude::Rect,
     symbols,
     text::Span,
-    widgets::{Axis, Chart, Dataset, GraphType, List, ListItem, Paragraph, Tabs},
+    widgets::{Axis, Chart, Dataset, GraphType, List, ListItem, Paragraph, Tabs, Wrap},
 };
 
 use crate::app::{OverlayFamilyGroup, OverlayToggleView, TimelineModel};
@@ -44,7 +44,7 @@ pub fn draw(
             .direction(Direction::Vertical)
             .spacing(metrics.panel_gap_y)
             .constraints([
-                Constraint::Length(5),
+                Constraint::Length(7),
                 Constraint::Length(3),
                 Constraint::Min(13),
                 Constraint::Length(7),
@@ -75,12 +75,15 @@ pub fn draw(
             kind: PanelKind::Hero,
         },
     );
+    let summary_body = if ui.viewport.is_compact() {
+        concise_detail(&summary, usize::from(summary_shell.content_area.width))
+    } else {
+        summary
+    };
     frame.render_widget(
-        Paragraph::new(concise_detail(
-            &summary,
-            usize::from(summary_shell.content_area.width),
-        ))
-        .style(theme.body()),
+        Paragraph::new(summary_body)
+            .wrap(Wrap { trim: true })
+            .style(theme.body()),
         summary_shell.content_area,
     );
 
@@ -265,8 +268,8 @@ fn draw_controls(
         &model.overlay_toggles,
         theme,
         metrics,
-        focused_region == FocusRegion::TimelineLanes,
-        expanded_region == Some(FocusRegion::TimelineLanes),
+        false,
+        false,
     );
 }
 
@@ -612,5 +615,126 @@ fn compact_event_summary(model: &TimelineModel) -> String {
         format!("[{}] {}", event.glyph, event.headline)
     } else {
         format!("[{}] {} | +{extra_count} more", event.glyph, event.headline)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    use super::draw;
+    use crate::{
+        app::{
+            EventListItem, OverlayBlock, OverlayFamilyGroup, OverlayToggleView, TimelineModel,
+            TimelinePoint, TimelineWindowPresetView,
+        },
+        navigation::FocusRegion,
+        ui::{layout::UiContext, theme::Theme},
+    };
+
+    fn base_model() -> TimelineModel {
+        TimelineModel {
+            summary: "Recovery stayed steady overnight.".to_owned(),
+            breadcrumb: "Workout carryover still visible.".to_owned(),
+            day_selector: "Selected day: 2026-04-08".to_owned(),
+            window_presets: vec![TimelineWindowPresetView {
+                label: "24H",
+                selected: true,
+            }],
+            selected_window_preset_index: 0,
+            selected_day_label: "2026-04-08".to_owned(),
+            selected_day_index: 0,
+            heart_rate: vec![TimelinePoint {
+                label: "07:00".to_owned(),
+                recorded_at: "2026-04-08T07:00:00Z".to_owned(),
+                bpm: 53,
+                minute_of_day: 420,
+                gap_before: false,
+            }],
+            selected_point_index: Some(0),
+            window_hours: 24,
+            window_start_minute: 0,
+            window_end_minute: 1439,
+            overlay_toggles: vec![OverlayToggleView {
+                label: "Workouts",
+                key_hint: "W",
+                enabled: true,
+                selected: true,
+            }],
+            overlay_groups: vec![OverlayFamilyGroup {
+                family_label: "Workouts",
+                glyph: 'W',
+                item_count: 1,
+                blocks: vec![OverlayBlock {
+                    id: "block-1".to_owned(),
+                    start_minute: 400,
+                    end_minute: 460,
+                    title: "Lift".to_owned(),
+                    selected: true,
+                }],
+            }],
+            events: vec![EventListItem {
+                id: "event-1".to_owned(),
+                family_label: "Workouts",
+                glyph: 'W',
+                headline: "Lift".to_owned(),
+                detail: "45 min".to_owned(),
+                selected: true,
+            }],
+            selected_event_index: Some(0),
+            selected_detail: "07:00 | 53 bpm".to_owned(),
+            event_detail_lines: vec!["Workout overlap: 45 min".to_owned()],
+        }
+    }
+
+    fn render_lines(model: &TimelineModel, focused_region: FocusRegion) -> Vec<String> {
+        let backend = TestBackend::new(160, 48);
+        let mut terminal = Terminal::new(backend).unwrap_or_else(|error| {
+            panic!("test backend should initialize: {error}");
+        });
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let ui = UiContext::new(area);
+                draw(
+                    frame,
+                    area,
+                    model,
+                    &ui,
+                    &Theme::default(),
+                    focused_region,
+                    None,
+                );
+            })
+            .unwrap_or_else(|error| panic!("timeline draw should succeed: {error}"));
+
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn wide_timeline_summary_keeps_breadcrumb_and_day_selector_visible() {
+        let lines = render_lines(&base_model(), FocusRegion::TimelineControls);
+        let rendered = lines.join("\n");
+
+        assert!(
+            rendered.contains("Workout carryover still visible."),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Selected day: 2026-04-08"), "{rendered}");
+    }
+
+    #[test]
+    fn timeline_lanes_focus_highlights_only_the_lane_panel() {
+        let lines = render_lines(&base_model(), FocusRegion::TimelineLanes);
+
+        assert!(lines.iter().any(|line| line.contains("> OVERLAY LANES")));
+        assert!(!lines.iter().any(|line| line.contains("> OVERLAY FILTERS")));
     }
 }

@@ -20,6 +20,14 @@ struct PanelState {
     expanded: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LinesPanelSpec<'a> {
+    title: &'a str,
+    availability: TelemetryAvailability,
+    lines: &'a [String],
+    panel_state: PanelState,
+}
+
 pub fn draw(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -79,8 +87,11 @@ pub fn draw(
         model,
         ui,
         theme,
-        focused_region == FocusRegion::Primary,
-        expanded_region == Some(FocusRegion::Primary),
+        metrics,
+        PanelState {
+            focused: focused_region == FocusRegion::Primary,
+            expanded: expanded_region == Some(FocusRegion::Primary),
+        },
     );
     draw_evidence_section(frame, layout[3], model, ui, theme, metrics);
     draw_footer_section(frame, layout[4], model, ui, theme, metrics);
@@ -148,10 +159,9 @@ fn draw_summary_section(
     model: &ExplainModel,
     ui: &UiContext,
     theme: &Theme,
-    focused: bool,
-    expanded: bool,
+    metrics: DashboardMetrics,
+    panel_state: PanelState,
 ) {
-    let metrics = DashboardMetrics::for_viewport(ui.viewport);
     let summary = Layout::default()
         .direction(if ui.viewport.is_compact() {
             Direction::Vertical
@@ -170,21 +180,27 @@ fn draw_summary_section(
         frame,
         summary[0],
         theme,
-        "Claim",
-        model.claim_availability,
-        &model.summary_lines,
-        PanelState { focused, expanded },
+        metrics,
+        LinesPanelSpec {
+            title: "Claim",
+            availability: model.claim_availability,
+            lines: &model.summary_lines,
+            panel_state,
+        },
     );
     render_lines_panel(
         frame,
         summary[1],
         theme,
-        "Measured Inputs",
-        model.measurements_availability,
-        &model.measurement_lines,
-        PanelState {
-            focused: false,
-            expanded: false,
+        metrics,
+        LinesPanelSpec {
+            title: "Measured Inputs",
+            availability: model.measurements_availability,
+            lines: &model.measurement_lines,
+            panel_state: PanelState {
+                focused: false,
+                expanded: false,
+            },
         },
     );
 }
@@ -221,24 +237,30 @@ fn draw_evidence_section(
         frame,
         middle[0],
         theme,
-        "Evidence Rails",
-        model.evidence_availability,
-        &evidence_lines,
-        PanelState {
-            focused: false,
-            expanded: false,
+        metrics,
+        LinesPanelSpec {
+            title: "Evidence Rails",
+            availability: model.evidence_availability,
+            lines: &evidence_lines,
+            panel_state: PanelState {
+                focused: false,
+                expanded: false,
+            },
         },
     );
     render_lines_panel(
         frame,
         middle[1],
         theme,
-        "Context",
-        model.context_availability,
-        &model.context_lines,
-        PanelState {
-            focused: false,
-            expanded: false,
+        metrics,
+        LinesPanelSpec {
+            title: "Context",
+            availability: model.context_availability,
+            lines: &model.context_lines,
+            panel_state: PanelState {
+                focused: false,
+                expanded: false,
+            },
         },
     );
 }
@@ -269,31 +291,37 @@ fn draw_footer_section(
         frame,
         footer[0],
         theme,
-        "Uncertainty",
-        model.uncertainty_availability,
-        &std::iter::once("Uncertainty".to_owned())
-            .chain(
-                model
-                    .caveat_lines
-                    .iter()
-                    .map(|line| format!("[caveat] {line}")),
-            )
-            .collect::<Vec<_>>(),
-        PanelState {
-            focused: false,
-            expanded: false,
+        metrics,
+        LinesPanelSpec {
+            title: "Uncertainty",
+            availability: model.uncertainty_availability,
+            lines: &std::iter::once("Uncertainty".to_owned())
+                .chain(
+                    model
+                        .caveat_lines
+                        .iter()
+                        .map(|line| format!("[caveat] {line}")),
+                )
+                .collect::<Vec<_>>(),
+            panel_state: PanelState {
+                focused: false,
+                expanded: false,
+            },
         },
     );
     render_lines_panel(
         frame,
         footer[1],
         theme,
-        "AI Launch",
-        model.ai_availability,
-        &model.ai_actions,
-        PanelState {
-            focused: false,
-            expanded: false,
+        metrics,
+        LinesPanelSpec {
+            title: "AI Launch",
+            availability: model.ai_availability,
+            lines: &model.ai_actions,
+            panel_state: PanelState {
+                focused: false,
+                expanded: false,
+            },
         },
     );
 }
@@ -302,27 +330,25 @@ fn render_lines_panel(
     frame: &mut Frame<'_>,
     area: Rect,
     theme: &Theme,
-    title: &str,
-    availability: TelemetryAvailability,
-    lines: &[String],
-    panel_state: PanelState,
+    metrics: DashboardMetrics,
+    spec: LinesPanelSpec<'_>,
 ) {
-    let body = if lines.is_empty() {
+    let body = if spec.lines.is_empty() {
         "No local evidence yet.".to_owned()
     } else {
-        lines.join("\n")
+        spec.lines.join("\n")
     };
     let shell = render_panel_shell(
         frame,
         area,
         theme,
-        DashboardMetrics::for_viewport(UiContext::new(area).viewport),
+        metrics,
         PanelShellSpec {
-            title,
-            status: availability.label(),
-            status_tone: availability.tone(),
-            focused: panel_state.focused,
-            expanded: panel_state.expanded,
+            title: spec.title,
+            status: spec.availability.label(),
+            status_tone: spec.availability.tone(),
+            focused: spec.panel_state.focused,
+            expanded: spec.panel_state.expanded,
             kind: PanelKind::Section,
         },
     );

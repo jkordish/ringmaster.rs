@@ -20,6 +20,14 @@ struct PanelState {
     expanded: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LinesPanelSpec<'a> {
+    title: &'a str,
+    availability: TelemetryAvailability,
+    lines: &'a [String],
+    panel_state: PanelState,
+}
+
 pub fn draw(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -111,38 +119,47 @@ pub fn draw(
         frame,
         body[0],
         theme,
-        "Grouped Findings",
-        model.findings_availability,
-        &pattern_lines(model),
-        PanelState {
-            focused: focused_region == FocusRegion::Primary,
-            expanded: expanded_region == Some(FocusRegion::Primary),
+        metrics,
+        LinesPanelSpec {
+            title: "Grouped Findings",
+            availability: model.findings_availability,
+            lines: &pattern_lines(model),
+            panel_state: PanelState {
+                focused: focused_region == FocusRegion::Primary,
+                expanded: expanded_region == Some(FocusRegion::Primary),
+            },
         },
     );
     render_lines_panel(
         frame,
         right[0],
         theme,
-        "Reading Guide",
-        model.guide_availability,
-        &guide_lines(model),
-        PanelState {
-            focused: false,
-            expanded: false,
+        metrics,
+        LinesPanelSpec {
+            title: "Reading Guide",
+            availability: model.guide_availability,
+            lines: &guide_lines(model),
+            panel_state: PanelState {
+                focused: false,
+                expanded: false,
+            },
         },
     );
     render_lines_panel(
         frame,
         right[1],
         theme,
-        "Interpretation",
-        model.interpretation_availability,
-        &[String::from(
-            "Patterns stay descriptive on purpose. Scan recurring pairings here, then pivot into Explain or Timeline when a row suggests a story worth validating.",
-        )],
-        PanelState {
-            focused: false,
-            expanded: false,
+        metrics,
+        LinesPanelSpec {
+            title: "Interpretation",
+            availability: model.interpretation_availability,
+            lines: &[String::from(
+                "Patterns stay descriptive on purpose. Use Explain or Timeline to validate any row that looks important.",
+            )],
+            panel_state: PanelState {
+                focused: false,
+                expanded: false,
+            },
         },
     );
 
@@ -150,12 +167,15 @@ pub fn draw(
         frame,
         layout[4],
         theme,
-        "Next Step",
-        ai_panel_availability(model),
-        &model.ai_actions,
-        PanelState {
-            focused: false,
-            expanded: false,
+        metrics,
+        LinesPanelSpec {
+            title: "Next Step",
+            availability: ai_panel_availability(model),
+            lines: &model.ai_actions,
+            panel_state: PanelState {
+                focused: false,
+                expanded: false,
+            },
         },
     );
 }
@@ -281,27 +301,25 @@ fn render_lines_panel(
     frame: &mut Frame<'_>,
     area: Rect,
     theme: &Theme,
-    title: &str,
-    availability: TelemetryAvailability,
-    lines: &[String],
-    panel_state: PanelState,
+    metrics: DashboardMetrics,
+    spec: LinesPanelSpec<'_>,
 ) {
-    let body = if lines.is_empty() {
+    let body = if spec.lines.is_empty() {
         "No local entries yet.".to_owned()
     } else {
-        lines.join("\n")
+        spec.lines.join("\n")
     };
     let shell = render_panel_shell(
         frame,
         area,
         theme,
-        DashboardMetrics::for_viewport(UiContext::new(area).viewport),
+        metrics,
         PanelShellSpec {
-            title,
-            status: availability.label(),
-            status_tone: availability.tone(),
-            focused: panel_state.focused,
-            expanded: panel_state.expanded,
+            title: spec.title,
+            status: spec.availability.label(),
+            status_tone: spec.availability.tone(),
+            focused: spec.panel_state.focused,
+            expanded: spec.panel_state.expanded,
             kind: PanelKind::Section,
         },
     );
