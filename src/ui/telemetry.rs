@@ -80,12 +80,15 @@ pub fn panel_block<'a>(
 #[must_use]
 pub fn spark_strip(values: &[u64], width: usize) -> String {
     let levels = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    if values.is_empty() || width == 0 {
-        return "····".to_owned();
+    if width == 0 {
+        return String::new();
+    }
+    if values.is_empty() {
+        return "·".repeat(width);
     }
     let max = values.iter().copied().max().unwrap_or(0);
     if max == 0 {
-        return "─".repeat(width.min(values.len()));
+        return "─".repeat(width);
     }
     resample(values, width)
         .into_iter()
@@ -353,6 +356,12 @@ mod tests {
     fn spark_strip_uses_terminal_safe_blocks() {
         let strip = spark_strip(&[1, 2, 3, 4, 5, 6, 7, 8], 8);
         assert_eq!(strip.chars().count(), 8);
+    }
+
+    #[test]
+    fn spark_strip_preserves_requested_width_for_empty_and_flat_inputs() {
+        assert_eq!(spark_strip(&[], 6), "······");
+        assert_eq!(spark_strip(&[0, 0, 0], 6), "──────");
     }
 
     #[test]

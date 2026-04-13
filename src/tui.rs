@@ -3962,10 +3962,14 @@ mod tests {
         let output = render_snapshot(&app, 160, 44).unwrap_or_else(|error| {
             unreachable!("dense-history dashboard snapshot should render: {error}")
         });
+        let medium_output = render_snapshot(&app, 120, 44).unwrap_or_else(|error| {
+            unreachable!("medium dense-history dashboard snapshot should render: {error}")
+        });
 
         assert!(output.contains("326 327 328 329"));
         assert!(output.contains("401 402 403 404"));
         assert!(output.contains("WEEKLY TRENDS"));
+        assert!(!medium_output.contains("326 327 328 329"));
     }
 
     #[test]

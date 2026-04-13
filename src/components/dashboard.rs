@@ -28,6 +28,15 @@ struct PanelRenderState {
     metrics: DashboardMetrics,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DashboardDrawContext<'a> {
+    theme: &'a Theme,
+    viewport: ViewportClass,
+    focused_region: FocusRegion,
+    expanded_region: Option<FocusRegion>,
+    metrics: DashboardMetrics,
+}
+
 const fn panel_state(focused: bool, expanded: bool, metrics: DashboardMetrics) -> PanelRenderState {
     PanelRenderState {
         focused,
@@ -46,39 +55,22 @@ pub fn draw(
     expanded_region: Option<FocusRegion>,
 ) {
     let metrics = DashboardMetrics::for_viewport(ui.viewport);
+    let ctx = DashboardDrawContext {
+        theme,
+        viewport: ui.viewport,
+        focused_region,
+        expanded_region,
+        metrics,
+    };
     match ui.viewport {
         ViewportClass::Compact => {
-            draw_compact(
-                frame,
-                area,
-                model,
-                theme,
-                focused_region,
-                expanded_region,
-                metrics,
-            );
+            draw_compact(frame, area, model, ctx);
         }
         ViewportClass::Medium => {
-            draw_medium(
-                frame,
-                area,
-                model,
-                theme,
-                focused_region,
-                expanded_region,
-                metrics,
-            );
+            draw_medium(frame, area, model, ctx);
         }
         ViewportClass::Wide => {
-            draw_wide(
-                frame,
-                area,
-                model,
-                theme,
-                focused_region,
-                expanded_region,
-                metrics,
-            );
+            draw_wide(frame, area, model, ctx);
         }
     }
 }
@@ -87,11 +79,15 @@ fn draw_wide(
     frame: &mut Frame<'_>,
     area: Rect,
     model: &DashboardModel,
-    theme: &Theme,
-    focused_region: FocusRegion,
-    expanded_region: Option<FocusRegion>,
-    metrics: DashboardMetrics,
+    ctx: DashboardDrawContext<'_>,
 ) {
+    let DashboardDrawContext {
+        theme,
+        viewport,
+        focused_region,
+        expanded_region,
+        metrics,
+    } = ctx;
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .spacing(metrics.panel_gap_y)
@@ -244,6 +240,7 @@ fn draw_wide(
         bottom[1],
         &model.weekly,
         theme,
+        viewport,
         panel_state(
             focused_region == FocusRegion::DashboardHeatmap,
             expanded_region == Some(FocusRegion::DashboardHeatmap),
@@ -256,11 +253,15 @@ fn draw_medium(
     frame: &mut Frame<'_>,
     area: Rect,
     model: &DashboardModel,
-    theme: &Theme,
-    focused_region: FocusRegion,
-    expanded_region: Option<FocusRegion>,
-    metrics: DashboardMetrics,
+    ctx: DashboardDrawContext<'_>,
 ) {
+    let DashboardDrawContext {
+        theme,
+        viewport,
+        focused_region,
+        expanded_region,
+        metrics,
+    } = ctx;
     let dashboard_rows = Layout::default()
         .direction(Direction::Vertical)
         .spacing(metrics.panel_gap_y)
@@ -413,6 +414,7 @@ fn draw_medium(
         right_stack[1],
         &model.weekly,
         theme,
+        viewport,
         panel_state(
             focused_region == FocusRegion::DashboardHeatmap,
             expanded_region == Some(FocusRegion::DashboardHeatmap),
@@ -425,11 +427,15 @@ fn draw_compact(
     frame: &mut Frame<'_>,
     area: Rect,
     model: &DashboardModel,
-    theme: &Theme,
-    focused_region: FocusRegion,
-    expanded_region: Option<FocusRegion>,
-    metrics: DashboardMetrics,
+    ctx: DashboardDrawContext<'_>,
 ) {
+    let DashboardDrawContext {
+        theme,
+        viewport,
+        focused_region,
+        expanded_region,
+        metrics,
+    } = ctx;
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .spacing(0)
@@ -574,6 +580,7 @@ fn draw_compact(
         bottom[1],
         &model.weekly,
         theme,
+        viewport,
         panel_state(
             focused_region == FocusRegion::DashboardHeatmap,
             expanded_region == Some(FocusRegion::DashboardHeatmap),
@@ -1097,6 +1104,7 @@ fn render_heatmap_panel(
     area: Rect,
     panel: &DashboardWeeklyHeatmap,
     theme: &Theme,
+    viewport: ViewportClass,
     state: PanelRenderState,
 ) {
     let shell = render_panel_shell(
@@ -1144,6 +1152,7 @@ fn render_heatmap_panel(
 
     let width = usize::from(shell.content_area.width);
     let use_dense_history = panel.history.day_labels.len() > panel.recent.day_labels.len()
+        && matches!(viewport, ViewportClass::Wide)
         && shell.content_area.width >= 40;
     let grid = if use_dense_history {
         &panel.history

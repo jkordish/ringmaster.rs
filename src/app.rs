@@ -3946,37 +3946,34 @@ fn build_dashboard_model(
         availability_from_freshness(&family_freshness(snapshot, DataFamily::Daily));
     let heartrate_availability =
         availability_from_freshness(&family_freshness(snapshot, DataFamily::Heartrate));
-    let activity_availability = if selected_activity.is_some() {
-        daily_availability
-    } else {
-        TelemetryAvailability::NoData
-    };
-    let readiness_availability = if selected_readiness.is_some() || selected_daily.is_some() {
-        daily_availability
-    } else {
-        TelemetryAvailability::NoData
-    };
-    let sleep_availability = if selected_daily
-        .and_then(|row| row.sleep_duration_seconds)
-        .is_some()
-    {
-        daily_availability
-    } else {
-        TelemetryAvailability::NoData
-    };
-    let hrv_availability = telemetry_availability_for_daily_metric(
+    let activity_availability =
+        availability_with_record_presence(daily_availability, selected_activity.is_some());
+    let readiness_availability = availability_with_record_presence(
+        daily_availability,
+        selected_readiness.is_some() || selected_daily.is_some(),
+    );
+    let sleep_availability = availability_with_record_presence(
+        daily_availability,
+        selected_daily
+            .and_then(|row| row.sleep_duration_seconds)
+            .is_some(),
+    );
+    let hrv_availability = telemetry_availability_for_metric(
         snapshot,
         CapabilityKind::Daily,
+        DataFamily::Daily,
         !hrv_points.is_empty(),
     );
-    let respiratory_availability = telemetry_availability_for_daily_metric(
+    let respiratory_availability = telemetry_availability_for_metric(
         snapshot,
         CapabilityKind::Daily,
+        DataFamily::Daily,
         !respiratory_points.is_empty(),
     );
-    let spo2_availability = telemetry_availability_for_daily_metric(
+    let spo2_availability = telemetry_availability_for_metric(
         snapshot,
         CapabilityKind::Spo2,
+        DataFamily::Daily,
         !spo2_points.is_empty(),
     );
     let capability_summary = dashboard_capability_summary(snapshot);
@@ -4090,14 +4087,12 @@ fn build_dashboard_model(
             ),
         },
         body_temp: DashboardThermometerPanel {
-            availability: if selected_readiness
-                .and_then(|row| row.temperature_deviation)
-                .is_some()
-            {
-                readiness_availability
-            } else {
-                TelemetryAvailability::NoData
-            },
+            availability: availability_with_record_presence(
+                readiness_availability,
+                selected_readiness
+                    .and_then(|row| row.temperature_deviation)
+                    .is_some(),
+            ),
             deviation_tenths: selected_readiness
                 .and_then(|row| row.temperature_deviation)
                 .map(|value| {
@@ -4118,11 +4113,10 @@ fn build_dashboard_model(
                 ),
         },
         heart_rate: DashboardTrendPanel {
-            availability: if snapshot.heartrate_daily_averages.is_empty() {
-                TelemetryAvailability::NoData
-            } else {
-                heartrate_availability
-            },
+            availability: availability_with_record_presence(
+                heartrate_availability,
+                !snapshot.heartrate_daily_averages.is_empty(),
+            ),
             primary_label: heart_rate_primary_label(snapshot, &selected_day),
             baseline_label: metric_delta_label(&heartrate_insight),
             range_label: metric_range_label(&snapshot.heartrate_daily_averages),
@@ -4435,7 +4429,12 @@ fn build_trends_model(
         trend_matrix_row(
             "Stress",
             &stress_points,
-            coverage_availability(snapshot, CoverageFamily::Daily),
+            telemetry_availability_for_metric(
+                snapshot,
+                CapabilityKind::Stress,
+                DataFamily::Daily,
+                !stress_points.is_empty(),
+            ),
             true,
         ),
     ];
@@ -4522,10 +4521,10 @@ fn trend_matrix_cell(
     window_days: usize,
     higher_is_concerning: bool,
 ) -> TrendMatrixCell {
-    let baseline = if window_days == 7 {
-        &insight.baseline_7d
-    } else {
-        &insight.baseline_30d
+    let baseline = match window_days {
+        7 => &insight.baseline_7d,
+        90 => &insight.baseline_90d,
+        _ => &insight.baseline_30d,
     };
     let delta = baseline
         .delta_from_today
@@ -4537,9 +4536,9 @@ fn trend_matrix_cell(
         "--".to_owned()
     };
     let concern_fill = if higher_is_concerning {
-        (50.0 + delta * 12.0).clamp(0.0, 100.0)
+        delta.mul_add(12.0, 50.0).clamp(0.0, 100.0)
     } else {
-        (50.0 - delta * 12.0).clamp(0.0, 100.0)
+        delta.mul_add(-12.0, 50.0).clamp(0.0, 100.0)
     };
 
     TrendMatrixCell {
@@ -4626,9 +4625,10 @@ fn build_explain_model(
         headline: format!("Day story for {selected_day}"),
         overlay_toggles: overlay_toggle_views(overlay_filters, selected_overlay_toggle_index),
         selected_overlay_toggle_index,
-        claim_availability: telemetry_availability_for_daily_metric(
+        claim_availability: telemetry_availability_for_metric(
             snapshot,
             CapabilityKind::Daily,
+            DataFamily::Daily,
             selected_daily.is_some(),
         ),
         summary_lines,
@@ -4682,14 +4682,16 @@ fn explain_measurements_availability(
     selected_daily: Option<&DailyOverviewRow>,
     heartrate: Option<&HeartRateDay>,
 ) -> TelemetryAvailability {
-    let daily = telemetry_availability_for_daily_metric(
+    let daily = telemetry_availability_for_metric(
         snapshot,
         CapabilityKind::Daily,
+        DataFamily::Daily,
         selected_daily.is_some(),
     );
-    let heartrate = telemetry_availability_for_daily_metric(
+    let heartrate = telemetry_availability_for_metric(
         snapshot,
-        CapabilityKind::Daily,
+        CapabilityKind::Heartrate,
+        DataFamily::Heartrate,
         heartrate.is_some(),
     );
     combine_availability(daily, heartrate)
@@ -4700,12 +4702,6 @@ const fn combine_availability(
     secondary: TelemetryAvailability,
 ) -> TelemetryAvailability {
     match (primary, secondary) {
-        (TelemetryAvailability::Fresh, _) | (_, TelemetryAvailability::Fresh) => {
-            TelemetryAvailability::Fresh
-        }
-        (TelemetryAvailability::Stale, _) | (_, TelemetryAvailability::Stale) => {
-            TelemetryAvailability::Stale
-        }
         (TelemetryAvailability::RateLimited, _) | (_, TelemetryAvailability::RateLimited) => {
             TelemetryAvailability::RateLimited
         }
@@ -4717,6 +4713,12 @@ const fn combine_availability(
         }
         (TelemetryAvailability::Unsupported, _) | (_, TelemetryAvailability::Unsupported) => {
             TelemetryAvailability::Unsupported
+        }
+        (TelemetryAvailability::Fresh, _) | (_, TelemetryAvailability::Fresh) => {
+            TelemetryAvailability::Fresh
+        }
+        (TelemetryAvailability::Stale, _) | (_, TelemetryAvailability::Stale) => {
+            TelemetryAvailability::Stale
         }
         _ => TelemetryAvailability::NoData,
     }
@@ -8183,18 +8185,8 @@ fn selected_primary_sleep_period<'a>(
         .sleep_periods
         .iter()
         .filter(|record| record.day == day)
-        .max_by(|left, right| {
-            let left_rank = primary_sleep_rank(left.sleep_type.as_deref());
-            let right_rank = primary_sleep_rank(right.sleep_type.as_deref());
-            left_rank
-                .cmp(&right_rank)
-                .then_with(|| {
-                    left.total_sleep_duration
-                        .unwrap_or_default()
-                        .cmp(&right.total_sleep_duration.unwrap_or_default())
-                })
-                .then_with(|| right.bedtime_start.cmp(&left.bedtime_start))
-        })
+        .filter(|record| is_primary_sleep_type(record.sleep_type.as_deref()))
+        .max_by(|left, right| compare_primary_sleep_periods(left, right))
 }
 
 fn selected_daily_spo2<'a>(snapshot: &'a LiveSnapshot, day: &str) -> Option<&'a DailySpO2Record> {
@@ -8222,15 +8214,24 @@ fn metric_points_from_sleep_periods<F>(
 where
     F: FnMut(&SleepPeriodRecord) -> Option<f64>,
 {
-    history
+    let mut best_per_day = BTreeMap::<String, &SleepPeriodRecord>::new();
+    for record in history
         .iter()
         .filter(|record| is_primary_sleep_type(record.sleep_type.as_deref()))
-        .filter_map(|record| {
-            mapper(record).map(|value| MetricPoint {
-                day: record.day.clone(),
-                value,
+    {
+        best_per_day
+            .entry(record.day.clone())
+            .and_modify(|best| {
+                if compare_primary_sleep_periods(record, best).is_gt() {
+                    *best = record;
+                }
             })
-        })
+            .or_insert(record);
+    }
+
+    best_per_day
+        .into_iter()
+        .filter_map(|(day, record)| mapper(record).map(|value| MetricPoint { day, value }))
         .collect()
 }
 
@@ -8310,9 +8311,21 @@ fn availability_from_freshness(freshness: &FreshnessState) -> TelemetryAvailabil
     }
 }
 
-fn telemetry_availability_for_daily_metric(
+const fn availability_with_record_presence(
+    availability: TelemetryAvailability,
+    has_records: bool,
+) -> TelemetryAvailability {
+    if has_records || !matches!(availability, TelemetryAvailability::Fresh) {
+        availability
+    } else {
+        TelemetryAvailability::NoData
+    }
+}
+
+fn telemetry_availability_for_metric(
     snapshot: &LiveSnapshot,
     capability: CapabilityKind,
+    freshness_family: DataFamily,
     has_records: bool,
 ) -> TelemetryAvailability {
     let status = snapshot
@@ -8320,14 +8333,27 @@ fn telemetry_availability_for_daily_metric(
         .capability_report
         .status_for(capability);
     match status {
-        Some(entry) if entry.granted => {
-            if has_records {
-                availability_from_freshness(&family_freshness(snapshot, DataFamily::Daily))
+        Some(entry) if entry.granted => availability_with_record_presence(
+            availability_from_freshness(&family_freshness(snapshot, freshness_family)),
+            has_records,
+        ),
+        Some(entry) if entry.requested => {
+            let freshness = family_freshness(snapshot, freshness_family);
+            let availability = availability_from_freshness(&freshness);
+            if capability == freshness_family.capability_kind()
+                || matches!(
+                    availability,
+                    TelemetryAvailability::MissingScope
+                        | TelemetryAvailability::RateLimited
+                        | TelemetryAvailability::Error
+                        | TelemetryAvailability::Stale
+                )
+            {
+                availability
             } else {
-                TelemetryAvailability::NoData
+                TelemetryAvailability::MissingScope
             }
         }
-        Some(entry) if entry.requested => TelemetryAvailability::MissingScope,
         _ => TelemetryAvailability::Unsupported,
     }
 }
@@ -8414,6 +8440,22 @@ fn primary_sleep_rank(sleep_type: Option<&str>) -> u8 {
         Some("rest") => 1,
         _ => 0,
     }
+}
+
+fn compare_primary_sleep_periods(
+    left: &SleepPeriodRecord,
+    right: &SleepPeriodRecord,
+) -> std::cmp::Ordering {
+    let left_rank = primary_sleep_rank(left.sleep_type.as_deref());
+    let right_rank = primary_sleep_rank(right.sleep_type.as_deref());
+    left_rank
+        .cmp(&right_rank)
+        .then_with(|| {
+            left.total_sleep_duration
+                .unwrap_or_default()
+                .cmp(&right.total_sleep_duration.unwrap_or_default())
+        })
+        .then_with(|| right.bedtime_start.cmp(&left.bedtime_start))
 }
 
 fn is_primary_sleep_type(sleep_type: Option<&str>) -> bool {
@@ -8543,9 +8585,10 @@ fn coverage_availability(snapshot: &LiveSnapshot, family: CoverageFamily) -> Tel
                 TelemetryAvailability::Unsupported
             }
         }
-        CoverageFamily::Spo2 => telemetry_availability_for_daily_metric(
+        CoverageFamily::Spo2 => telemetry_availability_for_metric(
             snapshot,
             CapabilityKind::Spo2,
+            DataFamily::Daily,
             !snapshot.daily_spo2.is_empty(),
         ),
     }
@@ -8583,11 +8626,15 @@ fn coverage_detail(snapshot: &LiveSnapshot, family: CoverageFamily) -> String {
                 || "SpO2 is not configured in the current local model.".to_owned(),
                 |entry| {
                     if entry.granted {
-                        if snapshot.daily_spo2.is_empty() {
+                        let freshness = family_freshness(snapshot, DataFamily::Daily);
+                        let availability = availability_from_freshness(&freshness);
+                        if snapshot.daily_spo2.is_empty()
+                            && matches!(availability, TelemetryAvailability::Fresh)
+                        {
                             "SpO2 scope is granted, but there are no cached SpO2 readings yet."
                                 .to_owned()
                         } else {
-                            family_freshness(snapshot, DataFamily::Daily).detail
+                            freshness.detail
                         }
                     } else {
                         entry.note.clone()
@@ -11165,9 +11212,10 @@ mod tests {
         AiRequestPreview, AiRequestPreviewSnapshot, ArtifactFinding, ArtifactFollowUpTarget,
         ArtifactStatus, ConfidenceLevel, GuidedFollowUpKind, ReviewArtifactV1, SufficiencyLevel,
     };
+    use crate::error::OuraProblem;
     use crate::evidence::policy::evidence_badges;
     use crate::evidence::{PopulationProfile, evidence_registry_version};
-    use crate::insights::MetricPoint;
+    use crate::insights::{MetricPoint, build_metric_insight};
     use crate::navigation::{self, FocusRegion, PreflightControl, SearchScope, TransientLayer};
     use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
     use crate::review::{
@@ -11180,10 +11228,11 @@ mod tests {
         ContextEventFamily, ContextEventRecord, DailySpO2Record, DataSufficiency, EffectDirection,
         HeartRatePoint, PatternMetric, PatternRelationWindow, PatternSummaryRecord, RecordCounts,
         ReportExportRecord, RestModePeriodRecord, ReviewSignalDayRecord, SleepPeriodRecord,
-        SleepTimeRecord, SnapshotCatalogEntry, TimeSemantics,
+        SleepTimeRecord, SnapshotCatalogEntry, SyncRunStatus, SyncStateRecord, TimeSemantics,
     };
     use crate::test_support::{ok, some};
     use crate::ui::layout::ViewportClass;
+    use crate::ui::telemetry::TelemetryAvailability;
 
     fn make_review_card(id: &str, signal_key: &str, score: i32) -> ReviewCard {
         ReviewCard {
@@ -12480,6 +12529,165 @@ mod tests {
         let snapshot = make_snapshot(&["2026-04-08"]);
         let freshness = super::family_freshness(&snapshot, DataFamily::Workout);
         assert_eq!(freshness.summary, "stale: receiver down");
+    }
+
+    #[test]
+    fn selected_primary_sleep_period_ignores_non_primary_sleep_types() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.sleep_periods = vec![
+            SleepPeriodRecord {
+                oura_id: "nap".to_owned(),
+                day: "2026-04-08".to_owned(),
+                bedtime_start: Some("2026-04-08T12:00:00Z".to_owned()),
+                bedtime_end: Some("2026-04-08T12:30:00Z".to_owned()),
+                sleep_type: Some("nap".to_owned()),
+                average_heart_rate: Some(60.0),
+                average_hrv: Some(30.0),
+                average_breath: Some(15.0),
+                total_sleep_duration: Some(1_800),
+                raw_cache_key: None,
+                updated_at: "2026-04-08T12:31:00Z".to_owned(),
+            },
+            SleepPeriodRecord {
+                oura_id: "primary".to_owned(),
+                day: "2026-04-08".to_owned(),
+                bedtime_start: Some("2026-04-08T23:00:00Z".to_owned()),
+                bedtime_end: Some("2026-04-09T06:30:00Z".to_owned()),
+                sleep_type: Some("long_sleep".to_owned()),
+                average_heart_rate: Some(55.0),
+                average_hrv: Some(42.0),
+                average_breath: Some(13.5),
+                total_sleep_duration: Some(27_000),
+                raw_cache_key: None,
+                updated_at: "2026-04-09T06:35:00Z".to_owned(),
+            },
+        ];
+
+        let selected = some(
+            super::selected_primary_sleep_period(&snapshot, "2026-04-08"),
+            "primary sleep period should be selected",
+        );
+        assert_eq!(selected.oura_id, "primary");
+    }
+
+    #[test]
+    fn sleep_period_metric_points_keep_one_primary_period_per_day() {
+        let history = vec![
+            SleepPeriodRecord {
+                oura_id: "first".to_owned(),
+                day: "2026-04-08".to_owned(),
+                bedtime_start: Some("2026-04-08T22:30:00Z".to_owned()),
+                bedtime_end: Some("2026-04-09T05:30:00Z".to_owned()),
+                sleep_type: Some("sleep".to_owned()),
+                average_heart_rate: Some(60.0),
+                average_hrv: Some(35.0),
+                average_breath: Some(14.0),
+                total_sleep_duration: Some(20_000),
+                raw_cache_key: None,
+                updated_at: "2026-04-09T05:31:00Z".to_owned(),
+            },
+            SleepPeriodRecord {
+                oura_id: "best".to_owned(),
+                day: "2026-04-08".to_owned(),
+                bedtime_start: Some("2026-04-08T23:00:00Z".to_owned()),
+                bedtime_end: Some("2026-04-09T06:30:00Z".to_owned()),
+                sleep_type: Some("long_sleep".to_owned()),
+                average_heart_rate: Some(55.0),
+                average_hrv: Some(42.0),
+                average_breath: Some(13.5),
+                total_sleep_duration: Some(27_000),
+                raw_cache_key: None,
+                updated_at: "2026-04-09T06:31:00Z".to_owned(),
+            },
+            SleepPeriodRecord {
+                oura_id: "second-day".to_owned(),
+                day: "2026-04-09".to_owned(),
+                bedtime_start: Some("2026-04-09T23:15:00Z".to_owned()),
+                bedtime_end: Some("2026-04-10T06:15:00Z".to_owned()),
+                sleep_type: Some("long_sleep".to_owned()),
+                average_heart_rate: Some(54.0),
+                average_hrv: Some(44.0),
+                average_breath: Some(13.2),
+                total_sleep_duration: Some(25_000),
+                raw_cache_key: None,
+                updated_at: "2026-04-10T06:20:00Z".to_owned(),
+            },
+        ];
+
+        let points = super::metric_points_from_sleep_periods(&history, |record| record.average_hrv);
+
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].day, "2026-04-08");
+        assert!((points[0].value - 42.0).abs() < f64::EPSILON);
+        assert_eq!(points[1].day, "2026-04-09");
+    }
+
+    #[test]
+    fn telemetry_availability_for_metric_preserves_sync_failures_without_cached_rows() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.auth_status.capability_report =
+            CapabilityReport::from_scopes(&["daily".to_owned()], &["daily".to_owned()]);
+        snapshot.sync_states = vec![SyncStateRecord {
+            sync_key: "oura.daily".to_owned(),
+            status: SyncRunStatus::Failed,
+            cursor: None,
+            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
+            last_completed_at: None,
+            message: Some("rate limited".to_owned()),
+            granted_scopes: vec!["daily".to_owned()],
+            last_error: Some(OuraProblem::new(
+                Some(429),
+                "Too Many Requests",
+                Some("rate limited".to_owned()),
+            )),
+            failure_count: 1,
+            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
+            last_trigger_source: Some("manual".to_owned()),
+            last_trigger_detail: None,
+        }];
+
+        let availability = super::telemetry_availability_for_metric(
+            &snapshot,
+            CapabilityKind::Daily,
+            DataFamily::Daily,
+            false,
+        );
+
+        assert_eq!(availability, TelemetryAvailability::RateLimited);
+    }
+
+    #[test]
+    fn combine_availability_prioritizes_active_failures_over_stale() {
+        assert_eq!(
+            super::combine_availability(
+                TelemetryAvailability::Stale,
+                TelemetryAvailability::RateLimited,
+            ),
+            TelemetryAvailability::RateLimited,
+        );
+        assert_eq!(
+            super::combine_availability(
+                TelemetryAvailability::Fresh,
+                TelemetryAvailability::MissingScope,
+            ),
+            TelemetryAvailability::MissingScope,
+        );
+    }
+
+    #[test]
+    fn trend_matrix_cell_uses_ninety_day_baseline_for_90d_column() {
+        let history = (1..=92)
+            .map(|value| MetricPoint {
+                day: format!("2026-01-{value:02}"),
+                value: f64::from(value),
+            })
+            .collect::<Vec<_>>();
+        let insight = build_metric_insight("stress", &history);
+
+        let cell =
+            super::trend_matrix_cell("90d", &insight, TelemetryAvailability::Fresh, 90, true);
+
+        assert_eq!(cell.delta_label, "+45.5");
     }
 
     #[test]

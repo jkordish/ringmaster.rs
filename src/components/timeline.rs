@@ -90,8 +90,8 @@ pub fn draw(
         model,
         theme,
         metrics,
-        focused_region == FocusRegion::TimelineControls,
-        expanded_region == Some(FocusRegion::TimelineControls),
+        focused_region,
+        expanded_region,
     );
     draw_chart(
         frame,
@@ -222,9 +222,11 @@ fn draw_controls(
     model: &TimelineModel,
     theme: &Theme,
     metrics: DashboardMetrics,
-    focused: bool,
-    expanded: bool,
+    focused_region: FocusRegion,
+    expanded_region: Option<FocusRegion>,
 ) {
+    let controls_focused = focused_region == FocusRegion::TimelineControls;
+    let controls_expanded = expanded_region == Some(FocusRegion::TimelineControls);
     let controls = Layout::default()
         .direction(Direction::Horizontal)
         .spacing(metrics.panel_gap_x)
@@ -243,8 +245,8 @@ fn draw_controls(
                 .get(model.selected_window_preset_index)
                 .map_or("24H", |preset| preset.label),
             status_tone: Tone::Focus,
-            focused,
-            expanded,
+            focused: controls_focused,
+            expanded: controls_expanded,
             kind: PanelKind::Section,
         },
     );
@@ -263,8 +265,8 @@ fn draw_controls(
         &model.overlay_toggles,
         theme,
         metrics,
-        focused,
-        expanded,
+        focused_region == FocusRegion::TimelineLanes,
+        expanded_region == Some(FocusRegion::TimelineLanes),
     );
 }
 

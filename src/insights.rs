@@ -29,6 +29,7 @@ pub struct MetricInsight {
     pub day_over_day_delta: Option<f64>,
     pub baseline_7d: BaselineStats,
     pub baseline_30d: BaselineStats,
+    pub baseline_90d: BaselineStats,
     pub summary: String,
     pub confidence: InsightConfidence,
     pub confidence_note: Option<String>,
@@ -44,6 +45,7 @@ pub fn build_metric_insight(label: &'static str, history: &[MetricPoint]) -> Met
         .map(|(current, previous)| current.value - previous.value);
     let baseline_7d = baseline_for_window(history, 7);
     let baseline_30d = baseline_for_window(history, 30);
+    let baseline_90d = baseline_for_window(history, 90);
     let confidence = classify_confidence(baseline_30d.sample_count.max(baseline_7d.sample_count));
     let confidence_note = confidence_note(
         confidence,
@@ -59,6 +61,7 @@ pub fn build_metric_insight(label: &'static str, history: &[MetricPoint]) -> Met
         day_over_day_delta,
         baseline_7d,
         baseline_30d,
+        baseline_90d,
         summary,
         confidence,
         confidence_note,
@@ -253,6 +256,7 @@ mod tests {
         assert_eq!(insight.baseline_7d.sample_count, 7);
         assert!(insight.baseline_7d.mean.is_some());
         assert!(insight.baseline_7d.z_score.is_some());
+        assert_eq!(insight.baseline_90d.sample_count, 7);
         assert_eq!(insight.confidence, InsightConfidence::Medium);
     }
 

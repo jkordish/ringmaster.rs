@@ -848,6 +848,13 @@ pub const MIGRATIONS: &[Migration] = &[
             ON daily_spo2(day);
         ",
     },
+    Migration {
+        version: 19,
+        name: "phase12_drop_redundant_daily_spo2_index",
+        sql: r"
+        DROP INDEX IF EXISTS idx_daily_spo2_day;
+        ",
+    },
 ];
 
 pub fn run_migrations(connection: &mut rusqlite::Connection) -> Result<MigrationReport> {
@@ -998,9 +1005,37 @@ mod tests {
         assert_eq!(
             report.applied_versions,
             vec![
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
             ]
         );
+    }
+
+    #[test]
+    fn bootstrap_schema_does_not_keep_redundant_daily_spo2_day_index() {
+        let mut connection = ok(Connection::open_in_memory(), "in-memory db should open");
+        ok(run_migrations(&mut connection), "migrations should succeed");
+
+        let index_names: Vec<String> = {
+            let mut statement = connection
+                .prepare("PRAGMA index_list(daily_spo2)")
+                .unwrap_or_else(|error| {
+                    unreachable!("daily_spo2 index list should prepare: {error}")
+                });
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap_or_else(|error| {
+                    unreachable!("daily_spo2 index list should query: {error}")
+                });
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap_or_else(|error| unreachable!("daily_spo2 index list should load: {error}"))
+        };
+
+        assert!(
+            index_names
+                .iter()
+                .any(|name| name == "sqlite_autoindex_daily_spo2_1")
+        );
+        assert!(!index_names.iter().any(|name| name == "idx_daily_spo2_day"));
     }
 
     #[test]
@@ -1080,7 +1115,7 @@ mod tests {
         );
         assert_eq!(
             report.applied_versions,
-            vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+            vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
         );
 
         let (workout_day, workout_title): (String, String) = connection
@@ -1157,7 +1192,7 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("phase4 migrations should succeed: {error}"));
         assert_eq!(
             report.applied_versions,
-            vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+            vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
         );
 
         let row: (String, String, String) = connection
@@ -1206,7 +1241,7 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("phase4 migration should succeed: {error}"));
         assert_eq!(
             report.applied_versions,
-            vec![9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+            vec![9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
         );
 
         let daily_sleep_columns: Vec<String> = {
@@ -1257,7 +1292,7 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("phase5 migration should succeed: {error}"));
         assert_eq!(
             report.applied_versions,
-            vec![10, 11, 12, 13, 14, 15, 16, 17, 18]
+            vec![10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
         );
 
         let table_names: Vec<String> = {
@@ -1367,7 +1402,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| unreachable!("phase8 sleep migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![17, 18]);
+        assert_eq!(report.applied_versions, vec![17, 18, 19]);
 
         let duration = connection
             .query_row(
@@ -1412,7 +1447,7 @@ mod tests {
         });
         assert_eq!(
             report.applied_versions,
-            vec![11, 12, 13, 14, 15, 16, 17, 18]
+            vec![11, 12, 13, 14, 15, 16, 17, 18, 19]
         );
 
         let table_names: Vec<String> = {
@@ -1485,7 +1520,10 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| unreachable!("vo2 history migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![12, 13, 14, 15, 16, 17, 18]);
+        assert_eq!(
+            report.applied_versions,
+            vec![12, 13, 14, 15, 16, 17, 18, 19]
+        );
 
         let primary_key_columns: Vec<String> = {
             let mut statement = connection
