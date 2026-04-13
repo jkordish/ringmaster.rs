@@ -53,9 +53,11 @@ pub struct DashboardMetrics {
     pub panel_gap_y: u16,
     pub panel_pad_x: u16,
     pub panel_pad_y: u16,
+    pub title_pad_x: u16,
     pub title_row_height: u16,
     pub title_separator_gap: u16,
     pub content_top_inset: u16,
+    pub major_inset_x: u16,
     pub badge_width: usize,
     pub focus_gutter_width: usize,
     pub footer_hint_limit: usize,
@@ -71,25 +73,29 @@ impl DashboardMetrics {
                 panel_gap_y: 1,
                 panel_pad_x: 1,
                 panel_pad_y: 0,
+                title_pad_x: 1,
                 title_row_height: 1,
                 title_separator_gap: 0,
                 content_top_inset: 1,
-                badge_width: 7,
+                major_inset_x: 2,
+                badge_width: 8,
                 focus_gutter_width: 2,
-                footer_hint_limit: 3,
+                footer_hint_limit: 1,
             },
             ViewportClass::Medium | ViewportClass::Wide => Self {
                 outer_margin: 0,
                 panel_gap_x: 1,
                 panel_gap_y: 1,
-                panel_pad_x: 1,
+                panel_pad_x: 2,
                 panel_pad_y: 0,
+                title_pad_x: 2,
                 title_row_height: 1,
                 title_separator_gap: 1,
                 content_top_inset: 2,
-                badge_width: 7,
+                major_inset_x: 4,
+                badge_width: 8,
                 focus_gutter_width: 2,
-                footer_hint_limit: 3,
+                footer_hint_limit: 2,
             },
         }
     }
@@ -125,8 +131,11 @@ mod tests {
 
         assert_eq!(compact.panel_gap_x, 1);
         assert_eq!(wide.panel_gap_x, 1);
-        assert_eq!(wide.badge_width, 7);
+        assert_eq!(compact.title_pad_x, 1);
+        assert_eq!(wide.panel_pad_x, 2);
+        assert_eq!(wide.major_inset_x, 4);
+        assert_eq!(wide.badge_width, 8);
         assert_eq!(wide.focus_gutter_width, 2);
-        assert_eq!(wide.footer_hint_limit, 3);
+        assert_eq!(wide.footer_hint_limit, 2);
     }
 }

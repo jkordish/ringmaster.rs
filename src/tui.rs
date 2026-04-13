@@ -3429,7 +3429,7 @@ mod tests {
         assert!(output.contains("Viewing: 2026-04-08"));
         assert!(output.contains("READINESS"));
         assert!(output.contains("WEEKLY TRENDS"));
-        assert!(output.contains("Readiness tile: score 74"));
+        assert!(output.contains("Readiness tile | score 74"));
         assert!(!output.contains("HEADER / STATUS"));
     }
 
@@ -3764,7 +3764,7 @@ mod tests {
         assert!(compact.contains("READINESS"));
         assert!(compact.contains("ACTIVITY"));
         assert!(medium.contains("HEART RATE"));
-        assert!(medium.contains("[ STALE ]"));
+        assert!(medium.contains("[STALE]"));
         assert!(wide.contains("READINESS BREAKDOWN"));
         assert!(wide.contains("WEEKLY TRENDS"));
         assert!(!compact.contains("HEADER / STATUS"));
@@ -3782,19 +3782,19 @@ mod tests {
             unreachable!("readiness focus snapshot should render: {error}")
         });
         assert!(readiness.contains("> READINESS"));
-        assert!(readiness.contains("Readiness tile: score 74"));
+        assert!(readiness.contains("Readiness tile | score 74"));
 
         app.handle(Action::FocusNextRegion);
         let sleep = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("sleep focus snapshot should render: {error}"));
         assert!(sleep.contains("> SLEEP"));
-        assert!(sleep.contains("Sleep tile: 6h 55m"));
+        assert!(sleep.contains("Sleep tile | 6h 55m | score 76"));
 
         app.handle(Action::FocusNextRegion);
         let activity = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("activity focus snapshot should render: {error}"));
         assert!(activity.contains("> ACTIVITY"));
-        assert!(activity.contains("Activity tile: activity 13,420"));
+        assert!(activity.contains("Activity tile | activity 13,420"));
     }
 
     #[test]
@@ -3806,7 +3806,7 @@ mod tests {
             unreachable!("stale dashboard snapshot should render: {error}")
         });
         assert!(stale_output.contains("HEART RATE"));
-        assert!(stale_output.contains("[ STALE ]"));
+        assert!(stale_output.contains("[STALE]"));
 
         let store = Store::open_test_store()
             .unwrap_or_else(|error| unreachable!("store should open: {error}"));
@@ -3851,8 +3851,8 @@ mod tests {
             unreachable!("dense-history dashboard snapshot should render: {error}")
         });
 
-        assert!(output.contains("326327328329"));
-        assert!(output.contains("40740"));
+        assert!(output.contains("326 327 328 329"));
+        assert!(output.contains("401 402 403 404"));
         assert!(output.contains("WEEKLY TRENDS"));
     }
 

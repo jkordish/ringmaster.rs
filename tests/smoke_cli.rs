@@ -66,7 +66,7 @@ async fn demo_output_mentions_dashboard() {
     assert!(output.contains("READINESS"));
     assert!(output.contains("READINESS BREAKDOWN"));
     assert!(output.contains("WEEKLY TRENDS"));
-    assert!(output.contains("Readiness tile: score 74"));
+    assert!(output.contains("Readiness tile | score 74"));
     assert!(output.contains("Review"));
 }
 

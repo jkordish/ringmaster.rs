@@ -1404,7 +1404,14 @@ impl AppState {
 
     #[must_use]
     pub fn footer(&self, viewport: ViewportClass) -> String {
-        let hints = crate::keybindings::footer_hints(self.binding_context());
+        let hint_limit = match viewport {
+            ViewportClass::Compact | ViewportClass::Medium => 1,
+            ViewportClass::Wide => 2,
+        };
+        let hints = crate::keybindings::footer_hints(self.binding_context())
+            .into_iter()
+            .take(hint_limit)
+            .collect::<Vec<_>>();
         let hint_text = if hints.is_empty() {
             "No contextual keys".to_owned()
         } else {

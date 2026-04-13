@@ -38,8 +38,7 @@ pub struct PanelShell {
 #[must_use]
 pub fn panel<'a>(theme: &Theme, title: impl Into<Line<'a>>, kind: PanelKind) -> Block<'a> {
     let tone = match kind {
-        PanelKind::Hero => Tone::Accent,
-        PanelKind::Section => Tone::Default,
+        PanelKind::Hero | PanelKind::Section => Tone::Default,
         PanelKind::Subtle => Tone::Muted,
         PanelKind::Diagnostic => Tone::Info,
     };
@@ -53,7 +52,7 @@ pub fn panel<'a>(theme: &Theme, title: impl Into<Line<'a>>, kind: PanelKind) -> 
         } else {
             theme.border(tone)
         })
-        .style(theme.body())
+        .style(theme.panel_surface(!matches!(kind, PanelKind::Hero)))
 }
 
 #[must_use]
@@ -61,8 +60,8 @@ pub fn app_frame(theme: &Theme) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_set(border::DOUBLE)
-        .border_style(theme.border(Tone::Accent))
-        .style(theme.body())
+        .border_style(theme.strong_border(Tone::Accent))
+        .style(theme.screen())
 }
 
 #[must_use]
@@ -89,11 +88,12 @@ pub fn render_panel_shell(
             border::PLAIN
         })
         .border_style(match (spec.focused, spec.kind) {
-            (true, _) => theme.border(Tone::Focus),
-            (false, PanelKind::Hero) => theme.border(Tone::Default),
-            (false, _) => theme.muted_border(),
+            (true, _) => theme.strong_border(Tone::Focus),
+            (false, PanelKind::Hero | PanelKind::Section) => theme.border(Tone::Default),
+            (false, PanelKind::Diagnostic) => theme.border(Tone::Info),
+            (false, PanelKind::Subtle) => theme.muted_border(),
         })
-        .style(theme.body());
+        .style(theme.panel_surface(matches!(spec.kind, PanelKind::Section | PanelKind::Subtle)));
     if area.height <= 3 {
         let (left_text, open_text, status_text) =
             panel_title_row_segments(metrics, spec, area.width.saturating_sub(2));
@@ -141,7 +141,9 @@ pub fn render_panel_shell(
 
     let title_height = metrics.title_row_height.min(inner.height);
     let title_area = Rect::new(inner.x, inner.y, inner.width, title_height);
-    let (left_text, open_text, status_text) = panel_title_row_segments(metrics, spec, inner.width);
+    let title_text_area = inset(title_area, metrics.title_pad_x, 0);
+    let (left_text, open_text, status_text) =
+        panel_title_row_segments(metrics, spec, title_text_area.width);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -156,7 +158,7 @@ pub fn render_panel_shell(
             Span::styled(status_text, theme.badge(spec.status_tone)),
         ]))
         .style(theme.body()),
-        title_area,
+        title_text_area,
     );
 
     let body_top = if inner.height > metrics.content_top_inset {
@@ -164,11 +166,14 @@ pub fn render_panel_shell(
     } else {
         inner.y.saturating_add(title_height)
     };
-    if metrics.title_separator_gap > 0 && inner.height > metrics.content_top_inset {
+    let show_title_separator = metrics.title_separator_gap > 0
+        && inner.height > metrics.content_top_inset
+        && matches!(spec.kind, PanelKind::Diagnostic);
+    if show_title_separator {
         let separator_y = inner.y.saturating_add(title_height);
         let separator_area = Rect::new(inner.x, separator_y, inner.width, 1);
         frame.render_widget(
-            Paragraph::new(subtle_rule(inner.width as usize)).style(theme.muted_border()),
+            Paragraph::new(subtle_rule(inner.width as usize)).style(theme.subtle_fill()),
             separator_area,
         );
     }
@@ -223,13 +228,12 @@ fn panel_title_row_segments(
     let title = spec.title.to_ascii_uppercase();
     let focus_marker = if spec.focused { ">" } else { " " };
     let left = format!(
-        "{focus_marker:<gutter$}{}",
-        title,
+        "{focus_marker:<gutter$}{title}",
         gutter = metrics.focus_gutter_width
     );
-    let status = format!("[{:^badge$}]", spec.status, badge = metrics.badge_width);
+    let status = format!("[{}]", truncate_ascii(spec.status, metrics.badge_width));
     let open = if spec.expanded {
-        "[OPEN] ".to_owned()
+        " [OPEN]".to_owned()
     } else {
         String::new()
     };
@@ -239,7 +243,7 @@ fn panel_title_row_segments(
         return (
             String::new(),
             String::new(),
-            truncate_ascii(&format!("{open}{status}"), available),
+            truncate_ascii(&format!("{status}{open}"), available),
         );
     }
 

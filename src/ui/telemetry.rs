@@ -5,7 +5,6 @@ use ratatui::{
     widgets::{Block, Borders},
 };
 
-use crate::numeric::rounded_clamped_f64_to_u16;
 use crate::ui::theme::{Theme, Tone};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,13 +68,13 @@ pub fn panel_block<'a>(
         ]))
         .borders(Borders::ALL)
         .border_style(if focused {
-            theme.border(Tone::Focus)
+            theme.strong_border(Tone::Focus)
         } else if matches!(status_tone, Tone::Muted) {
             theme.muted_border()
         } else {
             theme.border(border_tone)
         })
-        .style(theme.body())
+        .style(theme.panel_surface(true))
 }
 
 #[must_use]
@@ -130,47 +129,52 @@ pub fn segmented_bar(fill_percent: u16, segments: usize) -> String {
 }
 
 #[must_use]
-pub fn score_ring_lines(
-    value: &str,
-    fill_percent: u16,
-    delta: Option<&str>,
-    trend: &str,
-    subtitle: Option<&str>,
-) -> Vec<String> {
-    let ring = segmented_bar(fill_percent, 12);
-    let lower = segmented_bar(fill_percent.saturating_sub(18), 8);
-    let delta_text = delta.unwrap_or("Δ --");
-    vec![
-        format!("    {ring:^12}"),
-        "   ╭────────────╮".to_owned(),
-        format!("   │{:^12}│", value),
-        format!("   │{:^12}│", delta_text),
-        "   ╰────────────╯".to_owned(),
-        format!("     {lower:^8}"),
-        subtitle.map_or_else(
-            || trend.to_owned(),
-            |subtitle| format!("{subtitle} | {trend}"),
-        ),
-    ]
+pub fn meter_bar(fill_percent: u16, width: usize) -> String {
+    if width <= 2 {
+        return segmented_bar(fill_percent, width.max(1));
+    }
+    let interior = segmented_bar(fill_percent, width - 2)
+        .chars()
+        .map(|glyph| if glyph == '░' { '·' } else { glyph })
+        .collect::<String>();
+    format!("╺{interior}╸")
 }
 
 #[must_use]
-pub fn thermometer_lines(value: Option<f64>, label: &str) -> Vec<String> {
-    let mut lines = Vec::new();
-    let normalized = value.unwrap_or(0.0).clamp(-1.0, 1.0);
-    let fill = usize::from(rounded_clamped_f64_to_u16(
-        normalized.midpoint(1.0) * 6.0,
-        0.0,
-        6.0,
-    ));
-    lines.push("   ╭─╮".to_owned());
-    for index in (0..6).rev() {
-        let glyph = if index < fill { "█" } else { " " };
-        lines.push(format!("   │{glyph}│"));
+pub fn stacked_profile_rows(values: &[u64], width: usize, height: usize) -> Vec<String> {
+    if values.is_empty() || width == 0 || height == 0 {
+        return vec![placeholder_rule(width.max(4))];
     }
-    lines.push("   ╰█╯".to_owned());
-    lines.push(format!("{label:>7}"));
-    lines
+    let sampled = resample(values, width);
+    let max = sampled.iter().copied().max().unwrap_or(0);
+    if max == 0 {
+        return vec!["·".repeat(sampled.len().max(1))];
+    }
+
+    let max = usize::try_from(max).unwrap_or(usize::MAX).max(1);
+    let scaled = sampled
+        .iter()
+        .map(|value| {
+            let value = usize::try_from(*value).unwrap_or(usize::MAX);
+            value.saturating_mul(height).div_ceil(max).min(height)
+        })
+        .collect::<Vec<_>>();
+
+    let mut rows = vec![String::with_capacity(sampled.len()); height];
+    for (row_index, row) in rows.iter_mut().enumerate().take(height) {
+        let threshold = height.saturating_sub(row_index);
+        for value in &scaled {
+            let glyph = if *value >= threshold {
+                '█'
+            } else if row_index == height.saturating_sub(1) {
+                '·'
+            } else {
+                ' '
+            };
+            row.push(glyph);
+        }
+    }
+    rows
 }
 
 #[must_use]
@@ -188,9 +192,11 @@ pub fn weekly_heatmap_rows(
     selected: Option<(usize, usize)>,
     mode: WeeklyHeatmapMode,
     cell_width: usize,
+    row_height: usize,
 ) -> Vec<String> {
     let levels = ['·', '░', '▒', '▓', '█'];
     let cell_width = cell_width.max(1);
+    let row_height = row_height.max(1);
     let label_width = match mode {
         WeeklyHeatmapMode::Standard => 8,
         WeeklyHeatmapMode::DenseHistory => 6,
@@ -240,6 +246,9 @@ pub fn weekly_heatmap_rows(
             })
             .unwrap_or_default();
         output.push(format!("{label:<label_width$}{cells}"));
+        for _ in 1..row_height {
+            output.push(format!("{:label_width$}{cells}", ""));
+        }
     }
     output
 }
@@ -263,9 +272,9 @@ pub fn footer_inspector(
     let summary = if delta.is_empty() || delta == "Δ --" {
         exact.to_owned()
     } else {
-        format!("{exact} ({delta})")
+        format!("{exact} / {delta}")
     };
-    format!("{label}: {summary} | {freshness} | {hint}")
+    format!("{label} | {summary} | {freshness} | {hint}")
 }
 
 #[must_use]
@@ -326,12 +335,18 @@ fn resample(values: &[u64], width: usize) -> Vec<u64> {
 mod tests {
     use super::{
         TelemetryAvailability, WeeklyHeatmapMode, availability_scaffold, footer_inspector,
-        micro_histogram, segmented_bar, spark_strip, weekly_heatmap_rows,
+        meter_bar, micro_histogram, segmented_bar, spark_strip, stacked_profile_rows,
+        weekly_heatmap_rows,
     };
 
     #[test]
     fn segmented_bar_keeps_density_when_partially_filled() {
         assert_eq!(segmented_bar(50, 8), "████░░░░");
+    }
+
+    #[test]
+    fn meter_bar_uses_endcaps_and_quiet_empty_cells() {
+        assert_eq!(meter_bar(50, 8), "╺███···╸");
     }
 
     #[test]
@@ -343,6 +358,13 @@ mod tests {
     #[test]
     fn histogram_returns_placeholder_for_empty_data() {
         assert_eq!(micro_histogram(&[], 6), "no bars");
+    }
+
+    #[test]
+    fn stacked_profiles_gain_vertical_mass_without_extra_labels() {
+        let rows = stacked_profile_rows(&[1, 2, 3, 4], 4, 3);
+        assert_eq!(rows.len(), 3);
+        assert!(rows[2].contains('·') || rows[2].contains('█'));
     }
 
     #[test]
@@ -361,7 +383,7 @@ mod tests {
             "`Tab` next | `?` help",
         );
 
-        assert!(footer.starts_with("Readiness tile: score 74 (vs 7d -5.7)"));
+        assert!(footer.starts_with("Readiness tile | score 74 / vs 7d -5.7"));
         assert!(footer.ends_with("`Tab` next | `?` help"));
     }
 
@@ -374,6 +396,7 @@ mod tests {
             Some((0, 1)),
             WeeklyHeatmapMode::Standard,
             2,
+            1,
         );
 
         assert!(rows[0].contains('M'));
@@ -389,11 +412,13 @@ mod tests {
             Some((0, 2)),
             WeeklyHeatmapMode::DenseHistory,
             1,
+            2,
         );
 
         assert!(rows[0].contains("401"));
         assert!(rows[0].contains("402"));
         assert!(rows[1].contains("[▒]") || rows[1].contains("[▓]"));
+        assert_eq!(rows.len(), 3);
     }
 
     #[test]

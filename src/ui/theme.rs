@@ -14,82 +14,109 @@ pub enum Tone {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
-    pub background: Color,
-    pub surface_1: Color,
-    pub surface_2: Color,
-    pub surface_3: Color,
-    pub text_strong: Color,
-    pub text: Color,
-    pub text_muted: Color,
+    pub surface_base: Color,
+    pub surface_panel: Color,
+    pub surface_panel_alt: Color,
+    pub line_subtle: Color,
+    pub line_normal: Color,
+    pub line_strong: Color,
+    pub text_primary: Color,
+    pub text_secondary: Color,
+    pub text_tertiary: Color,
+    pub text_disabled: Color,
     pub accent: Color,
-    pub positive: Color,
-    pub warning: Color,
-    pub danger: Color,
-    pub info: Color,
-    pub focus: Color,
+    pub state_fresh: Color,
+    pub state_warn: Color,
+    pub state_error: Color,
+    pub state_info: Color,
+    pub focus_accent: Color,
 }
 
 impl Theme {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            background: Color::Black,
-            surface_1: Color::Rgb(24, 28, 34),
-            surface_2: Color::Rgb(31, 36, 43),
-            surface_3: Color::Rgb(39, 45, 53),
-            text_strong: Color::Rgb(235, 239, 244),
-            text: Color::Rgb(205, 212, 219),
-            text_muted: Color::Rgb(128, 138, 150),
-            accent: Color::Rgb(94, 168, 212),
-            positive: Color::Rgb(115, 186, 123),
-            warning: Color::Rgb(214, 177, 94),
-            danger: Color::Rgb(210, 103, 89),
-            info: Color::Rgb(120, 161, 206),
-            focus: Color::Rgb(188, 218, 95),
+            surface_base: Color::Rgb(12, 16, 20),
+            surface_panel: Color::Rgb(18, 24, 30),
+            surface_panel_alt: Color::Rgb(22, 28, 34),
+            line_subtle: Color::Rgb(48, 59, 71),
+            line_normal: Color::Rgb(78, 93, 108),
+            line_strong: Color::Rgb(118, 137, 158),
+            text_primary: Color::Rgb(235, 240, 246),
+            text_secondary: Color::Rgb(198, 207, 217),
+            text_tertiary: Color::Rgb(134, 147, 161),
+            text_disabled: Color::Rgb(94, 104, 116),
+            accent: Color::Rgb(121, 164, 206),
+            state_fresh: Color::Rgb(113, 188, 144),
+            state_warn: Color::Rgb(220, 181, 102),
+            state_error: Color::Rgb(216, 109, 97),
+            state_info: Color::Rgb(138, 168, 214),
+            focus_accent: Color::Rgb(127, 210, 236),
         }
     }
 
     #[must_use]
     pub const fn tone(self, tone: Tone) -> Color {
         match tone {
-            Tone::Default => self.text,
+            Tone::Default => self.text_secondary,
             Tone::Accent => self.accent,
-            Tone::Positive => self.positive,
-            Tone::Warning => self.warning,
-            Tone::Danger => self.danger,
-            Tone::Info => self.info,
-            Tone::Muted => self.text_muted,
-            Tone::Focus => self.focus,
+            Tone::Positive => self.state_fresh,
+            Tone::Warning => self.state_warn,
+            Tone::Danger => self.state_error,
+            Tone::Info => self.state_info,
+            Tone::Muted => self.text_tertiary,
+            Tone::Focus => self.focus_accent,
         }
     }
 
     #[must_use]
     pub fn screen(self) -> Style {
-        Style::default().bg(self.background).fg(self.text)
+        Style::default()
+            .bg(self.surface_base)
+            .fg(self.text_secondary)
+    }
+
+    #[must_use]
+    pub fn panel_surface(self, alternate: bool) -> Style {
+        Style::default()
+            .bg(if alternate {
+                self.surface_panel_alt
+            } else {
+                self.surface_panel
+            })
+            .fg(self.text_secondary)
     }
 
     #[must_use]
     pub fn hero(self) -> Style {
         Style::default()
-            .fg(self.text_strong)
+            .fg(self.text_primary)
             .add_modifier(Modifier::BOLD)
     }
 
     #[must_use]
     pub fn section_title(self, tone: Tone) -> Style {
-        Style::default()
-            .fg(self.tone(tone))
-            .add_modifier(Modifier::BOLD)
+        let foreground = match tone {
+            Tone::Default => self.text_primary,
+            Tone::Muted => self.text_tertiary,
+            other => self.tone(other),
+        };
+        Style::default().fg(foreground).add_modifier(Modifier::BOLD)
     }
 
     #[must_use]
     pub fn body(self) -> Style {
-        Style::default().fg(self.text)
+        Style::default().fg(self.text_secondary)
     }
 
     #[must_use]
     pub fn annotation(self) -> Style {
-        Style::default().fg(self.text_muted)
+        Style::default().fg(self.text_tertiary)
+    }
+
+    #[must_use]
+    pub fn disabled(self) -> Style {
+        Style::default().fg(self.text_disabled)
     }
 
     #[must_use]
@@ -108,12 +135,32 @@ impl Theme {
 
     #[must_use]
     pub fn border(self, tone: Tone) -> Style {
-        Style::default().fg(self.tone(tone))
+        let line = match tone {
+            Tone::Default => self.line_normal,
+            Tone::Muted => self.line_subtle,
+            Tone::Focus => self.focus_accent,
+            Tone::Accent => self.accent,
+            Tone::Positive => self.state_fresh,
+            Tone::Warning => self.state_warn,
+            Tone::Danger => self.state_error,
+            Tone::Info => self.state_info,
+        };
+        Style::default().fg(line)
+    }
+
+    #[must_use]
+    pub fn strong_border(self, tone: Tone) -> Style {
+        self.border(tone).add_modifier(Modifier::BOLD)
     }
 
     #[must_use]
     pub fn muted_border(self) -> Style {
-        Style::default().fg(self.surface_3)
+        Style::default().fg(self.line_subtle)
+    }
+
+    #[must_use]
+    pub fn subtle_fill(self) -> Style {
+        Style::default().fg(self.line_subtle)
     }
 }
 
@@ -128,10 +175,18 @@ mod tests {
     use super::{Theme, Tone};
 
     #[test]
-    fn palette_roles_are_distinct_enough_for_state_language() {
+    fn focus_and_freshness_are_visibly_distinct_roles() {
         let theme = Theme::default();
-        assert_ne!(theme.tone(Tone::Accent), theme.tone(Tone::Warning));
-        assert_ne!(theme.tone(Tone::Warning), theme.tone(Tone::Danger));
+        assert_ne!(theme.tone(Tone::Focus), theme.tone(Tone::Positive));
+        assert_ne!(theme.tone(Tone::Focus), theme.tone(Tone::Warning));
         assert_ne!(theme.tone(Tone::Positive), theme.tone(Tone::Danger));
+    }
+
+    #[test]
+    fn line_hierarchy_stays_ordered_from_subtle_to_strong() {
+        let theme = Theme::default();
+        assert_ne!(theme.line_subtle, theme.line_normal);
+        assert_ne!(theme.line_normal, theme.line_strong);
+        assert_ne!(theme.line_subtle, theme.line_strong);
     }
 }

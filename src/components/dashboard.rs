@@ -15,8 +15,8 @@ use crate::ui::{
     layout::{DashboardMetrics, UiContext, ViewportClass},
     telemetry::{
         TelemetryAvailability, WeeklyHeatmapMode, availability_scaffold, concise_detail,
-        concise_text, micro_histogram, primary_secondary_line, score_ring_lines, segmented_bar,
-        spark_strip, thermometer_lines, weekly_heatmap_rows,
+        concise_text, meter_bar, micro_histogram, primary_secondary_line, segmented_bar,
+        spark_strip, stacked_profile_rows, weekly_heatmap_rows,
     },
     theme::Theme,
 };
@@ -631,23 +631,45 @@ fn render_score_tile(
     }
 
     let width = usize::from(shell.content_area.width);
-    let trend = spark_strip(&score_tile.trend, width.saturating_sub(2).max(8));
-    let subtitle = score_tile
-        .secondary_lines
-        .first()
-        .map(|line| concise_text(line, width.min(22)));
-    let mut lines = score_ring_lines(
-        &score_tile.primary_value,
-        score_tile.ring_fill_percent,
-        Some(score_tile.delta_label.as_str()),
-        &trend,
-        subtitle.as_deref(),
-    );
-    if let Some(secondary) = score_tile.secondary_lines.get(1) {
-        lines.push(concise_text(secondary, width));
+    let trend_width = clamped_instrument_width(width, state.metrics, 14, 22);
+    let capacity = usize::from(shell.content_area.height).max(1);
+    let note_slot = usize::from(state.focused || state.expanded);
+    let instrument_rows = if capacity >= 6 { 2 } else { 1 };
+    let secondary_budget = capacity
+        .saturating_sub(instrument_rows + 2 + note_slot)
+        .min(if width >= 24 { 2 } else { 1 });
+
+    let mut lines = Vec::new();
+    if instrument_rows == 2 {
+        lines.push(centered_line(
+            width,
+            spark_strip(&score_tile.trend, trend_width),
+        ));
     }
+    lines.push(centered_line(
+        width,
+        meter_bar(score_tile.ring_fill_percent, trend_width),
+    ));
+    lines.push(centered_line(
+        width,
+        concise_text(&score_tile.primary_value, width),
+    ));
+    lines.push(centered_line(
+        width,
+        concise_text(&score_tile.delta_label, width),
+    ));
+    lines.extend(
+        score_tile
+            .secondary_lines
+            .iter()
+            .take(secondary_budget)
+            .map(|line| centered_line(width, concise_text(line, width))),
+    );
     if state.focused || state.expanded {
-        lines.push(concise_detail(&score_tile.note, width));
+        lines.push(centered_line(
+            width,
+            concise_detail(&score_tile.note, width),
+        ));
     }
     render_panel_text(
         frame,
@@ -711,17 +733,26 @@ fn render_sleep_tile(
     }
 
     let width = usize::from(shell.content_area.width);
-    let strip = micro_histogram(&tile.trend, width.max(8));
-    let spark = spark_strip(&tile.trend, width.max(8));
-    let mut lines = vec![
-        primary_secondary_line(
-            &format!("duration {}", tile.duration_label),
-            &tile.score_label,
-            width,
-        ),
-        strip,
-        spark,
-    ];
+    let band_width = clamped_instrument_width(width, state.metrics, 12, width.max(12));
+    let capacity = usize::from(shell.content_area.height).max(4);
+    let band_height = capacity
+        .saturating_sub(if state.focused || state.expanded {
+            3
+        } else {
+            2
+        })
+        .clamp(4, 7);
+    let mut lines = vec![primary_secondary_line(
+        &format!("duration {}", tile.duration_label),
+        &tile.score_label,
+        width,
+    )];
+    lines.extend(
+        stacked_profile_rows(&tile.trend, band_width, band_height)
+            .into_iter()
+            .map(|row| centered_line(width, row)),
+    );
+    lines.push(centered_line(width, spark_strip(&tile.trend, band_width)));
     if state.focused || state.expanded {
         lines.push(concise_detail(&tile.strip_note, width));
     }
@@ -787,14 +818,13 @@ fn render_trend_panel(
     }
 
     let width = usize::from(shell.content_area.width);
-    let mut lines = vec![
-        concise_text(&panel.primary_label, width),
-        spark_strip(&panel.values, width.max(6)),
-        primary_secondary_line(&panel.baseline_label, &panel.range_label, width),
-    ];
-    if state.focused || state.expanded {
-        lines.push(concise_detail(&panel.note, width));
-    }
+    let mut lines = vec![concise_text(&panel.primary_label, width)];
+    lines.extend(trend_instrument_lines(title, panel, width));
+    lines.push(primary_secondary_line(
+        &panel.baseline_label,
+        &panel.range_label,
+        width,
+    ));
     render_panel_text(
         frame,
         shell.content_area,
@@ -857,11 +887,11 @@ fn render_temp_panel(
     }
 
     let width = usize::from(shell.content_area.width);
-    let value = panel.deviation_tenths.map(|raw| f64::from(raw) / 10.0);
-    let mut lines = thermometer_lines(value, &panel.value_label);
-    if state.focused || state.expanded {
-        lines.push(concise_detail(&panel.note, width));
-    }
+    let mut lines = vec![centered_line(
+        width,
+        concise_text(&panel.value_label, width),
+    )];
+    lines.extend(compact_temperature_lines(panel.deviation_tenths, width));
     render_panel_text(
         frame,
         centered_body_area(shell.content_area, lines.len()),
@@ -924,11 +954,16 @@ fn render_histogram_panel(
     }
 
     let width = usize::from(shell.content_area.width);
+    let instrument_width = clamped_instrument_width(width, state.metrics, 10, width.max(10));
     let mut lines = vec![
         concise_text(&panel.primary_label, width),
+        centered_line(
+            width,
+            meter_bar(fill_percent(&panel.bars), instrument_width),
+        ),
         micro_histogram(&panel.bars, width.max(6)),
     ];
-    if state.focused || state.expanded {
+    if (state.focused || state.expanded) && shell.content_area.height >= 4 {
         lines.push(concise_detail(&panel.note, width));
     }
     render_panel_text(
@@ -994,55 +1029,60 @@ fn render_breakdown_panel(
     let label_width = panel
         .rails
         .iter()
-        .map(|rail| rail.label.len() + 1)
+        .map(|rail| rail.label.len() + 2)
         .max()
-        .unwrap_or(12)
-        .min(width.saturating_div(3).max(10));
+        .unwrap_or(14)
+        .min(width.saturating_div(3).max(12));
     let delta_width = panel
         .rails
         .iter()
         .map(|rail| rail.delta_label.len())
         .max()
-        .unwrap_or(5)
-        .min(10);
-    let bar_segments = width.saturating_sub(label_width + delta_width + 4).max(8);
-
-    let mut lines = panel
+        .unwrap_or(10)
+        .clamp(8, 14);
+    let bar_segments = width.saturating_sub(label_width + delta_width + 4).max(12);
+    let focus_note = panel
         .rails
         .iter()
-        .map(|rail| {
-            let label = format!("{}{}", if rail.selected { ">" } else { " " }, rail.label);
-            format!(
-                "{label:<label_width$} {} {:>delta_width$}",
-                segmented_bar(rail.fill_percent, bar_segments),
-                concise_text(&rail.delta_label, delta_width),
-            )
-        })
-        .collect::<Vec<_>>();
-    lines.push(format!(
-        "{:<label_width$} {}",
-        " signal",
-        spark_strip(
-            &panel.waveform,
-            width.saturating_sub(label_width + 1).max(8)
+        .find(|rail| rail.selected)
+        .map_or_else(|| panel.note.clone(), |rail| rail.note.clone());
+    let support_height = usize::from(shell.content_area.height)
+        .saturating_sub(panel.rails.len() + 2)
+        .clamp(2, 4);
+
+    let mut lines = vec![format!(
+        "{:<label_width$} {:<bar_segments$} {:>delta_width$}",
+        "factor", "signal", "delta"
+    )];
+    lines.extend(panel.rails.iter().map(|rail| {
+        let label = format!("{} {}", if rail.selected { ">" } else { " " }, rail.label);
+        let status = if availability_has_reading(rail.availability) {
+            rail.delta_label.clone()
+        } else {
+            rail.availability.label().to_owned()
+        };
+        format!(
+            "{label:<label_width$} {} {:>delta_width$}",
+            segmented_bar(rail.fill_percent, bar_segments),
+            concise_text(&status, delta_width),
         )
-    ));
-    lines.push(format!(
-        "{:<label_width$} {}",
-        " drift",
-        micro_histogram(
-            &panel.waveform,
-            width.saturating_sub(label_width + 1).max(8)
-        )
-    ));
-    if state.focused || state.expanded {
-        let detail = panel
-            .rails
-            .iter()
-            .find(|rail| rail.selected)
-            .map_or_else(|| panel.note.clone(), |rail| rail.note.clone());
-        lines.push(concise_detail(&detail, width));
+    }));
+    let support_width = width.saturating_sub(label_width + 1).max(10);
+    for (index, row) in stacked_profile_rows(&panel.waveform, support_width, support_height)
+        .into_iter()
+        .enumerate()
+    {
+        lines.push(format!(
+            "{:<label_width$} {}",
+            if index == 0 { "band" } else { "" },
+            row
+        ));
     }
+    lines.push(format!(
+        "{:<label_width$} {}",
+        "focus",
+        concise_text(&focus_note, width.saturating_sub(label_width + 1),)
+    ));
     render_panel_text(
         frame,
         shell.content_area,
@@ -1116,17 +1156,23 @@ fn render_heatmap_panel(
         .map(String::as_str)
         .collect::<Vec<_>>();
     let label_count = grid.day_labels.len().max(1);
+    let label_width = if use_dense_history { 6 } else { 8 };
     let cell_width = width
-        .saturating_sub(if use_dense_history { 6 } else { 8 })
+        .saturating_sub(label_width)
         .checked_div(label_count)
         .unwrap_or(1)
-        .saturating_sub(2)
-        .clamp(1, 5);
+        .saturating_sub(1)
+        .clamp(2, 6);
     let mode = if use_dense_history {
         WeeklyHeatmapMode::DenseHistory
     } else {
         WeeklyHeatmapMode::Standard
     };
+    let row_height = usize::from(shell.content_area.height)
+        .saturating_sub(3)
+        .checked_div(grid.rows.len().max(1))
+        .unwrap_or(1)
+        .clamp(1, 2);
     let mut lines = weekly_heatmap_rows(
         &grid.day_labels,
         &row_refs,
@@ -1134,17 +1180,20 @@ fn render_heatmap_panel(
         grid.selected_cell,
         mode,
         cell_width,
+        row_height,
     );
-    lines.push("lower ░▒▓ higher".to_owned());
-    if state.focused || state.expanded {
-        lines.push(concise_detail(
-            &selected_heatmap_summary(grid, &panel.row_labels, &panel.note),
-            width,
-        ));
+    lines.push(concise_text(
+        &selected_heatmap_summary(grid, &panel.row_labels, &panel.note),
+        width,
+    ));
+    lines.push("band ░▒▓ higher".to_owned());
+    let rendered_lines = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+    if (state.focused || state.expanded) && shell.content_area.height > rendered_lines {
+        lines.push(concise_detail(&panel.note, width));
     }
     render_panel_text(
         frame,
-        centered_body_area(shell.content_area, lines.len()),
+        shell.content_area,
         lines.join("\n"),
         theme,
         Alignment::Left,
@@ -1169,7 +1218,7 @@ fn selected_heatmap_summary(
             let value = row.get(column_index).copied().flatten()?;
             let row_label = row_labels.get(row_index)?;
             let day_label = grid.day_labels.get(column_index)?;
-            Some(format!("{row_label} {value} on {day_label}"))
+            Some(format!("{row_label} {value} | {day_label}"))
         })
         .unwrap_or_else(|| note.to_owned())
 }
@@ -1187,6 +1236,11 @@ fn render_panel_text(
             .alignment(alignment),
         area,
     );
+}
+
+fn centered_line(width: usize, text: impl AsRef<str>) -> String {
+    let text = text.as_ref();
+    format!("{text:^width$}")
 }
 
 fn centered_body_area(area: Rect, line_count: usize) -> Rect {
@@ -1218,4 +1272,65 @@ fn compact_heatmap_row(values: &[Option<u8>], selected_cell: Option<(usize, usiz
         })
         .collect::<String>();
     format!("S {cells}")
+}
+
+fn clamped_instrument_width(
+    width: usize,
+    metrics: DashboardMetrics,
+    minimum: usize,
+    maximum: usize,
+) -> usize {
+    width
+        .saturating_sub(usize::from(metrics.major_inset_x))
+        .clamp(minimum, maximum)
+}
+
+fn fill_percent(values: &[u64]) -> u16 {
+    let max = values.iter().copied().max().unwrap_or(0);
+    let current = values.last().copied().unwrap_or(0);
+    if max == 0 {
+        0
+    } else {
+        u16::try_from((current.saturating_mul(100)) / max).unwrap_or(100)
+    }
+}
+
+fn trend_instrument_lines(title: &str, panel: &DashboardTrendPanel, width: usize) -> Vec<String> {
+    match title {
+        "HRV Trend" => vec![
+            spark_strip(&panel.values, width.max(8)),
+            micro_histogram(&panel.values, width.max(8)),
+        ],
+        "Heart Rate" => stacked_profile_rows(&panel.values, width.max(8), 2),
+        "SpO2" => vec![
+            centered_line(
+                width,
+                meter_bar(fill_percent(&panel.values), width.clamp(10, 18)),
+            ),
+            spark_strip(&panel.values, width.max(8)),
+        ],
+        _ => vec![spark_strip(&panel.values, width.max(8))],
+    }
+}
+
+fn compact_temperature_lines(deviation_tenths: Option<i16>, width: usize) -> Vec<String> {
+    let marker_index = deviation_tenths.map_or(1, |value| match value {
+        value if value > 2 => 0,
+        value if value < -2 => 2,
+        _ => 1,
+    });
+    ["│", "┼", "│"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, glyph)| {
+            centered_line(
+                width,
+                if index == marker_index {
+                    "█".to_owned()
+                } else {
+                    glyph.to_owned()
+                },
+            )
+        })
+        .collect()
 }
