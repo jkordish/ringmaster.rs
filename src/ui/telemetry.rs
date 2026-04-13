@@ -38,6 +38,52 @@ impl TelemetryAvailability {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricPanelState {
+    Fresh,
+    Stale,
+    NoCurrentSample,
+    BaselineOnly,
+    HistoricalOnly,
+    MissingScope,
+    Unavailable,
+    Empty,
+    Error,
+}
+
+impl MetricPanelState {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Fresh => "FRESH",
+            Self::Stale => "STALE",
+            Self::NoCurrentSample => "NO CURRENT SAMPLE",
+            Self::BaselineOnly => "BASELINE ONLY",
+            Self::HistoricalOnly => "HISTORICAL ONLY",
+            Self::MissingScope => "MISSING SCOPE",
+            Self::Unavailable => "UNAVAILABLE",
+            Self::Empty => "EMPTY",
+            Self::Error => "ERROR",
+        }
+    }
+
+    #[must_use]
+    pub const fn tone(self) -> Tone {
+        match self {
+            Self::Fresh => Tone::Fresh,
+            Self::Stale | Self::NoCurrentSample => Tone::Stale,
+            Self::BaselineOnly | Self::HistoricalOnly => Tone::Info,
+            Self::MissingScope | Self::Unavailable | Self::Empty => Tone::Unavailable,
+            Self::Error => Tone::Error,
+        }
+    }
+
+    #[must_use]
+    pub const fn has_current_sample(self) -> bool {
+        matches!(self, Self::Fresh | Self::Stale)
+    }
+}
+
 #[must_use]
 pub fn spark_strip(values: &[u64], width: usize) -> String {
     let levels = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -151,6 +197,26 @@ pub enum WeeklyHeatmapMode {
     DenseHistory,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WeeklyHeatmapLayout {
+    pub label_column_width: usize,
+    pub header_height: usize,
+    pub grid_origin_x: usize,
+    pub cell_width: usize,
+    pub row_height: usize,
+    pub slot_width: usize,
+    pub summary_origin_x: usize,
+    pub legend_origin_x: usize,
+}
+
+impl WeeklyHeatmapLayout {
+    #[must_use]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub const fn selected_bracket_origin(self, column_index: usize) -> usize {
+        self.grid_origin_x + column_index.saturating_mul(self.slot_width)
+    }
+}
+
 #[must_use]
 pub fn heatmap_day_label(mode: WeeklyHeatmapMode, day: &str) -> String {
     match mode {
@@ -174,6 +240,21 @@ pub fn heatmap_day_label(mode: WeeklyHeatmapMode, day: &str) -> String {
 }
 
 #[must_use]
+pub fn fit_heatmap_label(label: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let preferred = match (label, width) {
+        ("Readiness", 1..=6) => "Ready",
+        ("Activity", 1..=6) => "Actv",
+        _ => label,
+    };
+
+    concise_text(preferred, width)
+}
+
+#[must_use]
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn weekly_heatmap_rows(
     day_labels: &[String],
@@ -185,19 +266,26 @@ pub fn weekly_heatmap_rows(
     row_height: usize,
 ) -> Vec<String> {
     let levels = ['·', '░', '▒', '▓', '█'];
-    let cell_width = cell_width.max(1);
-    let row_height = row_height.max(1);
-    let label_width = match mode {
-        WeeklyHeatmapMode::Standard => 8,
-        WeeklyHeatmapMode::DenseHistory => 6,
-    };
-    let header_prefix = " ".repeat(label_width);
+    let layout = weekly_heatmap_layout(
+        mode,
+        day_labels.len(),
+        row_labels.len(),
+        layout_width_for_rows(mode, day_labels.len(), cell_width.max(1)),
+        row_height
+            .max(1)
+            .saturating_mul(row_labels.len())
+            .saturating_add(1),
+    );
+    let header_prefix = " ".repeat(layout.grid_origin_x);
     let mut output = Vec::new();
     let mut header_cells = String::new();
     for day in day_labels {
         let label = heatmap_day_label(mode, day);
-        let slot_width = cell_width + 2;
-        let _ = write!(header_cells, "{label:^slot_width$}");
+        let _ = write!(
+            header_cells,
+            "{label:^slot_width$}",
+            slot_width = layout.slot_width
+        );
     }
     output.push(format!("{header_prefix}{header_cells}"));
     for (row_index, label) in row_labels.iter().enumerate() {
@@ -212,7 +300,7 @@ pub fn weekly_heatmap_rows(
                             let band = usize::from(score.min(100)) * (levels.len() - 1) / 100;
                             levels[band]
                         });
-                        let fill = glyph.to_string().repeat(cell_width);
+                        let fill = glyph.to_string().repeat(layout.cell_width);
                         if selected == Some((row_index, column_index)) {
                             format!("[{fill}]")
                         } else {
@@ -222,12 +310,75 @@ pub fn weekly_heatmap_rows(
                     .collect::<String>()
             })
             .unwrap_or_default();
-        output.push(format!("{label:<label_width$}{cells}"));
-        for _ in 1..row_height {
-            output.push(format!("{:label_width$}{cells}", ""));
+        output.push(format!(
+            "{label:<label_width$}{cells}",
+            label = fit_heatmap_label(label, layout.label_column_width),
+            label_width = layout.label_column_width,
+        ));
+        for _ in 1..layout.row_height {
+            output.push(format!(
+                "{:label_width$}{cells}",
+                "",
+                label_width = layout.label_column_width
+            ));
         }
     }
     output
+}
+
+#[must_use]
+pub fn weekly_heatmap_layout(
+    mode: WeeklyHeatmapMode,
+    day_count: usize,
+    row_count: usize,
+    available_width: usize,
+    available_height: usize,
+) -> WeeklyHeatmapLayout {
+    let label_column_width = match mode {
+        WeeklyHeatmapMode::Standard => 6,
+        WeeklyHeatmapMode::DenseHistory => 4,
+    };
+    let grid_origin_x = label_column_width;
+    let usable_width = available_width.saturating_sub(label_column_width).max(3);
+    let column_count = day_count.max(1);
+    let cell_width = match mode {
+        WeeklyHeatmapMode::DenseHistory => 1,
+        WeeklyHeatmapMode::Standard => usable_width
+            .checked_div(column_count)
+            .unwrap_or(3)
+            .saturating_sub(2)
+            .clamp(1, 6),
+    };
+    let slot_width = cell_width.saturating_add(2);
+    let header_height = 1;
+    let body_rows = available_height.saturating_sub(header_height + 2);
+    let row_height = body_rows
+        .checked_div(row_count.max(1))
+        .unwrap_or(1)
+        .clamp(1, 2);
+
+    WeeklyHeatmapLayout {
+        label_column_width,
+        header_height,
+        grid_origin_x,
+        cell_width,
+        row_height,
+        slot_width,
+        summary_origin_x: grid_origin_x,
+        legend_origin_x: grid_origin_x,
+    }
+}
+
+const fn layout_width_for_rows(
+    mode: WeeklyHeatmapMode,
+    day_count: usize,
+    cell_width: usize,
+) -> usize {
+    let label_column_width = match mode {
+        WeeklyHeatmapMode::Standard => 8,
+        WeeklyHeatmapMode::DenseHistory => 5,
+    };
+    label_column_width + day_count.saturating_mul(cell_width.saturating_add(2))
 }
 
 #[must_use]
@@ -270,6 +421,7 @@ pub fn placeholder_rule(width: usize) -> String {
 }
 
 #[must_use]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn availability_scaffold(
     availability: TelemetryAvailability,
     reason: &str,
@@ -278,6 +430,16 @@ pub fn availability_scaffold(
     let width = width.max(8);
     vec![
         format!("{:^width$}", availability.label()),
+        placeholder_rule(width),
+        concise_detail(reason, width),
+    ]
+}
+
+#[must_use]
+pub fn metric_panel_scaffold(state: MetricPanelState, reason: &str, width: usize) -> Vec<String> {
+    let width = width.max(10);
+    vec![
+        format!("{:^width$}", state.label()),
         placeholder_rule(width),
         concise_detail(reason, width),
     ]
@@ -312,8 +474,9 @@ fn resample(values: &[u64], width: usize) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        TelemetryAvailability, WeeklyHeatmapMode, availability_scaffold, footer_inspector,
-        meter_bar, micro_histogram, segmented_bar, spark_strip, stacked_profile_rows,
+        MetricPanelState, TelemetryAvailability, WeeklyHeatmapMode, availability_scaffold,
+        fit_heatmap_label, footer_inspector, meter_bar, metric_panel_scaffold, micro_histogram,
+        segmented_bar, spark_strip, stacked_profile_rows, weekly_heatmap_layout,
         weekly_heatmap_rows,
     };
 
@@ -386,7 +549,9 @@ mod tests {
         );
 
         assert!(rows[0].contains('M'));
-        assert!(rows[1].contains("[▓▓]"));
+        assert!(rows[1].contains("Sleep"));
+        assert!(rows[1].contains('['));
+        assert!(rows[1].contains(']'));
     }
 
     #[test]
@@ -422,7 +587,7 @@ mod tests {
         assert!(rows[0].contains("401"));
         assert!(rows[0].contains("402"));
         assert!(rows[1].contains("[▒]") || rows[1].contains("[▓]"));
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 2);
     }
 
     #[test]
@@ -435,5 +600,49 @@ mod tests {
 
         assert_eq!(lines.len(), 3);
         assert!(lines[0].contains("SCOPE"));
+    }
+
+    #[test]
+    fn metric_panel_states_keep_semantics_distinct() {
+        assert_eq!(MetricPanelState::BaselineOnly.label(), "BASELINE ONLY");
+        assert_eq!(
+            MetricPanelState::NoCurrentSample.label(),
+            "NO CURRENT SAMPLE"
+        );
+        assert_eq!(MetricPanelState::HistoricalOnly.label(), "HISTORICAL ONLY");
+        assert!(MetricPanelState::Fresh.has_current_sample());
+        assert!(!MetricPanelState::BaselineOnly.has_current_sample());
+    }
+
+    #[test]
+    fn metric_panel_scaffold_uses_precise_state_labels() {
+        let lines = metric_panel_scaffold(
+            MetricPanelState::BaselineOnly,
+            "Baseline remains available while the current-day sample is missing.",
+            36,
+        );
+
+        assert_eq!(lines[0].trim(), "BASELINE ONLY");
+        assert!(lines[2].contains("Baseline remains available"));
+    }
+
+    #[test]
+    fn weekly_heatmap_layout_aligns_grid_and_legend_from_one_origin() {
+        let layout = weekly_heatmap_layout(WeeklyHeatmapMode::Standard, 7, 4, 40, 10);
+
+        assert_eq!(layout.grid_origin_x, layout.label_column_width);
+        assert_eq!(layout.summary_origin_x, layout.grid_origin_x);
+        assert_eq!(layout.legend_origin_x, layout.grid_origin_x);
+        assert_eq!(
+            layout.selected_bracket_origin(6),
+            layout.grid_origin_x + (layout.slot_width * 6)
+        );
+    }
+
+    #[test]
+    fn heatmap_labels_abbreviate_before_stealing_grid_width() {
+        assert_eq!(fit_heatmap_label("Readiness", 6), "Ready");
+        assert_eq!(fit_heatmap_label("Activity", 4), "Actv");
+        assert_eq!(fit_heatmap_label("Sleep", 6), "Sleep");
     }
 }

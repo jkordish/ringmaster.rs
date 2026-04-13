@@ -50,7 +50,11 @@ use crate::store::queries::{
     AiEvalRunRecord, AiRunRecord, ReportExportRecord, SnapshotCatalogEntry, SnapshotExportRecord,
 };
 use crate::ui::chrome::{self, PanelKind, PanelShellSpec, render_panel_shell};
-use crate::ui::layout::{DashboardMetrics, UiContext, ViewportClass};
+use crate::ui::layout::{
+    DashboardMetrics, HELP_MODAL_MAX_HEIGHT, HELP_MODAL_MAX_WIDTH, ModalLayoutSpec,
+    SEARCH_MODAL_MAX_HEIGHT, SEARCH_MODAL_MAX_WIDTH, UiContext, ViewportClass,
+    centered_modal_layout,
+};
 use crate::ui::theme::{ColorCapability, Theme, Tone};
 
 enum WorkerCommand {
@@ -670,7 +674,13 @@ fn draw_transient_overlays(frame: &mut ratatui::Frame<'_>, app: &AppState, theme
     if let Some(search) = app.search_state() {
         draw_search_overlay(frame, frame.area(), search, app.search_focus(), theme);
     } else if app.help_open() {
-        draw_help_overlay(frame, frame.area(), app.binding_context(), theme);
+        draw_help_overlay(
+            frame,
+            frame.area(),
+            app.binding_context(),
+            app.help_scroll(),
+            theme,
+        );
     } else if let Some(preflight) = &app.model.ai.preflight {
         let compact = !crate::ui::layout::ViewportClass::from_width(frame.area().width).is_wide();
         ai_component::draw_preflight_overlay(frame, frame.area(), preflight, theme, compact);
@@ -685,7 +695,11 @@ fn draw_search_overlay(
     theme: &Theme,
 ) {
     let metrics = DashboardMetrics::for_viewport(ViewportClass::from_width(area.width));
-    let overlay = centered_rect(area, 64, 9);
+    let overlay = centered_modal_layout(
+        area,
+        ModalLayoutSpec::new(SEARCH_MODAL_MAX_WIDTH, SEARCH_MODAL_MAX_HEIGHT),
+    )
+    .bounds;
     let result_summary = if search.total_matches == 0 {
         "No matches yet".to_owned()
     } else {
@@ -743,31 +757,16 @@ fn draw_help_overlay(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     context: keybindings::BindingContext,
+    scroll: u16,
     theme: &Theme,
 ) {
     let metrics = DashboardMetrics::for_viewport(ViewportClass::from_width(area.width));
     let groups = keybindings::help_groups(context);
-    let mut lines = Vec::new();
-    lines.push(Line::from(vec![Span::styled(
-        "Keyboard help is modal while open.",
-        theme.section_title(Tone::Focus),
-    )]));
-    for (index, (group, entries)) in groups.iter().enumerate() {
-        if index > 0 {
-            lines.push(Line::from(""));
-        }
-        lines.push(Line::from(vec![Span::styled(
-            (*group).to_owned(),
-            theme.section_title(Tone::Focus),
-        )]));
-        if !entries.is_empty() {
-            lines.push(Line::from(format!("  {}", entries.join("  "))));
-        }
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from("Esc closes this help."));
-
-    let overlay = centered_rect(area, 72, 18);
+    let overlay = centered_modal_layout(
+        area,
+        ModalLayoutSpec::new(HELP_MODAL_MAX_WIDTH, HELP_MODAL_MAX_HEIGHT),
+    )
+    .bounds;
     frame.render_widget(Clear, overlay);
     let shell = render_panel_shell(
         frame,
@@ -783,20 +782,54 @@ fn draw_help_overlay(
             kind: PanelKind::Section,
         },
     );
+    let shortcut_width = groups
+        .values()
+        .flat_map(|entries| entries.iter())
+        .map(|entry| split_help_entry(entry).0.len())
+        .max()
+        .unwrap_or(0)
+        .max(12);
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![Span::styled(
+        "Keyboard help is modal while open.",
+        theme.section_title(Tone::Focus),
+    )]));
+    for (index, (group, entries)) in groups.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(vec![Span::styled(
+            (*group).to_owned(),
+            theme.section_title(Tone::Focus),
+        )]));
+        for entry in entries {
+            let (shortcut, description) = split_help_entry(entry);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{shortcut:<shortcut_width$}"),
+                    theme.section_title(Tone::Focus),
+                ),
+                Span::raw("  "),
+                Span::raw(description.to_owned()),
+            ]));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from("Esc closes this help."));
     frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
         shell.content_area,
     );
 }
 
-fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
-    let available_width = area.width.saturating_sub(2).max(1);
-    let available_height = area.height.saturating_sub(2).max(1);
-    let popup_width = width.min(available_width);
-    let popup_height = height.min(available_height);
-    let x = area.x + area.width.saturating_sub(popup_width) / 2;
-    let y = area.y + area.height.saturating_sub(popup_height) / 2;
-    Rect::new(x, y, popup_width, popup_height)
+fn split_help_entry(entry: &str) -> (&str, &str) {
+    entry
+        .split_once(' ')
+        .map_or((entry, ""), |(shortcut, description)| {
+            (shortcut, description.trim())
+        })
 }
 
 #[cfg(test)]
@@ -3358,6 +3391,10 @@ mod tests {
         DailySleepRecord, PersonalInfoRecord, SnapshotExportRecord, SyncRunStatus, SyncStateRecord,
     };
     use crate::tui::render_snapshot;
+    use crate::ui::layout::{
+        HELP_MODAL_MAX_HEIGHT, HELP_MODAL_MAX_WIDTH, ModalLayoutSpec, centered_modal_layout,
+    };
+    use crate::ui::telemetry::MetricPanelState;
     use crate::ui::theme::{ColorCapability, Theme, Tone};
     use crate::webhook::default_desired_subscriptions;
     use std::path::{Path, PathBuf};
@@ -3712,8 +3749,9 @@ mod tests {
         let config = test_config();
         let mut app = build_demo_state(&config);
         app.active_screen = Screen::Dashboard;
+        let (width, height) = crate::ui::layout::ViewportClass::Medium.named_dimensions();
 
-        let output = render_snapshot(&app, 100, 32)
+        let output = render_snapshot(&app, width, height)
             .unwrap_or_else(|error| unreachable!("snapshot should render: {error}"));
 
         assert!(output.contains("ringmaster"));
@@ -3742,8 +3780,9 @@ mod tests {
         let mut app = build_live_state(&config, &store, &auth_status)
             .unwrap_or_else(|error| unreachable!("live state should build: {error}"));
         app.active_screen = Screen::Dashboard;
+        let (width, height) = crate::ui::layout::ViewportClass::Medium.named_dimensions();
 
-        let output = render_snapshot(&app, 100, 32)
+        let output = render_snapshot(&app, width, height)
             .unwrap_or_else(|error| unreachable!("dashboard snapshot should render: {error}"));
 
         assert!(
@@ -3771,8 +3810,9 @@ mod tests {
         let mut app = build_live_state(&config, &store, &auth_status)
             .unwrap_or_else(|error| unreachable!("live state should build: {error}"));
         app.active_screen = Screen::Timeline;
+        let (width, height) = crate::ui::layout::ViewportClass::Medium.named_dimensions();
 
-        let output = render_snapshot(&app, 100, 32)
+        let output = render_snapshot(&app, width, height)
             .unwrap_or_else(|error| unreachable!("timeline snapshot should render: {error}"));
 
         assert!(output.contains("No context event is selected"));
@@ -4151,6 +4191,24 @@ mod tests {
         assert!(missing_output.contains("WEEKLY TRENDS"));
     }
 
+    #[test]
+    fn dashboard_precise_metric_states_render_distinct_labels() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Dashboard;
+        app.model.dashboard.spo2.availability = MetricPanelState::BaselineOnly;
+        app.model.dashboard.respiratory_rate.availability = MetricPanelState::NoCurrentSample;
+        app.model.dashboard.activity.availability = MetricPanelState::HistoricalOnly;
+
+        let output = render_snapshot(&app, 160, 44).unwrap_or_else(|error| {
+            unreachable!("dashboard semantic snapshot should render: {error}")
+        });
+
+        assert!(output.contains("BASELINE ONLY"));
+        assert!(output.contains("NO CURRENT SAMPLE"));
+        assert!(output.contains("HISTORICAL ONLY"));
+    }
+
     #[tokio::test]
     async fn dashboard_dense_history_snapshot_surfaces_fourteen_day_weekly_view() {
         let config = test_config();
@@ -4435,7 +4493,41 @@ mod tests {
 
         assert!(output.contains("MODAL"));
         assert!(output.contains("Keyboard help is modal while open."));
-        assert!(output.contains("Esc closes this help."));
+    }
+
+    #[test]
+    fn help_overlay_uses_centered_modal_bounds() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.handle(Action::ToggleHelp);
+
+        let buffer = super::render_buffer(&app, 160, 44)
+            .unwrap_or_else(|error| unreachable!("help overlay buffer should render: {error}"));
+        let popup = centered_modal_layout(
+            Rect::new(0, 0, 160, 44),
+            ModalLayoutSpec::new(HELP_MODAL_MAX_WIDTH, HELP_MODAL_MAX_HEIGHT),
+        )
+        .bounds;
+
+        assert_eq!(buffer[(popup.x, popup.y)].symbol(), "┏");
+        assert_eq!(
+            buffer[(popup.x + popup.width.saturating_sub(1), popup.y)].symbol(),
+            "┓"
+        );
+        assert_eq!(
+            buffer[(popup.x, popup.y + popup.height.saturating_sub(1))].symbol(),
+            "┗"
+        );
+        assert_eq!(
+            buffer[(
+                popup.x + popup.width.saturating_sub(1),
+                popup.y + popup.height.saturating_sub(1)
+            )]
+                .symbol(),
+            "┛"
+        );
+        assert!(popup.x > 0);
+        assert!(popup.y > 0);
     }
 
     #[test]
@@ -4494,23 +4586,11 @@ mod tests {
     }
 
     fn centered_test_rect(area: Rect, width_pct: u16, height_pct: u16) -> Rect {
-        let vertical = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage((100 - height_pct) / 2),
-                Constraint::Percentage(height_pct),
-                Constraint::Percentage((100 - height_pct) / 2),
-            ])
-            .split(area);
-        let horizontal = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage((100 - width_pct) / 2),
-                Constraint::Percentage(width_pct),
-                Constraint::Percentage((100 - width_pct) / 2),
-            ])
-            .split(vertical[1]);
-        horizontal[1]
+        centered_modal_layout(
+            area,
+            ModalLayoutSpec::from_percent(area, width_pct, height_pct),
+        )
+        .bounds
     }
 
     #[tokio::test]

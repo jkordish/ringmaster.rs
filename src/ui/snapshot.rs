@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::app::{AppState, Screen};
 use crate::error::{Result, RingmasterError};
 use crate::tui::{render_snapshot, render_snapshot_ansi};
+use crate::ui::layout::ViewportClass;
 use crate::ui::theme::ColorCapability;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -100,12 +101,17 @@ impl SnapshotSize {
         }
     }
 
-    pub const fn dimensions(self) -> (u16, u16) {
+    #[must_use]
+    pub const fn viewport(self) -> ViewportClass {
         match self {
-            Self::Compact => (90, 28),
-            Self::Medium => (120, 36),
-            Self::Wide => (160, 44),
+            Self::Compact => ViewportClass::Compact,
+            Self::Medium => ViewportClass::Medium,
+            Self::Wide => ViewportClass::Wide,
         }
+    }
+
+    pub const fn dimensions(self) -> (u16, u16) {
+        self.viewport().named_dimensions()
     }
 }
 
@@ -236,6 +242,7 @@ mod tests {
         app::{Screen, build_demo_state},
         config::{AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig},
         test_support::ok,
+        ui::layout::ViewportClass,
     };
 
     fn test_config() -> Config {
@@ -344,6 +351,7 @@ mod tests {
         assert_eq!(SnapshotSize::Compact.dimensions(), (90, 28));
         assert_eq!(SnapshotSize::Medium.dimensions(), (120, 36));
         assert_eq!(SnapshotSize::Wide.dimensions(), (160, 44));
+        assert_eq!(SnapshotSize::Medium.viewport(), ViewportClass::Medium);
     }
 
     #[test]

@@ -231,12 +231,23 @@ fn panel_title_row_segments(
         "{focus_marker:<gutter$}{title}",
         gutter = metrics.focus_gutter_width
     );
-    let status = format!("[{}]", truncate_ascii(spec.status, metrics.badge_width));
-    let open = if spec.expanded {
+    let min_left = metrics.focus_gutter_width + 4;
+    let mut open = if spec.expanded {
         " [OPEN]".to_owned()
     } else {
         String::new()
     };
+    let mut status_budget = metrics
+        .badge_width
+        .min(available.saturating_sub(min_left + open.len()).max(3));
+    let title_budget_with_open = available.saturating_sub(open.len() + status_budget + 2);
+    if spec.expanded && (status_budget <= 3 || title_budget_with_open < min_left + 4) {
+        open.clear();
+        status_budget = metrics
+            .badge_width
+            .min(available.saturating_sub(min_left).max(3));
+    }
+    let status = format!("[{}]", truncate_ascii(spec.status, status_budget));
     let right_width = open.len() + status.len();
 
     if right_width >= available {
@@ -300,5 +311,25 @@ mod tests {
 
         assert_eq!(fresh.find("READINESS"), na.find("READINESS"));
         assert_eq!(fresh.len(), na.len());
+    }
+
+    #[test]
+    fn cramped_title_rows_drop_open_before_consuming_the_entire_title() {
+        let metrics = DashboardMetrics::for_viewport(ViewportClass::Compact);
+        let row = panel_title_row_text(
+            metrics,
+            PanelShellSpec {
+                title: "Weekly Trends",
+                status: "MISSING SCOPE",
+                status_tone: Tone::Muted,
+                focused: true,
+                expanded: true,
+                kind: PanelKind::Section,
+            },
+            18,
+        );
+
+        assert!(row.contains("WEEK"));
+        assert!(!row.contains("[OPEN]"));
     }
 }

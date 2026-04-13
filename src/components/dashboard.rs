@@ -15,9 +15,10 @@ use crate::ui::{
     chrome::{PanelKind, PanelShellSpec, render_panel_shell},
     layout::{DashboardMetrics, UiContext, ViewportClass},
     telemetry::{
-        TelemetryAvailability, WeeklyHeatmapMode, availability_scaffold, concise_detail,
-        concise_text, heatmap_day_label, meter_bar, micro_histogram, segmented_bar, spark_strip,
-        stacked_profile_rows,
+        MetricPanelState, TelemetryAvailability, WeeklyHeatmapLayout, WeeklyHeatmapMode,
+        concise_detail, concise_text, fit_heatmap_label, heatmap_day_label, meter_bar,
+        metric_panel_scaffold, micro_histogram, segmented_bar, spark_strip, stacked_profile_rows,
+        weekly_heatmap_layout,
     },
     theme::{Theme, Tone},
 };
@@ -126,7 +127,7 @@ fn draw_wide(
     let bottom = Layout::default()
         .direction(Direction::Horizontal)
         .spacing(metrics.panel_gap_x)
-        .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
+        .constraints([Constraint::Percentage(64), Constraint::Percentage(36)])
         .split(rows[2]);
 
     render_score_tile(
@@ -295,7 +296,7 @@ fn draw_medium(
     let detail_row = Layout::default()
         .direction(Direction::Horizontal)
         .spacing(metrics.panel_gap_x)
-        .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
+        .constraints([Constraint::Percentage(64), Constraint::Percentage(36)])
         .split(dashboard_rows[2]);
     let right_stack = Layout::default()
         .direction(Direction::Vertical)
@@ -638,8 +639,8 @@ fn render_score_tile(
         return;
     }
 
-    if !availability_has_reading(score_tile.availability) {
-        let lines = availability_scaffold(
+    if !metric_panel_has_reading(score_tile.availability) {
+        let lines = metric_panel_scaffold(
             score_tile.availability,
             &score_tile.note,
             usize::from(shell.content_area.width),
@@ -656,7 +657,7 @@ fn render_score_tile(
 
     let width = usize::from(shell.content_area.width);
     let cue_tone = score_band_cue_tone(score_tile.score_band);
-    let trend_width = clamped_instrument_width(width, state.metrics, 14, 22);
+    let trend_width = clamped_instrument_width(width, state.metrics, 14, 24);
     let capacity = usize::from(shell.content_area.height).max(1);
     let note_slot = usize::from(state.focused || state.expanded);
     let instrument_rows = if capacity >= 6 { 2 } else { 1 };
@@ -759,8 +760,8 @@ fn render_sleep_tile(
         return;
     }
 
-    if !availability_has_reading(tile.availability) {
-        let lines = availability_scaffold(
+    if !metric_panel_has_reading(tile.availability) {
+        let lines = metric_panel_scaffold(
             tile.availability,
             &tile.strip_note,
             usize::from(shell.content_area.width),
@@ -855,7 +856,7 @@ fn render_trend_panel(
     }
 
     if area.height <= 3 {
-        if availability_has_reading(panel.availability) {
+        if metric_panel_has_reading(panel.availability) {
             render_panel_lines(
                 frame,
                 shell.content_area,
@@ -891,11 +892,11 @@ fn render_trend_panel(
         return;
     }
 
-    if !availability_has_reading(panel.availability) {
+    if !metric_panel_has_reading(panel.availability) {
         render_panel_text(
             frame,
             shell.content_area,
-            availability_scaffold(
+            metric_panel_scaffold(
                 panel.availability,
                 &panel.note,
                 usize::from(shell.content_area.width),
@@ -995,8 +996,8 @@ fn render_temp_panel(
         return;
     }
 
-    if !availability_has_reading(panel.availability) {
-        let lines = availability_scaffold(
+    if !metric_panel_has_reading(panel.availability) {
+        let lines = metric_panel_scaffold(
             panel.availability,
             &panel.note,
             usize::from(shell.content_area.width),
@@ -1078,7 +1079,7 @@ fn render_histogram_panel(
     }
 
     if area.height <= 3 {
-        if availability_has_reading(panel.availability) {
+        if metric_panel_has_reading(panel.availability) {
             render_panel_lines(
                 frame,
                 shell.content_area,
@@ -1114,11 +1115,11 @@ fn render_histogram_panel(
         return;
     }
 
-    if !availability_has_reading(panel.availability) {
+    if !metric_panel_has_reading(panel.availability) {
         render_panel_text(
             frame,
             shell.content_area,
-            availability_scaffold(
+            metric_panel_scaffold(
                 panel.availability,
                 &panel.note,
                 usize::from(shell.content_area.width),
@@ -1226,11 +1227,11 @@ fn render_breakdown_panel(
         return;
     }
 
-    if !availability_has_reading(panel.availability) {
+    if !metric_panel_has_reading(panel.availability) {
         render_panel_text(
             frame,
             shell.content_area,
-            availability_scaffold(
+            metric_panel_scaffold(
                 panel.availability,
                 &panel.note,
                 usize::from(shell.content_area.width),
@@ -1249,14 +1250,14 @@ fn render_breakdown_panel(
         .map(|rail| rail.label.len() + 2)
         .max()
         .unwrap_or(14)
-        .min(width.saturating_div(3).max(12));
+        .min(width.saturating_div(4).clamp(11, 14));
     let delta_width = panel
         .rails
         .iter()
         .map(|rail| rail.delta_label.len())
         .max()
         .unwrap_or(10)
-        .clamp(8, 14);
+        .clamp(7, 11);
     let bar_segments = width.saturating_sub(label_width + delta_width + 4).max(12);
     let focus_note = panel
         .rails
@@ -1347,8 +1348,8 @@ fn render_heatmap_panel(
         return;
     }
 
-    if !availability_has_reading(panel.availability) {
-        let lines = availability_scaffold(
+    if !metric_panel_has_reading(panel.availability) {
+        let lines = metric_panel_scaffold(
             panel.availability,
             &panel.note,
             usize::from(shell.content_area.width),
@@ -1378,43 +1379,34 @@ fn render_heatmap_panel(
         .map(String::as_str)
         .collect::<Vec<_>>();
     let label_count = grid.day_labels.len().max(1);
-    let label_width = if use_dense_history { 5 } else { 8 };
-    let available_width = width.saturating_sub(label_width);
-    let cell_width = if use_dense_history {
-        1
-    } else {
-        available_width
-            .checked_div(label_count)
-            .unwrap_or(1)
-            .saturating_sub(2)
-            .clamp(1, 6)
-    };
     let mode = if use_dense_history {
         WeeklyHeatmapMode::DenseHistory
     } else {
         WeeklyHeatmapMode::Standard
     };
-    let row_height = usize::from(shell.content_area.height)
-        .saturating_sub(3)
-        .checked_div(grid.rows.len().max(1))
-        .unwrap_or(1)
-        .clamp(1, 2);
+    let layout = weekly_heatmap_layout(
+        mode,
+        label_count,
+        panel.row_labels.len(),
+        width,
+        usize::from(shell.content_area.height),
+    );
     let mut lines = styled_heatmap_lines(HeatmapRenderSpec {
         theme,
         grid,
         row_labels: &row_refs,
         mode,
-        cell_width,
-        row_height,
+        layout,
     });
     lines.push(heatmap_summary_line(
         theme,
         grid,
         &panel.row_labels,
         &panel.note,
+        layout,
         width,
     ));
-    lines.push(heatmap_legend_line(theme));
+    lines.push(heatmap_legend_line(theme, layout));
     let rendered_lines = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     if (state.focused || state.expanded) && shell.content_area.height > rendered_lines {
         lines.push(Line::from(Span::styled(
@@ -1423,6 +1415,10 @@ fn render_heatmap_panel(
         )));
     }
     render_panel_lines(frame, shell.content_area, lines, theme, Alignment::Left);
+}
+
+const fn metric_panel_has_reading(state: MetricPanelState) -> bool {
+    state.has_current_sample()
 }
 
 const fn availability_has_reading(availability: TelemetryAvailability) -> bool {
@@ -1483,8 +1479,7 @@ struct HeatmapRenderSpec<'a> {
     grid: &'a crate::app::DashboardHeatmapGrid,
     row_labels: &'a [&'a str],
     mode: WeeklyHeatmapMode,
-    cell_width: usize,
-    row_height: usize,
+    layout: WeeklyHeatmapLayout,
 }
 
 fn render_panel_lines(
@@ -1677,7 +1672,10 @@ fn breakdown_line(
     bar_segments: usize,
     delta_width: usize,
 ) -> Line<'static> {
-    let label = format!("{} {}", if rail.selected { ">" } else { " " }, rail.label);
+    let label = concise_text(
+        &format!("{} {}", if rail.selected { ">" } else { " " }, rail.label),
+        label_width,
+    );
     let cue_text = if availability_has_reading(rail.availability) {
         rail.delta_label.clone()
     } else {
@@ -1729,21 +1727,14 @@ fn styled_heatmap_lines(spec: HeatmapRenderSpec<'_>) -> Vec<Line<'static>> {
         grid,
         row_labels,
         mode,
-        cell_width,
-        row_height,
+        layout,
     } = spec;
-    let cell_width = cell_width.max(1);
-    let row_height = row_height.max(1);
-    let label_width = match mode {
-        WeeklyHeatmapMode::Standard => 8,
-        WeeklyHeatmapMode::DenseHistory => 5,
-    };
-    let slot_width = match mode {
-        WeeklyHeatmapMode::Standard => cell_width + 2,
-        WeeklyHeatmapMode::DenseHistory => 3,
-    };
+    let cell_width = layout.cell_width.max(1);
+    let row_height = layout.row_height.max(1);
+    let label_width = layout.label_column_width;
+    let slot_width = layout.slot_width;
     let mut output = Vec::new();
-    let mut header_spans = vec![Span::raw(" ".repeat(label_width))];
+    let mut header_spans = vec![Span::raw(" ".repeat(layout.grid_origin_x))];
     for day in &grid.day_labels {
         let label = heatmap_day_label(mode, day);
         header_spans.push(Span::styled(
@@ -1755,7 +1746,10 @@ fn styled_heatmap_lines(spec: HeatmapRenderSpec<'_>) -> Vec<Line<'static>> {
 
     for (row_index, label) in row_labels.iter().enumerate() {
         let mut row_spans = vec![Span::styled(
-            format!("{label:<label_width$}"),
+            format!(
+                "{label:<label_width$}",
+                label = fit_heatmap_label(label, label_width)
+            ),
             theme.section_title(Tone::Muted),
         )];
         let mut repeat_spans = vec![Span::raw(" ".repeat(label_width))];
@@ -1808,14 +1802,16 @@ fn heatmap_summary_line(
     grid: &crate::app::DashboardHeatmapGrid,
     row_labels: &[String],
     note: &str,
+    layout: WeeklyHeatmapLayout,
     width: usize,
 ) -> Line<'static> {
     let (summary, band) =
         selected_heatmap_summary(grid, row_labels, note).unwrap_or_else(|| (note.to_owned(), None));
-    let mut spans = vec![Span::styled(
-        concise_text(&summary, width.saturating_sub(12)),
+    let mut spans = vec![Span::raw(" ".repeat(layout.summary_origin_x))];
+    spans.push(Span::styled(
+        concise_text(&summary, width.saturating_sub(layout.summary_origin_x + 12)),
         theme.body(),
-    )];
+    ));
     if band.is_some() {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
@@ -1826,8 +1822,9 @@ fn heatmap_summary_line(
     Line::from(spans)
 }
 
-fn heatmap_legend_line(theme: &Theme) -> Line<'static> {
+fn heatmap_legend_line(theme: &Theme, layout: WeeklyHeatmapLayout) -> Line<'static> {
     Line::from(vec![
+        Span::raw(" ".repeat(layout.legend_origin_x)),
         Span::styled("ramp ", theme.section_title(Tone::Muted)),
         Span::styled("░", theme.chart_ramp(1, 5)),
         Span::styled("▒", theme.chart_ramp(2, 5)),

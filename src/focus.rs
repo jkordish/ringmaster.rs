@@ -1,6 +1,47 @@
 use crate::navigation::NavMove;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusInteraction {
+    Navigate(&'static str),
+    Expand(&'static str),
+    Toggle(&'static str),
+    OpenOverlay(&'static str),
+    Activate(&'static str),
+    None,
+}
+
+impl FocusInteraction {
+    #[must_use]
+    pub const fn is_actionable(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    #[must_use]
+    pub const fn kind_label(self) -> &'static str {
+        match self {
+            Self::Navigate(_) => "navigate",
+            Self::Expand(_) => "expand",
+            Self::Toggle(_) => "toggle",
+            Self::OpenOverlay(_) => "open overlay",
+            Self::Activate(_) => "activate",
+            Self::None => "inspect only",
+        }
+    }
+
+    #[must_use]
+    pub const fn target_label(self) -> Option<&'static str> {
+        match self {
+            Self::Navigate(target)
+            | Self::Expand(target)
+            | Self::Toggle(target)
+            | Self::OpenOverlay(target)
+            | Self::Activate(target) => Some(target),
+            Self::None => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HelpOverlayAnchor {
     BindingList,
 }
@@ -89,8 +130,8 @@ pub const fn clamp_roving_index(index: usize, len: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        HelpOverlayAnchor, SearchOverlayAnchor, TrendsMatrixSubfocus, clamp_roving_index,
-        move_roving_index,
+        FocusInteraction, HelpOverlayAnchor, SearchOverlayAnchor, TrendsMatrixSubfocus,
+        clamp_roving_index, move_roving_index,
     };
     use crate::navigation::NavMove;
 
@@ -114,5 +155,19 @@ mod tests {
         assert_eq!(SearchOverlayAnchor::QueryField.label(), "query");
         assert_eq!(TrendsMatrixSubfocus::SortTabs.label(), "trend sort");
         assert_eq!(TrendsMatrixSubfocus::Rows.label(), "trend rows");
+    }
+
+    #[test]
+    fn focus_interaction_reports_actionability_truthfully() {
+        let navigate = FocusInteraction::Navigate("timeline detail");
+        let inspect_only = FocusInteraction::None;
+
+        assert!(navigate.is_actionable());
+        assert_eq!(navigate.kind_label(), "navigate");
+        assert_eq!(navigate.target_label(), Some("timeline detail"));
+
+        assert!(!inspect_only.is_actionable());
+        assert_eq!(inspect_only.kind_label(), "inspect only");
+        assert_eq!(inspect_only.target_label(), None);
     }
 }

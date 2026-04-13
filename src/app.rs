@@ -17,8 +17,8 @@ use crate::evidence::{
     PopulationProfile, PopulationSupportStatus, evidence_registry_version, stale_evidence_warnings,
 };
 use crate::focus::{
-    HelpOverlayAnchor, SearchOverlayAnchor, TrendsMatrixSubfocus, clamp_roving_index,
-    move_roving_index,
+    FocusInteraction, HelpOverlayAnchor, SearchOverlayAnchor, TrendsMatrixSubfocus,
+    clamp_roving_index, move_roving_index,
 };
 use crate::insights::{InsightConfidence, MetricInsight, MetricPoint, build_metric_insight};
 use crate::keybindings::BindingContext;
@@ -49,8 +49,8 @@ use crate::store::webhook_store::{
 };
 use crate::time_utils::current_local_day_string;
 use crate::ui::{
-    layout::ViewportClass,
-    telemetry::{TelemetryAvailability, footer_inspector},
+    layout::{DashboardMetrics, ViewportClass},
+    telemetry::{MetricPanelState, TelemetryAvailability, footer_inspector},
 };
 use serde::Serialize;
 use time::{Date, OffsetDateTime, format_description::well_known::Rfc3339};
@@ -298,6 +298,7 @@ pub struct AppState {
     focused_top_nav_screen: Screen,
     help_open: bool,
     help_focus: HelpOverlayAnchor,
+    help_scroll: u16,
     focus_before_help: Option<FocusRegion>,
     search: Option<SearchState>,
     search_focus: SearchOverlayAnchor,
@@ -492,7 +493,7 @@ pub enum DashboardJudgedState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardScoreTile {
-    pub availability: TelemetryAvailability,
+    pub availability: MetricPanelState,
     pub primary_value: String,
     pub score_band: Option<DashboardScoreBand>,
     pub secondary_lines: Vec<String>,
@@ -504,7 +505,7 @@ pub struct DashboardScoreTile {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardSleepTile {
-    pub availability: TelemetryAvailability,
+    pub availability: MetricPanelState,
     pub duration_label: String,
     pub score_label: String,
     pub score_band: Option<DashboardScoreBand>,
@@ -514,7 +515,7 @@ pub struct DashboardSleepTile {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardTrendPanel {
-    pub availability: TelemetryAvailability,
+    pub availability: MetricPanelState,
     pub primary_label: String,
     pub baseline_label: String,
     pub range_label: String,
@@ -526,7 +527,7 @@ pub struct DashboardTrendPanel {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardThermometerPanel {
-    pub availability: TelemetryAvailability,
+    pub availability: MetricPanelState,
     pub deviation_tenths: Option<i16>,
     pub value_label: String,
     pub delta_state: DashboardDeltaState,
@@ -536,7 +537,7 @@ pub struct DashboardThermometerPanel {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardHistogramPanel {
-    pub availability: TelemetryAvailability,
+    pub availability: MetricPanelState,
     pub primary_label: String,
     pub delta_label: String,
     pub range_label: String,
@@ -548,7 +549,7 @@ pub struct DashboardHistogramPanel {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardBreakdownPanel {
-    pub availability: TelemetryAvailability,
+    pub availability: MetricPanelState,
     pub rails: Vec<DashboardBreakdownRail>,
     pub waveform: Vec<u64>,
     pub note: String,
@@ -575,7 +576,7 @@ pub struct DashboardHeatmapGrid {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardWeeklyHeatmap {
-    pub availability: TelemetryAvailability,
+    pub availability: MetricPanelState,
     pub row_labels: Vec<String>,
     pub recent: DashboardHeatmapGrid,
     pub history: DashboardHeatmapGrid,
@@ -1072,7 +1073,7 @@ impl AppState {
         match action {
             Action::FocusNextRegion => {
                 if self.current_transient().is_none() {
-                    let next = navigation::next_region(self.active_screen, self.focused_region);
+                    let next = self.adjacent_focusable_region(true);
                     self.set_focused_region(next);
                     self.status_line = format!(
                         "Focused {}.",
@@ -1082,8 +1083,7 @@ impl AppState {
             }
             Action::FocusPreviousRegion => {
                 if self.current_transient().is_none() {
-                    let previous =
-                        navigation::previous_region(self.active_screen, self.focused_region);
+                    let previous = self.adjacent_focusable_region(false);
                     self.set_focused_region(previous);
                     self.status_line = format!(
                         "Focused {}.",
@@ -1458,14 +1458,14 @@ impl AppState {
 
     #[must_use]
     pub fn footer(&self, viewport: ViewportClass) -> String {
-        let hint_limit = match viewport {
-            ViewportClass::Compact | ViewportClass::Medium => 1,
-            ViewportClass::Wide => 2,
-        };
-        let hints = crate::keybindings::footer_hints(self.binding_context())
-            .into_iter()
-            .take(hint_limit)
-            .collect::<Vec<_>>();
+        let hint_limit = DashboardMetrics::for_viewport(viewport).footer_hint_limit;
+        let hints = crate::keybindings::footer_hints(
+            self.binding_context(),
+            self.focused_interaction().is_actionable(),
+        )
+        .into_iter()
+        .take(hint_limit)
+        .collect::<Vec<_>>();
         let hint_text = if hints.is_empty() {
             "No contextual keys".to_owned()
         } else {
@@ -1511,6 +1511,11 @@ impl AppState {
     }
 
     #[must_use]
+    pub const fn help_scroll(&self) -> u16 {
+        self.help_scroll
+    }
+
+    #[must_use]
     pub const fn ai_preflight_control(&self) -> PreflightControl {
         self.ai_preflight_control
     }
@@ -1524,6 +1529,142 @@ impl AppState {
             help_open: self.help_open,
             ai_preflight_open: self.ai_preflight.is_some(),
         }
+    }
+
+    #[must_use]
+    fn focused_interaction(&self) -> FocusInteraction {
+        if self.search.is_some() {
+            return FocusInteraction::Activate("next search result");
+        }
+
+        if self.help_open {
+            return FocusInteraction::None;
+        }
+
+        if self.ai_preflight.is_some() {
+            return match self.ai_preflight_control {
+                PreflightControl::Confirm => FocusInteraction::Activate("confirm preflight"),
+                PreflightControl::Privacy => FocusInteraction::Toggle("privacy profile"),
+                PreflightControl::Cancel => FocusInteraction::Activate("dismiss preflight"),
+            };
+        }
+
+        match (self.active_screen, self.focused_region) {
+            (_, FocusRegion::TopNav) => FocusInteraction::Navigate("selected view"),
+            (Screen::Dashboard, FocusRegion::DashboardReadiness) => {
+                FocusInteraction::Navigate("readiness explanation")
+            }
+            (Screen::Dashboard, FocusRegion::DashboardSleep) => {
+                FocusInteraction::Navigate("sleep trends")
+            }
+            (Screen::Dashboard, FocusRegion::DashboardActivity) => {
+                FocusInteraction::Navigate("activity timeline")
+            }
+            (Screen::Dashboard, FocusRegion::DashboardHrv) => FocusInteraction::Expand("HRV panel"),
+            (Screen::Dashboard, FocusRegion::DashboardTemp) => {
+                FocusInteraction::Navigate("temperature trends")
+            }
+            (Screen::Dashboard, FocusRegion::DashboardHeartRate) => {
+                FocusInteraction::Navigate("heart-rate trends")
+            }
+            (Screen::Dashboard, FocusRegion::DashboardRespRate) => {
+                FocusInteraction::Expand("respiratory panel")
+            }
+            (Screen::Dashboard, FocusRegion::DashboardBreakdown) => {
+                FocusInteraction::Expand("driver breakdown")
+            }
+            (Screen::Dashboard, FocusRegion::DashboardHeatmap) => {
+                FocusInteraction::Navigate("selected-day timeline")
+            }
+            (Screen::Timeline, FocusRegion::TimelineLanes)
+            | (Screen::Patterns, FocusRegion::ContextSecondary)
+            | (Screen::Explain, FocusRegion::ContextPrimary) => {
+                FocusInteraction::Toggle("selected filter")
+            }
+            (Screen::Timeline, FocusRegion::TimelineChart) => {
+                FocusInteraction::Expand("timeline chart")
+            }
+            (Screen::Timeline, FocusRegion::TimelineEvents) => {
+                FocusInteraction::Navigate("event detail")
+            }
+            (Screen::Timeline, FocusRegion::TimelineInspector) => {
+                FocusInteraction::Expand("timeline detail")
+            }
+            (Screen::Trends, FocusRegion::TrendsMatrix)
+                if self.trends_matrix_subfocus == TrendsMatrixSubfocus::Rows =>
+            {
+                FocusInteraction::Expand("trend matrix")
+            }
+            (Screen::Trends, FocusRegion::TrendsInspector) => {
+                FocusInteraction::Expand("trend inspector")
+            }
+            (Screen::Review, FocusRegion::Primary) => FocusInteraction::Navigate("selected brief"),
+            (Screen::Review, FocusRegion::Secondary) => {
+                FocusInteraction::Navigate("ranked observations")
+            }
+            (Screen::Ai, FocusRegion::Primary) => FocusInteraction::Activate("selected launch"),
+            (Screen::Ai, FocusRegion::Secondary) if !self.model.ai.artifact_actions.is_empty() => {
+                FocusInteraction::Navigate("artifact actions")
+            }
+            (Screen::Ai, FocusRegion::Tertiary) if self.current_ai_artifact_action().is_some() => {
+                FocusInteraction::Activate("selected artifact action")
+            }
+            (Screen::Ops, FocusRegion::OpsSummary) => FocusInteraction::Expand("status summary"),
+            (Screen::Ops, FocusRegion::OpsCoverage) => FocusInteraction::Expand("coverage matrix"),
+            (Screen::Ops, FocusRegion::OpsDiagnostics) => FocusInteraction::Expand("diagnostics"),
+            (Screen::Ops, FocusRegion::OpsWarnings) => FocusInteraction::Expand("warnings"),
+            _ => FocusInteraction::None,
+        }
+    }
+
+    #[must_use]
+    const fn region_is_focusable(&self, region: FocusRegion) -> bool {
+        match (self.active_screen, region) {
+            (Screen::Ai, FocusRegion::Tertiary) => !self.model.ai.artifact_actions.is_empty(),
+            _ => true,
+        }
+    }
+
+    #[must_use]
+    fn normalized_focus_region(&self, region: FocusRegion) -> FocusRegion {
+        if self.region_is_focusable(region) {
+            return region;
+        }
+
+        navigation::screen_regions(self.active_screen)
+            .iter()
+            .copied()
+            .find(|candidate| self.region_is_focusable(*candidate))
+            .unwrap_or_else(|| navigation::default_region(self.active_screen))
+    }
+
+    #[must_use]
+    fn adjacent_focusable_region(&self, forward: bool) -> FocusRegion {
+        let regions = navigation::screen_regions(self.active_screen);
+        let current = self.normalized_focus_region(self.focused_region);
+        let start_index = regions
+            .iter()
+            .position(|region| *region == current)
+            .unwrap_or(0);
+
+        for step in 1..=regions.len() {
+            let index = if forward {
+                (start_index + step) % regions.len()
+            } else {
+                (start_index + regions.len() - step) % regions.len()
+            };
+            let candidate = regions[index];
+            if self.region_is_focusable(candidate) {
+                return candidate;
+            }
+        }
+
+        current
+    }
+
+    fn restore_overlay_focus(&mut self, previous_region: Option<FocusRegion>) {
+        let fallback = navigation::default_region(self.active_screen);
+        self.set_focused_region(previous_region.unwrap_or(fallback));
     }
 
     fn focused_footer_details(&self, viewport: ViewportClass) -> (String, String, String, String) {
@@ -1547,7 +1688,7 @@ impl AppState {
                 label,
                 format!("score {}", self.model.dashboard.readiness.primary_value),
                 self.model.dashboard.readiness.delta_label.clone(),
-                self.dashboard_freshness(self.model.dashboard.readiness.availability),
+                self.dashboard_freshness(self.model.dashboard.readiness.availability.label()),
             ),
             (Screen::Dashboard, FocusRegion::DashboardSleep) => (
                 label,
@@ -1557,13 +1698,13 @@ impl AppState {
                     self.model.dashboard.sleep.score_label
                 ),
                 self.model.dashboard.sleep.strip_note.clone(),
-                self.dashboard_freshness(self.model.dashboard.sleep.availability),
+                self.dashboard_freshness(self.model.dashboard.sleep.availability.label()),
             ),
             (Screen::Dashboard, FocusRegion::DashboardActivity) => (
                 label,
                 format!("activity {}", self.model.dashboard.activity.primary_value),
                 self.model.dashboard.activity.delta_label.clone(),
-                self.dashboard_freshness(self.model.dashboard.activity.availability),
+                self.dashboard_freshness(self.model.dashboard.activity.availability.label()),
             ),
             (Screen::Dashboard, FocusRegion::DashboardHrv) => (
                 label,
@@ -1572,13 +1713,13 @@ impl AppState {
                     "{} | {}",
                     self.model.dashboard.hrv.baseline_label, self.model.dashboard.hrv.range_label
                 ),
-                self.dashboard_freshness(self.model.dashboard.hrv.availability),
+                self.dashboard_freshness(self.model.dashboard.hrv.availability.label()),
             ),
             (Screen::Dashboard, FocusRegion::DashboardTemp) => (
                 label,
                 self.model.dashboard.body_temp.value_label.clone(),
                 self.model.dashboard.body_temp.note.clone(),
-                self.dashboard_freshness(self.model.dashboard.body_temp.availability),
+                self.dashboard_freshness(self.model.dashboard.body_temp.availability.label()),
             ),
             (Screen::Dashboard, FocusRegion::DashboardHeartRate) => (
                 label,
@@ -1588,7 +1729,7 @@ impl AppState {
                     self.model.dashboard.heart_rate.baseline_label,
                     self.model.dashboard.heart_rate.range_label
                 ),
-                self.dashboard_freshness(self.model.dashboard.heart_rate.availability),
+                self.dashboard_freshness(self.model.dashboard.heart_rate.availability.label()),
             ),
             (Screen::Dashboard, FocusRegion::DashboardSpo2) => (
                 label,
@@ -1597,13 +1738,15 @@ impl AppState {
                     "{} | {}",
                     self.model.dashboard.spo2.baseline_label, self.model.dashboard.spo2.range_label
                 ),
-                self.dashboard_freshness(self.model.dashboard.spo2.availability),
+                self.dashboard_freshness(self.model.dashboard.spo2.availability.label()),
             ),
             (Screen::Dashboard, FocusRegion::DashboardRespRate) => (
                 label,
                 self.model.dashboard.respiratory_rate.primary_label.clone(),
                 self.model.dashboard.respiratory_rate.note.clone(),
-                self.dashboard_freshness(self.model.dashboard.respiratory_rate.availability),
+                self.dashboard_freshness(
+                    self.model.dashboard.respiratory_rate.availability.label(),
+                ),
             ),
             (Screen::Dashboard, FocusRegion::DashboardBreakdown) => {
                 self.focused_dashboard_breakdown_rail().map_or_else(
@@ -1612,7 +1755,9 @@ impl AppState {
                             label.clone(),
                             self.model.dashboard.breakdown.note.clone(),
                             "Δ --".to_owned(),
-                            self.dashboard_freshness(self.model.dashboard.breakdown.availability),
+                            self.dashboard_freshness(
+                                self.model.dashboard.breakdown.availability.label(),
+                            ),
                         )
                     },
                     |rail| {
@@ -1620,7 +1765,7 @@ impl AppState {
                             label.clone(),
                             rail.label.clone(),
                             rail.delta_label.clone(),
-                            self.dashboard_freshness(rail.availability),
+                            self.dashboard_freshness(rail.availability.label()),
                         )
                     },
                 )
@@ -1635,7 +1780,7 @@ impl AppState {
                     label,
                     exact,
                     self.model.dashboard.weekly.note.clone(),
-                    self.dashboard_freshness(self.model.dashboard.weekly.availability),
+                    self.dashboard_freshness(self.model.dashboard.weekly.availability.label()),
                 )
             }
             (Screen::Timeline, FocusRegion::TimelineControls) => (
@@ -1806,11 +1951,10 @@ impl AppState {
         self.model.trends.rows.iter().find(|row| row.selected)
     }
 
-    fn dashboard_freshness(&self, availability: TelemetryAvailability) -> String {
+    fn dashboard_freshness(&self, label: &str) -> String {
         format!(
             "{} | {}",
-            self.model.dashboard.header.freshness_badge,
-            availability.label()
+            self.model.dashboard.header.freshness_badge, label
         )
     }
 
@@ -1898,6 +2042,9 @@ impl AppState {
                     selected_dashboard_breakdown_index: self.selected_dashboard_breakdown_index,
                 },
             );
+            if !self.region_is_focusable(self.focused_region) {
+                self.set_focused_region(self.focused_region);
+            }
         }
     }
 
@@ -2198,18 +2345,19 @@ impl AppState {
     }
 
     fn set_focused_region(&mut self, region: FocusRegion) {
-        self.focused_region = region;
-        if region != FocusRegion::TopNav {
-            self.screen_focus_memory[self.active_screen.index()] = region;
+        let normalized = self.normalized_focus_region(region);
+        self.focused_region = normalized;
+        if normalized != FocusRegion::TopNav {
+            self.screen_focus_memory[self.active_screen.index()] = normalized;
         }
-        if region == FocusRegion::TopNav {
+        if normalized == FocusRegion::TopNav {
             self.focused_top_nav_screen = self.active_screen;
         }
     }
 
-    const fn restore_screen_focus(&mut self) {
+    fn restore_screen_focus(&mut self) {
         let region = self.screen_focus_memory[self.active_screen.index()];
-        self.focused_region = region;
+        self.set_focused_region(region);
     }
 
     fn move_transient_focus(&mut self, movement: NavMove) {
@@ -2260,6 +2408,7 @@ impl AppState {
             return;
         }
         if self.help_open {
+            self.scroll_help(movement);
             return;
         }
         if self.ai_preflight.is_some() {
@@ -2348,6 +2497,44 @@ impl AppState {
         }
     }
 
+    fn scroll_help(&mut self, movement: NavMove) {
+        let max_scroll = self.help_scroll_limit();
+        let page_step = crate::ui::layout::HELP_MODAL_VISIBLE_BODY_ROWS.saturating_sub(2);
+        self.help_scroll = match movement {
+            NavMove::Previous => self.help_scroll.saturating_sub(1),
+            NavMove::Next => self.help_scroll.saturating_add(1).min(max_scroll),
+            NavMove::First => 0,
+            NavMove::Last => max_scroll,
+            NavMove::PageBackward => self.help_scroll.saturating_sub(page_step),
+            NavMove::PageForward => self.help_scroll.saturating_add(page_step).min(max_scroll),
+        };
+
+        self.status_line = if max_scroll == 0 {
+            "Keyboard help fits without scrolling.".to_owned()
+        } else {
+            format!(
+                "Keyboard help scrolled to line {} of {}.",
+                self.help_scroll.saturating_add(1),
+                max_scroll.saturating_add(1)
+            )
+        };
+    }
+
+    #[must_use]
+    fn help_scroll_limit(&self) -> u16 {
+        let groups = crate::keybindings::help_groups(self.binding_context());
+        let group_lines = groups
+            .values()
+            .map(|entries| 1usize.saturating_add(entries.len()))
+            .sum::<usize>();
+        let total_lines = 1usize
+            .saturating_add(group_lines)
+            .saturating_add(groups.len().saturating_sub(1))
+            .saturating_add(2);
+        let visible_rows = usize::from(crate::ui::layout::HELP_MODAL_VISIBLE_BODY_ROWS);
+        u16::try_from(total_lines.saturating_sub(visible_rows)).unwrap_or(u16::MAX)
+    }
+
     fn activate_focused_region(&mut self, emitted: &mut Vec<Action>) {
         if self.search.is_some() {
             self.advance_search(true);
@@ -2368,6 +2555,10 @@ impl AppState {
                     self.dispatch_emitted_action(Action::DismissAiPreflight, emitted);
                 }
             }
+            return;
+        }
+
+        if !self.focused_interaction().is_actionable() {
             return;
         }
 
@@ -2476,18 +2667,10 @@ impl AppState {
             (Screen::Ai, FocusRegion::Tertiary) => {
                 if let Some(action) = self.current_ai_artifact_action() {
                     self.dispatch_emitted_action(action, emitted);
-                } else {
-                    "No direct actions are available for the selected saved artifact."
-                        .clone_into(&mut self.status_line);
                 }
             }
             (Screen::Trends, FocusRegion::TrendsMatrix) => {
-                if self.trends_matrix_subfocus == TrendsMatrixSubfocus::SortTabs {
-                    self.status_line =
-                        format!("Trend sort anchored on {}.", self.trend_sort_mode.label());
-                } else {
-                    self.toggle_region_expansion(FocusRegion::TrendsMatrix, "Trend matrix");
-                }
+                self.toggle_region_expansion(FocusRegion::TrendsMatrix, "Trend matrix");
             }
             (Screen::Trends, FocusRegion::TrendsInspector) => {
                 self.toggle_region_expansion(FocusRegion::TrendsInspector, "Trend inspector");
@@ -2562,7 +2745,7 @@ impl AppState {
         }
 
         if self.focused_region != FocusRegion::TopNav {
-            let region = navigation::previous_region(self.active_screen, self.focused_region);
+            let region = self.adjacent_focusable_region(false);
             self.set_focused_region(region);
             self.status_line = format!(
                 "Focused {}.",
@@ -2574,16 +2757,16 @@ impl AppState {
     fn toggle_help(&mut self) {
         if self.help_open {
             self.help_open = false;
-            if let Some(region) = self.focus_before_help.take() {
-                self.set_focused_region(region);
-            }
+            let previous_region = self.focus_before_help.take();
+            self.restore_overlay_focus(previous_region);
             "Closed keyboard help.".clone_into(&mut self.status_line);
         } else {
             if let Some(search) = self.search.take() {
-                self.set_focused_region(search.previous_region);
+                self.restore_overlay_focus(Some(search.previous_region));
             }
             self.focus_before_help = Some(self.focused_region);
             self.help_focus = HelpOverlayAnchor::BindingList;
+            self.help_scroll = 0;
             self.help_open = true;
             "Opened keyboard help.".clone_into(&mut self.status_line);
         }
@@ -2618,7 +2801,7 @@ impl AppState {
     fn close_search(&mut self) {
         if let Some(search) = self.search.take() {
             self.search_focus = SearchOverlayAnchor::QueryField;
-            self.set_focused_region(search.previous_region);
+            self.restore_overlay_focus(Some(search.previous_region));
             "Closed search.".clone_into(&mut self.status_line);
         }
     }
@@ -3633,6 +3816,7 @@ pub fn build_state_from_snapshot(
         focused_top_nav_screen: Screen::Dashboard,
         help_open: false,
         help_focus: HelpOverlayAnchor::BindingList,
+        help_scroll: 0,
         focus_before_help: None,
         search: None,
         search_focus: SearchOverlayAnchor::QueryField,
@@ -4076,6 +4260,9 @@ fn build_dashboard_model(
         &metric_points_from_activity(&snapshot.daily_activity),
     );
     let heartrate_insight = build_metric_insight("heartrate", &snapshot.heartrate_daily_averages);
+    let temperature_points = metric_points_from_readiness_temperature(&snapshot.daily_readiness);
+    let temperature_insight =
+        build_metric_insight_from_points(&temperature_points, &selected_day, "temperature");
     let hrv_points =
         metric_points_from_sleep_periods(&snapshot.sleep_periods, |record| record.average_hrv);
     let hrv_insight = build_metric_insight_from_points(&hrv_points, &selected_day, "hrv");
@@ -4121,6 +4308,85 @@ fn build_dashboard_model(
     );
     let capability_summary = dashboard_capability_summary(snapshot);
     let coverage = coverage_cell_views(snapshot);
+    let readiness_state = dashboard_panel_state(
+        readiness_availability,
+        selected_daily.and_then(|row| row.readiness_score).is_some(),
+        metric_panel_baseline_reference(&readiness_insight).is_some(),
+        metric_panel_has_history(&readiness_insight),
+    );
+    let sleep_state = dashboard_panel_state(
+        sleep_availability,
+        selected_daily
+            .and_then(|row| row.sleep_duration_seconds)
+            .is_some()
+            || selected_daily.and_then(|row| row.sleep_score).is_some(),
+        metric_panel_baseline_reference(&sleep_insight).is_some(),
+        metric_panel_has_history(&sleep_insight),
+    );
+    let activity_state = dashboard_panel_state(
+        activity_availability,
+        selected_activity.is_some() || selected_daily.and_then(|row| row.activity_score).is_some(),
+        metric_panel_baseline_reference(&activity_insight).is_some(),
+        metric_panel_has_history(&activity_insight),
+    );
+    let hrv_state = dashboard_panel_state(
+        hrv_availability,
+        selected_sleep_period
+            .and_then(|record| record.average_hrv)
+            .is_some(),
+        metric_panel_baseline_reference(&hrv_insight).is_some(),
+        metric_panel_has_history(&hrv_insight),
+    );
+    let body_temp_state = dashboard_panel_state(
+        availability_with_record_presence(
+            readiness_availability,
+            selected_readiness
+                .and_then(|row| row.temperature_deviation)
+                .is_some(),
+        ),
+        selected_readiness
+            .and_then(|row| row.temperature_deviation)
+            .is_some(),
+        metric_panel_baseline_reference(&temperature_insight).is_some(),
+        metric_panel_has_history(&temperature_insight),
+    );
+    let heart_rate_state = dashboard_panel_state(
+        availability_with_record_presence(
+            heartrate_availability,
+            !snapshot.heartrate_daily_averages.is_empty(),
+        ),
+        snapshot
+            .heartrate_daily_averages
+            .iter()
+            .any(|point| point.day == selected_day)
+            || selected_heartrate_day(snapshot, &selected_day)
+                .and_then(|day| day.points.last())
+                .is_some(),
+        metric_panel_baseline_reference(&heartrate_insight).is_some(),
+        metric_panel_has_history(&heartrate_insight),
+    );
+    let spo2_state = dashboard_panel_state(
+        spo2_availability,
+        selected_spo2
+            .and_then(|record| record.average_spo2)
+            .is_some(),
+        metric_panel_baseline_reference(&spo2_insight).is_some(),
+        metric_panel_has_history(&spo2_insight),
+    );
+    let respiratory_state = dashboard_panel_state(
+        respiratory_availability,
+        selected_sleep_period
+            .and_then(|record| record.average_breath)
+            .is_some(),
+        metric_panel_baseline_reference(&respiratory_insight).is_some(),
+        metric_panel_has_history(&respiratory_insight),
+    );
+    let breakdown_state = dashboard_panel_state(
+        readiness_availability,
+        selected_readiness.is_some() || selected_stress.is_some(),
+        metric_panel_baseline_reference(&readiness_insight).is_some(),
+        metric_panel_has_history(&readiness_insight),
+    );
 
     DashboardModel {
         header: HeaderStripModel {
@@ -4137,7 +4403,7 @@ fn build_dashboard_model(
         },
         selected_day_label: selected_day.clone(),
         readiness: DashboardScoreTile {
-            availability: readiness_availability,
+            availability: readiness_state,
             primary_value: selected_daily
                 .and_then(|row| row.readiness_score)
                 .map_or_else(|| "--".to_owned(), |value| value.to_string()),
@@ -4167,7 +4433,7 @@ fn build_dashboard_model(
             ),
         },
         sleep: DashboardSleepTile {
-            availability: sleep_availability,
+            availability: sleep_state,
             duration_label: selected_daily
                 .and_then(|row| row.sleep_duration_seconds)
                 .map_or_else(|| "--".to_owned(), format_duration_compact),
@@ -4184,7 +4450,7 @@ fn build_dashboard_model(
             strip_note: selected_day_baseline_sentence("Sleep", &selected_day, &sleep_insight),
         },
         activity: DashboardScoreTile {
-            availability: activity_availability,
+            availability: activity_state,
             primary_value: selected_activity.map_or_else(
                 || {
                     selected_daily
@@ -4223,7 +4489,7 @@ fn build_dashboard_model(
             note: selected_day_baseline_sentence("Activity", &selected_day, &activity_insight),
         },
         hrv: DashboardTrendPanel {
-            availability: hrv_availability,
+            availability: hrv_state,
             primary_label: selected_sleep_period
                 .and_then(|record| record.average_hrv)
                 .map_or_else(|| "--".to_owned(), |value| format!("{value:.0} ms")),
@@ -4242,12 +4508,7 @@ fn build_dashboard_model(
             ),
         },
         body_temp: DashboardThermometerPanel {
-            availability: availability_with_record_presence(
-                readiness_availability,
-                selected_readiness
-                    .and_then(|row| row.temperature_deviation)
-                    .is_some(),
-            ),
+            availability: body_temp_state,
             deviation_tenths: selected_readiness
                 .and_then(|row| row.temperature_deviation)
                 .map(|value| {
@@ -4275,10 +4536,7 @@ fn build_dashboard_model(
                 ),
         },
         heart_rate: DashboardTrendPanel {
-            availability: availability_with_record_presence(
-                heartrate_availability,
-                !snapshot.heartrate_daily_averages.is_empty(),
-            ),
+            availability: heart_rate_state,
             primary_label: heart_rate_primary_label(snapshot, &selected_day),
             baseline_label: metric_delta_label(&heartrate_insight),
             range_label: metric_range_label(&snapshot.heartrate_daily_averages),
@@ -4288,7 +4546,7 @@ fn build_dashboard_model(
             note: heartrate_insight.summary.clone(),
         },
         spo2: DashboardTrendPanel {
-            availability: spo2_availability,
+            availability: spo2_state,
             primary_label: selected_spo2
                 .and_then(|record| record.average_spo2)
                 .map_or_else(|| "--".to_owned(), |value| format!("{value:.1}%")),
@@ -4314,7 +4572,7 @@ fn build_dashboard_model(
                 ),
         },
         respiratory_rate: DashboardHistogramPanel {
-            availability: respiratory_availability,
+            availability: respiratory_state,
             primary_label: selected_sleep_period
                 .and_then(|record| record.average_breath)
                 .map_or_else(|| "--".to_owned(), |value| format!("{value:.1} br/min")),
@@ -4333,7 +4591,7 @@ fn build_dashboard_model(
             ),
         },
         breakdown: DashboardBreakdownPanel {
-            availability: readiness_availability,
+            availability: breakdown_state,
             rails: build_dashboard_breakdown_rails(&DashboardBreakdownInputs {
                 snapshot,
                 selected_day: &selected_day,
@@ -8637,8 +8895,78 @@ fn selected_metric_note(
 ) -> String {
     if value_present {
         insight.summary.clone()
+    } else if let Some(baseline) = metric_panel_baseline_reference(insight) {
+        format!(
+            "No current {label} reading is available for {selected_day}. Your trailing 30-day baseline is {}.",
+            format_float(baseline)
+        )
+    } else if metric_panel_has_history(insight) {
+        format!(
+            "No current {label} reading is available for {selected_day}. Historical readings are cached locally, but not for this day."
+        )
     } else {
-        format!("No {label} reading is available for {selected_day}.")
+        format!(
+            "No current {label} reading is available for {selected_day}, and no historical {label} readings are cached locally yet."
+        )
+    }
+}
+
+const fn metric_panel_baseline_reference(insight: &MetricInsight) -> Option<f64> {
+    if insight.baseline_30d.sample_count >= 4 {
+        insight.baseline_30d.mean
+    } else {
+        None
+    }
+}
+
+const fn metric_panel_has_history(insight: &MetricInsight) -> bool {
+    insight.today.is_some()
+        || insight.previous_day.is_some()
+        || insight.baseline_7d.sample_count > 0
+        || insight.baseline_30d.sample_count > 0
+        || insight.baseline_90d.sample_count > 0
+}
+
+const fn dashboard_panel_state(
+    availability: TelemetryAvailability,
+    has_current_sample: bool,
+    has_baseline_reference: bool,
+    has_history: bool,
+) -> MetricPanelState {
+    if has_current_sample {
+        return match availability {
+            TelemetryAvailability::Fresh | TelemetryAvailability::NoData => MetricPanelState::Fresh,
+            TelemetryAvailability::Stale => MetricPanelState::Stale,
+            TelemetryAvailability::MissingScope => MetricPanelState::MissingScope,
+            TelemetryAvailability::RateLimited | TelemetryAvailability::Unsupported => {
+                MetricPanelState::Unavailable
+            }
+            TelemetryAvailability::Error => MetricPanelState::Error,
+        };
+    }
+
+    match availability {
+        TelemetryAvailability::MissingScope => MetricPanelState::MissingScope,
+        TelemetryAvailability::RateLimited | TelemetryAvailability::Unsupported => {
+            MetricPanelState::Unavailable
+        }
+        TelemetryAvailability::Error => MetricPanelState::Error,
+        TelemetryAvailability::Fresh
+        | TelemetryAvailability::Stale
+        | TelemetryAvailability::NoData => {
+            if has_baseline_reference {
+                MetricPanelState::BaselineOnly
+            } else if has_history {
+                MetricPanelState::HistoricalOnly
+            } else if matches!(
+                availability,
+                TelemetryAvailability::Fresh | TelemetryAvailability::Stale
+            ) {
+                MetricPanelState::NoCurrentSample
+            } else {
+                MetricPanelState::Empty
+            }
+        }
     }
 }
 
@@ -9239,16 +9567,24 @@ fn build_dashboard_weekly_heatmap(
         }),
         !recent_rows.is_empty(),
     );
+    let recent = build_dashboard_heatmap_grid(&recent_rows, selected_day);
+    let history = build_dashboard_heatmap_grid(&history_rows, selected_day);
+    let availability = dashboard_panel_state(
+        daily_availability,
+        recent.selected_cell.is_some(),
+        false,
+        !history.day_labels.is_empty(),
+    );
 
     DashboardWeeklyHeatmap {
-        availability: daily_availability,
+        availability,
         row_labels: vec![
             "Sleep".to_owned(),
             "Readiness".to_owned(),
             "Activity".to_owned(),
         ],
-        recent: build_dashboard_heatmap_grid(&recent_rows, selected_day),
-        history: build_dashboard_heatmap_grid(&history_rows, selected_day),
+        recent,
+        history,
         note: "Recent score bands for sleep, readiness, and activity.".to_owned(),
     }
 }
@@ -10151,7 +10487,7 @@ const fn empty_dashboard_model() -> DashboardModel {
         },
         selected_day_label: String::new(),
         readiness: DashboardScoreTile {
-            availability: TelemetryAvailability::NoData,
+            availability: MetricPanelState::Empty,
             primary_value: String::new(),
             score_band: None,
             secondary_lines: Vec::new(),
@@ -10161,7 +10497,7 @@ const fn empty_dashboard_model() -> DashboardModel {
             note: String::new(),
         },
         sleep: DashboardSleepTile {
-            availability: TelemetryAvailability::NoData,
+            availability: MetricPanelState::Empty,
             duration_label: String::new(),
             score_label: String::new(),
             score_band: None,
@@ -10169,7 +10505,7 @@ const fn empty_dashboard_model() -> DashboardModel {
             strip_note: String::new(),
         },
         activity: DashboardScoreTile {
-            availability: TelemetryAvailability::NoData,
+            availability: MetricPanelState::Empty,
             primary_value: String::new(),
             score_band: None,
             secondary_lines: Vec::new(),
@@ -10179,7 +10515,7 @@ const fn empty_dashboard_model() -> DashboardModel {
             note: String::new(),
         },
         hrv: DashboardTrendPanel {
-            availability: TelemetryAvailability::Unsupported,
+            availability: MetricPanelState::Unavailable,
             primary_label: String::new(),
             baseline_label: String::new(),
             range_label: String::new(),
@@ -10189,7 +10525,7 @@ const fn empty_dashboard_model() -> DashboardModel {
             note: String::new(),
         },
         body_temp: DashboardThermometerPanel {
-            availability: TelemetryAvailability::NoData,
+            availability: MetricPanelState::Empty,
             deviation_tenths: None,
             value_label: String::new(),
             delta_state: DashboardDeltaState::Neutral,
@@ -10197,7 +10533,7 @@ const fn empty_dashboard_model() -> DashboardModel {
             note: String::new(),
         },
         heart_rate: DashboardTrendPanel {
-            availability: TelemetryAvailability::NoData,
+            availability: MetricPanelState::Empty,
             primary_label: String::new(),
             baseline_label: String::new(),
             range_label: String::new(),
@@ -10207,7 +10543,7 @@ const fn empty_dashboard_model() -> DashboardModel {
             note: String::new(),
         },
         respiratory_rate: DashboardHistogramPanel {
-            availability: TelemetryAvailability::Unsupported,
+            availability: MetricPanelState::Unavailable,
             primary_label: String::new(),
             delta_label: String::new(),
             range_label: String::new(),
@@ -10217,7 +10553,7 @@ const fn empty_dashboard_model() -> DashboardModel {
             note: String::new(),
         },
         spo2: DashboardTrendPanel {
-            availability: TelemetryAvailability::NoData,
+            availability: MetricPanelState::Empty,
             primary_label: String::new(),
             baseline_label: String::new(),
             range_label: String::new(),
@@ -10227,13 +10563,13 @@ const fn empty_dashboard_model() -> DashboardModel {
             note: String::new(),
         },
         breakdown: DashboardBreakdownPanel {
-            availability: TelemetryAvailability::NoData,
+            availability: MetricPanelState::Empty,
             rails: Vec::new(),
             waveform: Vec::new(),
             note: String::new(),
         },
         weekly: DashboardWeeklyHeatmap {
-            availability: TelemetryAvailability::NoData,
+            availability: MetricPanelState::Empty,
             row_labels: Vec::new(),
             recent: DashboardHeatmapGrid {
                 day_labels: Vec::new(),
@@ -11704,7 +12040,9 @@ mod tests {
     use crate::error::OuraProblem;
     use crate::evidence::policy::evidence_badges;
     use crate::evidence::{PopulationProfile, evidence_registry_version};
-    use crate::focus::{HelpOverlayAnchor, SearchOverlayAnchor, TrendsMatrixSubfocus};
+    use crate::focus::{
+        FocusInteraction, HelpOverlayAnchor, SearchOverlayAnchor, TrendsMatrixSubfocus,
+    };
     use crate::insights::{MetricPoint, build_metric_insight};
     use crate::navigation::{self, FocusRegion, PreflightControl, SearchScope, TransientLayer};
     use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
@@ -11722,7 +12060,7 @@ mod tests {
     };
     use crate::test_support::{ok, some};
     use crate::ui::layout::ViewportClass;
-    use crate::ui::telemetry::TelemetryAvailability;
+    use crate::ui::telemetry::{MetricPanelState, TelemetryAvailability};
 
     fn make_review_card(id: &str, signal_key: &str, score: i32) -> ReviewCard {
         ReviewCard {
@@ -11965,6 +12303,7 @@ mod tests {
             focused_top_nav_screen: Screen::Timeline,
             help_open: false,
             help_focus: HelpOverlayAnchor::BindingList,
+            help_scroll: 0,
             focus_before_help: None,
             search: None,
             search_focus: SearchOverlayAnchor::QueryField,
@@ -13438,7 +13777,7 @@ mod tests {
         assert!(
             rail.note
                 .to_ascii_lowercase()
-                .contains("no hrv reading is available")
+                .contains("no current hrv reading is available")
         );
     }
 
@@ -13469,7 +13808,7 @@ mod tests {
 
         let weekly = super::build_dashboard_weekly_heatmap(&snapshot, "2026-04-08");
 
-        assert_eq!(weekly.availability, TelemetryAvailability::RateLimited);
+        assert_eq!(weekly.availability, MetricPanelState::Unavailable);
         assert!(weekly.recent.day_labels.is_empty());
         assert!(weekly.history.day_labels.is_empty());
     }
@@ -13846,10 +14185,115 @@ mod tests {
 
         app.handle(Action::ToggleHelp);
         assert!(app.help_open());
+        assert_eq!(app.help_focus, HelpOverlayAnchor::BindingList);
+        assert_eq!(app.help_scroll(), 0);
 
         app.handle(Action::ToggleHelp);
         assert!(!app.help_open());
         assert_eq!(app.focused_region(), FocusRegion::ContextPrimary);
+    }
+
+    #[test]
+    fn focused_interaction_contract_matches_truthful_regions() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+
+        app.active_screen = Screen::Dashboard;
+        app.set_focused_region(FocusRegion::DashboardReadiness);
+        assert_eq!(
+            app.focused_interaction(),
+            FocusInteraction::Navigate("readiness explanation")
+        );
+
+        app.active_screen = Screen::Timeline;
+        app.set_focused_region(FocusRegion::TimelineChart);
+        assert_eq!(
+            app.focused_interaction(),
+            FocusInteraction::Expand("timeline chart")
+        );
+
+        app.active_screen = Screen::Explain;
+        app.set_focused_region(FocusRegion::ContextPrimary);
+        assert_eq!(
+            app.focused_interaction(),
+            FocusInteraction::Toggle("selected filter")
+        );
+
+        app.active_screen = Screen::Trends;
+        app.trends_matrix_subfocus = TrendsMatrixSubfocus::SortTabs;
+        app.set_focused_region(FocusRegion::TrendsMatrix);
+        assert_eq!(app.focused_interaction(), FocusInteraction::None);
+
+        app.trends_matrix_subfocus = TrendsMatrixSubfocus::Rows;
+        assert_eq!(
+            app.focused_interaction(),
+            FocusInteraction::Expand("trend matrix")
+        );
+    }
+
+    #[test]
+    fn inspect_only_sort_tabs_ignore_enter_and_leave_state_stable() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Trends;
+        app.trends_matrix_subfocus = TrendsMatrixSubfocus::SortTabs;
+        app.set_focused_region(FocusRegion::TrendsMatrix);
+
+        let before_status = app.status_line.clone();
+        let before_expanded = app.expanded_region();
+        let emitted = app.handle(Action::ActivateFocusedRegion);
+
+        assert!(emitted.is_empty());
+        assert_eq!(app.focused_interaction(), FocusInteraction::None);
+        assert_eq!(app.expanded_region(), before_expanded);
+        assert_eq!(app.trends_matrix_subfocus, TrendsMatrixSubfocus::SortTabs);
+        assert_eq!(app.status_line, before_status);
+    }
+
+    #[test]
+    fn empty_ai_actions_do_not_expose_dead_end_focus_or_activation() {
+        let mut app = build_state_from_snapshot(
+            RunMode::Demo,
+            "Demo mode ready.",
+            make_snapshot(&["2026-04-08"]),
+        );
+        app.active_screen = Screen::Ai;
+        app.model.ai.artifact_actions.clear();
+        app.set_focused_region(FocusRegion::Secondary);
+
+        assert_eq!(app.focused_interaction(), FocusInteraction::None);
+
+        app.handle(Action::FocusNextRegion);
+        assert_ne!(app.focused_region(), FocusRegion::Tertiary);
+
+        app.set_focused_region(FocusRegion::Tertiary);
+        assert_ne!(app.focused_region(), FocusRegion::Tertiary);
+    }
+
+    #[test]
+    fn dashboard_panel_state_distinguishes_precise_missing_data_semantics() {
+        assert_eq!(
+            super::dashboard_panel_state(TelemetryAvailability::NoData, false, true, false),
+            MetricPanelState::BaselineOnly
+        );
+        assert_eq!(
+            super::dashboard_panel_state(TelemetryAvailability::Fresh, false, false, false),
+            MetricPanelState::NoCurrentSample
+        );
+        assert_eq!(
+            super::dashboard_panel_state(TelemetryAvailability::NoData, false, false, true),
+            MetricPanelState::HistoricalOnly
+        );
+        assert_eq!(
+            super::dashboard_panel_state(TelemetryAvailability::NoData, false, false, false),
+            MetricPanelState::Empty
+        );
     }
 
     #[test]

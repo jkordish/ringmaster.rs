@@ -67,6 +67,7 @@ use review::{
 use time::{Date, Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
+use ui::layout::DEFAULT_NON_INTERACTIVE_VIEWPORT;
 
 static LOGGING_INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 
@@ -792,7 +793,8 @@ fn run_tui(config: &Config, args: &TuiArgs) -> Result<Option<String>> {
         } else {
             warn!("tui ran without a tty; rendering a live snapshot instead");
         }
-        tui::render_snapshot(&app, 100, 32).map(Some)
+        let (width, height) = DEFAULT_NON_INTERACTIVE_VIEWPORT.named_dimensions();
+        tui::render_snapshot(&app, width, height).map(Some)
     }
 }
 

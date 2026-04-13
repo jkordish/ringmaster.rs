@@ -452,6 +452,7 @@ Important current usage:
 - `--color-mode <mode>` controls ANSI sidecar rendering with `current`, `truecolor`, `ansi256`, `ansi16`, or `mono`
 - for deterministic color QA, prefer explicit `truecolor` plus `mono`
 - when `--ansi-sidecar` is passed without explicit modes, Ringmaster writes environment-driven `current` and `mono` sidecars by default
+- non-TTY `ringmaster demo` and `ringmaster tui` now reuse the shared `medium` viewport contract instead of a bespoke fallback size, so snapshot QA and fallback renders stay on the same geometry
 
 ## Verification sequence
 

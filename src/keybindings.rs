@@ -93,7 +93,7 @@ pub fn resolve(event: KeyEvent, context: BindingContext) -> Option<Action> {
 }
 
 #[must_use]
-pub fn footer_hints(context: BindingContext) -> Vec<&'static str> {
+pub fn footer_hints(context: BindingContext, activation_available: bool) -> Vec<&'static str> {
     let active_scopes = resolve_scopes(context);
     let mut seen = BTreeSet::new();
     bindings()
@@ -102,6 +102,7 @@ pub fn footer_hints(context: BindingContext) -> Vec<&'static str> {
             binding.kind == BindingKind::Standard
                 && binding.show_in_footer
                 && active_scopes.contains(&binding.scope)
+                && (activation_available || binding.action != Action::ActivateFocusedRegion)
         })
         .filter_map(|binding| {
             if seen.insert(binding.label) {
@@ -1639,15 +1640,34 @@ mod tests {
 
     #[test]
     fn footer_hints_surface_standard_bindings_only() {
-        let hints = footer_hints(BindingContext {
-            active_screen: Screen::Timeline,
-            focused_region: FocusRegion::TimelineChart,
-            search_open: false,
-            help_open: false,
-            ai_preflight_open: false,
-        });
+        let hints = footer_hints(
+            BindingContext {
+                active_screen: Screen::Timeline,
+                focused_region: FocusRegion::TimelineChart,
+                search_open: false,
+                help_open: false,
+                ai_preflight_open: false,
+            },
+            true,
+        );
         assert!(hints.iter().all(|hint| !hint.contains("`j`")));
         assert!(hints.iter().any(|hint| hint.contains("`Ctrl+F`")));
+    }
+
+    #[test]
+    fn footer_hints_hide_activation_copy_when_enter_is_not_truthful() {
+        let hints = footer_hints(
+            BindingContext {
+                active_screen: Screen::Ai,
+                focused_region: FocusRegion::Tertiary,
+                search_open: false,
+                help_open: false,
+                ai_preflight_open: false,
+            },
+            false,
+        );
+
+        assert!(!hints.iter().any(|hint| hint.contains("Enter")));
     }
 
     #[test]
@@ -1780,6 +1800,22 @@ mod tests {
             action,
             Some(Action::MoveTransientFocus(crate::navigation::NavMove::Next))
         );
+    }
+
+    #[test]
+    fn help_modal_escape_resolves_to_close_help() {
+        let action = super::resolve(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            BindingContext {
+                active_screen: Screen::Dashboard,
+                focused_region: FocusRegion::DashboardReadiness,
+                search_open: false,
+                help_open: true,
+                ai_preflight_open: false,
+            },
+        );
+
+        assert_eq!(action, Some(Action::ToggleHelp));
     }
 
     #[test]

@@ -357,7 +357,7 @@ fn render_matrix_row(row: &TrendMatrixRow, widths: TrendMatrixWidths) -> String 
 }
 
 fn render_matrix_cell(cell: &TrendMatrixCell, width: usize) -> String {
-    let bar_width = width.saturating_sub(6).clamp(3, 6);
+    let bar_width = width.saturating_sub(5).clamp(4, 12);
     format!(
         "{} {}",
         pad(
@@ -393,23 +393,30 @@ struct TrendMatrixWidths {
 
 const fn matrix_widths(total_width: usize) -> TrendMatrixWidths {
     let marker = 2;
-    let current = 8;
-    let window = 10;
-    let cue = 12;
+    let metric_min = 12;
+    let current_min = 8;
+    let window_min = 12;
+    let cue_min = 8;
+    let spark_min = 12;
     let spacing = 7;
-    let spark_min = 8;
-    let metric_min = 14;
-
-    let fixed_without_metric = marker + current + (window * 3) + cue + spark_min + spacing;
-    let extra = total_width.saturating_sub(fixed_without_metric + metric_min);
+    let base_total =
+        marker + metric_min + current_min + (window_min * 3) + cue_min + spark_min + spacing;
+    let extra = total_width.saturating_sub(base_total);
+    let metric_extra = extra.saturating_mul(2) / 10;
+    let current_extra = extra / 10;
+    let windows_extra_total = extra.saturating_mul(4) / 10;
+    let window_extra = windows_extra_total / 3;
+    let cue_extra = extra / 10;
+    let used = metric_extra + current_extra + windows_extra_total + cue_extra;
+    let spark_extra = extra.saturating_sub(used);
 
     TrendMatrixWidths {
         marker,
-        metric: metric_min + extra / 2,
-        current,
-        window,
-        cue,
-        spark: spark_min + (extra - (extra / 2)),
+        metric: metric_min + metric_extra,
+        current: current_min + current_extra,
+        window: window_min + window_extra,
+        cue: cue_min + cue_extra,
+        spark: spark_min + spark_extra,
     }
 }
 
@@ -418,5 +425,32 @@ fn pad(value: &str, width: usize, right_align: bool) -> String {
         format!("{value:>width$.width$}")
     } else {
         format!("{value:<width$.width$}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TrendMatrixWidths, matrix_widths};
+
+    const fn rendered_width(widths: TrendMatrixWidths) -> usize {
+        widths.marker
+            + widths.metric
+            + widths.current
+            + (widths.window * 3)
+            + widths.cue
+            + widths.spark
+            + 7
+    }
+
+    #[test]
+    fn matrix_widths_expand_confidently_without_overflowing_panel_width() {
+        let medium = matrix_widths(96);
+        let wide = matrix_widths(136);
+
+        assert!(rendered_width(medium) <= 96);
+        assert!(rendered_width(wide) <= 136);
+        assert!(wide.metric > medium.metric);
+        assert!(wide.window >= medium.window);
+        assert!(wide.spark > medium.spark);
     }
 }
