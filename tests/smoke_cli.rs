@@ -213,8 +213,10 @@ async fn ui_snapshot_scenario_fixture_root_writes_scenario_tagged_artifacts() {
     );
 
     assert!(output.contains("scenario fixture root"));
-    assert!(output.contains("strong, weak, empty, stale, error"));
+    assert!(output.contains("dense-history"));
+    assert!(output.contains("strong, weak, empty"));
     assert!(out_path.join("dashboard-strong-compact.txt").exists());
+    assert!(out_path.join("dashboard-dense-history-wide.txt").exists());
     assert!(out_path.join("dashboard-error-wide.txt").exists());
     assert!(out_path.join("status-stale-compact.txt").exists());
 }

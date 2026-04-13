@@ -1081,7 +1081,8 @@ fn scenario_fixture_seed_dir(
     let fixture_label = match scenario {
         ui::snapshot::SnapshotScenario::Strong
         | ui::snapshot::SnapshotScenario::Weak
-        | ui::snapshot::SnapshotScenario::Empty => scenario.label(),
+        | ui::snapshot::SnapshotScenario::Empty
+        | ui::snapshot::SnapshotScenario::DenseHistory => scenario.label(),
         ui::snapshot::SnapshotScenario::Stale
         | ui::snapshot::SnapshotScenario::Error
         | ui::snapshot::SnapshotScenario::MissingScope
@@ -1228,6 +1229,9 @@ fn apply_scenario_fixture_snapshot_overlay(
         ui::snapshot::SnapshotScenario::Strong => apply_strong_scenario_overlay(snapshot),
         ui::snapshot::SnapshotScenario::Weak => apply_weak_scenario_overlay(snapshot),
         ui::snapshot::SnapshotScenario::Empty => apply_empty_scenario_overlay(snapshot),
+        ui::snapshot::SnapshotScenario::DenseHistory => {
+            apply_strong_scenario_overlay(snapshot);
+        }
         ui::snapshot::SnapshotScenario::Stale => apply_stale_scenario_overlay(snapshot),
         ui::snapshot::SnapshotScenario::Error => apply_error_scenario_overlay(snapshot),
         ui::snapshot::SnapshotScenario::MissingScope => {

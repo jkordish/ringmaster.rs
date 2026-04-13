@@ -36,7 +36,18 @@ pub fn draw(
                 metrics,
             );
         }
-        ViewportClass::Medium | ViewportClass::Wide => {
+        ViewportClass::Medium => {
+            draw_medium(
+                frame,
+                area,
+                model,
+                theme,
+                focused_region,
+                expanded_region,
+                metrics,
+            );
+        }
+        ViewportClass::Wide => {
             draw_wide(
                 frame,
                 area,
@@ -50,7 +61,7 @@ pub fn draw(
     }
 }
 
-fn draw_wide(
+fn draw_medium(
     frame: &mut Frame<'_>,
     area: Rect,
     model: &TrendsModel,
@@ -82,7 +93,7 @@ fn draw_wide(
     let body = model
         .rows
         .iter()
-        .map(render_matrix_row)
+        .map(render_legacy_matrix_row)
         .collect::<Vec<_>>()
         .join("\n");
     let shell = render_panel_shell(
@@ -103,6 +114,65 @@ fn draw_wide(
         Paragraph::new(format!(
             "metric          current   concern     7d               30d              90d              spark\n{body}"
         )),
+        shell.content_area,
+    );
+
+    draw_notes(
+        frame,
+        layout[2],
+        model,
+        theme,
+        metrics,
+        focused_region == FocusRegion::TrendsInspector,
+        expanded_region == Some(FocusRegion::TrendsInspector),
+    );
+}
+
+fn draw_wide(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &TrendsModel,
+    theme: &Theme,
+    focused_region: FocusRegion,
+    expanded_region: Option<FocusRegion>,
+    metrics: crate::ui::layout::DashboardMetrics,
+) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .spacing(metrics.panel_gap_y)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(14),
+            Constraint::Length(5),
+        ])
+        .split(area);
+
+    draw_sort_tabs(
+        frame,
+        layout[0],
+        model,
+        theme,
+        metrics,
+        focused_region == FocusRegion::TrendsMatrix,
+        expanded_region == Some(FocusRegion::TrendsMatrix),
+    );
+
+    let shell = render_panel_shell(
+        frame,
+        layout[1],
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Trend Matrix",
+            status: "SORTED",
+            status_tone: Tone::Info,
+            focused: focused_region == FocusRegion::TrendsMatrix,
+            expanded: expanded_region == Some(FocusRegion::TrendsMatrix),
+            kind: PanelKind::Section,
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(render_wide_matrix(model)),
         shell.content_area,
     );
 
@@ -257,7 +327,7 @@ fn draw_notes(
     frame.render_widget(List::new(notes), shell.content_area);
 }
 
-fn render_matrix_row(row: &TrendMatrixRow) -> String {
+fn render_legacy_matrix_row(row: &TrendMatrixRow) -> String {
     let cells = row.cells.iter().map(render_matrix_cell).collect::<Vec<_>>();
     format!(
         "{} {:<14} {:>7} {:<11} {:<16} {:<16} {:<16} {}",
@@ -270,6 +340,75 @@ fn render_matrix_row(row: &TrendMatrixRow) -> String {
         cells.get(2).cloned().unwrap_or_default(),
         spark_strip(&row.sparkline, 10),
     )
+}
+
+fn render_wide_matrix(model: &TrendsModel) -> String {
+    let header = format!(
+        "{} {} {} {} {}",
+        pad(" ", 2, false),
+        pad("metric", 16, false),
+        pad("current", 8, true),
+        pad("concern", 12, false),
+        pad("spark", 14, false),
+    );
+    let subheader = format!(
+        "{} {} {} {}",
+        pad(" ", 2, false),
+        pad("7d", 18, false),
+        pad("30d", 18, false),
+        pad("90d", 18, false),
+    );
+
+    let mut lines = vec![header, subheader];
+    for row in &model.rows {
+        let (primary, detail) = render_wide_matrix_row(row);
+        lines.push(primary);
+        lines.push(detail);
+    }
+    lines.join("\n")
+}
+
+fn render_wide_matrix_row(row: &TrendMatrixRow) -> (String, String) {
+    let marker = if row.selected { ">" } else { " " };
+    let spark = spark_strip(&row.sparkline, 14);
+    let primary = format!(
+        "{} {} {} {} {}",
+        pad(marker, 2, false),
+        pad(row.label, 16, false),
+        pad(&row.current_value, 8, true),
+        pad(&row.concern_label, 12, false),
+        spark,
+    );
+    let cells = row
+        .cells
+        .iter()
+        .take(3)
+        .map(render_wide_matrix_cell)
+        .collect::<Vec<_>>();
+    let detail = format!(
+        "{} {} {} {}",
+        pad(" ", 2, false),
+        pad(cells.first().map_or("", String::as_str), 18, false),
+        pad(cells.get(1).map_or("", String::as_str), 18, false),
+        pad(cells.get(2).map_or("", String::as_str), 18, false),
+    );
+    (primary, detail)
+}
+
+fn render_wide_matrix_cell(cell: &TrendMatrixCell) -> String {
+    format!(
+        "{} {}",
+        pad(&cell.delta_label, 5, false),
+        segmented_bar(cell.fill_percent, 6)
+    )
+}
+
+fn pad(value: &str, width: usize, right_align: bool) -> String {
+    if right_align {
+        format!("{value:>width$.width$}")
+    } else {
+        format!("{value:<width$.width$}")
+    }
 }
 
 fn render_matrix_cell(cell: &TrendMatrixCell) -> String {

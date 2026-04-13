@@ -13,7 +13,7 @@ use crate::ui::chrome::{PanelKind, PanelShellSpec, render_panel_shell};
 use crate::ui::{
     charts, chrome,
     layout::{DashboardMetrics, UiContext},
-    telemetry::TelemetryAvailability,
+    telemetry::{TelemetryAvailability, concise_detail},
     theme::{Theme, Tone},
 };
 
@@ -27,20 +27,34 @@ pub fn draw(
     expanded_region: Option<FocusRegion>,
 ) {
     let metrics = DashboardMetrics::for_viewport(ui.viewport);
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .spacing(metrics.panel_gap_y)
-        .constraints([
-            Constraint::Length(if ui.viewport.is_compact() { 4 } else { 5 }),
-            Constraint::Length(3),
-            Constraint::Min(if ui.viewport.is_compact() { 6 } else { 13 }),
-            Constraint::Length(if ui.viewport.is_compact() { 4 } else { 7 }),
-            Constraint::Min(if ui.viewport.is_compact() { 5 } else { 10 }),
-        ])
-        .split(area);
+    let layout = if ui.viewport.is_compact() {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .spacing(metrics.panel_gap_y)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Min(8),
+                Constraint::Length(3),
+                Constraint::Length(3),
+            ])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .spacing(metrics.panel_gap_y)
+            .constraints([
+                Constraint::Length(5),
+                Constraint::Length(3),
+                Constraint::Min(13),
+                Constraint::Length(7),
+                Constraint::Min(10),
+            ])
+            .split(area)
+    };
 
     let summary = if ui.viewport.is_compact() {
-        format!("{}\n{}", model.selected_day_label, model.breadcrumb)
+        compact_timeline_summary(model)
     } else {
         format!(
             "{}\n{}\n{}",
@@ -62,7 +76,11 @@ pub fn draw(
         },
     );
     frame.render_widget(
-        Paragraph::new(summary).style(theme.body()),
+        Paragraph::new(concise_detail(
+            &summary,
+            usize::from(summary_shell.content_area.width),
+        ))
+        .style(theme.body()),
         summary_shell.content_area,
     );
 
@@ -96,9 +114,9 @@ pub fn draw(
 
     let bottom = if ui.viewport.is_compact() {
         Layout::default()
-            .direction(Direction::Vertical)
-            .spacing(metrics.panel_gap_y)
-            .constraints([Constraint::Length(3), Constraint::Min(2)])
+            .direction(Direction::Horizontal)
+            .spacing(metrics.panel_gap_x)
+            .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
             .split(layout[4])
     } else {
         Layout::default()
@@ -126,14 +144,24 @@ pub fn draw(
             kind: PanelKind::Diagnostic,
         },
     );
-    frame.render_widget(
-        List::new(
-            std::iter::once(model.selected_detail.clone())
-                .chain(model.event_detail_lines.iter().cloned())
-                .map(ListItem::new),
-        ),
-        inspector_shell.content_area,
-    );
+    if ui.viewport.is_compact() {
+        frame.render_widget(
+            Paragraph::new(concise_detail(
+                &compact_inspector_summary(model),
+                usize::from(inspector_shell.content_area.width),
+            )),
+            inspector_shell.content_area,
+        );
+    } else {
+        frame.render_widget(
+            List::new(
+                std::iter::once(model.selected_detail.clone())
+                    .chain(model.event_detail_lines.iter().cloned())
+                    .map(ListItem::new),
+            ),
+            inspector_shell.content_area,
+        );
+    }
 
     let events = if model.events.is_empty() {
         vec![ListItem::new(
@@ -175,7 +203,17 @@ pub fn draw(
             kind: PanelKind::Section,
         },
     );
-    frame.render_widget(List::new(events), event_shell.content_area);
+    if ui.viewport.is_compact() {
+        frame.render_widget(
+            Paragraph::new(concise_detail(
+                &compact_event_summary(model),
+                usize::from(event_shell.content_area.width),
+            )),
+            event_shell.content_area,
+        );
+    } else {
+        frame.render_widget(List::new(events), event_shell.content_area);
+    }
 }
 
 fn draw_controls(
@@ -372,21 +410,6 @@ fn draw_overlay_lane(
     focused: bool,
     expanded: bool,
 ) {
-    let overlay_lines = if model.overlay_groups.is_empty() {
-        vec![ListItem::new(
-            "[quiet] No workouts, tags, or sessions overlap the selected window.",
-        )]
-    } else {
-        render_overlay_lines(
-            area.width.saturating_sub(4),
-            model.window_start_minute,
-            model.window_end_minute,
-            &model.overlay_groups,
-        )
-        .into_iter()
-        .map(ListItem::new)
-        .collect()
-    };
     let shell = render_panel_shell(
         frame,
         area,
@@ -405,7 +428,32 @@ fn draw_overlay_lane(
             kind: PanelKind::Section,
         },
     );
-    frame.render_widget(List::new(overlay_lines), shell.content_area);
+    if area.height <= 3 {
+        frame.render_widget(
+            Paragraph::new(concise_detail(
+                &compact_overlay_summary(model),
+                usize::from(shell.content_area.width),
+            )),
+            shell.content_area,
+        );
+    } else {
+        let overlay_lines = if model.overlay_groups.is_empty() {
+            vec![ListItem::new(
+                "[quiet] No workouts, tags, or sessions overlap the selected window.",
+            )]
+        } else {
+            render_overlay_lines(
+                area.width.saturating_sub(4),
+                model.window_start_minute,
+                model.window_end_minute,
+                &model.overlay_groups,
+            )
+            .into_iter()
+            .map(ListItem::new)
+            .collect()
+        };
+        frame.render_widget(List::new(overlay_lines), shell.content_area);
+    }
 }
 
 fn draw_overlay_tabs(
@@ -514,4 +562,53 @@ fn overlay_tab_label(toggle: &OverlayToggleView) -> String {
         toggle.label,
         if toggle.enabled { "on" } else { "off" }
     )
+}
+
+fn compact_timeline_summary(model: &TimelineModel) -> String {
+    format!("{} | {}", model.selected_day_label, model.breadcrumb)
+}
+
+fn compact_overlay_summary(model: &TimelineModel) -> String {
+    if model.overlay_groups.is_empty() {
+        return "[quiet] No workouts, tags, or sessions in window".to_owned();
+    }
+
+    model
+        .overlay_groups
+        .iter()
+        .map(|group| {
+            format!(
+                "[{}] {} {}",
+                group.glyph, group.item_count, group.family_label
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" • ")
+}
+
+fn compact_inspector_summary(model: &TimelineModel) -> String {
+    if model.selected_event_index.is_some() && !model.event_detail_lines.is_empty() {
+        model.event_detail_lines[0].clone()
+    } else {
+        model.selected_detail.clone()
+    }
+}
+
+fn compact_event_summary(model: &TimelineModel) -> String {
+    if model.events.is_empty() {
+        return "[empty] No context events match the current filters".to_owned();
+    }
+
+    let selected_index = model
+        .events
+        .iter()
+        .position(|event| event.selected)
+        .unwrap_or(0);
+    let event = &model.events[selected_index];
+    let extra_count = model.events.len().saturating_sub(1);
+    if extra_count == 0 {
+        format!("[{}] {}", event.glyph, event.headline)
+    } else {
+        format!("[{}] {} | +{extra_count} more", event.glyph, event.headline)
+    }
 }

@@ -267,14 +267,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &AppState) {
     };
     let tab_titles = Screen::ALL
         .into_iter()
-        .map(|screen| {
-            let active_prefix = if screen == app.active_screen {
-                "* "
-            } else {
-                "  "
-            };
-            Line::from(format!("{active_prefix}{}", screen.title()))
-        })
+        .map(|screen| Line::from(screen.title()))
         .collect::<Vec<_>>();
     let top_nav_label = if top_nav_focused {
         format!("Views [{}]", Screen::ALL[top_nav_selected_index].title())
@@ -3494,6 +3487,21 @@ mod tests {
     }
 
     #[test]
+    fn compact_timeline_snapshot_keeps_summary_and_inspector_content_visible() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Timeline;
+
+        let output = render_snapshot(&app, 90, 28).unwrap_or_else(|error| {
+            unreachable!("compact timeline snapshot should render: {error}")
+        });
+
+        assert!(output.contains("2026-04-08 | Day 2026-04-08"));
+        assert!(output.contains("Tag Coffee"));
+        assert!(output.contains("EVENT FEED"));
+    }
+
+    #[test]
     fn renders_trends_empty_data_state() {
         let config = test_config();
         let store = Store::open_test_store()
@@ -3523,6 +3531,22 @@ mod tests {
 
         assert!(output.contains("TREND MATRIX"));
         assert!(output.contains("Sorted by concern"));
+    }
+
+    #[test]
+    fn wide_trends_snapshot_uses_two_line_matrix_layout() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Trends;
+
+        let output = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| unreachable!("wide trends snapshot should render: {error}"));
+
+        assert!(output.contains("current"));
+        assert!(output.contains("concern"));
+        assert!(output.contains("7d"));
+        assert!(output.contains("30d"));
+        assert!(output.contains("90d"));
     }
 
     #[test]
@@ -3803,6 +3827,33 @@ mod tests {
         });
         assert!(missing_output.contains("SCOPE") || missing_output.contains("scope"));
         assert!(missing_output.contains("WEEKLY TRENDS"));
+    }
+
+    #[tokio::test]
+    async fn dashboard_dense_history_snapshot_surfaces_fourteen_day_weekly_view() {
+        let config = test_config();
+        let states = build_scenario_fixture_snapshot_apps_for_tests(
+            &config,
+            std::path::Path::new("tests/fixtures/phase7"),
+        )
+        .await
+        .unwrap_or_else(|error| unreachable!("scenario fixture apps should build: {error}"));
+
+        let mut app = states
+            .into_iter()
+            .find_map(|(scenario, app)| {
+                (scenario == crate::ui::snapshot::SnapshotScenario::DenseHistory).then_some(app)
+            })
+            .unwrap_or_else(|| unreachable!("dense-history scenario should exist"));
+        app.active_screen = Screen::Dashboard;
+
+        let output = render_snapshot(&app, 160, 44).unwrap_or_else(|error| {
+            unreachable!("dense-history dashboard snapshot should render: {error}")
+        });
+
+        assert!(output.contains("326327328329"));
+        assert!(output.contains("40740"));
+        assert!(output.contains("WEEKLY TRENDS"));
     }
 
     #[test]

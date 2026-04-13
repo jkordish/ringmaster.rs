@@ -10,6 +10,7 @@ pub enum SnapshotScenario {
     Strong,
     Weak,
     Empty,
+    DenseHistory,
     Stale,
     Error,
     MissingScope,
@@ -17,17 +18,19 @@ pub enum SnapshotScenario {
 }
 
 impl SnapshotScenario {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Strong,
         Self::Weak,
         Self::Empty,
+        Self::DenseHistory,
         Self::Stale,
         Self::Error,
         Self::MissingScope,
         Self::RateLimited,
     ];
 
-    pub const FIXTURE_BACKED: [Self; 3] = [Self::Strong, Self::Weak, Self::Empty];
+    pub const FIXTURE_BACKED: [Self; 4] =
+        [Self::Strong, Self::Weak, Self::Empty, Self::DenseHistory];
 
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -35,6 +38,7 @@ impl SnapshotScenario {
             Self::Strong => "strong",
             Self::Weak => "weak",
             Self::Empty => "empty",
+            Self::DenseHistory => "dense-history",
             Self::Stale => "stale",
             Self::Error => "error",
             Self::MissingScope => "missing-scope",
@@ -312,6 +316,7 @@ mod tests {
                 "dashboard-strong-compact.txt",
                 "dashboard-weak-compact.txt",
                 "dashboard-empty-compact.txt",
+                "dashboard-dense-history-compact.txt",
                 "dashboard-stale-compact.txt",
                 "dashboard-error-compact.txt",
                 "dashboard-missing-scope-compact.txt",
