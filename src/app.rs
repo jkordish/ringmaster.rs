@@ -9034,6 +9034,19 @@ fn build_dashboard_breakdown_rails(
             )
         });
 
+    let heartrate_has_records = !inputs.snapshot.heartrate_daily_averages.is_empty();
+    let heartrate_freshness_availability =
+        availability_from_freshness(&family_freshness(inputs.snapshot, DataFamily::Heartrate));
+    let heartrate_availability = if heartrate_has_records {
+        heartrate_freshness_availability
+    } else {
+        availability_with_record_presence(
+            sync_failure_availability(inputs.snapshot, DataFamily::Heartrate)
+                .unwrap_or(heartrate_freshness_availability),
+            heartrate_has_records,
+        )
+    };
+
     let mut rails = vec![
         DashboardBreakdownRail {
             label: "HRV Balance".to_owned(),
@@ -9047,14 +9060,7 @@ fn build_dashboard_breakdown_rails(
         },
         DashboardBreakdownRail {
             label: "Resting HR".to_owned(),
-            availability: if inputs.snapshot.heartrate_daily_averages.is_empty() {
-                TelemetryAvailability::NoData
-            } else {
-                availability_from_freshness(&family_freshness(
-                    inputs.snapshot,
-                    DataFamily::Heartrate,
-                ))
-            },
+            availability: heartrate_availability,
             fill_percent: heartrate_fill,
             delta_label: metric_delta_label(inputs.heartrate_insight),
             delta_state: dashboard_delta_state_for_insight(inputs.heartrate_insight),
@@ -13178,6 +13184,43 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("tag sync failed")
         );
+    }
+
+    #[test]
+    fn dashboard_resting_hr_rail_preserves_sync_failures_without_cached_rows() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.heartrate_daily_averages.clear();
+        snapshot.auth_status.capability_report =
+            CapabilityReport::from_scopes(&["heartrate".to_owned()], &["heartrate".to_owned()]);
+        snapshot.sync_states = vec![SyncStateRecord {
+            sync_key: "oura.heartrate".to_owned(),
+            status: SyncRunStatus::Failed,
+            cursor: None,
+            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
+            last_completed_at: None,
+            message: Some("heartrate sync failed".to_owned()),
+            granted_scopes: vec!["heartrate".to_owned()],
+            last_error: Some(OuraProblem::new(
+                Some(429),
+                "Too Many Requests",
+                Some("heartrate sync failed".to_owned()),
+            )),
+            failure_count: 1,
+            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
+            last_trigger_source: Some("manual".to_owned()),
+            last_trigger_detail: None,
+        }];
+
+        let model = super::build_live_model(&snapshot, &base_live_model_options());
+        let rail = model
+            .dashboard
+            .breakdown
+            .rails
+            .iter()
+            .find(|rail| rail.label == "Resting HR")
+            .unwrap_or_else(|| panic!("resting hr rail should exist"));
+
+        assert_eq!(rail.availability, TelemetryAvailability::RateLimited);
     }
 
     #[test]
