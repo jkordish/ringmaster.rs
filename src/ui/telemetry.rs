@@ -64,12 +64,15 @@ pub fn spark_strip(values: &[u64], width: usize) -> String {
 #[must_use]
 pub fn micro_histogram(values: &[u64], width: usize) -> String {
     let levels = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    if values.is_empty() || width == 0 {
-        return "no bars".to_owned();
+    if width == 0 {
+        return String::new();
+    }
+    if values.is_empty() {
+        return "·".repeat(width);
     }
     let max = values.iter().copied().max().unwrap_or(0);
     if max == 0 {
-        return "·".repeat(width.min(values.len()));
+        return "·".repeat(width);
     }
     resample(values, width)
         .into_iter()
@@ -338,7 +341,9 @@ mod tests {
 
     #[test]
     fn histogram_returns_placeholder_for_empty_data() {
-        assert_eq!(micro_histogram(&[], 6), "no bars");
+        assert_eq!(micro_histogram(&[], 6), "······");
+        assert_eq!(micro_histogram(&[0, 0, 0], 6), "······");
+        assert_eq!(micro_histogram(&[1, 2, 3], 0), "");
     }
 
     #[test]

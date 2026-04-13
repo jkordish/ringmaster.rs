@@ -918,16 +918,19 @@ fn snapshot_color_modes(args: &UiSnapshotArgs) -> Vec<ui::snapshot::SnapshotColo
         ];
     }
 
-    args.color_mode
-        .iter()
-        .map(|mode| match mode {
-            SnapshotColorModeArg::Current => ui::snapshot::SnapshotColorMode::Current,
-            SnapshotColorModeArg::Truecolor => ui::snapshot::SnapshotColorMode::TrueColor,
-            SnapshotColorModeArg::Ansi256 => ui::snapshot::SnapshotColorMode::Ansi256,
-            SnapshotColorModeArg::Ansi16 => ui::snapshot::SnapshotColorMode::Ansi16,
-            SnapshotColorModeArg::Mono => ui::snapshot::SnapshotColorMode::Mono,
-        })
-        .collect()
+    let mut modes = Vec::new();
+    for mode in args.color_mode.iter().map(|mode| match mode {
+        SnapshotColorModeArg::Current => ui::snapshot::SnapshotColorMode::Current,
+        SnapshotColorModeArg::Truecolor => ui::snapshot::SnapshotColorMode::TrueColor,
+        SnapshotColorModeArg::Ansi256 => ui::snapshot::SnapshotColorMode::Ansi256,
+        SnapshotColorModeArg::Ansi16 => ui::snapshot::SnapshotColorMode::Ansi16,
+        SnapshotColorModeArg::Mono => ui::snapshot::SnapshotColorMode::Mono,
+    }) {
+        if !modes.contains(&mode) {
+            modes.push(mode);
+        }
+    }
+    modes
 }
 
 #[derive(Debug, Clone)]
@@ -3716,6 +3719,34 @@ mod tests {
                 ai: crate::config::AiConfig::default(),
             },
         )
+    }
+
+    #[test]
+    fn snapshot_color_modes_dedupe_duplicate_cli_flags_in_order() {
+        let args = crate::cli::UiSnapshotArgs {
+            demo: true,
+            fixture_dir: None,
+            screen: Vec::new(),
+            size: Vec::new(),
+            ansi_sidecar: true,
+            color_mode: vec![
+                crate::cli::SnapshotColorModeArg::Truecolor,
+                crate::cli::SnapshotColorModeArg::Mono,
+                crate::cli::SnapshotColorModeArg::Truecolor,
+                crate::cli::SnapshotColorModeArg::Ansi16,
+                crate::cli::SnapshotColorModeArg::Mono,
+            ],
+            out_dir: std::path::PathBuf::from("/tmp/snapshots"),
+        };
+
+        assert_eq!(
+            super::snapshot_color_modes(&args),
+            vec![
+                crate::ui::snapshot::SnapshotColorMode::TrueColor,
+                crate::ui::snapshot::SnapshotColorMode::Mono,
+                crate::ui::snapshot::SnapshotColorMode::Ansi16,
+            ]
+        );
     }
 
     fn future_rfc3339(days: i64) -> String {

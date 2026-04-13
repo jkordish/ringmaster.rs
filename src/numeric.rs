@@ -52,8 +52,9 @@ pub fn rounded_clamped_f64_to_u16(value: f64, min: f64, max: f64) -> u16 {
     if !value.is_finite() {
         return 0;
     }
-    value.round().clamp(min, max).to_u16().unwrap_or_else(|| {
-        if value.is_sign_negative() {
+    let clamped = value.round().clamp(min, max);
+    clamped.to_u16().unwrap_or_else(|| {
+        if clamped.is_sign_negative() {
             u16::MIN
         } else {
             u16::MAX
@@ -66,8 +67,9 @@ pub fn rounded_clamped_f64_to_i16(value: f64, min: f64, max: f64) -> i16 {
     if !value.is_finite() {
         return 0;
     }
-    value.round().clamp(min, max).to_i16().unwrap_or_else(|| {
-        if value.is_sign_negative() {
+    let clamped = value.round().clamp(min, max);
+    clamped.to_i16().unwrap_or_else(|| {
+        if clamped.is_sign_negative() {
             i16::MIN
         } else {
             i16::MAX
@@ -112,7 +114,15 @@ mod tests {
     fn rounds_and_clamps_float_ranges_for_small_integer_widgets() {
         assert_eq!(rounded_clamped_f64_to_u16(101.4, 0.0, 100.0), 100);
         assert_eq!(rounded_clamped_f64_to_u16(-8.0, 0.0, 100.0), 0);
+        assert_eq!(
+            rounded_clamped_f64_to_u16(3.0, 70_000.0, 80_000.0),
+            u16::MAX
+        );
         assert_eq!(rounded_clamped_f64_to_i16(12.6, -100.0, 100.0), 13);
+        assert_eq!(
+            rounded_clamped_f64_to_i16(-3.0, -40_000.0, -35_000.0),
+            i16::MIN
+        );
     }
 
     #[test]
