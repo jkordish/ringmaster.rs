@@ -4772,16 +4772,18 @@ const fn combine_availability(
         (TelemetryAvailability::MissingScope, _) | (_, TelemetryAvailability::MissingScope) => {
             TelemetryAvailability::MissingScope
         }
-        (TelemetryAvailability::Unsupported, _) | (_, TelemetryAvailability::Unsupported) => {
-            TelemetryAvailability::Unsupported
-        }
         (TelemetryAvailability::Fresh, _) | (_, TelemetryAvailability::Fresh) => {
             TelemetryAvailability::Fresh
         }
         (TelemetryAvailability::Stale, _) | (_, TelemetryAvailability::Stale) => {
             TelemetryAvailability::Stale
         }
-        _ => TelemetryAvailability::NoData,
+        // Mixed-capability panels should prefer a supported measurement state over an
+        // unrelated unsupported input. Only return Unsupported if neither side applies.
+        (TelemetryAvailability::NoData, _) | (_, TelemetryAvailability::NoData) => {
+            TelemetryAvailability::NoData
+        }
+        _ => TelemetryAvailability::Unsupported,
     }
 }
 
@@ -12866,6 +12868,51 @@ mod tests {
             ),
             TelemetryAvailability::MissingScope,
         );
+    }
+
+    #[test]
+    fn combine_availability_prefers_supported_state_over_unsupported() {
+        assert_eq!(
+            super::combine_availability(
+                TelemetryAvailability::Fresh,
+                TelemetryAvailability::Unsupported,
+            ),
+            TelemetryAvailability::Fresh,
+        );
+        assert_eq!(
+            super::combine_availability(
+                TelemetryAvailability::NoData,
+                TelemetryAvailability::Unsupported,
+            ),
+            TelemetryAvailability::NoData,
+        );
+        assert_eq!(
+            super::combine_availability(
+                TelemetryAvailability::Unsupported,
+                TelemetryAvailability::Unsupported,
+            ),
+            TelemetryAvailability::Unsupported,
+        );
+    }
+
+    #[test]
+    fn measurements_availability_prefers_fresh_daily_data_when_heartrate_is_unsupported() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.auth_status.capability_report =
+            CapabilityReport::from_scopes(&["daily".to_owned()], &["daily".to_owned()]);
+        snapshot.sync_states = vec![super::demo_sync_state(
+            crate::refresh::SyncFamily::Daily,
+            "daily sync complete",
+            SyncRunStatus::Success,
+        )];
+
+        let availability = super::explain_measurements_availability(
+            &snapshot,
+            snapshot.daily_history.first(),
+            None,
+        );
+
+        assert_eq!(availability, TelemetryAvailability::Fresh);
     }
 
     #[test]
