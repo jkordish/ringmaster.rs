@@ -776,11 +776,7 @@ async fn fetch_daily_pages(
 
     Ok(DailyPageFetches {
         daily_sleep_pages: daily_sleep_pages_result?,
-        sleep_period_pages: collect_optional_daily_pages(
-            "sleep",
-            sleep_period_pages_result,
-            &mut optional_failures,
-        ),
+        sleep_period_pages: sleep_period_pages_result?,
         readiness_pages: readiness_pages_result?,
         activity_pages: activity_pages_result?,
         daily_spo2_pages: collect_optional_daily_pages(
@@ -2176,6 +2172,49 @@ mod tests {
         assert_eq!(counts.daily_activity, 7);
         assert_eq!(counts.sleep_time, 0);
         assert!(daily_slice.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn daily_sync_fails_when_sleep_endpoint_fixture_is_malformed() {
+        let store = ok(Store::open_test_store(), "store should open");
+        let config = fixture_config();
+        let tempdir = ok(tempfile::tempdir(), "tempdir should build");
+        let fixture_dir = tempdir.path().join("review-malformed-sleep");
+        copy_fixture_dir(&review_fixture_dir(), &fixture_dir);
+        ok(
+            fs::write(fixture_dir.join("sleep.json"), "{ not valid json"),
+            "core sleep fixture should be rewritable",
+        );
+
+        let report = sync_once(
+            &config,
+            &store,
+            SyncOptions {
+                dry_run: false,
+                fixture_dir: Some(fixture_dir),
+                families: vec![SyncFamily::Daily],
+                trigger_source: Some("periodic_reconcile".to_owned()),
+                trigger_detail: Some("test failed daily sync".to_owned()),
+            },
+        )
+        .await;
+        let report = ok(report, "daily sync should report a persisted failure");
+        let counts = ok(store.views().record_counts(), "record counts should load");
+        let daily_slice = some(
+            report
+                .slice_reports
+                .iter()
+                .find(|slice| slice.sync_key == "oura.daily"),
+            "daily slice should exist",
+        );
+
+        assert_eq!(report.status, SyncRunStatus::Failed);
+        assert_eq!(daily_slice.status, SyncRunStatus::Failed);
+        assert!(daily_slice.message.contains("sleep"));
+        assert!(daily_slice.last_error.is_some());
+        assert_eq!(counts.daily_sleep, 0);
+        assert_eq!(counts.daily_readiness, 0);
+        assert_eq!(counts.daily_activity, 0);
     }
 
     #[test]
