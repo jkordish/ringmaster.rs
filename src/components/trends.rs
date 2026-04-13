@@ -90,12 +90,7 @@ fn draw_medium(
         expanded_region == Some(FocusRegion::TrendsMatrix),
     );
 
-    let body = model
-        .rows
-        .iter()
-        .map(render_legacy_matrix_row)
-        .collect::<Vec<_>>()
-        .join("\n");
+    let body = model.rows.iter().collect::<Vec<_>>();
     let shell = render_panel_shell(
         frame,
         layout[1],
@@ -111,9 +106,7 @@ fn draw_medium(
         },
     );
     frame.render_widget(
-        Paragraph::new(format!(
-            "metric          current   concern     7d               30d              90d              spark\n{body}"
-        )),
+        Paragraph::new(render_medium_matrix(&body)),
         shell.content_area,
     );
 
@@ -327,21 +320,6 @@ fn draw_notes(
     frame.render_widget(List::new(notes), shell.content_area);
 }
 
-fn render_legacy_matrix_row(row: &TrendMatrixRow) -> String {
-    let cells = row.cells.iter().map(render_matrix_cell).collect::<Vec<_>>();
-    format!(
-        "{} {:<14} {:>7} {:<11} {:<16} {:<16} {:<16} {}",
-        if row.selected { ">" } else { " " },
-        row.label,
-        row.current_value,
-        row.concern_label,
-        cells.first().cloned().unwrap_or_default(),
-        cells.get(1).cloned().unwrap_or_default(),
-        cells.get(2).cloned().unwrap_or_default(),
-        spark_strip(&row.sparkline, 10),
-    )
-}
-
 fn render_wide_matrix(model: &TrendsModel) -> String {
     let header = format!(
         "{} {} {} {} {}",
@@ -366,6 +344,67 @@ fn render_wide_matrix(model: &TrendsModel) -> String {
         lines.push(detail);
     }
     lines.join("\n")
+}
+
+fn render_medium_matrix(rows: &[&TrendMatrixRow]) -> String {
+    let header = format!(
+        "{} {} {} {} {}",
+        pad(" ", 2, false),
+        pad("metric", 14, false),
+        pad("current", 8, true),
+        pad("concern", 11, false),
+        pad("spark", 10, false),
+    );
+    let subheader = format!(
+        "{} {} {} {}",
+        pad(" ", 2, false),
+        pad("7d", 16, false),
+        pad("30d", 16, false),
+        pad("90d", 16, false),
+    );
+
+    let mut lines = vec![header, subheader];
+    for row in rows {
+        let (primary, detail) = render_medium_matrix_row(row);
+        lines.push(primary);
+        lines.push(detail);
+    }
+    lines.join("\n")
+}
+
+fn render_medium_matrix_row(row: &TrendMatrixRow) -> (String, String) {
+    let marker = if row.selected { ">" } else { " " };
+    let spark = spark_strip(&row.sparkline, 10);
+    let primary = format!(
+        "{} {} {} {} {}",
+        pad(marker, 2, false),
+        pad(row.label, 14, false),
+        pad(&row.current_value, 8, true),
+        pad(&row.concern_label, 11, false),
+        spark,
+    );
+    let cells = row
+        .cells
+        .iter()
+        .take(3)
+        .map(render_medium_matrix_cell)
+        .collect::<Vec<_>>();
+    let detail = format!(
+        "{} {} {} {}",
+        pad(" ", 2, false),
+        pad(cells.first().map_or("", String::as_str), 16, false),
+        pad(cells.get(1).map_or("", String::as_str), 16, false),
+        pad(cells.get(2).map_or("", String::as_str), 16, false),
+    );
+    (primary, detail)
+}
+
+fn render_medium_matrix_cell(cell: &TrendMatrixCell) -> String {
+    format!(
+        "{} {}",
+        pad(&format!("{} {}", cell.label, cell.delta_label), 9, false),
+        segmented_bar(cell.fill_percent, 4)
+    )
 }
 
 fn render_wide_matrix_row(row: &TrendMatrixRow) -> (String, String) {
@@ -409,13 +448,4 @@ fn pad(value: &str, width: usize, right_align: bool) -> String {
     } else {
         format!("{value:<width$.width$}")
     }
-}
-
-fn render_matrix_cell(cell: &TrendMatrixCell) -> String {
-    format!(
-        "{} {} {}",
-        cell.label,
-        cell.delta_label,
-        segmented_bar(cell.fill_percent, 5)
-    )
 }

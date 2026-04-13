@@ -317,32 +317,119 @@ fn render_app_status_bar(
 }
 
 fn app_status_line(title: &str, width: u16) -> String {
-    let max_segments = match width {
-        0..=90 => 4,
-        91..=130 => 5,
-        _ => 7,
-    };
+    let width = usize::from(width);
+    if width == 0 {
+        return String::new();
+    }
+
     let mut segments = vec!["ringmaster.rs".to_owned()];
-    segments.extend(
-        title
-            .lines()
-            .flat_map(|line| line.split(" | "))
-            .map(str::trim)
-            .filter(|segment| !segment.is_empty())
-            .map(ToOwned::to_owned),
-    );
-    truncate_line(
-        &segments
-            .into_iter()
-            .take(max_segments)
-            .collect::<Vec<_>>()
-            .join(" | "),
-        width,
-    )
+    segments.extend(app_status_segments(title));
+
+    while joined_status_width(&segments) > width && segments.len() > 1 {
+        if let Some(index) = lowest_priority_status_segment_index(&segments) {
+            segments.remove(index);
+        } else {
+            break;
+        }
+    }
+
+    fit_status_segments(segments, width)
 }
 
 fn truncate_line(value: &str, width: u16) -> String {
     let width = usize::from(width);
+    let char_count = value.chars().count();
+    if char_count <= width {
+        return value.to_owned();
+    }
+    if width <= 3 {
+        return value.chars().take(width).collect();
+    }
+    let mut truncated = value.chars().take(width - 3).collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn app_status_segments(title: &str) -> Vec<String> {
+    title
+        .lines()
+        .flat_map(|line| line.split(" | "))
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn joined_status_width(segments: &[String]) -> usize {
+    let separator_width = 3usize;
+    let segment_width = segments
+        .iter()
+        .map(|segment| segment.chars().count())
+        .sum::<usize>();
+    let separator_count = segments.len().saturating_sub(1);
+    segment_width + separator_count.saturating_mul(separator_width)
+}
+
+fn lowest_priority_status_segment_index(segments: &[String]) -> Option<usize> {
+    segments
+        .iter()
+        .enumerate()
+        .skip(1)
+        .max_by_key(|(_, segment)| status_segment_priority(segment))
+        .map(|(index, _)| index)
+}
+
+fn status_segment_priority(segment: &str) -> usize {
+    if segment.starts_with("Connection:") {
+        1
+    } else if segment.starts_with("Viewing:") {
+        2
+    } else if segment.starts_with("Sync:") {
+        3
+    } else if segment.starts_with("Daily status:") {
+        4
+    } else if segment.starts_with("Latest sync:") {
+        5
+    } else if segment.starts_with("Access:") {
+        6
+    } else if segment.starts_with("Triggers:") {
+        7
+    } else {
+        8
+    }
+}
+
+fn fit_status_segments(mut segments: Vec<String>, width: usize) -> String {
+    if segments.is_empty() {
+        return String::new();
+    }
+
+    if segments.len() == 1 {
+        return ellipsize_ascii(&segments[0], width);
+    }
+
+    let separator = " | ";
+    loop {
+        let prefix = segments[..segments.len() - 1].join(separator);
+        let reserved = prefix.chars().count() + separator.chars().count();
+        if reserved >= width {
+            segments.pop();
+            if segments.len() == 1 {
+                return ellipsize_ascii(&segments[0], width);
+            }
+            continue;
+        }
+
+        let available_last = width - reserved;
+        if let Some(last_segment) = segments.last() {
+            let last = ellipsize_ascii(last_segment, available_last);
+            return format!("{prefix}{separator}{last}");
+        }
+        return prefix;
+    }
+}
+
+fn ellipsize_ascii(value: &str, width: usize) -> String {
     let char_count = value.chars().count();
     if char_count <= width {
         return value.to_owned();
@@ -3686,7 +3773,8 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("ops snapshot should render: {error}"));
 
         assert!(output.contains("Auth state: authenticated"));
-        assert!(output.contains("Granted scopes: personal, daily, heartrate"));
+        assert!(output.contains("Granted scopes:"));
+        assert!(output.contains("personal, daily, heartrate"));
         assert!(output.contains("Database path: "));
         assert!(output.contains("WARNINGS"));
         assert!(output.contains("COVERAGE"));
@@ -3742,9 +3830,12 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("compact status snapshot should render: {error}"));
 
         assert!(output.contains("Auth state: authenticated"));
-        assert!(output.contains("Granted scopes: personal, daily, heartrate"));
+        assert!(output.contains("Granted scopes:"));
+        assert!(output.contains("personal, daily, heartrate"));
         assert!(output.contains("Receiver heartbeat: missing"));
-        assert!(output.contains("Invalidation queue: pending=0"));
+        assert!(output.contains("Invalidation queue:"));
+        assert!(output.contains("pending=0"));
+        assert!(output.contains("[warn]"));
     }
 
     #[test]
@@ -3761,6 +3852,8 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("wide snapshot should render: {error}"));
 
         assert!(compact.contains("Connection: Connected"));
+        assert!(compact.contains("Viewing: 2026-04-08 | Sync: Idle"));
+        assert!(!compact.contains("Viewing: 2..."));
         assert!(compact.contains("READINESS"));
         assert!(compact.contains("ACTIVITY"));
         assert!(medium.contains("HEART RATE"));
@@ -3770,6 +3863,25 @@ mod tests {
         assert!(!compact.contains("HEADER / STATUS"));
         assert!(!medium.contains("HEADER / STATUS"));
         assert!(!wide.contains("HEADER / STATUS"));
+    }
+
+    #[test]
+    fn medium_trends_snapshot_uses_two_line_matrix_rows() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Trends;
+
+        let output = render_snapshot(&app, 120, 36)
+            .unwrap_or_else(|error| unreachable!("medium trends snapshot should render: {error}"));
+
+        assert!(output.contains("metric          current concern     spark"));
+        assert!(output.contains("7d               30d              90d"));
+        assert!(output.contains("7d -6.0   ████"));
+        assert!(output.contains("30d -6.0  ████"));
+        assert!(output.contains("90d -6.0  ████"));
+        assert!(!output.contains(
+            "metric          current   concern     7d               30d              90d              spark"
+        ));
     }
 
     #[test]
