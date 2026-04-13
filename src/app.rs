@@ -8531,6 +8531,27 @@ const fn capability_failure_markers(capability: CapabilityKind) -> &'static [&'s
     }
 }
 
+fn availability_from_partial_failure_message(
+    message: &str,
+    markers: &[&str],
+) -> Option<TelemetryAvailability> {
+    let mut saw_rate_limit = false;
+    let lower = message.to_ascii_lowercase();
+
+    for segment in lower.split(';') {
+        if !markers.iter().any(|marker| segment.contains(marker)) {
+            continue;
+        }
+        if segment.contains("429") || segment.contains("rate limit") {
+            saw_rate_limit = true;
+        } else {
+            return Some(TelemetryAvailability::Error);
+        }
+    }
+
+    saw_rate_limit.then_some(TelemetryAvailability::RateLimited)
+}
+
 fn partial_failure_availability_for_capability(
     snapshot: &LiveSnapshot,
     freshness_family: DataFamily,
@@ -8543,6 +8564,13 @@ fn partial_failure_availability_for_capability(
     let sync_state = sync_state_for(&snapshot.sync_states, freshness_family)?;
     if sync_state.status != SyncRunStatus::Partial {
         return None;
+    }
+    if let Some(availability) = sync_state
+        .message
+        .as_deref()
+        .and_then(|message| availability_from_partial_failure_message(message, markers))
+    {
+        return Some(availability);
     }
     let problem = sync_state.last_error.as_ref()?;
     let combined = format!(
@@ -13205,6 +13233,57 @@ mod tests {
         assert!(
             super::coverage_detail(&snapshot, super::CoverageFamily::Spo2).contains("daily_spo2")
         );
+    }
+
+    #[test]
+    fn telemetry_availability_for_metric_uses_capability_specific_partial_failures() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.auth_status.capability_report = CapabilityReport::from_scopes(
+            &["daily".to_owned(), "spo2".to_owned(), "stress".to_owned()],
+            &["daily".to_owned(), "spo2".to_owned(), "stress".to_owned()],
+        );
+        snapshot.daily_spo2.clear();
+        snapshot.daily_stress.clear();
+        snapshot.sync_states = vec![SyncStateRecord {
+            sync_key: "oura.daily".to_owned(),
+            status: SyncRunStatus::Partial,
+            cursor: None,
+            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
+            last_completed_at: Some("2026-04-08T12:01:00Z".to_owned()),
+            message: Some(
+                "Imported core daily rows; optional review-support endpoints degraded independently: daily_spo2 (Oura API problem 429: Too Many Requests); daily_stress (Oura API problem 500: Internal Server Error).".to_owned(),
+            ),
+            granted_scopes: vec![
+                "daily".to_owned(),
+                "spo2".to_owned(),
+                "stress".to_owned(),
+            ],
+            last_error: Some(OuraProblem::new(
+                Some(429),
+                "Too Many Requests",
+                Some("daily_spo2 rate limited".to_owned()),
+            )),
+            failure_count: 1,
+            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
+            last_trigger_source: Some("manual".to_owned()),
+            last_trigger_detail: None,
+        }];
+
+        let spo2 = super::telemetry_availability_for_metric(
+            &snapshot,
+            CapabilityKind::Spo2,
+            DataFamily::Daily,
+            false,
+        );
+        let stress = super::telemetry_availability_for_metric(
+            &snapshot,
+            CapabilityKind::Stress,
+            DataFamily::Daily,
+            false,
+        );
+
+        assert_eq!(spo2, TelemetryAvailability::RateLimited);
+        assert_eq!(stress, TelemetryAvailability::Error);
     }
 
     #[test]
