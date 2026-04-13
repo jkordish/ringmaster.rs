@@ -448,6 +448,10 @@ Important current usage:
 - `--screen ai` renders deterministic AI workbench snapshots
 - demo AI snapshots cover provider-disabled, preflight, running, success, failure/cancel, and saved-detail paths
 - `--screen status` renders deterministic Status/Ops snapshots, including eval-health diagnostics
+- `--ansi-sidecar` adds color-aware `.ansi` artifacts alongside the normal `.txt` snapshots
+- `--color-mode <mode>` controls ANSI sidecar rendering with `current`, `truecolor`, `ansi256`, `ansi16`, or `mono`
+- for deterministic color QA, prefer explicit `truecolor` plus `mono`
+- when `--ansi-sidecar` is passed without explicit modes, Ringmaster writes environment-driven `current` and `mono` sidecars by default
 
 ## Verification sequence
 

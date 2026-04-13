@@ -74,10 +74,13 @@ cargo run -- review week --demo
 
 ```bash
 cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots
+cargo run -- ui snapshot --demo --screen dashboard --size compact --size medium --size wide --ansi-sidecar --color-mode truecolor --color-mode mono --out-dir /tmp/ringmaster-dashboard-ui
 cargo run -- ui snapshot --screen explain --screen patterns --screen review --demo --out-dir /tmp/ringmaster-telemetry-ui
 cargo run -- ui snapshot --screen ai --demo --out-dir /tmp/ringmaster-ai-ui
 cargo run -- ui snapshot --screen status --demo --out-dir /tmp/ringmaster-status-ui
 ```
+
+When `--ansi-sidecar` is enabled, Ringmaster writes the usual stable `.txt` artifacts plus color-aware `.ansi` sidecars for visual QA. For regression work, prefer explicit `truecolor` and `mono`; if you omit `--color-mode`, Ringmaster defaults to environment-driven `current` plus `mono`.
 
 ### Run the snapshot library and report workflow
 

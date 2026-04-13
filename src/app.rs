@@ -453,10 +453,33 @@ pub struct CoverageCellView {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DashboardScoreBand {
+    Optimal,
+    Good,
+    Fair,
+    PayAttention,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DashboardDeltaState {
+    Cool,
+    Neutral,
+    Warm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DashboardJudgedState {
+    Ok,
+    Warn,
+    Alert,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardScoreTile {
     pub availability: TelemetryAvailability,
     pub primary_value: String,
+    pub score_band: Option<DashboardScoreBand>,
     pub secondary_lines: Vec<String>,
     pub delta_label: String,
     pub trend: Vec<u64>,
@@ -469,6 +492,7 @@ pub struct DashboardSleepTile {
     pub availability: TelemetryAvailability,
     pub duration_label: String,
     pub score_label: String,
+    pub score_band: Option<DashboardScoreBand>,
     pub trend: Vec<u64>,
     pub strip_note: String,
 }
@@ -479,6 +503,8 @@ pub struct DashboardTrendPanel {
     pub primary_label: String,
     pub baseline_label: String,
     pub range_label: String,
+    pub delta_state: DashboardDeltaState,
+    pub judged_state: Option<DashboardJudgedState>,
     pub values: Vec<u64>,
     pub note: String,
 }
@@ -488,6 +514,8 @@ pub struct DashboardThermometerPanel {
     pub availability: TelemetryAvailability,
     pub deviation_tenths: Option<i16>,
     pub value_label: String,
+    pub delta_state: DashboardDeltaState,
+    pub judged_state: Option<DashboardJudgedState>,
     pub note: String,
 }
 
@@ -495,6 +523,10 @@ pub struct DashboardThermometerPanel {
 pub struct DashboardHistogramPanel {
     pub availability: TelemetryAvailability,
     pub primary_label: String,
+    pub delta_label: String,
+    pub range_label: String,
+    pub delta_state: DashboardDeltaState,
+    pub judged_state: Option<DashboardJudgedState>,
     pub bars: Vec<u64>,
     pub note: String,
 }
@@ -513,6 +545,8 @@ pub struct DashboardBreakdownRail {
     pub availability: TelemetryAvailability,
     pub fill_percent: u16,
     pub delta_label: String,
+    pub delta_state: DashboardDeltaState,
+    pub judged_state: Option<DashboardJudgedState>,
     pub note: String,
     pub selected: bool,
 }
@@ -3998,6 +4032,9 @@ fn build_dashboard_model(
             primary_value: selected_daily
                 .and_then(|row| row.readiness_score)
                 .map_or_else(|| "--".to_owned(), |value| value.to_string()),
+            score_band: selected_daily
+                .and_then(|row| row.readiness_score)
+                .map(dashboard_score_band_for_value),
             secondary_lines: vec![
                 selected_daily.and_then(|row| row.sleep_score).map_or_else(
                     || "sleep score --".to_owned(),
@@ -4028,6 +4065,9 @@ fn build_dashboard_model(
             score_label: selected_daily
                 .and_then(|row| row.sleep_score)
                 .map_or_else(|| "score --".to_owned(), |value| format!("score {value}")),
+            score_band: selected_daily
+                .and_then(|row| row.sleep_score)
+                .map(dashboard_score_band_for_value),
             trend: values_from_metric_points(&metric_points_from_daily(
                 &snapshot.daily_history,
                 |row| row.sleep_duration_seconds.map(crate::numeric::i64_to_f64),
@@ -4053,6 +4093,10 @@ fn build_dashboard_model(
                     .and_then(|record| record.activity_score)
                     .map_or_else(|| "score --".to_owned(), |value| format!("score {value}")),
             ],
+            score_band: selected_activity
+                .and_then(|record| record.activity_score)
+                .or_else(|| selected_daily.and_then(|row| row.activity_score))
+                .map(dashboard_score_band_for_value),
             delta_label: activity_delta_label(snapshot, &selected_day),
             trend: values_from_metric_points(&metric_points_from_activity(
                 &snapshot.daily_activity,
@@ -4076,6 +4120,8 @@ fn build_dashboard_model(
                 .map_or_else(|| "--".to_owned(), |value| format!("{value:.0} ms")),
             baseline_label: metric_delta_label(&hrv_insight),
             range_label: metric_range_label(&hrv_points),
+            delta_state: dashboard_delta_state_for_insight(&hrv_insight),
+            judged_state: None,
             values: values_from_metric_points(&hrv_points),
             note: selected_metric_note(
                 "HRV",
@@ -4105,6 +4151,13 @@ fn build_dashboard_model(
             value_label: selected_readiness
                 .and_then(|row| row.temperature_deviation)
                 .map_or_else(|| "--".to_owned(), |value| format!("{value:+.1}°C")),
+            delta_state: dashboard_delta_state_from_signed_delta(
+                selected_readiness.and_then(|row| row.temperature_deviation),
+                0.2,
+            ),
+            judged_state: dashboard_temp_judged_state(
+                selected_readiness.and_then(|row| row.temperature_deviation),
+            ),
             note: selected_readiness
                 .and_then(|row| row.temperature_trend_deviation)
                 .map_or_else(
@@ -4120,6 +4173,8 @@ fn build_dashboard_model(
             primary_label: heart_rate_primary_label(snapshot, &selected_day),
             baseline_label: metric_delta_label(&heartrate_insight),
             range_label: metric_range_label(&snapshot.heartrate_daily_averages),
+            delta_state: dashboard_delta_state_for_insight(&heartrate_insight),
+            judged_state: dashboard_rhr_judged_state(&heartrate_insight),
             values: values_from_metric_points(&snapshot.heartrate_daily_averages),
             note: heartrate_insight.summary.clone(),
         },
@@ -4130,6 +4185,8 @@ fn build_dashboard_model(
                 .map_or_else(|| "--".to_owned(), |value| format!("{value:.1}%")),
             baseline_label: metric_delta_label(&spo2_insight),
             range_label: metric_range_label(&spo2_points),
+            delta_state: dashboard_delta_state_for_insight(&spo2_insight),
+            judged_state: None,
             values: values_from_metric_points(&spo2_points),
             note: selected_spo2
                 .and_then(|record| record.breathing_disturbance_index)
@@ -4152,6 +4209,10 @@ fn build_dashboard_model(
             primary_label: selected_sleep_period
                 .and_then(|record| record.average_breath)
                 .map_or_else(|| "--".to_owned(), |value| format!("{value:.1} br/min")),
+            delta_label: metric_delta_label(&respiratory_insight),
+            range_label: metric_range_label(&respiratory_points),
+            delta_state: dashboard_delta_state_for_insight(&respiratory_insight),
+            judged_state: dashboard_respiratory_judged_state(&respiratory_insight),
             bars: values_from_metric_points(&respiratory_points),
             note: selected_metric_note(
                 "respiratory-rate",
@@ -8422,6 +8483,93 @@ fn metric_delta_label(insight: &MetricInsight) -> String {
     )
 }
 
+const fn dashboard_score_band_for_value(value: u8) -> DashboardScoreBand {
+    match value {
+        85..=100 => DashboardScoreBand::Optimal,
+        70..=84 => DashboardScoreBand::Good,
+        60..=69 => DashboardScoreBand::Fair,
+        _ => DashboardScoreBand::PayAttention,
+    }
+}
+
+const fn dashboard_score_band_to_judged_state(
+    score_band: Option<DashboardScoreBand>,
+) -> Option<DashboardJudgedState> {
+    match score_band {
+        Some(DashboardScoreBand::Optimal | DashboardScoreBand::Good) => {
+            Some(DashboardJudgedState::Ok)
+        }
+        Some(DashboardScoreBand::Fair) => Some(DashboardJudgedState::Warn),
+        Some(DashboardScoreBand::PayAttention) => Some(DashboardJudgedState::Alert),
+        None => None,
+    }
+}
+
+fn dashboard_delta_state_from_signed_delta(
+    delta: Option<f64>,
+    neutral_threshold: f64,
+) -> DashboardDeltaState {
+    match delta {
+        Some(value) if value <= -neutral_threshold => DashboardDeltaState::Cool,
+        Some(value) if value >= neutral_threshold => DashboardDeltaState::Warm,
+        _ => DashboardDeltaState::Neutral,
+    }
+}
+
+fn dashboard_delta_state_for_insight(insight: &MetricInsight) -> DashboardDeltaState {
+    if let Some(z_score) = insight.baseline_7d.z_score {
+        return dashboard_delta_state_from_signed_delta(Some(z_score), 0.7);
+    }
+
+    if let Some(delta) = insight.baseline_7d.delta_from_today {
+        if let Some(mean) = insight.baseline_7d.mean {
+            let relative_delta = if mean.abs() > f64::EPSILON {
+                delta / mean.abs()
+            } else {
+                delta
+            };
+            return dashboard_delta_state_from_signed_delta(Some(relative_delta), 0.05);
+        }
+        return dashboard_delta_state_from_signed_delta(Some(delta), 0.2);
+    }
+
+    DashboardDeltaState::Neutral
+}
+
+fn dashboard_rhr_judged_state(insight: &MetricInsight) -> Option<DashboardJudgedState> {
+    let delta = insight.baseline_7d.delta_from_today?;
+
+    let z_score = insight.baseline_7d.z_score.unwrap_or_default();
+    if delta >= 6.0 || z_score >= 2.5 {
+        Some(DashboardJudgedState::Alert)
+    } else if delta >= 3.0 || z_score >= 1.5 {
+        Some(DashboardJudgedState::Warn)
+    } else {
+        None
+    }
+}
+
+fn dashboard_respiratory_judged_state(insight: &MetricInsight) -> Option<DashboardJudgedState> {
+    let delta = insight.baseline_7d.delta_from_today?;
+
+    let z_score = insight.baseline_7d.z_score.unwrap_or_default().abs();
+    if delta.abs() >= 0.8 || z_score >= 2.5 {
+        Some(DashboardJudgedState::Alert)
+    } else if delta.abs() >= 0.4 || z_score >= 1.5 {
+        Some(DashboardJudgedState::Warn)
+    } else {
+        None
+    }
+}
+
+fn dashboard_temp_judged_state(delta: Option<f64>) -> Option<DashboardJudgedState> {
+    match delta.map(f64::abs) {
+        Some(value) if value >= 0.6 => Some(DashboardJudgedState::Alert),
+        Some(value) if value >= 0.3 => Some(DashboardJudgedState::Warn),
+        _ => None,
+    }
+}
+
 fn metric_range_label(history: &[MetricPoint]) -> String {
     let mut values = history.iter().map(|point| point.value);
     let Some(first) = values.next() else {
@@ -8688,6 +8836,8 @@ fn build_dashboard_breakdown_rails(
             availability: TelemetryAvailability::Unsupported,
             fill_percent: 0,
             delta_label: "scope pending".to_owned(),
+            delta_state: DashboardDeltaState::Neutral,
+            judged_state: None,
             note: "HRV balance is reserved until HRV history is stored locally.".to_owned(),
             selected: false,
         },
@@ -8703,6 +8853,8 @@ fn build_dashboard_breakdown_rails(
             },
             fill_percent: heartrate_fill,
             delta_label: metric_delta_label(inputs.heartrate_insight),
+            delta_state: dashboard_delta_state_for_insight(inputs.heartrate_insight),
+            judged_state: dashboard_rhr_judged_state(inputs.heartrate_insight),
             note: inputs.heartrate_insight.summary.clone(),
             selected: false,
         },
@@ -8715,6 +8867,16 @@ fn build_dashboard_breakdown_rails(
             },
             fill_percent: sleep_fill,
             delta_label: metric_delta_label(inputs.sleep_insight),
+            delta_state: dashboard_delta_state_for_insight(inputs.sleep_insight),
+            judged_state: dashboard_score_band_to_judged_state(
+                inputs
+                    .snapshot
+                    .daily_history
+                    .iter()
+                    .find(|row| row.day == inputs.selected_day)
+                    .and_then(|row| row.sleep_score)
+                    .map(dashboard_score_band_for_value),
+            ),
             note: selected_day_baseline_sentence(
                 "Sleep",
                 inputs.selected_day,
@@ -8731,6 +8893,23 @@ fn build_dashboard_breakdown_rails(
             },
             fill_percent: recovery_fill.max(temp_fill),
             delta_label: metric_delta_label(inputs.readiness_insight),
+            delta_state: dashboard_delta_state_for_insight(inputs.readiness_insight),
+            judged_state: dashboard_score_band_to_judged_state(
+                inputs
+                    .snapshot
+                    .daily_history
+                    .iter()
+                    .find(|row| row.day == inputs.selected_day)
+                    .and_then(|row| row.readiness_score)
+                    .map(dashboard_score_band_for_value),
+            )
+            .or_else(|| {
+                dashboard_temp_judged_state(
+                    inputs
+                        .selected_readiness
+                        .and_then(|row| row.temperature_deviation),
+                )
+            }),
             note: inputs
                 .selected_stress
                 .and_then(|row| row.day_summary.clone())
@@ -9680,6 +9859,7 @@ const fn empty_dashboard_model() -> DashboardModel {
         readiness: DashboardScoreTile {
             availability: TelemetryAvailability::NoData,
             primary_value: String::new(),
+            score_band: None,
             secondary_lines: Vec::new(),
             delta_label: String::new(),
             trend: Vec::new(),
@@ -9690,12 +9870,14 @@ const fn empty_dashboard_model() -> DashboardModel {
             availability: TelemetryAvailability::NoData,
             duration_label: String::new(),
             score_label: String::new(),
+            score_band: None,
             trend: Vec::new(),
             strip_note: String::new(),
         },
         activity: DashboardScoreTile {
             availability: TelemetryAvailability::NoData,
             primary_value: String::new(),
+            score_band: None,
             secondary_lines: Vec::new(),
             delta_label: String::new(),
             trend: Vec::new(),
@@ -9707,6 +9889,8 @@ const fn empty_dashboard_model() -> DashboardModel {
             primary_label: String::new(),
             baseline_label: String::new(),
             range_label: String::new(),
+            delta_state: DashboardDeltaState::Neutral,
+            judged_state: None,
             values: Vec::new(),
             note: String::new(),
         },
@@ -9714,6 +9898,8 @@ const fn empty_dashboard_model() -> DashboardModel {
             availability: TelemetryAvailability::NoData,
             deviation_tenths: None,
             value_label: String::new(),
+            delta_state: DashboardDeltaState::Neutral,
+            judged_state: None,
             note: String::new(),
         },
         heart_rate: DashboardTrendPanel {
@@ -9721,12 +9907,18 @@ const fn empty_dashboard_model() -> DashboardModel {
             primary_label: String::new(),
             baseline_label: String::new(),
             range_label: String::new(),
+            delta_state: DashboardDeltaState::Neutral,
+            judged_state: None,
             values: Vec::new(),
             note: String::new(),
         },
         respiratory_rate: DashboardHistogramPanel {
             availability: TelemetryAvailability::Unsupported,
             primary_label: String::new(),
+            delta_label: String::new(),
+            range_label: String::new(),
+            delta_state: DashboardDeltaState::Neutral,
+            judged_state: None,
             bars: Vec::new(),
             note: String::new(),
         },
@@ -9735,6 +9927,8 @@ const fn empty_dashboard_model() -> DashboardModel {
             primary_label: String::new(),
             baseline_label: String::new(),
             range_label: String::new(),
+            delta_state: DashboardDeltaState::Neutral,
+            judged_state: None,
             values: Vec::new(),
             note: String::new(),
         },

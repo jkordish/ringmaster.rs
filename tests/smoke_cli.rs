@@ -108,6 +108,43 @@ async fn ui_snapshot_demo_writes_artifacts() {
 }
 
 #[tokio::test]
+async fn ui_snapshot_demo_writes_ansi_sidecars_when_requested() {
+    let out_dir = ok(tempdir(), "tempdir should build");
+    let out_path = out_dir.path().join("color-snapshots");
+    let out_arg = out_path.to_string_lossy().into_owned();
+
+    let result = ringmaster::run_from([
+        "ringmaster",
+        "ui",
+        "snapshot",
+        "--demo",
+        "--screen",
+        "dashboard",
+        "--size",
+        "compact",
+        "--ansi-sidecar",
+        "--color-mode",
+        "truecolor",
+        "--color-mode",
+        "mono",
+        "--out-dir",
+        &out_arg,
+    ])
+    .await;
+    assert!(result.is_ok(), "ansi ui snapshot should run");
+
+    let output = some(
+        ok(result, "unexpected ansi ui snapshot failure"),
+        "ansi ui snapshot should render command output",
+    );
+
+    assert!(output.contains("ansi_sidecars: truecolor, mono"));
+    assert!(out_path.join("dashboard-compact.txt").exists());
+    assert!(out_path.join("dashboard-compact-truecolor.ansi").exists());
+    assert!(out_path.join("dashboard-compact-mono.ansi").exists());
+}
+
+#[tokio::test]
 async fn ui_snapshot_ai_demo_writes_ai_workbench_artifacts() {
     let out_dir = ok(tempdir(), "tempdir should build");
     let out_path = out_dir.path().join("ai-snapshots");

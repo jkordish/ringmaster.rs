@@ -16,6 +16,7 @@ use ratatui::{
     backend::{CrosstermBackend, TestBackend},
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier},
     text::{Line, Span},
     widgets::{Block, Clear, Paragraph, Tabs, Wrap},
 };
@@ -50,7 +51,7 @@ use crate::store::queries::{
 };
 use crate::ui::chrome::{self, PanelKind};
 use crate::ui::layout::UiContext;
-use crate::ui::theme::{Theme, Tone};
+use crate::ui::theme::{ColorCapability, Theme, Tone};
 
 enum WorkerCommand {
     ManualRefresh,
@@ -122,7 +123,7 @@ pub fn run(config: &Config, app: &mut AppState) -> Result<()> {
         ));
     }
 
-    let mut session = TerminalSession::start()?;
+    let mut session = TerminalSession::start(Theme::for_capability(ColorCapability::detect()))?;
     let tick_rate = Duration::from_millis(250);
     let (worker_tx, mut worker_actions, worker_handle) = if app.mode == RunMode::Live {
         let (command_tx, action_rx, handle) = spawn_refresh_worker(config.clone());
@@ -202,6 +203,22 @@ pub fn render_snapshot(app: &AppState, width: u16, height: u16) -> Result<String
     Ok(buffer_to_string(&buffer))
 }
 
+/// Renders the current app state into an ANSI-styled terminal snapshot string.
+///
+/// # Errors
+///
+/// Returns an error when the in-memory terminal backend cannot be constructed or
+/// the frame cannot be rendered.
+pub fn render_snapshot_ansi(
+    app: &AppState,
+    width: u16,
+    height: u16,
+    capability: ColorCapability,
+) -> Result<String> {
+    let buffer = render_buffer_with_capability(app, width, height, capability)?;
+    Ok(buffer_to_ansi(&buffer))
+}
+
 /// Renders the current app state into a Ratatui buffer.
 ///
 /// # Errors
@@ -209,11 +226,27 @@ pub fn render_snapshot(app: &AppState, width: u16, height: u16) -> Result<String
 /// Returns an error when the in-memory terminal backend cannot be constructed or
 /// the frame cannot be rendered.
 pub fn render_buffer(app: &AppState, width: u16, height: u16) -> Result<Buffer> {
+    render_buffer_with_capability(app, width, height, ColorCapability::TrueColor)
+}
+
+/// Renders the current app state into a Ratatui buffer for a specific color capability.
+///
+/// # Errors
+///
+/// Returns an error when the in-memory terminal backend cannot be constructed or
+/// the frame cannot be rendered.
+pub fn render_buffer_with_capability(
+    app: &AppState,
+    width: u16,
+    height: u16,
+    capability: ColorCapability,
+) -> Result<Buffer> {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend)
         .map_err(|error| RingmasterError::Ui(format!("building test terminal failed: {error}")))?;
+    let theme = Theme::for_capability(capability);
     terminal
-        .draw(|frame| draw(frame, app))
+        .draw(|frame| draw_with_theme(frame, app, &theme))
         .map_err(|error| RingmasterError::Ui(format!("drawing test terminal failed: {error}")))?;
     Ok(terminal.backend().buffer().clone())
 }
@@ -232,12 +265,120 @@ fn buffer_to_string(buffer: &Buffer) -> String {
     lines.join("\n")
 }
 
-fn draw(frame: &mut ratatui::Frame<'_>, app: &AppState) {
-    let theme = Theme::default();
+fn buffer_to_ansi(buffer: &Buffer) -> String {
+    let mut output = String::new();
+    let mut current_fg = Color::Reset;
+    let mut active_bg = Color::Reset;
+    let mut current_modifier = Modifier::empty();
+
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            let cell = &buffer[(x, y)];
+            if cell.fg != current_fg || cell.bg != active_bg || cell.modifier != current_modifier {
+                output.push_str(&ansi_style_prefix(cell.fg, cell.bg, cell.modifier));
+                current_fg = cell.fg;
+                active_bg = cell.bg;
+                current_modifier = cell.modifier;
+            }
+            output.push_str(cell.symbol());
+        }
+        if current_fg != Color::Reset
+            || active_bg != Color::Reset
+            || current_modifier != Modifier::empty()
+        {
+            output.push_str("\u{1b}[0m");
+            current_fg = Color::Reset;
+            active_bg = Color::Reset;
+            current_modifier = Modifier::empty();
+        }
+        if y + 1 < buffer.area.height {
+            output.push('\n');
+        }
+    }
+
+    output
+}
+
+fn ansi_style_prefix(fg: Color, bg: Color, modifier: Modifier) -> String {
+    let mut codes = vec!["0".to_owned()];
+    if modifier.contains(Modifier::BOLD) {
+        codes.push("1".to_owned());
+    }
+    if modifier.contains(Modifier::DIM) {
+        codes.push("2".to_owned());
+    }
+    if modifier.contains(Modifier::ITALIC) {
+        codes.push("3".to_owned());
+    }
+    if modifier.contains(Modifier::UNDERLINED) {
+        codes.push("4".to_owned());
+    }
+    if modifier.contains(Modifier::REVERSED) {
+        codes.push("7".to_owned());
+    }
+    if modifier.contains(Modifier::CROSSED_OUT) {
+        codes.push("9".to_owned());
+    }
+    codes.push(ansi_color_code(fg, true));
+    codes.push(ansi_color_code(bg, false));
+    format!("\u{1b}[{}m", codes.join(";"))
+}
+
+fn ansi_color_code(color: Color, foreground: bool) -> String {
+    match color {
+        Color::Reset => {
+            if foreground {
+                "39".to_owned()
+            } else {
+                "49".to_owned()
+            }
+        }
+        Color::Black => ansi_basic_code(30, 40, foreground),
+        Color::Red => ansi_basic_code(31, 41, foreground),
+        Color::Green => ansi_basic_code(32, 42, foreground),
+        Color::Yellow => ansi_basic_code(33, 43, foreground),
+        Color::Blue => ansi_basic_code(34, 44, foreground),
+        Color::Magenta => ansi_basic_code(35, 45, foreground),
+        Color::Cyan => ansi_basic_code(36, 46, foreground),
+        Color::Gray => ansi_basic_code(37, 47, foreground),
+        Color::DarkGray => ansi_basic_code(90, 100, foreground),
+        Color::LightRed => ansi_basic_code(91, 101, foreground),
+        Color::LightGreen => ansi_basic_code(92, 102, foreground),
+        Color::LightYellow => ansi_basic_code(93, 103, foreground),
+        Color::LightBlue => ansi_basic_code(94, 104, foreground),
+        Color::LightMagenta => ansi_basic_code(95, 105, foreground),
+        Color::LightCyan => ansi_basic_code(96, 106, foreground),
+        Color::White => ansi_basic_code(97, 107, foreground),
+        Color::Rgb(red, green, blue) => {
+            if foreground {
+                format!("38;2;{red};{green};{blue}")
+            } else {
+                format!("48;2;{red};{green};{blue}")
+            }
+        }
+        Color::Indexed(index) => {
+            if foreground {
+                format!("38;5;{index}")
+            } else {
+                format!("48;5;{index}")
+            }
+        }
+    }
+}
+
+fn ansi_basic_code(foreground_code: u8, background_code: u8, foreground: bool) -> String {
+    if foreground {
+        foreground_code.to_string()
+    } else {
+        background_code.to_string()
+    }
+}
+
+fn draw_with_theme(frame: &mut ratatui::Frame<'_>, app: &AppState, theme: &Theme) {
     let ui = UiContext::new(frame.area());
     frame.render_widget(Block::default().style(theme.screen()), frame.area());
 
-    let app_frame = chrome::app_frame(&theme);
+    let app_frame = chrome::app_frame(theme);
     let inner = app_frame.inner(frame.area());
     frame.render_widget(app_frame, frame.area());
     if inner.width == 0 || inner.height == 0 {
@@ -254,7 +395,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &AppState) {
         ])
         .split(inner);
 
-    render_app_status_bar(frame, layout[0], app, &theme);
+    render_app_status_bar(frame, layout[0], app, theme);
 
     let top_nav_focused = app.is_region_focused(navigation::FocusRegion::TopNav);
     let top_nav_selected_index = if top_nav_focused {
@@ -298,12 +439,12 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &AppState) {
         .select(top_nav_selected_index);
     frame.render_widget(tabs, nav_layout[1]);
 
-    draw_active_screen(frame, layout[2], app, &ui, &theme);
+    draw_active_screen(frame, layout[2], app, &ui, theme);
 
     let footer = Paragraph::new(app.footer(ui.viewport)).style(theme.annotation());
     frame.render_widget(footer, layout[3]);
 
-    draw_transient_overlays(frame, app, &theme);
+    draw_transient_overlays(frame, app, theme);
 }
 
 fn render_app_status_bar(
@@ -3114,10 +3255,11 @@ fn refresh_summary(report: &SyncReport, manual: bool) -> String {
 
 struct TerminalSession {
     terminal: Terminal<CrosstermBackend<Stdout>>,
+    theme: Theme,
 }
 
 impl TerminalSession {
-    fn start() -> Result<Self> {
+    fn start(theme: Theme) -> Result<Self> {
         enable_raw_mode().map_err(|error| RingmasterError::io("enabling raw mode", error))?;
         let mut output = stdout();
         execute!(output, EnterAlternateScreen)
@@ -3126,12 +3268,12 @@ impl TerminalSession {
         let terminal = Terminal::new(backend)
             .map_err(|error| RingmasterError::Ui(format!("creating terminal failed: {error}")))?;
 
-        Ok(Self { terminal })
+        Ok(Self { terminal, theme })
     }
 
     fn draw(&mut self, app: &AppState) -> Result<()> {
         self.terminal
-            .draw(|frame| draw(frame, app))
+            .draw(|frame| draw_with_theme(frame, app, &self.theme))
             .map_err(|error| RingmasterError::Ui(format!("drawing terminal failed: {error}")))?;
         Ok(())
     }
@@ -3148,7 +3290,9 @@ impl Drop for TerminalSession {
 #[cfg(test)]
 mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::buffer::Buffer;
     use ratatui::layout::{Constraint, Direction, Layout, Rect};
+    use ratatui::style::Modifier;
     use std::collections::HashMap;
     use std::future::pending;
     use std::time::Duration;
@@ -3175,6 +3319,7 @@ mod tests {
         DailySleepRecord, PersonalInfoRecord, SnapshotExportRecord, SyncRunStatus, SyncStateRecord,
     };
     use crate::tui::render_snapshot;
+    use crate::ui::theme::{ColorCapability, Theme, Tone};
     use crate::webhook::default_desired_subscriptions;
     use std::path::{Path, PathBuf};
 
@@ -3329,6 +3474,27 @@ mod tests {
             guidance: crate::config::GuidanceConfig::default(),
             ai: crate::config::AiConfig::default(),
         }
+    }
+
+    fn find_text_position(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
+        let symbols = needle.chars().map(|ch| ch.to_string()).collect::<Vec<_>>();
+        if symbols.is_empty() {
+            return None;
+        }
+        let needle_width = u16::try_from(symbols.len()).ok()?;
+
+        for y in 0..buffer.area.height {
+            for x in 0..=buffer.area.width.saturating_sub(needle_width) {
+                let matched = symbols.iter().enumerate().all(|(index, symbol)| {
+                    let offset = u16::try_from(index).ok();
+                    offset.is_some_and(|offset| buffer[(x + offset, y)].symbol() == symbol)
+                });
+                if matched {
+                    return Some((x, y));
+                }
+            }
+        }
+        None
     }
 
     fn test_auth_status(config: &Config, granted_scopes: &[String]) -> AuthStatus {
@@ -3966,10 +4132,89 @@ mod tests {
             unreachable!("medium dense-history dashboard snapshot should render: {error}")
         });
 
-        assert!(output.contains("326 327 328 329"));
-        assert!(output.contains("401 402 403 404"));
+        assert!(output.contains("326327328329"));
+        assert!(output.contains("401402403404"));
         assert!(output.contains("WEEKLY TRENDS"));
-        assert!(!medium_output.contains("326 327 328 329"));
+        assert!(!medium_output.contains("326327328329"));
+    }
+
+    #[test]
+    fn dashboard_weekly_header_uses_day_labels_in_standard_wide_demo_snapshot() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Dashboard;
+
+        let output = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| unreachable!("wide dashboard snapshot should render: {error}"));
+
+        assert!(output.contains("05"));
+        assert!(output.contains("06"));
+        assert!(output.contains("07"));
+        assert!(output.contains("08"));
+        assert!(!output.contains("0       0       0       0"));
+    }
+
+    #[test]
+    fn dashboard_buffer_styles_keep_focus_freshness_and_alert_separate() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Dashboard;
+        app.model.dashboard.readiness.primary_value = "58".to_owned();
+        app.model.dashboard.readiness.score_band =
+            Some(crate::app::DashboardScoreBand::PayAttention);
+
+        let buffer =
+            super::render_buffer_with_capability(&app, 160, 44, ColorCapability::TrueColor)
+                .unwrap_or_else(|error| unreachable!("dashboard buffer should render: {error}"));
+        let theme = Theme::for_capability(ColorCapability::TrueColor);
+
+        let (focus_x, focus_y) = find_text_position(&buffer, "> READINESS")
+            .unwrap_or_else(|| unreachable!("focused readiness title should exist"));
+        let focus_cell = &buffer[(focus_x, focus_y)];
+        assert_eq!(focus_cell.fg, theme.tone(Tone::Focus));
+
+        let (stale_x, stale_y) = find_text_position(&buffer, "[STALE]")
+            .unwrap_or_else(|| unreachable!("stale badge should exist"));
+        let stale_cell = &buffer[(stale_x + 1, stale_y)];
+        assert_eq!(stale_cell.fg, theme.tone(Tone::Stale));
+
+        let (score_x, score_y) = find_text_position(&buffer, "58")
+            .unwrap_or_else(|| unreachable!("alert score should exist"));
+        let score_cell = &buffer[(score_x, score_y)];
+        assert_eq!(score_cell.fg, theme.tone(Tone::JudgedAlert));
+
+        assert_ne!(focus_cell.fg, stale_cell.fg);
+        assert_ne!(focus_cell.fg, score_cell.fg);
+        assert_ne!(stale_cell.fg, score_cell.fg);
+    }
+
+    #[test]
+    fn dashboard_mono_buffer_preserves_focus_and_state_without_hue() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Dashboard;
+        app.model.dashboard.readiness.primary_value = "58".to_owned();
+        app.model.dashboard.readiness.score_band =
+            Some(crate::app::DashboardScoreBand::PayAttention);
+
+        let buffer = super::render_buffer_with_capability(&app, 160, 44, ColorCapability::Mono)
+            .unwrap_or_else(|error| unreachable!("dashboard mono buffer should render: {error}"));
+
+        let (focus_x, focus_y) = find_text_position(&buffer, "> READINESS")
+            .unwrap_or_else(|| unreachable!("focused readiness title should exist"));
+        let focus_cell = &buffer[(focus_x, focus_y)];
+        assert!(focus_cell.modifier.contains(Modifier::UNDERLINED));
+
+        let (stale_x, stale_y) = find_text_position(&buffer, "[STALE]")
+            .unwrap_or_else(|| unreachable!("stale badge should exist"));
+        let stale_cell = &buffer[(stale_x + 1, stale_y)];
+        assert!(stale_cell.modifier.contains(Modifier::BOLD));
+        assert!(!stale_cell.modifier.contains(Modifier::UNDERLINED));
+
+        let (score_x, score_y) = find_text_position(&buffer, "58")
+            .unwrap_or_else(|| unreachable!("alert score should exist"));
+        let score_cell = &buffer[(score_x, score_y)];
+        assert!(score_cell.modifier.contains(Modifier::REVERSED));
     }
 
     #[test]

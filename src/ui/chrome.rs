@@ -40,7 +40,7 @@ pub fn panel<'a>(theme: &Theme, title: impl Into<Line<'a>>, kind: PanelKind) -> 
     let tone = match kind {
         PanelKind::Hero | PanelKind::Section => Tone::Default,
         PanelKind::Subtle => Tone::Muted,
-        PanelKind::Diagnostic => Tone::Info,
+        PanelKind::Diagnostic => Tone::Fresh,
     };
 
     Block::default()
@@ -60,7 +60,7 @@ pub fn app_frame(theme: &Theme) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_set(border::DOUBLE)
-        .border_style(theme.strong_border(Tone::Accent))
+        .border_style(theme.strong_border(Tone::Default))
         .style(theme.screen())
 }
 
@@ -90,7 +90,7 @@ pub fn render_panel_shell(
         .border_style(match (spec.focused, spec.kind) {
             (true, _) => theme.strong_border(Tone::Focus),
             (false, PanelKind::Hero | PanelKind::Section) => theme.border(Tone::Default),
-            (false, PanelKind::Diagnostic) => theme.border(Tone::Info),
+            (false, PanelKind::Diagnostic) => theme.border(Tone::Muted),
             (false, PanelKind::Subtle) => theme.muted_border(),
         })
         .style(theme.panel_surface(matches!(spec.kind, PanelKind::Section | PanelKind::Subtle)));

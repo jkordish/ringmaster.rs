@@ -1,12 +1,13 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
-    prelude::{Alignment, Rect},
+    prelude::{Alignment, Line, Rect, Span},
     widgets::Paragraph,
 };
 
 use crate::app::{
-    DashboardBreakdownPanel, DashboardHistogramPanel, DashboardModel, DashboardScoreTile,
+    DashboardBreakdownPanel, DashboardBreakdownRail, DashboardDeltaState, DashboardHistogramPanel,
+    DashboardJudgedState, DashboardModel, DashboardScoreBand, DashboardScoreTile,
     DashboardSleepTile, DashboardThermometerPanel, DashboardTrendPanel, DashboardWeeklyHeatmap,
 };
 use crate::navigation::FocusRegion;
@@ -15,10 +16,10 @@ use crate::ui::{
     layout::{DashboardMetrics, UiContext, ViewportClass},
     telemetry::{
         TelemetryAvailability, WeeklyHeatmapMode, availability_scaffold, concise_detail,
-        concise_text, meter_bar, micro_histogram, primary_secondary_line, segmented_bar,
-        spark_strip, stacked_profile_rows, weekly_heatmap_rows,
+        concise_text, heatmap_day_label, meter_bar, micro_histogram, segmented_bar, spark_strip,
+        stacked_profile_rows,
     },
-    theme::Theme,
+    theme::{Theme, Tone},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -616,8 +617,24 @@ fn render_score_tile(
     }
 
     if area.height <= 3 {
-        let compact = format!("{} {}", score_tile.primary_value, score_tile.delta_label);
-        render_panel_text(frame, shell.content_area, compact, theme, Alignment::Center);
+        let cue_tone = score_band_cue_tone(score_tile.score_band);
+        render_panel_lines(
+            frame,
+            shell.content_area,
+            vec![Line::from(vec![
+                Span::styled(
+                    score_tile.primary_value.clone(),
+                    theme.dominant_metric(score_band_primary_tone(score_tile.score_band)),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    score_band_label(score_tile.score_band).to_owned(),
+                    theme.badge(cue_tone),
+                ),
+            ])],
+            theme,
+            Alignment::Center,
+        );
         return;
     }
 
@@ -638,6 +655,7 @@ fn render_score_tile(
     }
 
     let width = usize::from(shell.content_area.width);
+    let cue_tone = score_band_cue_tone(score_tile.score_band);
     let trend_width = clamped_instrument_width(width, state.metrics, 14, 22);
     let capacity = usize::from(shell.content_area.height).max(1);
     let note_slot = usize::from(state.focused || state.expanded);
@@ -648,40 +666,47 @@ fn render_score_tile(
 
     let mut lines = Vec::new();
     if instrument_rows == 2 {
-        lines.push(centered_line(
-            width,
-            spark_strip(&score_tile.trend, trend_width),
-        ));
+        lines.push(Line::from(Span::styled(
+            centered_line(width, spark_strip(&score_tile.trend, trend_width)),
+            theme.status_marker(cue_tone),
+        )));
     }
-    lines.push(centered_line(
-        width,
-        meter_bar(score_tile.ring_fill_percent, trend_width),
-    ));
-    lines.push(centered_line(
-        width,
-        concise_text(&score_tile.primary_value, width),
-    ));
-    lines.push(centered_line(
-        width,
-        concise_text(&score_tile.delta_label, width),
-    ));
+    let band_label = score_band_label(score_tile.score_band).to_owned();
+    lines.push(Line::from(Span::styled(
+        centered_line(width, meter_bar(score_tile.ring_fill_percent, trend_width)),
+        theme.status_marker(cue_tone),
+    )));
+    lines.push(Line::from(Span::styled(
+        centered_line(width, concise_text(&score_tile.primary_value, width)),
+        theme.dominant_metric(score_band_primary_tone(score_tile.score_band)),
+    )));
+    lines.push(Line::from(vec![
+        Span::styled(centered_line(width / 2, band_label), theme.badge(cue_tone)),
+        Span::styled(
+            centered_line(
+                width.saturating_sub(width / 2),
+                concise_text(&score_tile.delta_label, width / 2),
+            ),
+            theme.status_marker(cue_tone),
+        ),
+    ]));
     lines.extend(
         score_tile
             .secondary_lines
             .iter()
             .take(secondary_budget)
-            .map(|line| centered_line(width, concise_text(line, width))),
+            .map(|line| Line::from(centered_line(width, concise_text(line, width)))),
     );
     if state.focused || state.expanded {
-        lines.push(centered_line(
-            width,
-            concise_detail(&score_tile.note, width),
-        ));
+        lines.push(Line::from(Span::styled(
+            centered_line(width, concise_detail(&score_tile.note, width)),
+            theme.annotation(),
+        )));
     }
-    render_panel_text(
+    render_panel_lines(
         frame,
         centered_body_area(shell.content_area, lines.len()),
-        lines.join("\n"),
+        lines,
         theme,
         Alignment::Center,
     );
@@ -713,10 +738,21 @@ fn render_sleep_tile(
     }
 
     if area.height <= 3 {
-        render_panel_text(
+        let cue_tone = score_band_cue_tone(tile.score_band);
+        render_panel_lines(
             frame,
             shell.content_area,
-            format!("{} {}", tile.duration_label, tile.score_label),
+            vec![Line::from(vec![
+                Span::styled(
+                    tile.duration_label.clone(),
+                    theme.dominant_metric(score_band_primary_tone(tile.score_band)),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    score_band_label(tile.score_band).to_owned(),
+                    theme.badge(cue_tone),
+                ),
+            ])],
             theme,
             Alignment::Center,
         );
@@ -740,6 +776,7 @@ fn render_sleep_tile(
     }
 
     let width = usize::from(shell.content_area.width);
+    let cue_tone = score_band_cue_tone(tile.score_band);
     let band_width = clamped_instrument_width(width, state.metrics, 12, width.max(12));
     let capacity = usize::from(shell.content_area.height).max(4);
     let band_height = capacity
@@ -749,24 +786,43 @@ fn render_sleep_tile(
             2
         })
         .clamp(4, 7);
-    let mut lines = vec![primary_secondary_line(
-        &format!("duration {}", tile.duration_label),
-        &tile.score_label,
-        width,
-    )];
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            centered_line(width / 2, format!("duration {}", tile.duration_label)),
+            theme.dominant_metric(score_band_primary_tone(tile.score_band)),
+        ),
+        Span::styled(
+            centered_line(
+                width.saturating_sub(width / 2),
+                format!("{} {}", tile.score_label, score_band_label(tile.score_band)),
+            ),
+            theme.badge(cue_tone),
+        ),
+    ])];
     lines.extend(
         stacked_profile_rows(&tile.trend, band_width, band_height)
             .into_iter()
-            .map(|row| centered_line(width, row)),
+            .map(|row| {
+                Line::from(Span::styled(
+                    centered_line(width, row),
+                    theme.chart_ramp(3, 4),
+                ))
+            }),
     );
-    lines.push(centered_line(width, spark_strip(&tile.trend, band_width)));
+    lines.push(Line::from(Span::styled(
+        centered_line(width, spark_strip(&tile.trend, band_width)),
+        theme.status_marker(cue_tone),
+    )));
     if state.focused || state.expanded {
-        lines.push(concise_detail(&tile.strip_note, width));
+        lines.push(Line::from(Span::styled(
+            concise_detail(&tile.strip_note, width),
+            theme.annotation(),
+        )));
     }
-    render_panel_text(
+    render_panel_lines(
         frame,
         centered_body_area(shell.content_area, lines.len()),
-        lines.join("\n"),
+        lines,
         theme,
         Alignment::Center,
     );
@@ -799,12 +855,39 @@ fn render_trend_panel(
     }
 
     if area.height <= 3 {
-        let compact = if availability_has_reading(panel.availability) {
-            concise_text(&panel.primary_label, usize::from(shell.content_area.width))
+        if availability_has_reading(panel.availability) {
+            render_panel_lines(
+                frame,
+                shell.content_area,
+                vec![Line::from(vec![
+                    Span::styled(
+                        concise_text(
+                            &panel.primary_label,
+                            usize::from(shell.content_area.width) / 2,
+                        ),
+                        theme.dominant_metric(judged_primary_tone(panel.judged_state)),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(
+                        concise_text(
+                            &panel.baseline_label,
+                            usize::from(shell.content_area.width).saturating_div(2),
+                        ),
+                        theme.status_marker(delta_state_tone(panel.delta_state)),
+                    ),
+                ])],
+                theme,
+                Alignment::Left,
+            );
         } else {
-            concise_detail(&panel.note, usize::from(shell.content_area.width))
-        };
-        render_panel_text(frame, shell.content_area, compact, theme, Alignment::Left);
+            render_panel_text(
+                frame,
+                shell.content_area,
+                concise_detail(&panel.note, usize::from(shell.content_area.width)),
+                theme,
+                Alignment::Left,
+            );
+        }
         return;
     }
 
@@ -825,20 +908,45 @@ fn render_trend_panel(
     }
 
     let width = usize::from(shell.content_area.width);
-    let mut lines = vec![concise_text(&panel.primary_label, width)];
-    lines.extend(trend_instrument_lines(title, panel, width));
-    lines.push(primary_secondary_line(
-        &panel.baseline_label,
-        &panel.range_label,
-        width,
-    ));
-    render_panel_text(
-        frame,
-        shell.content_area,
-        lines.join("\n"),
-        theme,
-        Alignment::Left,
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            concise_text(&panel.primary_label, width.saturating_sub(10)),
+            theme.dominant_metric(judged_primary_tone(panel.judged_state)),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            judged_state_label(panel.judged_state).to_owned(),
+            theme.badge(judged_badge_tone(panel.judged_state)),
+        ),
+    ])];
+    lines.extend(
+        trend_instrument_lines(title, panel, width)
+            .into_iter()
+            .map(|line| {
+                Line::from(Span::styled(
+                    line,
+                    theme.status_marker(delta_state_tone(panel.delta_state)),
+                ))
+            }),
     );
+    lines.push(Line::from(vec![
+        Span::styled(
+            concise_text(&panel.baseline_label, width / 2),
+            theme.status_marker(delta_state_tone(panel.delta_state)),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            concise_text(&panel.range_label, width.saturating_sub(width / 2 + 1)),
+            theme.annotation(),
+        ),
+    ]));
+    if state.focused || state.expanded {
+        lines.push(Line::from(Span::styled(
+            concise_detail(&panel.note, width),
+            theme.annotation(),
+        )));
+    }
+    render_panel_lines(frame, shell.content_area, lines, theme, Alignment::Left);
 }
 
 fn render_temp_panel(
@@ -867,10 +975,20 @@ fn render_temp_panel(
     }
 
     if area.height <= 3 {
-        render_panel_text(
+        render_panel_lines(
             frame,
             shell.content_area,
-            concise_text(&panel.value_label, usize::from(shell.content_area.width)),
+            vec![Line::from(vec![
+                Span::styled(
+                    concise_text(&panel.value_label, usize::from(shell.content_area.width)),
+                    theme.dominant_metric(delta_state_tone(panel.delta_state)),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    judged_state_label(panel.judged_state).to_owned(),
+                    theme.badge(judged_badge_tone(panel.judged_state)),
+                ),
+            ])],
             theme,
             Alignment::Center,
         );
@@ -894,15 +1012,40 @@ fn render_temp_panel(
     }
 
     let width = usize::from(shell.content_area.width);
-    let mut lines = vec![centered_line(
-        width,
-        concise_text(&panel.value_label, width),
-    )];
-    lines.extend(compact_temperature_lines(panel.deviation_tenths, width));
-    render_panel_text(
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            centered_line(
+                width.saturating_sub(8),
+                concise_text(&panel.value_label, width),
+            ),
+            theme.dominant_metric(delta_state_tone(panel.delta_state)),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            judged_state_label(panel.judged_state).to_owned(),
+            theme.badge(judged_badge_tone(panel.judged_state)),
+        ),
+    ])];
+    lines.extend(
+        compact_temperature_lines(panel.deviation_tenths, width)
+            .into_iter()
+            .map(|line| {
+                Line::from(Span::styled(
+                    line,
+                    theme.status_marker(delta_state_tone(panel.delta_state)),
+                ))
+            }),
+    );
+    if state.focused || state.expanded {
+        lines.push(Line::from(Span::styled(
+            centered_line(width, concise_detail(&panel.note, width)),
+            theme.annotation(),
+        )));
+    }
+    render_panel_lines(
         frame,
         centered_body_area(shell.content_area, lines.len()),
-        lines.join("\n"),
+        lines,
         theme,
         Alignment::Center,
     );
@@ -935,12 +1078,39 @@ fn render_histogram_panel(
     }
 
     if area.height <= 3 {
-        let compact = if availability_has_reading(panel.availability) {
-            concise_text(&panel.primary_label, usize::from(shell.content_area.width))
+        if availability_has_reading(panel.availability) {
+            render_panel_lines(
+                frame,
+                shell.content_area,
+                vec![Line::from(vec![
+                    Span::styled(
+                        concise_text(
+                            &panel.primary_label,
+                            usize::from(shell.content_area.width) / 2,
+                        ),
+                        theme.dominant_metric(judged_primary_tone(panel.judged_state)),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(
+                        concise_text(
+                            &panel.delta_label,
+                            usize::from(shell.content_area.width).saturating_div(2),
+                        ),
+                        theme.status_marker(delta_state_tone(panel.delta_state)),
+                    ),
+                ])],
+                theme,
+                Alignment::Center,
+            );
         } else {
-            concise_detail(&panel.note, usize::from(shell.content_area.width))
-        };
-        render_panel_text(frame, shell.content_area, compact, theme, Alignment::Center);
+            render_panel_text(
+                frame,
+                shell.content_area,
+                concise_detail(&panel.note, usize::from(shell.content_area.width)),
+                theme,
+                Alignment::Center,
+            );
+        }
         return;
     }
 
@@ -962,24 +1132,46 @@ fn render_histogram_panel(
 
     let width = usize::from(shell.content_area.width);
     let instrument_width = clamped_instrument_width(width, state.metrics, 10, width.max(10));
-    let mut lines = vec![
-        concise_text(&panel.primary_label, width),
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            concise_text(&panel.primary_label, width.saturating_sub(10)),
+            theme.dominant_metric(judged_primary_tone(panel.judged_state)),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            judged_state_label(panel.judged_state).to_owned(),
+            theme.badge(judged_badge_tone(panel.judged_state)),
+        ),
+    ])];
+    lines.push(Line::from(Span::styled(
         centered_line(
             width,
             meter_bar(fill_percent(&panel.bars), instrument_width),
         ),
+        theme.status_marker(delta_state_tone(panel.delta_state)),
+    )));
+    lines.push(Line::from(Span::styled(
         micro_histogram(&panel.bars, width.max(6)),
-    ];
+        theme.chart_ramp(3, 4),
+    )));
+    lines.push(Line::from(vec![
+        Span::styled(
+            concise_text(&panel.delta_label, width / 2),
+            theme.status_marker(delta_state_tone(panel.delta_state)),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            concise_text(&panel.range_label, width.saturating_sub(width / 2 + 1)),
+            theme.annotation(),
+        ),
+    ]));
     if (state.focused || state.expanded) && shell.content_area.height >= 4 {
-        lines.push(concise_detail(&panel.note, width));
+        lines.push(Line::from(Span::styled(
+            concise_detail(&panel.note, width),
+            theme.annotation(),
+        )));
     }
-    render_panel_text(
-        frame,
-        shell.content_area,
-        lines.join("\n"),
-        theme,
-        Alignment::Center,
-    );
+    render_panel_lines(frame, shell.content_area, lines, theme, Alignment::Center);
 }
 
 fn render_breakdown_panel(
@@ -1008,11 +1200,29 @@ fn render_breakdown_panel(
     }
 
     if area.height <= 3 {
-        let compact = panel.rails.iter().find(|rail| rail.selected).map_or_else(
-            || concise_detail(&panel.note, usize::from(shell.content_area.width)),
-            |rail| format!("{} {}", rail.label, rail.delta_label),
-        );
-        render_panel_text(frame, shell.content_area, compact, theme, Alignment::Left);
+        if let Some(rail) = panel.rails.iter().find(|rail| rail.selected) {
+            render_panel_lines(
+                frame,
+                shell.content_area,
+                vec![breakdown_line(
+                    rail,
+                    usize::from(shell.content_area.width),
+                    theme,
+                    8,
+                    6,
+                )],
+                theme,
+                Alignment::Left,
+            );
+        } else {
+            render_panel_text(
+                frame,
+                shell.content_area,
+                concise_detail(&panel.note, usize::from(shell.content_area.width)),
+                theme,
+                Alignment::Left,
+            );
+        }
         return;
     }
 
@@ -1057,46 +1267,49 @@ fn render_breakdown_panel(
         .saturating_sub(panel.rails.len() + 2)
         .clamp(2, 4);
 
-    let mut lines = vec![format!(
-        "{:<label_width$} {:<bar_segments$} {:>delta_width$}",
-        "factor", "signal", "delta"
-    )];
-    lines.extend(panel.rails.iter().map(|rail| {
-        let label = format!("{} {}", if rail.selected { ">" } else { " " }, rail.label);
-        let status = if availability_has_reading(rail.availability) {
-            rail.delta_label.clone()
-        } else {
-            rail.availability.label().to_owned()
-        };
-        format!(
-            "{label:<label_width$} {} {:>delta_width$}",
-            segmented_bar(rail.fill_percent, bar_segments),
-            concise_text(&status, delta_width),
-        )
-    }));
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            format!("{:<label_width$}", "factor"),
+            theme.section_title(Tone::Muted),
+        ),
+        Span::styled(format!(" {:<bar_segments$}", "signal"), theme.annotation()),
+        Span::styled(
+            format!(" {:>delta_width$}", "delta"),
+            theme.section_title(Tone::Muted),
+        ),
+    ])];
+    lines.extend(
+        panel
+            .rails
+            .iter()
+            .map(|rail| breakdown_line(rail, label_width, theme, bar_segments, delta_width)),
+    );
     let support_width = width.saturating_sub(label_width + 1).max(10);
     for (index, row) in stacked_profile_rows(&panel.waveform, support_width, support_height)
         .into_iter()
         .enumerate()
     {
-        lines.push(format!(
-            "{:<label_width$} {}",
-            if index == 0 { "band" } else { "" },
-            row
-        ));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<label_width$}", if index == 0 { "band" } else { "" }),
+                theme.annotation(),
+            ),
+            Span::raw(" "),
+            Span::styled(row, theme.chart_ramp(3, 4)),
+        ]));
     }
-    lines.push(format!(
-        "{:<label_width$} {}",
-        "focus",
-        concise_text(&focus_note, width.saturating_sub(label_width + 1),)
-    ));
-    render_panel_text(
-        frame,
-        shell.content_area,
-        lines.join("\n"),
-        theme,
-        Alignment::Left,
-    );
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{:<label_width$}", "focus"),
+            theme.section_title(Tone::Muted),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            concise_text(&focus_note, width.saturating_sub(label_width + 1)),
+            theme.annotation(),
+        ),
+    ]));
+    render_panel_lines(frame, shell.content_area, lines, theme, Alignment::Left);
 }
 
 fn render_heatmap_panel(
@@ -1165,13 +1378,17 @@ fn render_heatmap_panel(
         .map(String::as_str)
         .collect::<Vec<_>>();
     let label_count = grid.day_labels.len().max(1);
-    let label_width = if use_dense_history { 6 } else { 8 };
-    let cell_width = width
-        .saturating_sub(label_width)
-        .checked_div(label_count)
-        .unwrap_or(1)
-        .saturating_sub(1)
-        .clamp(2, 6);
+    let label_width = if use_dense_history { 5 } else { 8 };
+    let available_width = width.saturating_sub(label_width);
+    let cell_width = if use_dense_history {
+        1
+    } else {
+        available_width
+            .checked_div(label_count)
+            .unwrap_or(1)
+            .saturating_sub(2)
+            .clamp(1, 6)
+    };
     let mode = if use_dense_history {
         WeeklyHeatmapMode::DenseHistory
     } else {
@@ -1182,31 +1399,30 @@ fn render_heatmap_panel(
         .checked_div(grid.rows.len().max(1))
         .unwrap_or(1)
         .clamp(1, 2);
-    let mut lines = weekly_heatmap_rows(
-        &grid.day_labels,
-        &row_refs,
-        &grid.rows,
-        grid.selected_cell,
+    let mut lines = styled_heatmap_lines(HeatmapRenderSpec {
+        theme,
+        grid,
+        row_labels: &row_refs,
         mode,
         cell_width,
         row_height,
-    );
-    lines.push(concise_text(
-        &selected_heatmap_summary(grid, &panel.row_labels, &panel.note),
+    });
+    lines.push(heatmap_summary_line(
+        theme,
+        grid,
+        &panel.row_labels,
+        &panel.note,
         width,
     ));
-    lines.push("band ░▒▓ higher".to_owned());
+    lines.push(heatmap_legend_line(theme));
     let rendered_lines = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     if (state.focused || state.expanded) && shell.content_area.height > rendered_lines {
-        lines.push(concise_detail(&panel.note, width));
+        lines.push(Line::from(Span::styled(
+            concise_detail(&panel.note, width),
+            theme.annotation(),
+        )));
     }
-    render_panel_text(
-        frame,
-        shell.content_area,
-        lines.join("\n"),
-        theme,
-        Alignment::Left,
-    );
+    render_panel_lines(frame, shell.content_area, lines, theme, Alignment::Left);
 }
 
 const fn availability_has_reading(availability: TelemetryAvailability) -> bool {
@@ -1220,27 +1436,66 @@ fn selected_heatmap_summary(
     grid: &crate::app::DashboardHeatmapGrid,
     row_labels: &[String],
     note: &str,
-) -> String {
+) -> Option<(String, Option<DashboardScoreBand>)> {
     grid.selected_cell
         .and_then(|(row_index, column_index)| {
             let row = grid.rows.get(row_index)?;
             let value = row.get(column_index).copied().flatten()?;
             let row_label = row_labels.get(row_index)?;
             let day_label = grid.day_labels.get(column_index)?;
-            Some(format!("{row_label} {value} | {day_label}"))
+            let score_band = score_band_from_value(value);
+            Some((
+                format!("{row_label} {value} | {day_label}"),
+                Some(score_band),
+            ))
         })
-        .unwrap_or_else(|| note.to_owned())
+        .or_else(|| {
+            if note.is_empty() {
+                None
+            } else {
+                Some((note.to_owned(), None))
+            }
+        })
 }
 
 fn render_panel_text(
     frame: &mut Frame<'_>,
     area: Rect,
-    text: String,
+    text: impl AsRef<str>,
+    theme: &Theme,
+    alignment: Alignment,
+) {
+    let text = text.as_ref();
+    render_panel_lines(
+        frame,
+        area,
+        text.lines()
+            .map(|line| Line::from(line.to_owned()))
+            .collect::<Vec<_>>(),
+        theme,
+        alignment,
+    );
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HeatmapRenderSpec<'a> {
+    theme: &'a Theme,
+    grid: &'a crate::app::DashboardHeatmapGrid,
+    row_labels: &'a [&'a str],
+    mode: WeeklyHeatmapMode,
+    cell_width: usize,
+    row_height: usize,
+}
+
+fn render_panel_lines(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    lines: Vec<Line<'static>>,
     theme: &Theme,
     alignment: Alignment,
 ) {
     frame.render_widget(
-        Paragraph::new(text)
+        Paragraph::new(lines)
             .style(theme.body())
             .alignment(alignment),
         area,
@@ -1342,4 +1597,242 @@ fn compact_temperature_lines(deviation_tenths: Option<i16>, width: usize) -> Vec
             )
         })
         .collect()
+}
+
+const fn score_band_label(score_band: Option<DashboardScoreBand>) -> &'static str {
+    match score_band {
+        Some(DashboardScoreBand::Optimal) => "optimal",
+        Some(DashboardScoreBand::Good) => "good",
+        Some(DashboardScoreBand::Fair) => "fair",
+        Some(DashboardScoreBand::PayAttention) => "watch",
+        None => "score",
+    }
+}
+
+const fn score_band_from_value(value: u8) -> DashboardScoreBand {
+    match value {
+        85..=100 => DashboardScoreBand::Optimal,
+        70..=84 => DashboardScoreBand::Good,
+        60..=69 => DashboardScoreBand::Fair,
+        _ => DashboardScoreBand::PayAttention,
+    }
+}
+
+const fn score_band_cue_tone(score_band: Option<DashboardScoreBand>) -> Tone {
+    match score_band {
+        Some(DashboardScoreBand::Optimal | DashboardScoreBand::Good) => Tone::JudgedOk,
+        Some(DashboardScoreBand::Fair) => Tone::JudgedWarn,
+        Some(DashboardScoreBand::PayAttention) => Tone::JudgedAlert,
+        None => Tone::Muted,
+    }
+}
+
+const fn score_band_primary_tone(score_band: Option<DashboardScoreBand>) -> Tone {
+    match score_band {
+        Some(DashboardScoreBand::Optimal) => Tone::JudgedOk,
+        Some(DashboardScoreBand::Fair) => Tone::JudgedWarn,
+        Some(DashboardScoreBand::PayAttention) => Tone::JudgedAlert,
+        Some(DashboardScoreBand::Good) | None => Tone::Default,
+    }
+}
+
+const fn delta_state_tone(delta_state: DashboardDeltaState) -> Tone {
+    match delta_state {
+        DashboardDeltaState::Cool => Tone::DeltaCool,
+        DashboardDeltaState::Neutral => Tone::Muted,
+        DashboardDeltaState::Warm => Tone::DeltaWarm,
+    }
+}
+
+const fn judged_badge_tone(judged_state: Option<DashboardJudgedState>) -> Tone {
+    match judged_state {
+        Some(DashboardJudgedState::Ok) => Tone::JudgedOk,
+        Some(DashboardJudgedState::Warn) => Tone::JudgedWarn,
+        Some(DashboardJudgedState::Alert) => Tone::JudgedAlert,
+        None => Tone::Muted,
+    }
+}
+
+const fn judged_primary_tone(judged_state: Option<DashboardJudgedState>) -> Tone {
+    match judged_state {
+        Some(DashboardJudgedState::Warn) => Tone::JudgedWarn,
+        Some(DashboardJudgedState::Alert) => Tone::JudgedAlert,
+        Some(DashboardJudgedState::Ok) | None => Tone::Default,
+    }
+}
+
+const fn judged_state_label(judged_state: Option<DashboardJudgedState>) -> &'static str {
+    match judged_state {
+        Some(DashboardJudgedState::Ok) => "ok",
+        Some(DashboardJudgedState::Warn) => "watch",
+        Some(DashboardJudgedState::Alert) => "alert",
+        None => "",
+    }
+}
+
+fn breakdown_line(
+    rail: &DashboardBreakdownRail,
+    label_width: usize,
+    theme: &Theme,
+    bar_segments: usize,
+    delta_width: usize,
+) -> Line<'static> {
+    let label = format!("{} {}", if rail.selected { ">" } else { " " }, rail.label);
+    let cue_text = if availability_has_reading(rail.availability) {
+        rail.delta_label.clone()
+    } else {
+        rail.availability.label().to_owned()
+    };
+    let marker_label = if !availability_has_reading(rail.availability) {
+        rail.availability.label().to_ascii_lowercase()
+    } else if rail.judged_state.is_some() {
+        judged_state_label(rail.judged_state).to_owned()
+    } else {
+        match rail.delta_state {
+            DashboardDeltaState::Cool => "cool".to_owned(),
+            DashboardDeltaState::Warm => "warm".to_owned(),
+            DashboardDeltaState::Neutral => "steady".to_owned(),
+        }
+    };
+    let label_style = if rail.selected {
+        theme.section_title(Tone::Focus)
+    } else {
+        theme.body()
+    };
+    let cue_tone = if !availability_has_reading(rail.availability) {
+        rail.availability.tone()
+    } else if rail.judged_state.is_some() {
+        judged_badge_tone(rail.judged_state)
+    } else {
+        delta_state_tone(rail.delta_state)
+    };
+
+    Line::from(vec![
+        Span::styled(format!("{label:<label_width$}"), label_style),
+        Span::styled(format!("[{marker_label:<5}]"), theme.badge(cue_tone)),
+        Span::raw(" "),
+        Span::styled(
+            segmented_bar(rail.fill_percent, bar_segments),
+            theme.annotation(),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:>delta_width$}", concise_text(&cue_text, delta_width)),
+            theme.status_marker(cue_tone),
+        ),
+    ])
+}
+
+fn styled_heatmap_lines(spec: HeatmapRenderSpec<'_>) -> Vec<Line<'static>> {
+    let HeatmapRenderSpec {
+        theme,
+        grid,
+        row_labels,
+        mode,
+        cell_width,
+        row_height,
+    } = spec;
+    let cell_width = cell_width.max(1);
+    let row_height = row_height.max(1);
+    let label_width = match mode {
+        WeeklyHeatmapMode::Standard => 8,
+        WeeklyHeatmapMode::DenseHistory => 5,
+    };
+    let slot_width = match mode {
+        WeeklyHeatmapMode::Standard => cell_width + 2,
+        WeeklyHeatmapMode::DenseHistory => 3,
+    };
+    let mut output = Vec::new();
+    let mut header_spans = vec![Span::raw(" ".repeat(label_width))];
+    for day in &grid.day_labels {
+        let label = heatmap_day_label(mode, day);
+        header_spans.push(Span::styled(
+            format!("{label:^slot_width$}"),
+            theme.section_title(Tone::Muted),
+        ));
+    }
+    output.push(Line::from(header_spans));
+
+    for (row_index, label) in row_labels.iter().enumerate() {
+        let mut row_spans = vec![Span::styled(
+            format!("{label:<label_width$}"),
+            theme.section_title(Tone::Muted),
+        )];
+        let mut repeat_spans = vec![Span::raw(" ".repeat(label_width))];
+        if let Some(values) = grid.rows.get(row_index) {
+            for (column_index, value) in values.iter().enumerate() {
+                let band = (*value).map(score_band_from_value);
+                let level = value.map_or(0, |score| usize::from(score) * 4 / 100 + 1);
+                let glyph = match level {
+                    0 => '·',
+                    1 => '░',
+                    2 => '▒',
+                    3 => '▓',
+                    _ => '█',
+                };
+                let fill = glyph.to_string().repeat(cell_width);
+                if grid.selected_cell == Some((row_index, column_index)) {
+                    let open = Span::styled("[", theme.badge(Tone::Focus));
+                    let body = Span::styled(fill, theme.status_marker(score_band_cue_tone(band)));
+                    let close = Span::styled("]", theme.badge(Tone::Focus));
+                    row_spans.push(open.clone());
+                    row_spans.push(body.clone());
+                    row_spans.push(close.clone());
+                    repeat_spans.push(open);
+                    repeat_spans.push(body);
+                    repeat_spans.push(close);
+                } else {
+                    let open = Span::raw(" ");
+                    let body = Span::styled(fill, theme.chart_ramp(level, 5));
+                    let close = Span::raw(" ");
+                    row_spans.push(open.clone());
+                    row_spans.push(body.clone());
+                    row_spans.push(close.clone());
+                    repeat_spans.push(open);
+                    repeat_spans.push(body);
+                    repeat_spans.push(close);
+                }
+            }
+        }
+        output.push(Line::from(row_spans));
+        for _ in 1..row_height {
+            output.push(Line::from(repeat_spans.clone()));
+        }
+    }
+
+    output
+}
+
+fn heatmap_summary_line(
+    theme: &Theme,
+    grid: &crate::app::DashboardHeatmapGrid,
+    row_labels: &[String],
+    note: &str,
+    width: usize,
+) -> Line<'static> {
+    let (summary, band) =
+        selected_heatmap_summary(grid, row_labels, note).unwrap_or_else(|| (note.to_owned(), None));
+    let mut spans = vec![Span::styled(
+        concise_text(&summary, width.saturating_sub(12)),
+        theme.body(),
+    )];
+    if band.is_some() {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!("[{}]", score_band_label(band)),
+            theme.badge(score_band_cue_tone(band)),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn heatmap_legend_line(theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("ramp ", theme.section_title(Tone::Muted)),
+        Span::styled("░", theme.chart_ramp(1, 5)),
+        Span::styled("▒", theme.chart_ramp(2, 5)),
+        Span::styled("▓", theme.chart_ramp(3, 5)),
+        Span::styled("█", theme.chart_ramp(4, 5)),
+        Span::styled(" higher", theme.annotation()),
+    ])
 }

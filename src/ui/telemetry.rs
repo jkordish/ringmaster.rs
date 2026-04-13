@@ -35,11 +35,10 @@ impl TelemetryAvailability {
     #[must_use]
     pub const fn tone(self) -> Tone {
         match self {
-            Self::Fresh => Tone::Positive,
-            Self::Stale | Self::RateLimited => Tone::Warning,
-            Self::NoData | Self::Unsupported => Tone::Muted,
-            Self::MissingScope => Tone::Info,
-            Self::Error => Tone::Danger,
+            Self::Fresh => Tone::Fresh,
+            Self::Stale | Self::RateLimited => Tone::Stale,
+            Self::NoData | Self::Unsupported | Self::MissingScope => Tone::Unavailable,
+            Self::Error => Tone::Error,
         }
     }
 }
@@ -53,7 +52,6 @@ pub fn panel_block<'a>(
     focused: bool,
     expanded: bool,
 ) -> Block<'a> {
-    let border_tone = if focused { Tone::Focus } else { status_tone };
     let marker = if focused { ">" } else { " " };
     let expand = if expanded { " [OPEN]" } else { "" };
     Block::default()
@@ -69,10 +67,10 @@ pub fn panel_block<'a>(
         .borders(Borders::ALL)
         .border_style(if focused {
             theme.strong_border(Tone::Focus)
-        } else if matches!(status_tone, Tone::Muted) {
+        } else if matches!(status_tone, Tone::Unavailable | Tone::Muted) {
             theme.muted_border()
         } else {
-            theme.border(border_tone)
+            theme.border(Tone::Default)
         })
         .style(theme.panel_surface(true))
 }
@@ -188,6 +186,29 @@ pub enum WeeklyHeatmapMode {
 }
 
 #[must_use]
+pub fn heatmap_day_label(mode: WeeklyHeatmapMode, day: &str) -> String {
+    match mode {
+        WeeklyHeatmapMode::Standard => day.rsplit_once('-').map_or_else(
+            || day.chars().next().unwrap_or('?').to_string(),
+            |(_, day_of_month)| day_of_month.to_owned(),
+        ),
+        WeeklyHeatmapMode::DenseHistory => day.rsplit_once('-').map_or_else(
+            || day.chars().take(2).collect::<String>(),
+            |(prefix, day_of_month)| {
+                let month = prefix.rsplit_once('-').map_or(prefix, |(_, month)| month);
+                let month_digit = month
+                    .trim_start_matches('0')
+                    .chars()
+                    .next()
+                    .unwrap_or_else(|| month.chars().last().unwrap_or('?'));
+                format!("{month_digit}{day_of_month}")
+            },
+        ),
+    }
+}
+
+#[must_use]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn weekly_heatmap_rows(
     day_labels: &[String],
     row_labels: &[&str],
@@ -208,20 +229,7 @@ pub fn weekly_heatmap_rows(
     let mut output = Vec::new();
     let mut header_cells = String::new();
     for day in day_labels {
-        let label = match mode {
-            WeeklyHeatmapMode::Standard => day.chars().next().unwrap_or('?').to_string(),
-            WeeklyHeatmapMode::DenseHistory => day.split_once('-').map_or_else(
-                || day.chars().take(2).collect::<String>(),
-                |(month, day)| {
-                    let month_digit = month
-                        .trim_start_matches('0')
-                        .chars()
-                        .next()
-                        .unwrap_or_else(|| month.chars().last().unwrap_or('?'));
-                    format!("{month_digit}{day}")
-                },
-            ),
-        };
+        let label = heatmap_day_label(mode, day);
         let slot_width = cell_width + 2;
         let _ = write!(header_cells, "{label:^slot_width$}");
     }
@@ -310,6 +318,7 @@ pub fn availability_scaffold(
 }
 
 #[must_use]
+#[allow(dead_code)]
 pub fn primary_secondary_line(primary: &str, secondary: &str, width: usize) -> String {
     let width = width.max(primary.len() + secondary.len() + 1);
     let gap = width.saturating_sub(primary.len() + secondary.len());
@@ -410,6 +419,24 @@ mod tests {
 
         assert!(rows[0].contains('M'));
         assert!(rows[1].contains("[▓▓]"));
+    }
+
+    #[test]
+    fn weekly_heatmap_rows_use_day_of_month_headers_for_date_labels() {
+        let rows = weekly_heatmap_rows(
+            &["04-05".to_owned(), "04-06".to_owned(), "04-07".to_owned()],
+            &["Sleep"],
+            &[vec![Some(30), Some(80), Some(55)]],
+            Some((0, 1)),
+            WeeklyHeatmapMode::Standard,
+            2,
+            1,
+        );
+
+        assert!(rows[0].contains("05"));
+        assert!(rows[0].contains("06"));
+        assert!(rows[0].contains("07"));
+        assert!(!rows[0].contains("0   0   0"));
     }
 
     #[test]

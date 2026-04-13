@@ -25,9 +25,9 @@ Surfaces:
 
 Lines:
 
-- `line_subtle`: internal separators and quiet shell edges
-- `line_normal`: standard panel shell
-- `line_strong`: outer frame and explicit emphasis
+- `border_subtle`: internal separators and quiet shell edges
+- `border_normal`: standard panel shell
+- `border_focus`: focused shell emphasis only
 
 Text:
 
@@ -38,22 +38,24 @@ Text:
 
 States:
 
-- `focus_accent`: keyboard focus/selection emphasis
-- `state_fresh`: fresh or healthy data state
-- `state_warn`: stale, caution, or partial confidence
-- `state_error`: hard failures
-- `state_info`: neutral-but-important operator context
-- `accent`: active navigation and selected analytical references
+- `focus_lilac`: keyboard focus and selection emphasis only
+- `fresh_cyan`: freshness, sync recency, and connected informational state
+- `ok_mint`: interpreted healthy or optimal state
+- `warn_butter`: stale, caution, fair, or attention-needed state
+- `alert_rose`: hard failure or judged alert state
+- `delta_cool`: below-baseline raw delta without moral meaning
+- `delta_warm`: above-baseline raw delta without moral meaning
+- `na_gray`: unavailable, missing scope, unsupported, or disabled state
 
 Critical rule:
 
-- focus and freshness must remain visually distinct; a focused stale panel and a fresh unfocused panel should not collapse into the same accent family
+- focus, freshness, and judged health must remain visually distinct; a focused stale panel, a fresh unfocused panel, and a judged alert state should never collapse into one accent family
 
 AI-specific interpretation:
 
-- `accent` and `focus` call out the active AI workbench slice or selected saved artifact
-- `warning` communicates privacy or provider concerns before launch
-- `info` communicates trust metadata such as stateless mode, disabled tools, and payload scope
+- `focus_lilac` calls out the active AI workbench slice or selected saved artifact
+- `warn_butter` communicates privacy or provider concerns before launch
+- `fresh_cyan` communicates trust metadata such as stateless mode, disabled tools, and payload scope
 
 ## Text hierarchy
 
@@ -89,7 +91,7 @@ Rules:
 - outer app frame carries the strongest line weight
 - primary panel shells use normal line weight
 - internal separators should prefer subtle lines or whitespace over nested boxes
-- focused panels use stronger line weight and `focus_accent`
+- focused panels use stronger line weight and `focus_lilac`
 - fresh/stale/error state is communicated by badge and tone, not by stealing focus styling
 - avoid placing many equal-weight full boxes side by side unless the view is explicitly comparative
 
@@ -115,12 +117,16 @@ Badges combine text, state prefix, and style.
 - show stale data through badge/context language adjacent to the chart, not by over-coloring the line
 - keep annotation restraint: baseline and threshold markers should be fewer and clearer than raw data marks
 - each panel should prefer one rendering vocabulary at a time: bars, rails, blocks, or braille-like density, rather than mixing all of them
+- use `ok_mint` / `warn_butter` / `alert_rose` for judged status and threshold cues only
+- use ordered sequential ramps for magnitude and diverging `delta_cool` / neutral / `delta_warm` for signed baseline-relative changes
+- never make raw quantitative charts depend on red-green alone
 
 ## State language
 
 Every state should be legible in monochrome and in low-color terminals.
 
 - `fresh`: affirmative label + positive tone
+- `fresh`: explicit fresh/synced wording + `fresh_cyan`, never a health color
 - `stale`: explicit stale wording + warning tone + contextual detail
 - `syncing`: active wording + focus/info tone
 - `empty`: neutral empty block with next-step hint
@@ -128,6 +134,7 @@ Every state should be legible in monochrome and in low-color terminals.
 - `insufficient history`: explicit “thin” or “not enough data yet” wording
 - `error`: concise hard-failure block with danger tone
 - `selected`: focus marker, ordering emphasis, and accent/focus tone
+- every colored state also needs a second cue such as text, border weight, selection marker, or fill density
 - `disabled`: muted text plus explicit unavailable wording
 - `queued`: explicit queued wording plus info/focus tone
 - `running`: active wording plus focus tone
@@ -198,6 +205,7 @@ It should:
 - render deterministic screen snapshots from demo or fixture-backed data
 - support multiple screens and multiple terminal sizes
 - write stable text artifacts to an output directory
+- optionally write ANSI sidecar artifacts for color-aware review in `current`, `truecolor`, `ansi256`, `ansi16`, or `mono` modes
 - be usable for human review and regression tests
 
 Phase-9 AI QA extends this to cover:

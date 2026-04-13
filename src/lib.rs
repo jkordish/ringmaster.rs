@@ -51,9 +51,9 @@ use cli::{
     AiCommand, AiCompareArgs, AiEvalArgs, AiReviewArgs, AiRunsCommand, AiRunsListArgs,
     AiRunsShowArgs, AuthCommand, Cli, Command, DeriveCommand, DeriveRebuildArgs, ReportCommand,
     ReportExportArgs, ReviewCommand, ReviewFocusArg, ReviewInvestigateArgs, ReviewTodayArgs,
-    ReviewWeekArgs, SnapshotCommand, SnapshotExportArgs, SnapshotListArgs, SnapshotScreenArg,
-    SnapshotShowArgs, SnapshotSizeArg, SyncCommand, SyncOnceArgs, SyncWatchArgs, TuiArgs,
-    UiCommand, UiSnapshotArgs, WebhookCommand, WebhookReplayArgs, WebhookServeArgs,
+    ReviewWeekArgs, SnapshotColorModeArg, SnapshotCommand, SnapshotExportArgs, SnapshotListArgs,
+    SnapshotScreenArg, SnapshotShowArgs, SnapshotSizeArg, SyncCommand, SyncOnceArgs, SyncWatchArgs,
+    TuiArgs, UiCommand, UiSnapshotArgs, WebhookCommand, WebhookReplayArgs, WebhookServeArgs,
     WebhookSubscriptionCommand, WebhookSubscriptionsListArgs, WebhookSubscriptionsSyncArgs,
 };
 use config::{AppPaths, Config};
@@ -801,6 +801,7 @@ async fn run_ui_snapshot(config: &Config, args: UiSnapshotArgs) -> Result<Option
     let render_source =
         build_snapshot_render_source(config, args.demo, args.fixture_dir.clone()).await?;
     let scenario_list = render_source.scenarios();
+    let color_modes = snapshot_color_modes(&args);
     let requests = ui::snapshot::build_requests(
         &screens,
         &sizes,
@@ -810,9 +811,10 @@ async fn run_ui_snapshot(config: &Config, args: UiSnapshotArgs) -> Result<Option
             Some(scenario_list.as_slice())
         },
     );
-    let artifact_paths = ui::snapshot::write_snapshots(&args.out_dir, &requests, |request| {
-        render_source.app_for_request(request)
-    })?;
+    let artifact_paths =
+        ui::snapshot::write_snapshots(&args.out_dir, &requests, &color_modes, |request| {
+            render_source.app_for_request(request)
+        })?;
 
     let artifacts = artifact_paths
         .iter()
@@ -837,6 +839,7 @@ source: {}
 scenarios: {}
 screens: {}
 sizes: {}
+ansi_sidecars: {}
 out_dir: {}
 artifacts:
 {}
@@ -853,6 +856,15 @@ artifacts:
             .map(|size| size.label().to_owned())
             .collect::<Vec<_>>()
             .join(", "),
+        if color_modes.is_empty() {
+            "disabled".to_owned()
+        } else {
+            color_modes
+                .iter()
+                .map(|mode| mode.label().to_owned())
+                .collect::<Vec<_>>()
+                .join(", ")
+        },
         args.out_dir.display(),
         artifacts
     )))
@@ -891,6 +903,30 @@ fn snapshot_sizes(args: &UiSnapshotArgs) -> Vec<ui::snapshot::SnapshotSize> {
             })
             .collect()
     }
+}
+
+fn snapshot_color_modes(args: &UiSnapshotArgs) -> Vec<ui::snapshot::SnapshotColorMode> {
+    if !args.ansi_sidecar {
+        return Vec::new();
+    }
+
+    if args.color_mode.is_empty() {
+        return vec![
+            ui::snapshot::SnapshotColorMode::Current,
+            ui::snapshot::SnapshotColorMode::Mono,
+        ];
+    }
+
+    args.color_mode
+        .iter()
+        .map(|mode| match mode {
+            SnapshotColorModeArg::Current => ui::snapshot::SnapshotColorMode::Current,
+            SnapshotColorModeArg::Truecolor => ui::snapshot::SnapshotColorMode::TrueColor,
+            SnapshotColorModeArg::Ansi256 => ui::snapshot::SnapshotColorMode::Ansi256,
+            SnapshotColorModeArg::Ansi16 => ui::snapshot::SnapshotColorMode::Ansi16,
+            SnapshotColorModeArg::Mono => ui::snapshot::SnapshotColorMode::Mono,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
