@@ -15,7 +15,8 @@ use ratatui::{
     Terminal,
     backend::{CrosstermBackend, TestBackend},
     buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier},
     text::{Line, Span},
     widgets::{Block, Clear, Paragraph, Tabs, Wrap},
 };
@@ -48,9 +49,14 @@ use crate::store::Store;
 use crate::store::queries::{
     AiEvalRunRecord, AiRunRecord, ReportExportRecord, SnapshotCatalogEntry, SnapshotExportRecord,
 };
-use crate::ui::chrome::{self, PanelKind};
-use crate::ui::layout::UiContext;
-use crate::ui::theme::{Theme, Tone};
+use crate::ui::chrome::{self, PanelKind, PanelShellSpec, render_panel_shell};
+use crate::ui::layout::{
+    DashboardMetrics, HELP_MODAL_MAX_HEIGHT, HELP_MODAL_MAX_WIDTH, HELP_MODAL_VISIBLE_BODY_ROWS,
+    ModalLayoutSpec, OverlayLayoutSpec, SEARCH_MODAL_MAX_HEIGHT, SEARCH_MODAL_MAX_WIDTH, UiContext,
+    ViewportClass, centered_modal_layout, content_fit_overlay_layout,
+};
+use crate::ui::text_fit::measure_one_line;
+use crate::ui::theme::{ColorCapability, Theme, Tone};
 
 enum WorkerCommand {
     ManualRefresh,
@@ -61,8 +67,8 @@ enum InFlightRefreshResult<T> {
     Completed {
         result: T,
         queued_manual_refresh: bool,
+        shutdown_requested: bool,
     },
-    Shutdown,
 }
 
 #[derive(Debug, Clone)]
@@ -122,7 +128,7 @@ pub fn run(config: &Config, app: &mut AppState) -> Result<()> {
         ));
     }
 
-    let mut session = TerminalSession::start()?;
+    let mut session = TerminalSession::start(Theme::for_capability(ColorCapability::detect()))?;
     let tick_rate = Duration::from_millis(250);
     let (worker_tx, mut worker_actions, worker_handle) = if app.mode == RunMode::Live {
         let (command_tx, action_rx, handle) = spawn_refresh_worker(config.clone());
@@ -202,6 +208,22 @@ pub fn render_snapshot(app: &AppState, width: u16, height: u16) -> Result<String
     Ok(buffer_to_string(&buffer))
 }
 
+/// Renders the current app state into an ANSI-styled terminal snapshot string.
+///
+/// # Errors
+///
+/// Returns an error when the in-memory terminal backend cannot be constructed or
+/// the frame cannot be rendered.
+pub fn render_snapshot_ansi(
+    app: &AppState,
+    width: u16,
+    height: u16,
+    capability: ColorCapability,
+) -> Result<String> {
+    let buffer = render_buffer_with_capability(app, width, height, capability)?;
+    Ok(buffer_to_ansi(&buffer))
+}
+
 /// Renders the current app state into a Ratatui buffer.
 ///
 /// # Errors
@@ -209,11 +231,27 @@ pub fn render_snapshot(app: &AppState, width: u16, height: u16) -> Result<String
 /// Returns an error when the in-memory terminal backend cannot be constructed or
 /// the frame cannot be rendered.
 pub fn render_buffer(app: &AppState, width: u16, height: u16) -> Result<Buffer> {
+    render_buffer_with_capability(app, width, height, ColorCapability::TrueColor)
+}
+
+/// Renders the current app state into a Ratatui buffer for a specific color capability.
+///
+/// # Errors
+///
+/// Returns an error when the in-memory terminal backend cannot be constructed or
+/// the frame cannot be rendered.
+pub fn render_buffer_with_capability(
+    app: &AppState,
+    width: u16,
+    height: u16,
+    capability: ColorCapability,
+) -> Result<Buffer> {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend)
         .map_err(|error| RingmasterError::Ui(format!("building test terminal failed: {error}")))?;
+    let theme = Theme::for_capability(capability);
     terminal
-        .draw(|frame| draw(frame, app))
+        .draw(|frame| draw_with_theme(frame, app, &theme))
         .map_err(|error| RingmasterError::Ui(format!("drawing test terminal failed: {error}")))?;
     Ok(terminal.backend().buffer().clone())
 }
@@ -232,30 +270,137 @@ fn buffer_to_string(buffer: &Buffer) -> String {
     lines.join("\n")
 }
 
-fn draw(frame: &mut ratatui::Frame<'_>, app: &AppState) {
-    let theme = Theme::default();
+fn buffer_to_ansi(buffer: &Buffer) -> String {
+    let mut output = String::new();
+    let mut current_fg = Color::Reset;
+    let mut active_bg = Color::Reset;
+    let mut current_modifier = Modifier::empty();
+
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            let cell = &buffer[(x, y)];
+            if cell.fg != current_fg || cell.bg != active_bg || cell.modifier != current_modifier {
+                output.push_str(&ansi_style_prefix(cell.fg, cell.bg, cell.modifier));
+                current_fg = cell.fg;
+                active_bg = cell.bg;
+                current_modifier = cell.modifier;
+            }
+            output.push_str(cell.symbol());
+        }
+        if current_fg != Color::Reset
+            || active_bg != Color::Reset
+            || current_modifier != Modifier::empty()
+        {
+            output.push_str("\u{1b}[0m");
+            current_fg = Color::Reset;
+            active_bg = Color::Reset;
+            current_modifier = Modifier::empty();
+        }
+        if y + 1 < buffer.area.height {
+            output.push('\n');
+        }
+    }
+
+    output
+}
+
+fn ansi_style_prefix(fg: Color, bg: Color, modifier: Modifier) -> String {
+    let mut codes = vec!["0".to_owned()];
+    if modifier.contains(Modifier::BOLD) {
+        codes.push("1".to_owned());
+    }
+    if modifier.contains(Modifier::DIM) {
+        codes.push("2".to_owned());
+    }
+    if modifier.contains(Modifier::ITALIC) {
+        codes.push("3".to_owned());
+    }
+    if modifier.contains(Modifier::UNDERLINED) {
+        codes.push("4".to_owned());
+    }
+    if modifier.contains(Modifier::REVERSED) {
+        codes.push("7".to_owned());
+    }
+    if modifier.contains(Modifier::CROSSED_OUT) {
+        codes.push("9".to_owned());
+    }
+    codes.push(ansi_color_code(fg, true));
+    codes.push(ansi_color_code(bg, false));
+    format!("\u{1b}[{}m", codes.join(";"))
+}
+
+fn ansi_color_code(color: Color, foreground: bool) -> String {
+    match color {
+        Color::Reset => {
+            if foreground {
+                "39".to_owned()
+            } else {
+                "49".to_owned()
+            }
+        }
+        Color::Black => ansi_basic_code(30, 40, foreground),
+        Color::Red => ansi_basic_code(31, 41, foreground),
+        Color::Green => ansi_basic_code(32, 42, foreground),
+        Color::Yellow => ansi_basic_code(33, 43, foreground),
+        Color::Blue => ansi_basic_code(34, 44, foreground),
+        Color::Magenta => ansi_basic_code(35, 45, foreground),
+        Color::Cyan => ansi_basic_code(36, 46, foreground),
+        Color::Gray => ansi_basic_code(37, 47, foreground),
+        Color::DarkGray => ansi_basic_code(90, 100, foreground),
+        Color::LightRed => ansi_basic_code(91, 101, foreground),
+        Color::LightGreen => ansi_basic_code(92, 102, foreground),
+        Color::LightYellow => ansi_basic_code(93, 103, foreground),
+        Color::LightBlue => ansi_basic_code(94, 104, foreground),
+        Color::LightMagenta => ansi_basic_code(95, 105, foreground),
+        Color::LightCyan => ansi_basic_code(96, 106, foreground),
+        Color::White => ansi_basic_code(97, 107, foreground),
+        Color::Rgb(red, green, blue) => {
+            if foreground {
+                format!("38;2;{red};{green};{blue}")
+            } else {
+                format!("48;2;{red};{green};{blue}")
+            }
+        }
+        Color::Indexed(index) => {
+            if foreground {
+                format!("38;5;{index}")
+            } else {
+                format!("48;5;{index}")
+            }
+        }
+    }
+}
+
+fn ansi_basic_code(foreground_code: u8, background_code: u8, foreground: bool) -> String {
+    if foreground {
+        foreground_code.to_string()
+    } else {
+        background_code.to_string()
+    }
+}
+
+fn draw_with_theme(frame: &mut ratatui::Frame<'_>, app: &AppState, theme: &Theme) {
     let ui = UiContext::new(frame.area());
     frame.render_widget(Block::default().style(theme.screen()), frame.area());
+
+    let app_frame = chrome::app_frame(theme);
+    let inner = app_frame.inner(frame.area());
+    frame.render_widget(app_frame, frame.area());
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(if ui.viewport.is_compact() { 4 } else { 5 }),
-            Constraint::Length(3),
-            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Min(8),
-            Constraint::Length(3),
+            Constraint::Length(1),
         ])
-        .split(frame.area());
+        .split(inner);
 
-    let header = Paragraph::new(app.model.title.clone())
-        .style(theme.hero())
-        .block(chrome::panel(
-            &theme,
-            Line::from("ringmaster.rs"),
-            PanelKind::Hero,
-        ));
-    frame.render_widget(header, layout[0]);
+    render_app_status_bar(frame, layout[0], app, theme);
 
     let top_nav_focused = app.is_region_focused(navigation::FocusRegion::TopNav);
     let top_nav_selected_index = if top_nav_focused {
@@ -268,53 +413,179 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &AppState) {
     };
     let tab_titles = Screen::ALL
         .into_iter()
-        .map(|screen| {
-            let active_prefix = if screen == app.active_screen {
-                "* "
-            } else {
-                "  "
-            };
-            Line::from(format!("{active_prefix}{}", screen.title()))
-        })
+        .map(|screen| Line::from(screen.title()))
         .collect::<Vec<_>>();
+    let top_nav_label = if top_nav_focused {
+        format!("Views [{}]", Screen::ALL[top_nav_selected_index].title())
+    } else {
+        "Views".to_owned()
+    };
+    let label_width = u16::try_from(top_nav_label.chars().count() + 1)
+        .unwrap_or(u16::MAX)
+        .min(layout[1].width.saturating_sub(1).max(1));
+    let nav_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(label_width), Constraint::Min(1)])
+        .split(layout[1]);
+    frame.render_widget(
+        Paragraph::new(truncate_line(&top_nav_label, nav_layout[0].width)).style(
+            if top_nav_focused {
+                theme.emphasis(Tone::Focus)
+            } else {
+                theme.annotation()
+            },
+        ),
+        nav_layout[0],
+    );
     let tabs = Tabs::new(tab_titles)
-        .block(chrome::panel(
-            &theme,
-            chrome::title_with_badge(
-                &theme,
-                "Views",
-                if top_nav_focused {
-                    "focus in tabs"
-                } else {
-                    app.active_screen.title()
-                },
-                if top_nav_focused {
-                    Tone::Focus
-                } else {
-                    Tone::Accent
-                },
-            ),
-            PanelKind::Subtle,
-        ))
         .style(theme.annotation())
         .highlight_style(theme.emphasis(Tone::Focus))
         .divider(" ")
         .select(top_nav_selected_index);
-    frame.render_widget(tabs, layout[1]);
+    frame.render_widget(tabs, nav_layout[1]);
 
-    draw_orientation_strip(frame, layout[2], app, &theme);
-    draw_active_screen(frame, layout[3], app, &ui, &theme);
+    draw_active_screen(frame, layout[2], app, &ui, theme);
 
-    let footer = Paragraph::new(app.footer())
-        .style(theme.annotation())
-        .block(chrome::panel(
-            &theme,
-            chrome::title_with_badge(&theme, "Keys", "keyboard-first", Tone::Muted),
-            PanelKind::Subtle,
-        ));
-    frame.render_widget(footer, layout[4]);
+    let footer = Paragraph::new(app.footer(ui.viewport)).style(theme.annotation());
+    frame.render_widget(footer, layout[3]);
 
-    draw_transient_overlays(frame, app, &theme);
+    draw_transient_overlays(frame, app, theme);
+}
+
+fn render_app_status_bar(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    app: &AppState,
+    theme: &Theme,
+) {
+    let line = app_status_line(&app.model.title, area.width);
+    frame.render_widget(Paragraph::new(line).style(theme.hero()), area);
+}
+
+fn app_status_line(title: &str, width: u16) -> String {
+    let width = usize::from(width);
+    if width == 0 {
+        return String::new();
+    }
+
+    let mut segments = vec!["ringmaster.rs".to_owned()];
+    segments.extend(app_status_segments(title));
+
+    while joined_status_width(&segments) > width && segments.len() > 1 {
+        if let Some(index) = lowest_priority_status_segment_index(&segments) {
+            segments.remove(index);
+        } else {
+            break;
+        }
+    }
+
+    fit_status_segments(segments, width)
+}
+
+fn truncate_line(value: &str, width: u16) -> String {
+    let width = usize::from(width);
+    let char_count = value.chars().count();
+    if char_count <= width {
+        return value.to_owned();
+    }
+    if width <= 3 {
+        return value.chars().take(width).collect();
+    }
+    let mut truncated = value.chars().take(width - 3).collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn app_status_segments(title: &str) -> Vec<String> {
+    title
+        .lines()
+        .flat_map(|line| line.split(" | "))
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn joined_status_width(segments: &[String]) -> usize {
+    let separator_width = 3usize;
+    let segment_width = segments
+        .iter()
+        .map(|segment| segment.chars().count())
+        .sum::<usize>();
+    let separator_count = segments.len().saturating_sub(1);
+    segment_width + separator_count.saturating_mul(separator_width)
+}
+
+fn lowest_priority_status_segment_index(segments: &[String]) -> Option<usize> {
+    segments
+        .iter()
+        .enumerate()
+        .skip(1)
+        .max_by_key(|(_, segment)| status_segment_priority(segment))
+        .map(|(index, _)| index)
+}
+
+fn status_segment_priority(segment: &str) -> usize {
+    if segment.starts_with("Connection:") {
+        1
+    } else if segment.starts_with("Viewing:") {
+        2
+    } else if segment.starts_with("Sync:") {
+        3
+    } else if segment.starts_with("Daily status:") {
+        4
+    } else if segment.starts_with("Latest sync:") {
+        5
+    } else if segment.starts_with("Access:") {
+        6
+    } else if segment.starts_with("Triggers:") {
+        7
+    } else {
+        8
+    }
+}
+
+fn fit_status_segments(mut segments: Vec<String>, width: usize) -> String {
+    if segments.is_empty() {
+        return String::new();
+    }
+
+    if segments.len() == 1 {
+        return ellipsize_ascii(&segments[0], width);
+    }
+
+    let separator = " | ";
+    loop {
+        let prefix = segments[..segments.len() - 1].join(separator);
+        let reserved = prefix.chars().count() + separator.chars().count();
+        if reserved >= width {
+            segments.pop();
+            if segments.len() == 1 {
+                return ellipsize_ascii(&segments[0], width);
+            }
+            continue;
+        }
+
+        let available_last = width - reserved;
+        if let Some(last_segment) = segments.last() {
+            let last = ellipsize_ascii(last_segment, available_last);
+            return format!("{prefix}{separator}{last}");
+        }
+        return prefix;
+    }
+}
+
+fn ellipsize_ascii(value: &str, width: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= width {
+        return value.to_owned();
+    }
+    if width <= 3 {
+        return value.chars().take(width).collect();
+    }
+    let mut truncated = value.chars().take(width - 3).collect::<String>();
+    truncated.push_str("...");
+    truncated
 }
 
 fn draw_active_screen(
@@ -325,67 +596,95 @@ fn draw_active_screen(
     theme: &Theme,
 ) {
     match app.active_screen {
-        Screen::Dashboard => dashboard::draw(frame, area, &app.model.dashboard, ui, theme),
-        Screen::Timeline => timeline::draw(frame, area, &app.model.timeline, ui, theme),
-        Screen::Trends => trends::draw(frame, area, &app.model.trends, ui, theme),
-        Screen::Explain => explain::draw(frame, area, &app.model.explain, ui, theme),
-        Screen::Patterns => patterns::draw(frame, area, &app.model.patterns, ui, theme),
-        Screen::Review => review::draw(frame, area, &app.model.review, ui, theme),
-        Screen::Ai => ai_component::draw(frame, area, &app.model.ai, ui, theme),
-        Screen::Ops => ops::draw(frame, area, &app.model.ops, ui, theme),
+        Screen::Dashboard => dashboard::draw(
+            frame,
+            area,
+            &app.model.dashboard,
+            ui,
+            theme,
+            app.focused_region(),
+            app.expanded_region(),
+        ),
+        Screen::Timeline => timeline::draw(
+            frame,
+            area,
+            &app.model.timeline,
+            ui,
+            theme,
+            app.focused_region(),
+            app.expanded_region(),
+        ),
+        Screen::Trends => trends::draw(
+            frame,
+            area,
+            &app.model.trends,
+            ui,
+            theme,
+            app.focused_region(),
+            app.expanded_region(),
+        ),
+        Screen::Explain => explain::draw(
+            frame,
+            area,
+            &app.model.explain,
+            ui,
+            theme,
+            app.focused_region(),
+            app.expanded_region(),
+        ),
+        Screen::Patterns => patterns::draw(
+            frame,
+            area,
+            &app.model.patterns,
+            ui,
+            theme,
+            app.focused_region(),
+            app.expanded_region(),
+        ),
+        Screen::Review => review::draw(
+            frame,
+            area,
+            &app.model.review,
+            ui,
+            theme,
+            app.focused_region(),
+            app.expanded_region(),
+        ),
+        Screen::Ai => ai_component::draw(
+            frame,
+            area,
+            &app.model.ai,
+            ui,
+            theme,
+            app.focused_region(),
+            app.expanded_region(),
+        ),
+        Screen::Ops => ops::draw(
+            frame,
+            area,
+            &app.model.ops,
+            ui,
+            theme,
+            app.focused_region(),
+            app.expanded_region(),
+        ),
     }
-}
-
-fn draw_orientation_strip(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    app: &AppState,
-    theme: &Theme,
-) {
-    let region_summary = navigation::screen_regions(app.active_screen)
-        .iter()
-        .filter_map(|region| {
-            navigation::region_label(app.active_screen, *region).map(|label| {
-                if *region == app.focused_region() && app.current_transient().is_none() {
-                    format!("[{label}]")
-                } else {
-                    label.to_owned()
-                }
-            })
-        })
-        .collect::<Vec<_>>()
-        .join(" | ");
-
-    let transient_label = match app.current_transient() {
-        Some(navigation::TransientLayer::Help) => "help open",
-        Some(navigation::TransientLayer::Search) => "find open",
-        Some(navigation::TransientLayer::AiPreflight) => "preflight open",
-        None => "body focus",
-    };
-    let body = format!("Focus: {transient_label} | {region_summary}");
-    frame.render_widget(
-        Paragraph::new(body)
-            .wrap(Wrap { trim: true })
-            .block(chrome::panel(
-                theme,
-                chrome::title_with_badge(
-                    theme,
-                    "Orientation",
-                    app.active_screen.title(),
-                    Tone::Info,
-                ),
-                PanelKind::Subtle,
-            )),
-        area,
-    );
 }
 
 fn draw_transient_overlays(frame: &mut ratatui::Frame<'_>, app: &AppState, theme: &Theme) {
     if let Some(search) = app.search_state() {
-        draw_search_overlay(frame, frame.area(), search, theme);
-    }
-    if app.help_open() {
-        draw_help_overlay(frame, frame.area(), app.binding_context(), theme);
+        draw_search_overlay(frame, frame.area(), search, app.search_focus(), theme);
+    } else if app.help_open() {
+        draw_help_overlay(
+            frame,
+            frame.area(),
+            app.binding_context(),
+            app.help_scroll(),
+            theme,
+        );
+    } else if let Some(preflight) = &app.model.ai.preflight {
+        let compact = !crate::ui::layout::ViewportClass::from_width(frame.area().width).is_wide();
+        ai_component::draw_preflight_overlay(frame, frame.area(), preflight, theme, compact);
     }
 }
 
@@ -393,9 +692,15 @@ fn draw_search_overlay(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     search: &navigation::SearchState,
+    search_focus: crate::focus::SearchOverlayAnchor,
     theme: &Theme,
 ) {
-    let overlay = centered_rect(area, 60, 7);
+    let metrics = DashboardMetrics::for_viewport(ViewportClass::from_width(area.width));
+    let overlay = centered_modal_layout(
+        area,
+        ModalLayoutSpec::new(SEARCH_MODAL_MAX_WIDTH, SEARCH_MODAL_MAX_HEIGHT),
+    )
+    .bounds;
     let result_summary = if search.total_matches == 0 {
         "No matches yet".to_owned()
     } else {
@@ -406,6 +711,10 @@ fn draw_search_overlay(
         )
     };
     let body = vec![
+        Line::from(vec![Span::styled(
+            "Search is modal while open.",
+            theme.section_title(Tone::Focus),
+        )]),
         Line::from(vec![
             Span::styled("Query: ", theme.section_title(Tone::Focus)),
             Span::raw(if search.query.is_empty() {
@@ -415,23 +724,33 @@ fn draw_search_overlay(
             }),
         ]),
         Line::from(result_summary),
-        Line::from("Enter next  Shift+Enter previous  Esc close"),
+        Line::from(format!(
+            "Search focus stays on the {} field.",
+            search_focus.label()
+        )),
+        Line::from("Tab stays in search  Enter next  Shift+Enter previous"),
+        Line::from("Esc closes search."),
     ];
     frame.render_widget(Clear, overlay);
+    let shell = render_panel_shell(
+        frame,
+        overlay,
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Find in Current Context",
+            status: "MODAL",
+            status_tone: Tone::Focus,
+            focused: true,
+            expanded: false,
+            kind: PanelKind::Section,
+        },
+    );
     frame.render_widget(
         Paragraph::new(body)
             .wrap(Wrap { trim: true })
-            .block(chrome::panel(
-                theme,
-                chrome::title_with_badge(
-                    theme,
-                    "Find in Current Context",
-                    "search focus",
-                    Tone::Focus,
-                ),
-                PanelKind::Section,
-            )),
-        overlay,
+            .alignment(Alignment::Left),
+        shell.content_area,
     );
 }
 
@@ -439,10 +758,67 @@ fn draw_help_overlay(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     context: keybindings::BindingContext,
+    scroll: u16,
     theme: &Theme,
 ) {
+    let metrics = DashboardMetrics::for_viewport(ViewportClass::from_width(area.width));
     let groups = keybindings::help_groups(context);
+    let shortcut_width = groups
+        .values()
+        .flat_map(|entries| entries.iter())
+        .map(|entry| split_help_entry(entry).0.len())
+        .max()
+        .unwrap_or(0)
+        .max(12);
+    let mut help_lines = Vec::new();
+    help_lines.push("Keyboard help is modal while open.".to_owned());
+    for (index, (group, entries)) in groups.iter().enumerate() {
+        if index > 0 {
+            help_lines.push(String::new());
+        }
+        help_lines.push((*group).to_owned());
+        for entry in entries {
+            let (shortcut, description) = split_help_entry(entry);
+            help_lines.push(format!("{shortcut:<shortcut_width$}  {description}",));
+        }
+    }
+    help_lines.push(String::new());
+    help_lines.push("Esc closes this help.".to_owned());
+    let content_width_hint = help_lines
+        .iter()
+        .map(|line| measure_one_line(line).width)
+        .max()
+        .unwrap_or(0);
+    let overlay = content_fit_overlay_layout(
+        area,
+        metrics,
+        OverlayLayoutSpec::new(HELP_MODAL_MAX_WIDTH, HELP_MODAL_MAX_HEIGHT)
+            .with_min_size(56, 12)
+            .with_content_hints(
+                u16::try_from(content_width_hint).unwrap_or(u16::MAX),
+                HELP_MODAL_VISIBLE_BODY_ROWS,
+            ),
+    );
+    frame.render_widget(Clear, overlay.bounds);
+    let _shell = render_panel_shell(
+        frame,
+        overlay.bounds,
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Keyboard Help",
+            status: "MODAL",
+            status_tone: Tone::Focus,
+            focused: true,
+            expanded: false,
+            kind: PanelKind::Section,
+        },
+    );
     let mut lines = Vec::new();
+    lines.push(Line::from(vec![Span::styled(
+        "Keyboard help is modal while open.",
+        theme.section_title(Tone::Focus),
+    )]));
     for (index, (group, entries)) in groups.iter().enumerate() {
         if index > 0 {
             lines.push(Line::from(""));
@@ -451,35 +827,34 @@ fn draw_help_overlay(
             (*group).to_owned(),
             theme.section_title(Tone::Focus),
         )]));
-        if !entries.is_empty() {
-            lines.push(Line::from(format!("  {}", entries.join("  "))));
+        for entry in entries {
+            let (shortcut, description) = split_help_entry(entry);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{shortcut:<shortcut_width$}"),
+                    theme.section_title(Tone::Focus),
+                ),
+                Span::raw("  "),
+                Span::raw(description.to_owned()),
+            ]));
         }
     }
     lines.push(Line::from(""));
     lines.push(Line::from("Esc closes this help."));
-
-    let overlay = centered_rect(area, 72, 18);
-    frame.render_widget(Clear, overlay);
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .block(chrome::panel(
-                theme,
-                chrome::title_with_badge(theme, "Keyboard Help", "current scope", Tone::Focus),
-                PanelKind::Section,
-            )),
-        overlay,
+            .scroll((scroll, 0)),
+        overlay.content_area,
     );
 }
 
-fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
-    let available_width = area.width.saturating_sub(2).max(1);
-    let available_height = area.height.saturating_sub(2).max(1);
-    let popup_width = width.min(available_width);
-    let popup_height = height.min(available_height);
-    let x = area.x + area.width.saturating_sub(popup_width) / 2;
-    let y = area.y + area.height.saturating_sub(popup_height) / 2;
-    Rect::new(x, y, popup_width, popup_height)
+fn split_help_entry(entry: &str) -> (&str, &str) {
+    entry
+        .split_once(' ')
+        .map_or((entry, ""), |(shortcut, description)| {
+            (shortcut, description.trim())
+        })
 }
 
 #[cfg(test)]
@@ -2826,10 +3201,12 @@ async fn perform_refresh_cycle(
     let InFlightRefreshResult::Completed {
         result,
         queued_manual_refresh,
-    } = refresh_result
-    else {
+        shutdown_requested,
+    } = refresh_result;
+
+    if shutdown_requested {
         return RefreshCycleOutcome::Shutdown;
-    };
+    }
 
     translate_refresh_result(config, action_tx, result, manual);
     RefreshCycleOutcome::Completed {
@@ -2904,6 +3281,7 @@ where
 {
     let mut sync_future = std::pin::pin!(sync_future);
     let mut queued_manual_refresh = false;
+    let mut shutdown_requested = false;
 
     loop {
         tokio::select! {
@@ -2911,13 +3289,16 @@ where
                 return InFlightRefreshResult::Completed {
                     result,
                     queued_manual_refresh,
+                    shutdown_requested,
                 };
             }
-            command = command_rx.recv() => match command {
+            command = command_rx.recv(), if !shutdown_requested => match command {
                 Some(WorkerCommand::ManualRefresh) => {
                     queued_manual_refresh = true;
                 }
-                Some(WorkerCommand::Shutdown) | None => return InFlightRefreshResult::Shutdown,
+                Some(WorkerCommand::Shutdown) | None => {
+                    shutdown_requested = true;
+                }
             }
         }
     }
@@ -2977,10 +3358,11 @@ fn refresh_summary(report: &SyncReport, manual: bool) -> String {
 
 struct TerminalSession {
     terminal: Terminal<CrosstermBackend<Stdout>>,
+    theme: Theme,
 }
 
 impl TerminalSession {
-    fn start() -> Result<Self> {
+    fn start(theme: Theme) -> Result<Self> {
         enable_raw_mode().map_err(|error| RingmasterError::io("enabling raw mode", error))?;
         let mut output = stdout();
         execute!(output, EnterAlternateScreen)
@@ -2989,12 +3371,12 @@ impl TerminalSession {
         let terminal = Terminal::new(backend)
             .map_err(|error| RingmasterError::Ui(format!("creating terminal failed: {error}")))?;
 
-        Ok(Self { terminal })
+        Ok(Self { terminal, theme })
     }
 
     fn draw(&mut self, app: &AppState) -> Result<()> {
         self.terminal
-            .draw(|frame| draw(frame, app))
+            .draw(|frame| draw_with_theme(frame, app, &self.theme))
             .map_err(|error| RingmasterError::Ui(format!("drawing terminal failed: {error}")))?;
         Ok(())
     }
@@ -3011,9 +3393,10 @@ impl Drop for TerminalSession {
 #[cfg(test)]
 mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::buffer::Buffer;
     use ratatui::layout::{Constraint, Direction, Layout, Rect};
+    use ratatui::style::Modifier;
     use std::collections::HashMap;
-    use std::future::pending;
     use std::time::Duration;
     use tokio::sync::mpsc::unbounded_channel;
 
@@ -3038,6 +3421,14 @@ mod tests {
         DailySleepRecord, PersonalInfoRecord, SnapshotExportRecord, SyncRunStatus, SyncStateRecord,
     };
     use crate::tui::render_snapshot;
+    use crate::ui::layout::{
+        DashboardMetrics, HELP_MODAL_MAX_HEIGHT, HELP_MODAL_MAX_WIDTH,
+        HELP_MODAL_VISIBLE_BODY_ROWS, ModalLayoutSpec, OverlayLayoutSpec, ViewportClass,
+        centered_modal_layout, content_fit_overlay_layout,
+    };
+    use crate::ui::telemetry::MetricPanelState;
+    use crate::ui::text_fit::measure_one_line;
+    use crate::ui::theme::{ColorCapability, Theme, Tone};
     use crate::webhook::default_desired_subscriptions;
     use std::path::{Path, PathBuf};
 
@@ -3192,6 +3583,27 @@ mod tests {
             guidance: crate::config::GuidanceConfig::default(),
             ai: crate::config::AiConfig::default(),
         }
+    }
+
+    fn find_text_position(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
+        let symbols = needle.chars().map(|ch| ch.to_string()).collect::<Vec<_>>();
+        if symbols.is_empty() {
+            return None;
+        }
+        let needle_width = u16::try_from(symbols.len()).ok()?;
+
+        for y in 0..buffer.area.height {
+            for x in 0..=buffer.area.width.saturating_sub(needle_width) {
+                let matched = symbols.iter().enumerate().all(|(index, symbol)| {
+                    let offset = u16::try_from(index).ok();
+                    offset.is_some_and(|offset| buffer[(x + offset, y)].symbol() == symbol)
+                });
+                if matched {
+                    return Some((x, y));
+                }
+            }
+        }
+        None
     }
 
     fn test_auth_status(config: &Config, granted_scopes: &[String]) -> AuthStatus {
@@ -3370,16 +3782,18 @@ mod tests {
         let config = test_config();
         let mut app = build_demo_state(&config);
         app.active_screen = Screen::Dashboard;
+        let (width, height) = crate::ui::layout::ViewportClass::Medium.named_dimensions();
 
-        let output = render_snapshot(&app, 100, 32)
+        let output = render_snapshot(&app, width, height)
             .unwrap_or_else(|error| unreachable!("snapshot should render: {error}"));
 
         assert!(output.contains("ringmaster"));
         assert!(output.contains("Connection: Connected"));
-        assert!(output.contains("Latest sync:"));
-        assert!(output.contains("What matters now | 2026-04-08"));
-        assert!(output.contains("Capabilities"));
-        assert!(output.contains("Drill-down cues"));
+        assert!(output.contains("Viewing: 2026-04-08"));
+        assert!(output.contains("READINESS"));
+        assert!(output.contains("WEEKLY TRENDS"));
+        assert!(output.contains("Readiness tile | score 74"));
+        assert!(!output.contains("HEADER / STATUS"));
     }
 
     #[test]
@@ -3399,12 +3813,17 @@ mod tests {
         let mut app = build_live_state(&config, &store, &auth_status)
             .unwrap_or_else(|error| unreachable!("live state should build: {error}"));
         app.active_screen = Screen::Dashboard;
+        let (width, height) = crate::ui::layout::ViewportClass::Medium.named_dimensions();
 
-        let output = render_snapshot(&app, 100, 32)
+        let output = render_snapshot(&app, width, height)
             .unwrap_or_else(|error| unreachable!("dashboard snapshot should render: {error}"));
 
-        assert!(output.contains("missing scope"));
-        assert!(output.contains("sleep normal is still forming."));
+        assert!(
+            output.contains("SCOPE")
+                || output.contains("scope")
+                || output.contains("NO DATA")
+                || output.contains("unavailable")
+        );
     }
 
     #[test]
@@ -3424,11 +3843,27 @@ mod tests {
         let mut app = build_live_state(&config, &store, &auth_status)
             .unwrap_or_else(|error| unreachable!("live state should build: {error}"));
         app.active_screen = Screen::Timeline;
+        let (width, height) = crate::ui::layout::ViewportClass::Medium.named_dimensions();
 
-        let output = render_snapshot(&app, 100, 32)
+        let output = render_snapshot(&app, width, height)
             .unwrap_or_else(|error| unreachable!("timeline snapshot should render: {error}"));
 
         assert!(output.contains("No context event is selected"));
+    }
+
+    #[test]
+    fn compact_timeline_snapshot_keeps_summary_and_inspector_content_visible() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Timeline;
+
+        let output = render_snapshot(&app, 90, 28).unwrap_or_else(|error| {
+            unreachable!("compact timeline snapshot should render: {error}")
+        });
+
+        assert!(output.contains("2026-04-08 | Day 2026-04-08"));
+        assert!(output.contains("Tag Coffee"));
+        assert!(output.contains("EVENT FEED"));
     }
 
     #[test]
@@ -3459,8 +3894,27 @@ mod tests {
         let output = render_snapshot(&app, 120, 44)
             .unwrap_or_else(|error| unreachable!("trends snapshot should render: {error}"));
 
-        assert!(output.contains("Analyst notes"));
-        assert!(output.contains("confidence: thin"));
+        assert!(output.contains("TREND MATRIX"));
+        assert!(output.contains("TREND SORT"));
+        assert!(output.contains("INSPECTOR"));
+    }
+
+    #[test]
+    fn wide_trends_snapshot_uses_two_line_matrix_layout() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Trends;
+
+        let output = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| unreachable!("wide trends snapshot should render: {error}"));
+
+        assert!(output.contains("metric"));
+        assert!(output.contains("current"));
+        assert!(output.contains("7d"));
+        assert!(output.contains("30d"));
+        assert!(output.contains("90d"));
+        assert!(output.contains("cue"));
+        assert!(output.contains("signature"));
     }
 
     #[test]
@@ -3502,7 +3956,8 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("patterns snapshot should render: {error}"));
 
         assert!(output.contains("Not enough data yet"));
-        assert!(output.contains("Patterns stay descriptive on purpose."));
+        assert!(output.contains("Patterns stay descriptive"), "{output}");
+        assert!(output.contains("Use Explain or Timeline"), "{output}");
     }
 
     #[test]
@@ -3517,7 +3972,7 @@ mod tests {
         assert!(output.contains("Ranked observations"));
         assert!(output.contains("AI artifact"));
         assert!(output.contains("AI artifact: available"));
-        assert!(output.contains("Provider / model: openai / gpt-4o-2024-08-06"));
+        assert!(output.contains("Kind / created: review"));
         assert!(output.contains("Briefing detail"));
         assert!(output.contains("Readiness score"));
     }
@@ -3547,7 +4002,7 @@ mod tests {
 
         assert!(output.contains("AI artifact"));
         assert!(output.contains("AI artifact: none"));
-        assert!(output.contains("No saved AI artifact is linked to this day yet."));
+        assert!(output.contains("No saved AI artifact"));
     }
 
     #[test]
@@ -3600,10 +4055,11 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("ops snapshot should render: {error}"));
 
         assert!(output.contains("Auth state: authenticated"));
-        assert!(output.contains("Granted scopes: personal, daily, heartrate"));
+        assert!(output.contains("Granted scopes:"));
+        assert!(output.contains("personal, daily, heartrate"));
         assert!(output.contains("Database path: "));
-        assert!(output.contains("Warnings [operator attention]"));
-        assert!(output.contains("Warnings"));
+        assert!(output.contains("WARNINGS"));
+        assert!(output.contains("COVERAGE"));
     }
 
     #[test]
@@ -3656,24 +4112,333 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("compact status snapshot should render: {error}"));
 
         assert!(output.contains("Auth state: authenticated"));
-        assert!(output.contains("Granted scopes: personal, daily, heartrate"));
+        assert!(output.contains("Granted scopes:"));
+        assert!(output.contains("personal, daily, heartrate"));
         assert!(output.contains("Receiver heartbeat: missing"));
-        assert!(output.contains("Invalidation queue: pending=0"));
+        assert!(output.contains("Invalidation queue:"));
+        assert!(output.contains("pending=0"));
+        assert!(output.contains("[warn]"));
     }
 
     #[test]
-    fn dashboard_compact_and_wide_snapshots_have_distinct_reading_paths() {
+    fn dashboard_compact_medium_and_wide_snapshots_have_distinct_reading_paths() {
         let config = test_config();
         let mut app = build_demo_state(&config);
         app.active_screen = Screen::Dashboard;
 
         let compact = render_snapshot(&app, 90, 28)
             .unwrap_or_else(|error| unreachable!("compact snapshot should render: {error}"));
+        let medium = render_snapshot(&app, 120, 36)
+            .unwrap_or_else(|error| unreachable!("medium snapshot should render: {error}"));
         let wide = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("wide snapshot should render: {error}"));
 
-        assert!(compact.contains("Secondary detail"));
-        assert!(wide.contains("Drill-down cues"));
+        assert!(compact.contains("Connection: Connected"));
+        assert!(compact.contains("Viewing: 2026-04-08 | Sync: Idle"));
+        assert!(!compact.contains("Viewing: 2..."));
+        assert!(compact.contains("READINESS"));
+        assert!(compact.contains("ACTIVITY"));
+        assert!(medium.contains("HEART RATE"));
+        assert!(medium.contains("[STALE]"));
+        assert!(wide.contains("READINESS BREAKDOWN"));
+        assert!(wide.contains("WEEKLY TRENDS"));
+        assert!(!compact.contains("HEADER / STATUS"));
+        assert!(!medium.contains("HEADER / STATUS"));
+        assert!(!wide.contains("HEADER / STATUS"));
+    }
+
+    #[test]
+    fn medium_trends_snapshot_uses_two_line_matrix_rows() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Trends;
+
+        let output = render_snapshot(&app, 120, 36)
+            .unwrap_or_else(|error| unreachable!("medium trends snapshot should render: {error}"));
+
+        assert!(output.contains("metric"));
+        assert!(output.contains("current"));
+        assert!(output.contains("7d"));
+        assert!(output.contains("30d"));
+        assert!(output.contains("90d"));
+        assert!(output.contains("cue"));
+        assert!(output.contains("signature"));
+        assert!(output.contains("Sleep"));
+        assert!(output.contains("watch"));
+    }
+
+    #[test]
+    fn dashboard_focus_snapshots_keep_hero_focus_and_footer_context_aligned() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Dashboard;
+
+        let readiness = render_snapshot(&app, 160, 44).unwrap_or_else(|error| {
+            unreachable!("readiness focus snapshot should render: {error}")
+        });
+        assert!(readiness.contains("> READINESS"));
+        assert!(readiness.contains("Readiness tile | score 74"));
+
+        app.handle(Action::FocusNextRegion);
+        let sleep = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| unreachable!("sleep focus snapshot should render: {error}"));
+        assert!(sleep.contains("> SLEEP"));
+        assert!(sleep.contains("Sleep tile | 6h 55m | score 76"));
+
+        app.handle(Action::FocusNextRegion);
+        let activity = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| unreachable!("activity focus snapshot should render: {error}"));
+        assert!(activity.contains("> ACTIVITY"));
+        assert!(activity.contains("Activity tile | activity 13,420"));
+    }
+
+    #[test]
+    fn dashboard_stale_and_missing_shells_stay_structured() {
+        let config = test_config();
+        let mut demo = build_demo_state(&config);
+        demo.active_screen = Screen::Dashboard;
+        let stale_output = render_snapshot(&demo, 160, 44).unwrap_or_else(|error| {
+            unreachable!("stale dashboard snapshot should render: {error}")
+        });
+        assert!(stale_output.contains("HEART RATE"));
+        assert!(stale_output.contains("[STALE]"));
+
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
+        seed_sync_state(
+            &store,
+            "oura.daily",
+            SyncRunStatus::Blocked,
+            "Missing `daily` scope; dashboard summary rows remain unavailable.",
+            &["personal"],
+            None,
+        );
+        let auth_status = test_auth_status(&config, &["personal".to_owned()]);
+        let mut missing = build_live_state(&config, &store, &auth_status)
+            .unwrap_or_else(|error| unreachable!("live state should build: {error}"));
+        missing.active_screen = Screen::Dashboard;
+        let missing_output = render_snapshot(&missing, 160, 44).unwrap_or_else(|error| {
+            unreachable!("missing capability dashboard snapshot should render: {error}")
+        });
+        assert!(missing_output.contains("SCOPE") || missing_output.contains("scope"));
+        assert!(missing_output.contains("WEEKLY TRENDS"));
+    }
+
+    #[test]
+    fn dashboard_precise_metric_states_render_distinct_labels() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Dashboard;
+        app.model.dashboard.spo2.availability = MetricPanelState::BaselineOnly;
+        app.model.dashboard.respiratory_rate.availability = MetricPanelState::NoCurrentSample;
+        app.model.dashboard.activity.availability = MetricPanelState::HistoricalOnly;
+
+        let output = render_snapshot(&app, 160, 44).unwrap_or_else(|error| {
+            unreachable!("dashboard semantic snapshot should render: {error}")
+        });
+
+        assert!(output.contains("BASELINE ONLY"));
+        assert!(output.contains("NO CURRENT SAMPLE"));
+        assert!(output.contains("HISTORICAL ONLY"));
+    }
+
+    #[tokio::test]
+    async fn dashboard_dense_history_snapshot_surfaces_fourteen_day_weekly_view() {
+        let config = test_config();
+        let states = build_scenario_fixture_snapshot_apps_for_tests(
+            &config,
+            std::path::Path::new("tests/fixtures/phase7"),
+        )
+        .await
+        .unwrap_or_else(|error| unreachable!("scenario fixture apps should build: {error}"));
+
+        let mut app = states
+            .into_iter()
+            .find_map(|(scenario, app)| {
+                (scenario == crate::ui::snapshot::SnapshotScenario::DenseHistory).then_some(app)
+            })
+            .unwrap_or_else(|| unreachable!("dense-history scenario should exist"));
+        app.active_screen = Screen::Dashboard;
+
+        let output = render_snapshot(&app, 160, 44).unwrap_or_else(|error| {
+            unreachable!("dense-history dashboard snapshot should render: {error}")
+        });
+        let medium_output = render_snapshot(&app, 120, 44).unwrap_or_else(|error| {
+            unreachable!("medium dense-history dashboard snapshot should render: {error}")
+        });
+
+        assert!(output.contains("26 27 28 29 30 31 01 02 03 04 05 06 07 08"));
+        assert!(output.contains("WEEKLY TRENDS"));
+        assert!(!output.contains("326327328329"));
+        assert!(!medium_output.contains("26 27 28 29 30 31 01 02 03 04 05 06 07 08"));
+    }
+
+    #[test]
+    fn dashboard_weekly_header_uses_day_labels_in_standard_wide_demo_snapshot() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Dashboard;
+
+        let output = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| unreachable!("wide dashboard snapshot should render: {error}"));
+
+        assert!(output.contains("05         06         07         08"));
+        assert!(output.contains("Sleep  █████████"));
+        assert!(output.contains("Ready  █████████"));
+        assert!(output.contains("Actv   ━━━━━━━━━"));
+        assert!(output.contains("ramp ░▒▓█ higher"));
+        assert!(output.contains("Sleep 76 | 04-08 [good]"));
+        assert!(!output.contains("0       0       0       0"));
+    }
+
+    #[test]
+    fn dashboard_bottom_band_medium_snapshot_uses_chart_and_support_lanes() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Dashboard;
+
+        let output = render_snapshot(&app, 120, 36).unwrap_or_else(|error| {
+            unreachable!("medium dashboard snapshot should render: {error}")
+        });
+
+        assert!(
+            output.contains(
+                "factor        signal                                              delta"
+            )
+        );
+        assert!(output.contains("WEEKLY TRENDS"));
+        assert!(output.contains("Sleep  ██████"));
+        assert!(output.contains("Ready  ██████"));
+        assert!(output.contains("Actv   "));
+        assert!(output.contains("Sleep 76 | 04-08 [good]"));
+        assert!(output.contains("ramp ░▒▓█ higher"));
+        assert!(output.contains("Today's hrv is 34; there is not enough history"));
+        assert!(!output.contains("focus          "));
+        assert!(!output.contains("Recent score bands for sleep, readines"));
+    }
+
+    #[test]
+    fn dashboard_bottom_band_focus_snapshots_lock_to_panel_titles() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Dashboard;
+
+        while app.focused_region() != FocusRegion::DashboardBreakdown {
+            app.handle(Action::FocusNextRegion);
+        }
+        let breakdown = render_snapshot(&app, 160, 44).unwrap_or_else(|error| {
+            unreachable!("breakdown focus snapshot should render: {error}")
+        });
+        assert!(breakdown.contains("> READINESS BREAKDOWN"));
+        assert!(breakdown.contains("> HRV Balance"));
+
+        while app.focused_region() != FocusRegion::DashboardHeatmap {
+            app.handle(Action::FocusNextRegion);
+        }
+        let weekly = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| unreachable!("weekly focus snapshot should render: {error}"));
+        assert!(weekly.contains("> WEEKLY TRENDS"));
+        assert!(weekly.contains("[█████████]"));
+    }
+
+    #[tokio::test]
+    async fn dashboard_bottom_band_empty_fixture_keeps_scaffold_copy_bounded() {
+        let config = test_config();
+        let states = build_scenario_fixture_snapshot_apps_for_tests(
+            &config,
+            std::path::Path::new("tests/fixtures/phase7"),
+        )
+        .await
+        .unwrap_or_else(|error| unreachable!("scenario fixture apps should build: {error}"));
+
+        let mut app = states
+            .into_iter()
+            .find_map(|(scenario, app)| {
+                (scenario == crate::ui::snapshot::SnapshotScenario::Empty).then_some(app)
+            })
+            .unwrap_or_else(|| unreachable!("empty scenario should exist"));
+        app.active_screen = Screen::Dashboard;
+
+        let medium = render_snapshot(&app, 120, 36).unwrap_or_else(|error| {
+            unreachable!("medium empty dashboard snapshot should render: {error}")
+        });
+        let wide = render_snapshot(&app, 160, 44).unwrap_or_else(|error| {
+            unreachable!("wide empty dashboard snapshot should render: {error}")
+        });
+
+        assert!(medium.contains("READINESS BREAKDOWN"));
+        assert!(medium.contains("WEEKLY TRENDS"));
+        assert!(medium.contains("EMPTY"));
+        assert!(medium.contains("Driver rails explain the top-line recovery state"));
+        assert!(medium.contains("Recent score bands for sleep, readi..."));
+
+        assert!(wide.contains("READINESS BREAKDOWN"));
+        assert!(wide.contains("WEEKLY TRENDS"));
+        assert!(wide.contains("EMPTY"));
+        assert!(wide.contains("Recent score bands for sleep, readiness, and act..."));
+    }
+
+    #[test]
+    fn dashboard_buffer_styles_keep_focus_freshness_and_alert_separate() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Dashboard;
+        app.model.dashboard.readiness.primary_value = "58".to_owned();
+        app.model.dashboard.readiness.score_band =
+            Some(crate::app::DashboardScoreBand::PayAttention);
+
+        let buffer =
+            super::render_buffer_with_capability(&app, 160, 44, ColorCapability::TrueColor)
+                .unwrap_or_else(|error| unreachable!("dashboard buffer should render: {error}"));
+        let theme = Theme::for_capability(ColorCapability::TrueColor);
+
+        let (focus_x, focus_y) = find_text_position(&buffer, "> READINESS")
+            .unwrap_or_else(|| unreachable!("focused readiness title should exist"));
+        let focus_cell = &buffer[(focus_x, focus_y)];
+        assert_eq!(focus_cell.fg, theme.tone(Tone::Focus));
+
+        let (stale_x, stale_y) = find_text_position(&buffer, "[STALE]")
+            .unwrap_or_else(|| unreachable!("stale badge should exist"));
+        let stale_cell = &buffer[(stale_x + 1, stale_y)];
+        assert_eq!(stale_cell.fg, theme.tone(Tone::Stale));
+
+        let (score_x, score_y) = find_text_position(&buffer, "58")
+            .unwrap_or_else(|| unreachable!("alert score should exist"));
+        let score_cell = &buffer[(score_x, score_y)];
+        assert_eq!(score_cell.fg, theme.tone(Tone::JudgedAlert));
+
+        assert_ne!(focus_cell.fg, stale_cell.fg);
+        assert_ne!(focus_cell.fg, score_cell.fg);
+        assert_ne!(stale_cell.fg, score_cell.fg);
+    }
+
+    #[test]
+    fn dashboard_mono_buffer_preserves_focus_and_state_without_hue() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Dashboard;
+        app.model.dashboard.readiness.primary_value = "58".to_owned();
+        app.model.dashboard.readiness.score_band =
+            Some(crate::app::DashboardScoreBand::PayAttention);
+
+        let buffer = super::render_buffer_with_capability(&app, 160, 44, ColorCapability::Mono)
+            .unwrap_or_else(|error| unreachable!("dashboard mono buffer should render: {error}"));
+
+        let (focus_x, focus_y) = find_text_position(&buffer, "> READINESS")
+            .unwrap_or_else(|| unreachable!("focused readiness title should exist"));
+        let focus_cell = &buffer[(focus_x, focus_y)];
+        assert!(focus_cell.modifier.contains(Modifier::UNDERLINED));
+
+        let (stale_x, stale_y) = find_text_position(&buffer, "[STALE]")
+            .unwrap_or_else(|| unreachable!("stale badge should exist"));
+        let stale_cell = &buffer[(stale_x + 1, stale_y)];
+        assert!(stale_cell.modifier.contains(Modifier::BOLD));
+        assert!(!stale_cell.modifier.contains(Modifier::UNDERLINED));
+
+        let (score_x, score_y) = find_text_position(&buffer, "58")
+            .unwrap_or_else(|| unreachable!("alert score should exist"));
+        let score_cell = &buffer[(score_x, score_y)];
+        assert!(score_cell.modifier.contains(Modifier::REVERSED));
     }
 
     #[test]
@@ -3701,7 +4466,6 @@ mod tests {
         assert!(output.contains("Mode [Today]"));
         assert!(output.contains("Focus [Readiness]"));
         assert!(output.contains("> #1"));
-        assert!(output.contains("#2"));
         assert!(output.contains("AI artifact: available"));
     }
 
@@ -3841,6 +4605,122 @@ mod tests {
     }
 
     #[test]
+    fn help_overlay_renders_as_a_modal_snapshot() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.handle(Action::ToggleHelp);
+
+        let output = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| unreachable!("help overlay snapshot should render: {error}"));
+
+        assert!(output.contains("MODAL"));
+        assert!(output.contains("Keyboard help is modal while open."));
+    }
+
+    #[test]
+    fn help_overlay_uses_content_fit_bounds_across_viewports() {
+        let config = test_config();
+        let groups = keybindings::help_groups(keybindings::BindingContext {
+            active_screen: Screen::Dashboard,
+            focused_region: FocusRegion::DashboardReadiness,
+            search_open: false,
+            help_open: true,
+            ai_preflight_open: false,
+        });
+        let shortcut_width = groups
+            .values()
+            .flat_map(|entries| entries.iter())
+            .map(|entry| super::split_help_entry(entry).0.len())
+            .max()
+            .unwrap_or(0)
+            .max(12);
+        let mut help_lines = Vec::new();
+        help_lines.push("Keyboard help is modal while open.".to_owned());
+        for (index, (group, entries)) in groups.iter().enumerate() {
+            if index > 0 {
+                help_lines.push(String::new());
+            }
+            help_lines.push((*group).to_owned());
+            for entry in entries {
+                let (shortcut, description) = super::split_help_entry(entry);
+                help_lines.push(format!("{shortcut:<shortcut_width$}  {description}"));
+            }
+        }
+        help_lines.push(String::new());
+        help_lines.push("Esc closes this help.".to_owned());
+        let content_width_hint = help_lines
+            .iter()
+            .map(|line| measure_one_line(line).width)
+            .max()
+            .unwrap_or(0);
+
+        for (width, height) in [(90, 28), (120, 36), (160, 44)] {
+            let mut app = build_demo_state(&config);
+            app.handle(Action::ToggleHelp);
+
+            let buffer = super::render_buffer(&app, width, height).unwrap_or_else(|error| {
+                unreachable!("help overlay buffer should render at {width}x{height}: {error}")
+            });
+            let metrics = DashboardMetrics::for_viewport(ViewportClass::from_width(width));
+            let popup = content_fit_overlay_layout(
+                Rect::new(0, 0, width, height),
+                metrics,
+                OverlayLayoutSpec::new(HELP_MODAL_MAX_WIDTH, HELP_MODAL_MAX_HEIGHT)
+                    .with_min_size(56, 12)
+                    .with_content_hints(
+                        u16::try_from(content_width_hint).unwrap_or(u16::MAX),
+                        HELP_MODAL_VISIBLE_BODY_ROWS,
+                    ),
+            )
+            .bounds;
+
+            assert_eq!(buffer[(popup.x, popup.y)].symbol(), "┏");
+            assert_eq!(
+                buffer[(popup.x + popup.width.saturating_sub(1), popup.y)].symbol(),
+                "┓"
+            );
+            assert_eq!(
+                buffer[(popup.x, popup.y + popup.height.saturating_sub(1))].symbol(),
+                "┗"
+            );
+            assert_eq!(
+                buffer[(
+                    popup.x + popup.width.saturating_sub(1),
+                    popup.y + popup.height.saturating_sub(1)
+                )]
+                    .symbol(),
+                "┛"
+            );
+            assert!(
+                popup.x > 0,
+                "popup should be inset from the left at {width}x{height}"
+            );
+            assert!(
+                popup.y > 0,
+                "popup should be inset from the top at {width}x{height}"
+            );
+            assert!(popup.width <= HELP_MODAL_MAX_WIDTH);
+            assert!(popup.height <= HELP_MODAL_MAX_HEIGHT);
+        }
+    }
+
+    #[test]
+    fn trends_snapshot_exposes_full_width_matrix_headers() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Trends;
+
+        let output = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| unreachable!("trends snapshot should render: {error}"));
+
+        assert!(output.contains("metric"));
+        assert!(output.contains("current"));
+        assert!(output.contains("90d"));
+        assert!(output.contains("cue"));
+        assert!(output.contains("signature"));
+    }
+
+    #[test]
     fn ai_workbench_browser_tabs_render_snapshot_report_and_eval_details() {
         let config = test_config();
         let mut app = build_demo_state(&config);
@@ -3880,27 +4760,15 @@ mod tests {
     }
 
     fn centered_test_rect(area: Rect, width_pct: u16, height_pct: u16) -> Rect {
-        let vertical = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage((100 - height_pct) / 2),
-                Constraint::Percentage(height_pct),
-                Constraint::Percentage((100 - height_pct) / 2),
-            ])
-            .split(area);
-        let horizontal = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage((100 - width_pct) / 2),
-                Constraint::Percentage(width_pct),
-                Constraint::Percentage((100 - width_pct) / 2),
-            ])
-            .split(vertical[1]);
-        horizontal[1]
+        centered_modal_layout(
+            area,
+            ModalLayoutSpec::from_percent(area, width_pct, height_pct),
+        )
+        .bounds
     }
 
     #[tokio::test]
-    async fn renders_scenario_fixture_matrix_across_compact_and_wide() {
+    async fn renders_scenario_fixture_matrix_across_compact_medium_and_wide() {
         let config = test_config();
         let states = build_scenario_fixture_snapshot_apps_for_tests(
             &config,
@@ -3910,38 +4778,48 @@ mod tests {
         .unwrap_or_else(|error| unreachable!("scenario fixture apps should build: {error}"));
 
         for (scenario, mut app) in states {
-            let scenario_marker = format!("Scenario fixture `{}`", scenario.label());
-
-            for (screen, compact_marker, wide_marker) in [
-                (Screen::Dashboard, "Now |", "What matters now"),
-                (Screen::Timeline, "Day events", "Day events"),
-                (Screen::Trends, "Trend windows", "Trend windows"),
+            for (screen, compact_marker, medium_marker, wide_marker) in [
+                (Screen::Dashboard, "READINESS", "READINESS", "READINESS"),
+                (Screen::Timeline, "TIMELINE", "HEART RATE", "TIMELINE"),
+                (
+                    Screen::Trends,
+                    "TREND MATRIX",
+                    "TREND MATRIX",
+                    "TREND MATRIX",
+                ),
                 (
                     Screen::Explain,
                     "Supporting evidence",
                     "Supporting evidence",
+                    "Supporting evidence",
                 ),
-                (Screen::Patterns, "Patterns browser", "Patterns browser"),
-                (Screen::Review, "Review digest", "Review digest"),
-                (Screen::Ai, "AI workbench", "AI workbench"),
-                (Screen::Ops, "Status console", "Status console"),
+                (
+                    Screen::Patterns,
+                    "Patterns browser",
+                    "Patterns browser",
+                    "Patterns browser",
+                ),
+                (
+                    Screen::Review,
+                    "Ranked observations",
+                    "Ranked observations",
+                    "Ranked observations",
+                ),
+                (Screen::Ai, "AI workbench", "AI workbench", "AI workbench"),
+                (Screen::Ops, "COVERAGE", "COVERAGE", "COVERAGE"),
             ] {
                 app.active_screen = screen;
 
-                for (width, height) in [(90, 28), (160, 44)] {
+                for (width, height) in [(90, 28), (120, 36), (160, 44)] {
                     let output = render_snapshot(&app, width, height).unwrap_or_else(|error| {
                         unreachable!("matrix snapshot should render: {error}")
                     });
-                    let marker = if width == 90 {
-                        compact_marker
-                    } else {
-                        wide_marker
+                    let marker = match width {
+                        90 => compact_marker,
+                        120 => medium_marker,
+                        _ => wide_marker,
                     };
 
-                    assert!(
-                        output.contains(&scenario_marker),
-                        "scenario marker missing for {scenario:?} {screen:?} {width}x{height}"
-                    );
                     assert!(
                         output.contains(marker),
                         "screen marker `{marker}` missing for {scenario:?} {screen:?} {width}x{height}"
@@ -3981,8 +4859,8 @@ mod tests {
                 Some(Action::MoveFocusedRegion(NavMove::Previous)),
             ),
             (
-                Screen::Patterns,
-                FocusRegion::ContextPrimary,
+                Screen::Timeline,
+                FocusRegion::TimelineControls,
                 KeyCode::Right,
                 Some(Action::MoveFocusedRegion(NavMove::Next)),
             ),
@@ -4170,18 +5048,21 @@ mod tests {
     }
 
     #[test]
-    fn orientation_strip_marks_the_focused_region() {
+    fn top_nav_focus_uses_the_tab_focus_badge() {
         let config = test_config();
         let mut app = build_demo_state(&config);
-        app.active_screen = Screen::Ai;
+        app.handle(Action::ShowScreen(Screen::Ai));
         app.handle(Action::FocusNextRegion);
+        app.handle(Action::FocusNextRegion);
+        app.handle(Action::FocusNextRegion);
+        app.handle(Action::FocusNextRegion);
+
+        assert_eq!(app.focused_region(), FocusRegion::TopNav);
 
         let output = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("ai snapshot should render: {error}"));
 
-        assert!(output.contains(
-            "Focus: body focus | Views | Browser | Launch points | [Saved artifacts] | Artifact actions"
-        ));
+        assert!(output.contains("Views [AI]") || output.contains("Views [focus in tabs]"));
     }
 
     #[test]
@@ -4196,9 +5077,8 @@ mod tests {
         let output = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("review search snapshot should render: {error}"));
 
-        assert!(output.contains("Find in Current Context"));
+        assert!(output.contains("Search is modal while open."));
         assert!(output.contains("Query: st"));
-        assert!(output.contains("Enter next  Shift+Enter previous  Esc close"));
     }
 
     #[test]
@@ -4211,7 +5091,8 @@ mod tests {
         let output = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("help snapshot should render: {error}"));
 
-        assert!(output.contains("Keyboard Help"));
+        assert!(output.contains("KEYBOARD HELP"));
+        assert!(output.contains("Keyboard help is modal while open."));
         assert!(output.contains("Standard"));
         assert!(output.contains("Expert aliases"));
     }
@@ -4659,13 +5540,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_preempts_inflight_refresh() {
+    async fn shutdown_waits_for_inflight_refresh_completion() {
         let (command_tx, mut command_rx) = unbounded_channel();
         let send_result = command_tx.send(super::WorkerCommand::Shutdown);
         assert!(send_result.is_ok());
 
-        let result = super::await_inflight_refresh(&mut command_rx, pending::<usize>()).await;
-        assert!(matches!(result, super::InFlightRefreshResult::Shutdown));
+        let result = super::await_inflight_refresh(&mut command_rx, async {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            7usize
+        })
+        .await;
+
+        match result {
+            super::InFlightRefreshResult::Completed {
+                result,
+                queued_manual_refresh,
+                shutdown_requested,
+            } => {
+                assert_eq!(result, 7);
+                assert!(!queued_manual_refresh);
+                assert!(shutdown_requested);
+            }
+        }
     }
 
     #[tokio::test]
@@ -4691,12 +5587,11 @@ mod tests {
             super::InFlightRefreshResult::Completed {
                 result,
                 queued_manual_refresh,
+                shutdown_requested,
             } => {
                 assert_eq!(result, 7);
                 assert!(queued_manual_refresh);
-            }
-            super::InFlightRefreshResult::Shutdown => {
-                unreachable!("refresh should complete instead of shutting down")
+                assert!(!shutdown_requested);
             }
         }
     }

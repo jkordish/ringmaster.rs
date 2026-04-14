@@ -3,27 +3,36 @@ use std::path::{Path, PathBuf};
 
 use crate::app::{AppState, Screen};
 use crate::error::{Result, RingmasterError};
-use crate::tui::render_snapshot;
+use crate::tui::{render_snapshot, render_snapshot_ansi};
+use crate::ui::layout::ViewportClass;
+use crate::ui::theme::ColorCapability;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SnapshotScenario {
     Strong,
     Weak,
     Empty,
+    DenseHistory,
     Stale,
     Error,
+    MissingScope,
+    RateLimited,
 }
 
 impl SnapshotScenario {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 8] = [
         Self::Strong,
         Self::Weak,
         Self::Empty,
+        Self::DenseHistory,
         Self::Stale,
         Self::Error,
+        Self::MissingScope,
+        Self::RateLimited,
     ];
 
-    pub const FIXTURE_BACKED: [Self; 3] = [Self::Strong, Self::Weak, Self::Empty];
+    pub const FIXTURE_BACKED: [Self; 4] =
+        [Self::Strong, Self::Weak, Self::Empty, Self::DenseHistory];
 
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -31,8 +40,11 @@ impl SnapshotScenario {
             Self::Strong => "strong",
             Self::Weak => "weak",
             Self::Empty => "empty",
+            Self::DenseHistory => "dense-history",
             Self::Stale => "stale",
             Self::Error => "error",
+            Self::MissingScope => "missing-scope",
+            Self::RateLimited => "rate-limited",
         }
     }
 }
@@ -42,6 +54,39 @@ pub enum SnapshotSize {
     Compact,
     Medium,
     Wide,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SnapshotColorMode {
+    Current,
+    TrueColor,
+    Ansi256,
+    Ansi16,
+    Mono,
+}
+
+impl SnapshotColorMode {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::TrueColor => "truecolor",
+            Self::Ansi256 => "ansi256",
+            Self::Ansi16 => "ansi16",
+            Self::Mono => "mono",
+        }
+    }
+
+    #[must_use]
+    pub fn capability(self) -> ColorCapability {
+        match self {
+            Self::Current => ColorCapability::detect(),
+            Self::TrueColor => ColorCapability::TrueColor,
+            Self::Ansi256 => ColorCapability::Ansi256,
+            Self::Ansi16 => ColorCapability::Ansi16,
+            Self::Mono => ColorCapability::Mono,
+        }
+    }
 }
 
 impl SnapshotSize {
@@ -56,12 +101,17 @@ impl SnapshotSize {
         }
     }
 
-    pub const fn dimensions(self) -> (u16, u16) {
+    #[must_use]
+    pub const fn viewport(self) -> ViewportClass {
         match self {
-            Self::Compact => (90, 28),
-            Self::Medium => (120, 36),
-            Self::Wide => (160, 44),
+            Self::Compact => ViewportClass::Compact,
+            Self::Medium => ViewportClass::Medium,
+            Self::Wide => ViewportClass::Wide,
         }
+    }
+
+    pub const fn dimensions(self) -> (u16, u16) {
+        self.viewport().named_dimensions()
     }
 }
 
@@ -79,6 +129,22 @@ impl SnapshotRequest {
         self.scenario.map_or_else(
             || format!("{screen}-{}.txt", self.size.label()),
             |scenario| format!("{screen}-{}-{}.txt", scenario.label(), self.size.label()),
+        )
+    }
+
+    #[must_use]
+    pub fn ansi_artifact_name(self, color_mode: SnapshotColorMode) -> String {
+        let screen = self.screen.title().to_ascii_lowercase();
+        self.scenario.map_or_else(
+            || format!("{screen}-{}-{}.ansi", self.size.label(), color_mode.label()),
+            |scenario| {
+                format!(
+                    "{screen}-{}-{}-{}.ansi",
+                    scenario.label(),
+                    self.size.label(),
+                    color_mode.label()
+                )
+            },
         )
     }
 }
@@ -128,6 +194,7 @@ pub fn is_scenario_fixture_root(path: &Path) -> bool {
 pub fn write_snapshots<F>(
     out_dir: &Path,
     requests: &[SnapshotRequest],
+    ansi_sidecars: &[SnapshotColorMode],
     mut app_for_request: F,
 ) -> Result<Vec<PathBuf>>
 where
@@ -147,6 +214,15 @@ where
         fs::write(&path, rendered)
             .map_err(|error| RingmasterError::io("writing UI snapshot artifact", error))?;
         paths.push(path);
+
+        for color_mode in ansi_sidecars {
+            let rendered = render_snapshot_ansi(&app, width, height, color_mode.capability())?;
+            let path = out_dir.join(request.ansi_artifact_name(*color_mode));
+            fs::write(&path, rendered).map_err(|error| {
+                RingmasterError::io("writing ANSI UI snapshot sidecar artifact", error)
+            })?;
+            paths.push(path);
+        }
     }
 
     Ok(paths)
@@ -159,13 +235,14 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        SnapshotRequest, SnapshotScenario, SnapshotSize, build_requests, is_scenario_fixture_root,
-        write_snapshots,
+        SnapshotColorMode, SnapshotRequest, SnapshotScenario, SnapshotSize, build_requests,
+        is_scenario_fixture_root, write_snapshots,
     };
     use crate::{
         app::{Screen, build_demo_state},
         config::{AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig},
         test_support::ok,
+        ui::layout::ViewportClass,
     };
 
     fn test_config() -> Config {
@@ -259,8 +336,10 @@ mod tests {
             None,
         );
 
-        let paths = write_snapshots(out_dir.path(), &requests, |_| Ok(build_demo_state(&config)))
-            .unwrap_or_else(|error| panic!("snapshots should write: {error}"));
+        let paths = write_snapshots(out_dir.path(), &requests, &[], |_| {
+            Ok(build_demo_state(&config))
+        })
+        .unwrap_or_else(|error| panic!("snapshots should write: {error}"));
 
         assert_eq!(paths.len(), 4);
         assert!(out_dir.path().join("dashboard-compact.txt").exists());
@@ -272,6 +351,7 @@ mod tests {
         assert_eq!(SnapshotSize::Compact.dimensions(), (90, 28));
         assert_eq!(SnapshotSize::Medium.dimensions(), (120, 36));
         assert_eq!(SnapshotSize::Wide.dimensions(), (160, 44));
+        assert_eq!(SnapshotSize::Medium.viewport(), ViewportClass::Medium);
     }
 
     #[test]
@@ -306,8 +386,11 @@ mod tests {
                 "dashboard-strong-compact.txt",
                 "dashboard-weak-compact.txt",
                 "dashboard-empty-compact.txt",
+                "dashboard-dense-history-compact.txt",
                 "dashboard-stale-compact.txt",
                 "dashboard-error-compact.txt",
+                "dashboard-missing-scope-compact.txt",
+                "dashboard-rate-limited-compact.txt",
             ]
         );
     }
@@ -321,5 +404,34 @@ mod tests {
         };
 
         assert_eq!(request.artifact_name(), "timeline-wide.txt");
+        assert_eq!(
+            request.ansi_artifact_name(SnapshotColorMode::Mono),
+            "timeline-wide-mono.ansi"
+        );
+    }
+
+    #[test]
+    fn writes_ansi_sidecar_artifacts_when_requested() {
+        let config = test_config();
+        let out_dir = tempdir().unwrap_or_else(|error| panic!("tempdir should build: {error}"));
+        let requests = build_requests(&[Screen::Dashboard], &[SnapshotSize::Compact], None);
+
+        let paths = write_snapshots(
+            out_dir.path(),
+            &requests,
+            &[SnapshotColorMode::Mono, SnapshotColorMode::TrueColor],
+            |_| Ok(build_demo_state(&config)),
+        )
+        .unwrap_or_else(|error| panic!("snapshots should write: {error}"));
+
+        assert_eq!(paths.len(), 3);
+        assert!(out_dir.path().join("dashboard-compact.txt").exists());
+        assert!(out_dir.path().join("dashboard-compact-mono.ansi").exists());
+        assert!(
+            out_dir
+                .path()
+                .join("dashboard-compact-truecolor.ansi")
+                .exists()
+        );
     }
 }

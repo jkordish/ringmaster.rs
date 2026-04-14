@@ -3,6 +3,27 @@ use crate::app::Screen;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FocusRegion {
     TopNav,
+    DashboardReadiness,
+    DashboardSleep,
+    DashboardActivity,
+    DashboardHrv,
+    DashboardTemp,
+    DashboardHeartRate,
+    DashboardSpo2,
+    DashboardRespRate,
+    DashboardBreakdown,
+    DashboardHeatmap,
+    TimelineControls,
+    TimelineChart,
+    TimelineLanes,
+    TimelineInspector,
+    TimelineEvents,
+    TrendsMatrix,
+    TrendsInspector,
+    OpsSummary,
+    OpsCoverage,
+    OpsDiagnostics,
+    OpsWarnings,
     ContextPrimary,
     ContextSecondary,
     Primary,
@@ -81,19 +102,31 @@ impl PreflightControl {
     }
 }
 
-const DASHBOARD_REGIONS: [FocusRegion; 2] = [FocusRegion::TopNav, FocusRegion::Primary];
+const DASHBOARD_REGIONS: [FocusRegion; 11] = [
+    FocusRegion::TopNav,
+    FocusRegion::DashboardReadiness,
+    FocusRegion::DashboardSleep,
+    FocusRegion::DashboardActivity,
+    FocusRegion::DashboardHrv,
+    FocusRegion::DashboardTemp,
+    FocusRegion::DashboardHeartRate,
+    FocusRegion::DashboardSpo2,
+    FocusRegion::DashboardRespRate,
+    FocusRegion::DashboardBreakdown,
+    FocusRegion::DashboardHeatmap,
+];
 const TIMELINE_REGIONS: [FocusRegion; 6] = [
     FocusRegion::TopNav,
-    FocusRegion::ContextPrimary,
-    FocusRegion::ContextSecondary,
-    FocusRegion::Primary,
-    FocusRegion::Secondary,
-    FocusRegion::Tertiary,
+    FocusRegion::TimelineControls,
+    FocusRegion::TimelineChart,
+    FocusRegion::TimelineLanes,
+    FocusRegion::TimelineInspector,
+    FocusRegion::TimelineEvents,
 ];
 const TRENDS_REGIONS: [FocusRegion; 3] = [
     FocusRegion::TopNav,
-    FocusRegion::ContextPrimary,
-    FocusRegion::Primary,
+    FocusRegion::TrendsMatrix,
+    FocusRegion::TrendsInspector,
 ];
 const EXPLAIN_REGIONS: [FocusRegion; 3] = [
     FocusRegion::TopNav,
@@ -120,7 +153,13 @@ const AI_REGIONS: [FocusRegion; 5] = [
     FocusRegion::Secondary,
     FocusRegion::Tertiary,
 ];
-const OPS_REGIONS: [FocusRegion; 2] = [FocusRegion::TopNav, FocusRegion::Primary];
+const OPS_REGIONS: [FocusRegion; 5] = [
+    FocusRegion::TopNav,
+    FocusRegion::OpsSummary,
+    FocusRegion::OpsCoverage,
+    FocusRegion::OpsDiagnostics,
+    FocusRegion::OpsWarnings,
+];
 
 #[must_use]
 pub const fn screen_regions(screen: Screen) -> &'static [FocusRegion] {
@@ -139,11 +178,13 @@ pub const fn screen_regions(screen: Screen) -> &'static [FocusRegion] {
 #[must_use]
 pub const fn default_region(screen: Screen) -> FocusRegion {
     match screen {
-        Screen::Dashboard | Screen::Ops => FocusRegion::Primary,
-        Screen::Explain | Screen::Patterns => FocusRegion::ContextPrimary,
-        Screen::Timeline | Screen::Trends | Screen::Review | Screen::Ai => {
+        Screen::Dashboard => FocusRegion::DashboardReadiness,
+        Screen::Ops => FocusRegion::OpsSummary,
+        Screen::Explain | Screen::Patterns | Screen::Review | Screen::Ai => {
             FocusRegion::ContextPrimary
         }
+        Screen::Timeline => FocusRegion::TimelineControls,
+        Screen::Trends => FocusRegion::TrendsMatrix,
     }
 }
 
@@ -151,15 +192,25 @@ pub const fn default_region(screen: Screen) -> FocusRegion {
 pub const fn region_label(screen: Screen, region: FocusRegion) -> Option<&'static str> {
     match (screen, region) {
         (_, FocusRegion::TopNav) => Some("Views"),
-        (Screen::Dashboard, FocusRegion::Primary) => Some("Dashboard body"),
-        (Screen::Timeline, FocusRegion::ContextPrimary) => Some("Window presets"),
-        (Screen::Timeline, FocusRegion::ContextSecondary)
-        | (Screen::Explain, FocusRegion::ContextPrimary) => Some("Overlay filters"),
-        (Screen::Timeline, FocusRegion::Primary) => Some("Timeline chart"),
-        (Screen::Timeline, FocusRegion::Secondary) => Some("Day events"),
-        (Screen::Timeline, FocusRegion::Tertiary) => Some("Selected detail"),
-        (Screen::Trends, FocusRegion::ContextPrimary) => Some("Trend windows"),
-        (Screen::Trends, FocusRegion::Primary) => Some("Comparison scan"),
+        (Screen::Dashboard, FocusRegion::DashboardReadiness) => Some("Readiness tile"),
+        (Screen::Dashboard, FocusRegion::DashboardSleep) => Some("Sleep tile"),
+        (Screen::Dashboard, FocusRegion::DashboardActivity) => Some("Activity tile"),
+        (Screen::Dashboard, FocusRegion::DashboardHrv) => Some("HRV trend"),
+        (Screen::Dashboard, FocusRegion::DashboardTemp) => Some("Body temperature"),
+        (Screen::Dashboard, FocusRegion::DashboardHeartRate) => Some("Heart rate"),
+        (Screen::Dashboard, FocusRegion::DashboardSpo2) => Some("SpO2"),
+        (Screen::Dashboard, FocusRegion::DashboardRespRate) => Some("Respiratory rate"),
+        (Screen::Dashboard, FocusRegion::DashboardBreakdown) => Some("Readiness breakdown"),
+        (Screen::Dashboard, FocusRegion::DashboardHeatmap) => Some("Weekly trends"),
+        (Screen::Timeline, FocusRegion::TimelineControls) => Some("Timeline controls"),
+        (Screen::Timeline, FocusRegion::TimelineChart) => Some("Timeline chart"),
+        (Screen::Timeline, FocusRegion::TimelineLanes) => Some("Overlay lanes"),
+        (Screen::Timeline, FocusRegion::TimelineInspector) => Some("Timeline detail"),
+        (Screen::Timeline, FocusRegion::TimelineEvents) => Some("Event feed"),
+        (Screen::Explain, FocusRegion::ContextPrimary)
+        | (Screen::Timeline, FocusRegion::ContextSecondary) => Some("Overlay filters"),
+        (Screen::Trends, FocusRegion::TrendsMatrix) => Some("Trend matrix"),
+        (Screen::Trends, FocusRegion::TrendsInspector) => Some("Trend detail"),
         (Screen::Explain, FocusRegion::Primary) => Some("Explain body"),
         (Screen::Patterns, FocusRegion::ContextPrimary) => Some("Metric filter"),
         (Screen::Patterns, FocusRegion::ContextSecondary) => Some("Family filter"),
@@ -172,7 +223,10 @@ pub const fn region_label(screen: Screen, region: FocusRegion) -> Option<&'stati
         (Screen::Ai, FocusRegion::Primary) => Some("Launch points"),
         (Screen::Ai, FocusRegion::Secondary) => Some("Saved artifacts"),
         (Screen::Ai, FocusRegion::Tertiary) => Some("Artifact actions"),
-        (Screen::Ops, FocusRegion::Primary) => Some("Status console"),
+        (Screen::Ops, FocusRegion::OpsSummary) => Some("Status summary"),
+        (Screen::Ops, FocusRegion::OpsCoverage) => Some("Coverage matrix"),
+        (Screen::Ops, FocusRegion::OpsDiagnostics) => Some("Diagnostics"),
+        (Screen::Ops, FocusRegion::OpsWarnings) => Some("Warnings"),
         _ => None,
     }
 }
@@ -180,7 +234,7 @@ pub const fn region_label(screen: Screen, region: FocusRegion) -> Option<&'stati
 #[must_use]
 pub const fn search_scope(screen: Screen, region: FocusRegion) -> Option<SearchScope> {
     match (screen, region) {
-        (Screen::Timeline, FocusRegion::Secondary) => Some(SearchScope::TimelineEvents),
+        (Screen::Timeline, FocusRegion::TimelineEvents) => Some(SearchScope::TimelineEvents),
         (Screen::Review, FocusRegion::Primary) => Some(SearchScope::ReviewCards),
         (Screen::Ai, FocusRegion::Secondary) => Some(SearchScope::AiBrowserItems),
         _ => None,
@@ -226,7 +280,13 @@ mod tests {
     fn read_mostly_screens_only_expose_real_focus_stops() {
         assert_eq!(
             screen_regions(Screen::Ops),
-            &[FocusRegion::TopNav, FocusRegion::Primary]
+            &[
+                FocusRegion::TopNav,
+                FocusRegion::OpsSummary,
+                FocusRegion::OpsCoverage,
+                FocusRegion::OpsDiagnostics,
+                FocusRegion::OpsWarnings,
+            ]
         );
     }
 
@@ -237,7 +297,11 @@ mod tests {
             FocusRegion::ContextPrimary
         );
         assert_eq!(default_region(Screen::Explain), FocusRegion::ContextPrimary);
-        assert_eq!(default_region(Screen::Ops), FocusRegion::Primary);
+        assert_eq!(default_region(Screen::Ops), FocusRegion::OpsSummary);
+        assert_eq!(
+            default_region(Screen::Dashboard),
+            FocusRegion::DashboardReadiness
+        );
     }
 
     #[test]

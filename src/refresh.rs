@@ -56,6 +56,7 @@ pub struct InvalidationRunReport {
     pub notes: Vec<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SyncInterruption<T> {
     Completed(T),
@@ -366,7 +367,7 @@ async fn run_watch_inner(
         }
 
         let sync_store = reopen_store(config, &store_plan)?;
-        let report = match await_sync_or_interrupt(
+        let (report, interrupted_during_sync) = await_non_cancelable_sync_or_interrupt(
             sync_selected(
                 config,
                 &sync_store,
@@ -380,14 +381,7 @@ async fn run_watch_inner(
             ),
             tokio::signal::ctrl_c(),
         )
-        .await?
-        {
-            SyncInterruption::Completed(report) => report,
-            SyncInterruption::Interrupted => {
-                notes.push("watch loop interrupted by ctrl-c".to_owned());
-                break;
-            }
-        };
+        .await?;
         if let Some(simulated_sync_states) = simulated_sync_states.as_mut() {
             advance_dry_run_sync_states(
                 config,
@@ -399,6 +393,13 @@ async fn run_watch_inner(
         }
         iterations = iterations.saturating_add(1);
         last_report = Some(report);
+        if interrupted_during_sync {
+            notes.push(
+                "watch loop observed ctrl-c after finishing the in-flight periodic reconcile"
+                    .to_owned(),
+            );
+            break;
+        }
 
         if options
             .max_iterations
@@ -600,6 +601,7 @@ fn prepare_invalidation_run(
     })
 }
 
+#[cfg(test)]
 async fn await_sync_or_interrupt<T, SyncFuture, InterruptFuture>(
     sync_future: SyncFuture,
     interrupt_future: InterruptFuture,
@@ -752,7 +754,7 @@ fn settle_processed_invalidations(
             continue;
         };
 
-        if slice.status == crate::store::queries::SyncRunStatus::Success {
+        if invalidation_completed_by_slice(slice) {
             store.webhook().complete_processing_attempt_success(
                 invalidation.record.invalidation_id,
                 invalidation.attempt_id.ok_or_else(|| {
@@ -800,6 +802,12 @@ fn settle_processed_invalidations(
     }
 
     Ok(notes)
+}
+
+fn invalidation_completed_by_slice(slice: &SliceReport) -> bool {
+    matches!(slice.status, crate::store::queries::SyncRunStatus::Success)
+        || (slice.sync_key == SyncFamily::Daily.sync_key()
+            && slice.status == crate::store::queries::SyncRunStatus::Partial)
 }
 
 fn apply_delete_side_effect(store: &Store, invalidation: &InvalidationRecord) -> Result<bool> {
@@ -1165,7 +1173,8 @@ mod tests {
     use crate::store::webhook_store::{AcceptedWebhookDeliveryInput, InvalidationInput};
     use crate::webhook::WebhookEventType;
     use crate::webhook::default_desired_subscriptions;
-    use std::path::PathBuf;
+    use std::fs;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
     use time::format_description::well_known::Rfc3339;
     use time::{Duration, OffsetDateTime};
@@ -1261,6 +1270,29 @@ mod tests {
 
     fn baseline_fixture_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase3")
+    }
+
+    fn review_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase5")
+    }
+
+    fn copy_fixture_dir(source: &Path, destination: &Path) {
+        fs::create_dir_all(destination)
+            .unwrap_or_else(|error| unreachable!("fixture destination should exist: {error}"));
+        for entry in fs::read_dir(source)
+            .unwrap_or_else(|error| unreachable!("fixture directory should read: {error}"))
+        {
+            let entry =
+                entry.unwrap_or_else(|error| unreachable!("fixture entry should read: {error}"));
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            if source_path.is_dir() {
+                copy_fixture_dir(&source_path, &destination_path);
+            } else {
+                fs::copy(&source_path, &destination_path)
+                    .unwrap_or_else(|error| unreachable!("fixture file should copy: {error}"));
+            }
+        }
     }
 
     fn seed_delivery(
@@ -1691,6 +1723,72 @@ mod tests {
         assert_eq!(daily_state.last_trigger_source.as_deref(), Some("webhook"));
         let trigger_detail = daily_state.last_trigger_detail.unwrap_or_default();
         assert!(trigger_detail.contains("daily_sleep:create:sleep_2026-04-08"));
+    }
+
+    #[tokio::test]
+    async fn invalidation_processing_treats_partial_daily_slice_as_success() {
+        let config = test_config();
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
+        let tempdir = tempfile::tempdir()
+            .unwrap_or_else(|error| unreachable!("tempdir should build: {error}"));
+        let fixture_dir = tempdir.path().join("review-invalidations");
+        copy_fixture_dir(&review_fixture_dir(), &fixture_dir);
+        fs::write(fixture_dir.join("sleep_time.json"), "{ not valid json")
+            .unwrap_or_else(|error| unreachable!("optional fixture should be rewritable: {error}"));
+
+        let queued_at = crate::store::webhook_store::now_rfc3339()
+            .unwrap_or_else(|error| unreachable!("timestamp should render: {error}"));
+        let delivery_id = seed_delivery(
+            &store,
+            "daily_sleep",
+            crate::webhook::WebhookEventType::Create,
+            "sleep_2026-04-08",
+        );
+        store
+            .webhook()
+            .enqueue_invalidation(&crate::store::webhook_store::InvalidationInput {
+                queue_key: "daily_sleep:create:sleep_2026-04-08".to_owned(),
+                data_type: "daily_sleep".to_owned(),
+                event_type: crate::webhook::WebhookEventType::Create,
+                object_id: Some("sleep_2026-04-08".to_owned()),
+                delivery_id,
+                queued_at: queued_at.clone(),
+                available_at: queued_at,
+            })
+            .unwrap_or_else(|error| unreachable!("invalidation should queue: {error}"));
+
+        let report =
+            super::process_pending_invalidations_once(&config, &store, false, Some(fixture_dir))
+                .await
+                .unwrap_or_else(|error| {
+                    unreachable!("invalidation processing should succeed: {error}")
+                });
+
+        assert_eq!(report.claimed_invalidations, 1);
+        let sync_report = report
+            .sync_report
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("sync report should exist"));
+        let daily_slice = sync_report
+            .slice_reports
+            .iter()
+            .find(|slice| slice.sync_key == SyncFamily::Daily.sync_key())
+            .unwrap_or_else(|| unreachable!("daily slice should exist"));
+        assert_eq!(daily_slice.status, SyncRunStatus::Partial);
+        assert!(
+            store
+                .webhook()
+                .list_pending_invalidations()
+                .unwrap_or_else(|error| unreachable!("queue should read: {error}"))
+                .is_empty()
+        );
+        let attempts = store
+            .webhook()
+            .list_recent_processing_attempts(8)
+            .unwrap_or_else(|error| unreachable!("attempts should read: {error}"));
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].outcome, "success");
     }
 
     #[tokio::test]

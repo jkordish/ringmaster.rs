@@ -1,0 +1,131 @@
+{
+  "data": [
+    {
+      "id": "activity_2026-03-26",
+      "day": "2026-03-26",
+      "score": 71,
+      "active_calories": 470,
+      "steps": 9130,
+      "total_calories": 2410,
+      "timestamp": "2026-03-26T22:00:00Z"
+    },
+    {
+      "id": "activity_2026-03-27",
+      "day": "2026-03-27",
+      "score": 78,
+      "active_calories": 620,
+      "steps": 12840,
+      "total_calories": 2560,
+      "timestamp": "2026-03-27T22:00:00Z"
+    },
+    {
+      "id": "activity_2026-03-28",
+      "day": "2026-03-28",
+      "score": 64,
+      "active_calories": 380,
+      "steps": 7010,
+      "total_calories": 2260,
+      "timestamp": "2026-03-28T22:00:00Z"
+    },
+    {
+      "id": "activity_2026-03-29",
+      "day": "2026-03-29",
+      "score": 83,
+      "active_calories": 735,
+      "steps": 15110,
+      "total_calories": 2680,
+      "timestamp": "2026-03-29T22:00:00Z"
+    },
+    {
+      "id": "activity_2026-03-30",
+      "day": "2026-03-30",
+      "score": 68,
+      "active_calories": 425,
+      "steps": 8125,
+      "total_calories": 2330,
+      "timestamp": "2026-03-30T22:00:00Z"
+    },
+    {
+      "id": "activity_2026-03-31",
+      "day": "2026-03-31",
+      "score": 80,
+      "active_calories": 665,
+      "steps": 13690,
+      "total_calories": 2595,
+      "timestamp": "2026-03-31T22:00:00Z"
+    },
+    {
+      "id": "activity_2026-04-01",
+      "day": "2026-04-01",
+      "score": 66,
+      "active_calories": 405,
+      "steps": 7560,
+      "total_calories": 2295,
+      "timestamp": "2026-04-01T22:00:00Z"
+    },
+    {
+      "id": "activity_2026-04-02",
+      "day": "2026-04-02",
+      "score": 69,
+      "active_calories": 440,
+      "steps": 8420,
+      "total_calories": 2350,
+      "timestamp": "2026-04-02T22:00:00Z"
+    },
+    {
+      "id": "activity_2026-04-03",
+      "day": "2026-04-03",
+      "score": 82,
+      "active_calories": 690,
+      "steps": 14120,
+      "total_calories": 2620,
+      "timestamp": "2026-04-03T22:00:00Z"
+    },
+    {
+      "id": "activity_2026-04-04",
+      "day": "2026-04-04",
+      "score": 65,
+      "active_calories": 390,
+      "steps": 7200,
+      "total_calories": 2280,
+      "timestamp": "2026-04-04T22:00:00Z"
+    },
+    {
+      "id": "activity_2026-04-05",
+      "day": "2026-04-05",
+      "score": 84,
+      "active_calories": 740,
+      "steps": 15320,
+      "total_calories": 2690,
+      "timestamp": "2026-04-05T22:00:00Z"
+    },
+    {
+      "id": "activity_2026-04-06",
+      "day": "2026-04-06",
+      "score": 61,
+      "active_calories": 360,
+      "steps": 6840,
+      "total_calories": 2240,
+      "timestamp": "2026-04-06T22:00:00Z"
+    },
+    {
+      "id": "activity_2026-04-07",
+      "day": "2026-04-07",
+      "score": 85,
+      "active_calories": 760,
+      "steps": 15950,
+      "total_calories": 2720,
+      "timestamp": "2026-04-07T22:00:00Z"
+    },
+    {
+      "id": "activity_2026-04-08",
+      "day": "2026-04-08",
+      "score": 67,
+      "active_calories": 430,
+      "steps": 8010,
+      "total_calories": 2335,
+      "timestamp": "2026-04-08T22:00:00Z"
+    }
+  ],
+  "next_token": null
+}

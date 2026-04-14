@@ -12,6 +12,8 @@ It gives you:
 
 The design goal is simple: useful local insight first, optional external analysis second, and no surprise data sharing.
 
+The crate is app-first. The `lib` target exists to support the binary, tests, and local tooling, and the package is not published as a general-purpose library crate. The supported code-facing facade is intentionally narrow: `run_from`, `ringmaster::cli`, and the top-level `Result` / `RingmasterError` re-exports.
+
 ## Start here
 
 If you just want to see the product:
@@ -57,7 +59,7 @@ The default auth request now tracks Oura's broader current scope surface:
 - `stress`
 - `heart_health`
 
-Today the local product fully uses the baseline sync scopes plus the currently wired stress and heart-health reads. `spo2`, `ring_configuration`, and `email` are surfaced in auth/doctor/status as future-ready capability slots rather than hidden or silently ignored.
+Today the local product fully uses the baseline sync scopes plus the currently wired stress, heart-health, sleep-physiology, and `spo2` reads. `ring_configuration` and `email` are still surfaced in auth/doctor/status as future-ready capability slots rather than hidden or silently ignored.
 
 ## Common workflows
 
@@ -74,9 +76,13 @@ cargo run -- review week --demo
 
 ```bash
 cargo run -- ui snapshot --demo --out-dir /tmp/ringmaster-ui-snapshots
+cargo run -- ui snapshot --demo --screen dashboard --size compact --size medium --size wide --ansi-sidecar --color-mode truecolor --color-mode mono --out-dir /tmp/ringmaster-dashboard-ui
+cargo run -- ui snapshot --screen explain --screen patterns --screen review --demo --out-dir /tmp/ringmaster-telemetry-ui
 cargo run -- ui snapshot --screen ai --demo --out-dir /tmp/ringmaster-ai-ui
 cargo run -- ui snapshot --screen status --demo --out-dir /tmp/ringmaster-status-ui
 ```
+
+When `--ansi-sidecar` is enabled, Ringmaster writes the usual stable `.txt` artifacts plus color-aware `.ansi` sidecars for visual QA. For regression work, prefer explicit `truecolor` and `mono`; if you omit `--color-mode`, Ringmaster defaults to environment-driven `current` plus `mono`.
 
 ### Run the snapshot library and report workflow
 
@@ -102,6 +108,8 @@ The TUI now follows one standard navigation grammar across Dashboard, Timeline, 
 - `Esc` closes help, closes search, dismisses a transient panel, or backs out one interaction layer.
 - `Ctrl+F` opens search in the current searchable context.
 - `?` opens a scoped keyboard-help overlay.
+
+Search, help, and AI preflight now all behave as strict modal overlays: they trap interaction while open, restore the invoking region when closed, and keep background screen shortcuts inactive.
 
 Pane behavior is now consistent by pane type:
 

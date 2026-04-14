@@ -118,6 +118,42 @@ pub struct DailySleepDocument {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SleepDocument {
+    pub id: String,
+    pub day: String,
+    #[serde(default)]
+    pub bedtime_start: Option<String>,
+    #[serde(default)]
+    pub bedtime_end: Option<String>,
+    #[serde(default)]
+    pub average_heart_rate: Option<f64>,
+    #[serde(default)]
+    pub average_hrv: Option<f64>,
+    #[serde(default)]
+    pub average_breath: Option<f64>,
+    #[serde(default)]
+    pub total_sleep_duration: Option<i64>,
+    #[serde(default, rename = "type")]
+    pub sleep_type: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpO2PercentageDocument {
+    #[serde(default)]
+    pub average: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DailySpO2Document {
+    pub id: String,
+    pub day: String,
+    #[serde(default)]
+    pub spo2_percentage: Option<SpO2PercentageDocument>,
+    #[serde(default)]
+    pub breathing_disturbance_index: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DailyReadinessDocument {
     pub id: String,
     pub day: String,
@@ -342,13 +378,7 @@ impl CapabilityReport {
                     .iter()
                     .any(|scope| kind.matches_scope(scope));
                 let granted = granted_scopes.iter().any(|scope| kind.matches_scope(scope));
-                let note = match (requested, granted, kind.is_local_sync_ready()) {
-                    (true, true, true) => "granted".to_owned(),
-                    (true, true, false) => "granted for future support".to_owned(),
-                    (true, false, true) => "missing scope".to_owned(),
-                    (true, false, false) => "missing scope; future support only".to_owned(),
-                    (false, _, _) => "not requested".to_owned(),
-                };
+                let note = capability_note(kind, requested, granted, &granted_scopes);
 
                 CapabilityEntry {
                     kind,
@@ -483,7 +513,41 @@ impl CapabilityKind {
 
     #[must_use]
     pub const fn is_local_sync_ready(self) -> bool {
-        !matches!(self, Self::Email | Self::Spo2 | Self::RingConfiguration)
+        !matches!(self, Self::Email | Self::RingConfiguration)
+    }
+
+    #[must_use]
+    pub const fn requires_daily_scope_for_local_sync(self) -> bool {
+        matches!(self, Self::Spo2 | Self::Stress | Self::HeartHealth)
+    }
+}
+
+fn capability_note(
+    kind: CapabilityKind,
+    requested: bool,
+    granted: bool,
+    granted_scopes: &[String],
+) -> String {
+    if !requested {
+        return "not requested".to_owned();
+    }
+    if granted {
+        if !kind.is_local_sync_ready() {
+            return "granted for future support".to_owned();
+        }
+        if kind.requires_daily_scope_for_local_sync()
+            && !granted_scopes
+                .iter()
+                .any(|scope| CapabilityKind::Daily.matches_scope(scope))
+        {
+            return "granted; waiting on `daily` scope for local sync".to_owned();
+        }
+        return "granted".to_owned();
+    }
+    if kind.is_local_sync_ready() {
+        "missing scope".to_owned()
+    } else {
+        "missing scope; future support only".to_owned()
     }
 }
 
@@ -709,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn future_ready_capabilities_have_descriptive_notes() {
+    fn capability_notes_reflect_future_ready_and_locally_synced_surfaces() {
         let report = CapabilityReport::from_scopes(
             &["email".to_owned(), "spo2".to_owned()],
             &["email".to_owned()],
@@ -727,7 +791,30 @@ mod tests {
                 .status_for(CapabilityKind::Spo2)
                 .unwrap_or_else(|| panic!("spo2 capability should exist"))
                 .note,
-            "missing scope; future support only"
+            "missing scope"
+        );
+    }
+
+    #[test]
+    fn daily_derived_capabilities_note_their_daily_sync_dependency() {
+        let report = CapabilityReport::from_scopes(
+            &["spo2".to_owned(), "stress".to_owned()],
+            &["spo2".to_owned(), "stress".to_owned()],
+        );
+
+        assert_eq!(
+            report
+                .status_for(CapabilityKind::Spo2)
+                .unwrap_or_else(|| panic!("spo2 capability should exist"))
+                .note,
+            "granted; waiting on `daily` scope for local sync"
+        );
+        assert_eq!(
+            report
+                .status_for(CapabilityKind::Stress)
+                .unwrap_or_else(|| panic!("stress capability should exist"))
+                .note,
+            "granted; waiting on `daily` scope for local sync"
         );
     }
 

@@ -20,6 +20,9 @@ This document defines the canonical keyboard model for `ringmaster.rs`.
 
 - `Ctrl+F`: open search for the current searchable region or its default screen list
 - While search is active:
+  - search behaves as a strict modal overlay
+  - `Tab` / `Shift+Tab` stay inside search
+  - arrow keys and `Home` / `End` stay inside search even though this pass keeps one active focus anchor
   - `Enter`: move to the next result
   - `Shift+Enter`: move to the previous result
   - `Backspace`: delete one character
@@ -31,6 +34,17 @@ This document defines the canonical keyboard model for `ringmaster.rs`.
 - Focus the tab row with `Tab`.
 - Use `Left` / `Right` / `Home` / `End` to move across top-level screens.
 - Use `Enter` or `Space` to activate the focused screen.
+
+## Modal overlays
+
+- Search, Help, and AI preflight behave as strict modal overlays.
+- Opening a modal keeps the previously focused region as the restore target.
+- While a modal is open:
+  - `Tab` / `Shift+Tab` stay inside the modal
+  - arrow keys move between modal controls when the modal exposes multiple controls
+  - `Esc` closes the modal
+  - background screen shortcuts do not activate
+- Closing a modal restores focus to the region that invoked it.
 
 ## Pane semantics
 
@@ -48,6 +62,10 @@ The app now treats pane movement by pane type instead of by screen-specific shor
   - `PageUp` / `PageDown` move by a larger chunk
   - `Enter` / `Space` inspect, launch, or drill into the selected item
   - examples include Timeline events, Review cards, AI launch points, saved-artifact browsers, and AI artifact actions
+- Focus and selection are intentionally separate:
+  - moving within a composite updates the focused child or preview target
+  - activation happens only where the pane advertises an explicit commit step
+  - selection persists when focus moves to a different major region
 - Chart and pager panes:
   - `Left` / `Right` move within the current series or window
   - `Home` / `End` jump to the first or last point

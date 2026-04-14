@@ -4,7 +4,7 @@ use super::theme::{Theme, Tone};
 
 #[must_use]
 pub fn line_style(theme: &Theme) -> Style {
-    theme.emphasis(Tone::Accent)
+    theme.emphasis(Tone::AccentNeutral)
 }
 
 #[must_use]

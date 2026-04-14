@@ -63,12 +63,11 @@ async fn demo_output_mentions_dashboard() {
 
     assert!(output.contains("ringmaster"));
     assert!(output.contains("Connection: Connected"));
-    assert!(output.contains("Latest sync:"));
-    assert!(output.contains("What matters now | 2026-04-08"));
-    assert!(output.contains("Capabilities"));
-    assert!(output.contains("Dashboard body"));
+    assert!(output.contains("READINESS"));
+    assert!(output.contains("READINESS BREAKDOWN"));
+    assert!(output.contains("WEEKLY TRENDS"));
+    assert!(output.contains("Readiness tile | score 74"));
     assert!(output.contains("Review"));
-    assert!(output.contains("Stress high time is higher than usual."));
 }
 
 #[tokio::test]
@@ -109,6 +108,43 @@ async fn ui_snapshot_demo_writes_artifacts() {
 }
 
 #[tokio::test]
+async fn ui_snapshot_demo_writes_ansi_sidecars_when_requested() {
+    let out_dir = ok(tempdir(), "tempdir should build");
+    let out_path = out_dir.path().join("color-snapshots");
+    let out_arg = out_path.to_string_lossy().into_owned();
+
+    let result = ringmaster::run_from([
+        "ringmaster",
+        "ui",
+        "snapshot",
+        "--demo",
+        "--screen",
+        "dashboard",
+        "--size",
+        "compact",
+        "--ansi-sidecar",
+        "--color-mode",
+        "truecolor",
+        "--color-mode",
+        "mono",
+        "--out-dir",
+        &out_arg,
+    ])
+    .await;
+    assert!(result.is_ok(), "ansi ui snapshot should run");
+
+    let output = some(
+        ok(result, "unexpected ansi ui snapshot failure"),
+        "ansi ui snapshot should render command output",
+    );
+
+    assert!(output.contains("ansi_sidecars: truecolor, mono"));
+    assert!(out_path.join("dashboard-compact.txt").exists());
+    assert!(out_path.join("dashboard-compact-truecolor.ansi").exists());
+    assert!(out_path.join("dashboard-compact-mono.ansi").exists());
+}
+
+#[tokio::test]
 async fn ui_snapshot_ai_demo_writes_ai_workbench_artifacts() {
     let out_dir = ok(tempdir(), "tempdir should build");
     let out_path = out_dir.path().join("ai-snapshots");
@@ -143,6 +179,46 @@ async fn ui_snapshot_ai_demo_writes_ai_workbench_artifacts() {
 }
 
 #[tokio::test]
+async fn ui_snapshot_demo_writes_telemetry_screen_artifacts() {
+    let out_dir = ok(tempdir(), "tempdir should build");
+    let out_path = out_dir.path().join("telemetry-snapshots");
+    let out_arg = out_path.to_string_lossy().into_owned();
+
+    let result = ringmaster::run_from([
+        "ringmaster",
+        "ui",
+        "snapshot",
+        "--demo",
+        "--screen",
+        "explain",
+        "--screen",
+        "patterns",
+        "--screen",
+        "review",
+        "--size",
+        "compact",
+        "--size",
+        "wide",
+        "--out-dir",
+        &out_arg,
+    ])
+    .await;
+    assert!(result.is_ok(), "telemetry ui snapshot should run");
+
+    let output = some(
+        ok(result, "unexpected telemetry ui snapshot failure"),
+        "telemetry ui snapshot should render command output",
+    );
+
+    assert!(output.contains("explain"));
+    assert!(output.contains("patterns"));
+    assert!(output.contains("review"));
+    assert!(out_path.join("explain-compact.txt").exists());
+    assert!(out_path.join("patterns-wide.txt").exists());
+    assert!(out_path.join("review-compact.txt").exists());
+}
+
+#[tokio::test]
 async fn ui_snapshot_scenario_fixture_root_writes_scenario_tagged_artifacts() {
     let out_dir = ok(tempdir(), "tempdir should build");
     let out_path = out_dir.path().join("phase7");
@@ -174,8 +250,10 @@ async fn ui_snapshot_scenario_fixture_root_writes_scenario_tagged_artifacts() {
     );
 
     assert!(output.contains("scenario fixture root"));
-    assert!(output.contains("strong, weak, empty, stale, error"));
+    assert!(output.contains("dense-history"));
+    assert!(output.contains("strong, weak, empty"));
     assert!(out_path.join("dashboard-strong-compact.txt").exists());
+    assert!(out_path.join("dashboard-dense-history-wide.txt").exists());
     assert!(out_path.join("dashboard-error-wide.txt").exists());
     assert!(out_path.join("status-stale-compact.txt").exists());
 }

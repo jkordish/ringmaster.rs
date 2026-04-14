@@ -17,25 +17,45 @@ This document defines the visual system used by the current terminal redesign. I
 
 The palette is semantic rather than screen-specific. Code should reference roles, not literal colors.
 
-- `background`: terminal canvas and outer frame
-- `surface_1`: primary panel background
-- `surface_2`: secondary grouping surface
-- `surface_3`: tertiary grouping surface or muted chrome
-- `text_strong`: strongest foreground for hero numbers and active titles
-- `text`: default readable foreground
-- `text_muted`: metadata, annotations, inactive helpers
-- `accent`: active navigation, current focal emphasis, selected analytical references
-- `positive`: success and favorable change
-- `warning`: stale, caution, thin-confidence, partial operator concerns
-- `danger`: errors, rejected operations, hard failures
-- `info`: neutral-but-important operator or context information
-- `focus`: keyboard focus/selection emphasis, paired with glyph and wording
+Surfaces:
+
+- `surface_base`: terminal canvas and outer frame
+- `surface_panel`: default panel background
+- `surface_panel_alt`: secondary grouping surface or muted chrome
+
+Lines:
+
+- `border_subtle`: internal separators and quiet shell edges
+- `border_normal`: standard panel shell
+- `border_focus`: focused shell emphasis only
+
+Text:
+
+- `text_primary`: strongest foreground for hero values and selected focal text
+- `text_secondary`: default readable foreground
+- `text_tertiary`: metadata, annotations, inactive helpers
+- `text_disabled`: unavailable or suppressed text
+
+States:
+
+- `focus_lilac`: keyboard focus and selection emphasis only
+- `fresh_cyan`: freshness, sync recency, and connected informational state
+- `ok_mint`: interpreted healthy or optimal state
+- `warn_butter`: stale, caution, fair, or attention-needed state
+- `alert_rose`: hard failure or judged alert state
+- `delta_cool`: below-baseline raw delta without moral meaning
+- `delta_warm`: above-baseline raw delta without moral meaning
+- `na_gray`: unavailable, missing scope, unsupported, or disabled state
+
+Critical rule:
+
+- focus, freshness, and judged health must remain visually distinct; a focused stale panel, a fresh unfocused panel, and a judged alert state should never collapse into one accent family
 
 AI-specific interpretation:
 
-- `accent` and `focus` call out the active AI workbench slice or selected saved artifact
-- `warning` communicates privacy or provider concerns before launch
-- `info` communicates trust metadata such as stateless mode, disabled tools, and payload scope
+- `focus_lilac` calls out the active AI workbench slice or selected saved artifact
+- `warn_butter` communicates privacy or provider concerns before launch
+- `fresh_cyan` communicates trust metadata such as stateless mode, disabled tools, and payload scope
 
 ## Text hierarchy
 
@@ -50,10 +70,9 @@ AI-specific interpretation:
 
 Use semantic spacing rules rather than per-screen magic numbers:
 
-- `dense_gap`: one cell between tightly related rows
-- `standard_gap`: default separation between sibling regions
-- `section_gap`: larger break between major sections
-- `panel_padding`: one-cell inset inside primary panels where the widget allows it
+- `micro_gap`: one cell between tightly related rows
+- `panel_padding`: two-cell default inset where the viewport allows it
+- `section_gap`: larger four-cell break reserved for major internal compositions
 - `compact_density`: prefer stacked sections and fewer side rails
 - `wide_density`: prefer lateral comparisons and inspector sidecars
 
@@ -69,8 +88,11 @@ Not every grouping needs a full border.
 
 Rules:
 
-- use full bordered blocks for the strongest one or two regions on a screen
-- use dividers or muted group titles for secondary regions
+- outer app frame carries the strongest line weight
+- primary panel shells use normal line weight
+- internal separators should prefer subtle lines or whitespace over nested boxes
+- focused panels use stronger line weight and `focus_lilac`
+- fresh/stale/error state is communicated by badge and tone, not by stealing focus styling
 - avoid placing many equal-weight full boxes side by side unless the view is explicitly comparative
 
 ## Badge and chip language
@@ -83,22 +105,28 @@ Badges combine text, state prefix, and style.
 - review confidence and sufficiency labels remain compact and repeatable
 - AI lifecycle badges must combine text and semantics, never color alone
 - preflight trust chips should surface privacy and request posture before confirmation
+- title bars should share one optical system: consistent inset, badge alignment, and title-to-body spacing
 
 ## Chart grammar
 
 - use line charts for continuous temporal series
-- use compact bars or value rails for ranked/discrete comparison
+- use compact bars, value rails, or stacked profiles for ranked/discrete comparison
 - use sparklines only as directional hints, never as the sole carrier of meaning
 - emphasize selected points with symbol, position, and label treatment
 - show missing data through gaps or explicit “no data” language
 - show stale data through badge/context language adjacent to the chart, not by over-coloring the line
 - keep annotation restraint: baseline and threshold markers should be fewer and clearer than raw data marks
+- each panel should prefer one rendering vocabulary at a time: bars, rails, blocks, or braille-like density, rather than mixing all of them
+- use `ok_mint` / `warn_butter` / `alert_rose` for judged status and threshold cues only
+- use ordered sequential ramps for magnitude and diverging `delta_cool` / neutral / `delta_warm` for signed baseline-relative changes
+- never make raw quantitative charts depend on red-green alone
 
 ## State language
 
 Every state should be legible in monochrome and in low-color terminals.
 
 - `fresh`: affirmative label + positive tone
+- `fresh`: explicit fresh/synced wording + `fresh_cyan`, never a health color
 - `stale`: explicit stale wording + warning tone + contextual detail
 - `syncing`: active wording + focus/info tone
 - `empty`: neutral empty block with next-step hint
@@ -106,6 +134,7 @@ Every state should be legible in monochrome and in low-color terminals.
 - `insufficient history`: explicit “thin” or “not enough data yet” wording
 - `error`: concise hard-failure block with danger tone
 - `selected`: focus marker, ordering emphasis, and accent/focus tone
+- every colored state also needs a second cue such as text, border weight, selection marker, or fill density
 - `disabled`: muted text plus explicit unavailable wording
 - `queued`: explicit queued wording plus info/focus tone
 - `running`: active wording plus focus tone
@@ -176,6 +205,7 @@ It should:
 - render deterministic screen snapshots from demo or fixture-backed data
 - support multiple screens and multiple terminal sizes
 - write stable text artifacts to an output directory
+- optionally write ANSI sidecar artifacts for color-aware review in `current`, `truecolor`, `ansi256`, `ansi16`, or `mono` modes
 - be usable for human review and regression tests
 
 Phase-9 AI QA extends this to cover:

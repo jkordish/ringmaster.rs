@@ -194,6 +194,15 @@ pub enum SnapshotSizeArg {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SnapshotColorModeArg {
+    Current,
+    Truecolor,
+    Ansi256,
+    Ansi16,
+    Mono,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum PrivacyProfileArg {
     Redacted,
     Balanced,
@@ -220,6 +229,12 @@ pub struct UiSnapshotArgs {
     /// Limit snapshot generation to specific terminal sizes. Defaults to compact, medium, and wide.
     #[arg(long, value_enum)]
     pub size: Vec<SnapshotSizeArg>,
+    /// Emit ANSI sidecar artifacts alongside stable text snapshots.
+    #[arg(long)]
+    pub ansi_sidecar: bool,
+    /// Color modes to export for ANSI sidecars. Defaults to `current` and `mono`; prefer explicit `truecolor` plus `mono` for regression QA.
+    #[arg(long, value_enum)]
+    pub color_mode: Vec<SnapshotColorModeArg>,
     /// Output directory for deterministic snapshot artifacts.
     #[arg(long)]
     pub out_dir: PathBuf,
@@ -526,10 +541,11 @@ mod tests {
         AiCommand, AiCompareArgs, AiEvalArgs, AiReviewArgs, AiRunsCommand, AiRunsListArgs,
         AiRunsShowArgs, AuthCommand, Cli, Command, DeriveCommand, DeriveRebuildArgs,
         PrivacyProfileArg, ReportCommand, ReportExportArgs, ReportFormatArg, ReviewCommand,
-        ReviewFocusArg, ReviewInvestigateArgs, ReviewTodayArgs, SnapshotCommand,
-        SnapshotExportArgs, SnapshotListArgs, SnapshotScreenArg, SnapshotShowArgs, SnapshotSizeArg,
-        SyncCommand, SyncOnceArgs, SyncWatchArgs, UiCommand, UiSnapshotArgs, WebhookCommand,
-        WebhookReplayArgs, WebhookSubscriptionCommand, WebhookSubscriptionsSyncArgs,
+        ReviewFocusArg, ReviewInvestigateArgs, ReviewTodayArgs, SnapshotColorModeArg,
+        SnapshotCommand, SnapshotExportArgs, SnapshotListArgs, SnapshotScreenArg, SnapshotShowArgs,
+        SnapshotSizeArg, SyncCommand, SyncOnceArgs, SyncWatchArgs, UiCommand, UiSnapshotArgs,
+        WebhookCommand, WebhookReplayArgs, WebhookSubscriptionCommand,
+        WebhookSubscriptionsSyncArgs,
     };
     use crate::test_support::ok;
 
@@ -766,6 +782,8 @@ mod tests {
                         fixture_dir: None,
                         screen,
                         size,
+                        ansi_sidecar: false,
+                        color_mode,
                         out_dir,
                     }),
             }) => {
@@ -774,7 +792,45 @@ mod tests {
                     vec![SnapshotScreenArg::Dashboard, SnapshotScreenArg::Status]
                 );
                 assert_eq!(size, vec![SnapshotSizeArg::Compact, SnapshotSizeArg::Wide]);
+                assert!(color_mode.is_empty());
                 assert_eq!(out_dir, PathBuf::from("/tmp/ringmaster-snapshots"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ui_snapshot_ansi_sidecar_modes() {
+        let cli = Cli::parse_from([
+            "ringmaster",
+            "ui",
+            "snapshot",
+            "--ansi-sidecar",
+            "--color-mode",
+            "current",
+            "--color-mode",
+            "mono",
+            "--out-dir",
+            "/tmp/ringmaster-snapshots",
+        ])
+        .unwrap_or_else(|error| {
+            panic!("expected clap parsing to succeed in test: {error}");
+        });
+
+        match cli.command {
+            Some(Command::Ui {
+                command:
+                    UiCommand::Snapshot(UiSnapshotArgs {
+                        ansi_sidecar,
+                        color_mode,
+                        ..
+                    }),
+            }) => {
+                assert!(ansi_sidecar);
+                assert_eq!(
+                    color_mode,
+                    vec![SnapshotColorModeArg::Current, SnapshotColorModeArg::Mono]
+                );
             }
             other => panic!("unexpected command: {other:?}"),
         }

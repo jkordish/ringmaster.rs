@@ -10,9 +10,10 @@ use crate::app::{
     AiArtifactActionView, AiLaunchPointView, AiPreflightControlView, AiPreflightView,
     AiWorkbenchModel,
 };
+use crate::navigation::FocusRegion;
 use crate::ui::{
     chrome::{self, PanelKind},
-    layout::UiContext,
+    layout::{ModalLayoutSpec, UiContext, centered_modal_layout},
     theme::{Theme, Tone},
 };
 
@@ -22,15 +23,13 @@ pub fn draw(
     model: &AiWorkbenchModel,
     ui: &UiContext,
     theme: &Theme,
+    _focused_region: FocusRegion,
+    _expanded_region: Option<FocusRegion>,
 ) {
     if ui.viewport.is_wide() {
         draw_wide(frame, area, model, theme);
     } else {
         draw_narrow(frame, area, model, theme, ui.viewport.is_compact());
-    }
-
-    if let Some(preflight) = &model.preflight {
-        draw_preflight_overlay(frame, area, preflight, theme, !ui.viewport.is_wide());
     }
 }
 
@@ -346,18 +345,22 @@ fn draw_warnings(frame: &mut Frame<'_>, area: Rect, model: &AiWorkbenchModel, th
     );
 }
 
-fn draw_preflight_overlay(
+pub(crate) fn draw_preflight_overlay(
     frame: &mut Frame<'_>,
     area: Rect,
     preflight: &AiPreflightView,
     theme: &Theme,
     compact: bool,
 ) {
-    let popup = centered_rect(
+    let popup = centered_modal_layout(
         area,
-        if compact { 92 } else { 74 },
-        if compact { 72 } else { 68 },
-    );
+        ModalLayoutSpec::from_percent(
+            area,
+            if compact { 92 } else { 74 },
+            if compact { 72 } else { 68 },
+        ),
+    )
+    .bounds;
     frame.render_widget(Clear, popup);
     let sections = Layout::default()
         .direction(Direction::Vertical)
@@ -437,24 +440,4 @@ fn draw_preflight_controls(
         .select(selected_index),
         area,
     );
-}
-
-fn centered_rect(area: Rect, width_pct: u16, height_pct: u16) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - height_pct) / 2),
-            Constraint::Percentage(height_pct),
-            Constraint::Percentage((100 - height_pct) / 2),
-        ])
-        .split(area);
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - width_pct) / 2),
-            Constraint::Percentage(width_pct),
-            Constraint::Percentage((100 - width_pct) / 2),
-        ])
-        .split(vertical[1]);
-    horizontal[1]
 }

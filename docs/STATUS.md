@@ -52,6 +52,9 @@ The repository now includes:
 
 - a local snapshot catalog backed by `snapshot_exports`
 - an expanded Oura auth capability surface that now tracks `email`, `spo2`, `ring_configuration`, `stress`, and `heart_health` alongside the original baseline scopes
+- persisted sleep-physiology storage for nightly HRV and respiratory rate plus persisted daily `spo2` summaries
+- dashboard physiology panels that now read real local HRV, respiratory-rate, and `spo2` telemetry instead of placeholder shells
+- telemetry-first Explain, Patterns, and Review compositions that share the same panel language as Dashboard while keeping honest degraded states
 - canonical snapshot library commands:
   - `snapshot list`
   - `snapshot show`

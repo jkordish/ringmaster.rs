@@ -3,15 +3,17 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     prelude::Rect,
     symbols,
-    text::{Line, Span},
-    widgets::{Axis, Chart, Dataset, GraphType, List, ListItem, Paragraph, Tabs},
+    text::Span,
+    widgets::{Axis, Chart, Dataset, GraphType, List, ListItem, Paragraph, Tabs, Wrap},
 };
 
 use crate::app::{OverlayFamilyGroup, OverlayToggleView, TimelineModel};
+use crate::navigation::FocusRegion;
+use crate::ui::chrome::{PanelKind, PanelShellSpec, render_panel_shell};
 use crate::ui::{
-    charts,
-    chrome::{self, PanelKind},
-    layout::UiContext,
+    charts, chrome,
+    layout::{DashboardMetrics, UiContext},
+    telemetry::{TelemetryAvailability, concise_detail},
     theme::{Theme, Tone},
 };
 
@@ -21,80 +23,148 @@ pub fn draw(
     model: &TimelineModel,
     ui: &UiContext,
     theme: &Theme,
+    focused_region: FocusRegion,
+    expanded_region: Option<FocusRegion>,
 ) {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(if ui.viewport.is_compact() { 4 } else { 5 }),
-            Constraint::Length(3),
-            Constraint::Min(if ui.viewport.is_compact() { 6 } else { 13 }),
-            Constraint::Length(if ui.viewport.is_compact() { 4 } else { 7 }),
-            Constraint::Min(if ui.viewport.is_compact() { 5 } else { 10 }),
-        ])
-        .split(area);
+    let metrics = DashboardMetrics::for_viewport(ui.viewport);
+    let layout = if ui.viewport.is_compact() {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .spacing(metrics.panel_gap_y)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Min(8),
+                Constraint::Length(3),
+                Constraint::Length(3),
+            ])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .spacing(metrics.panel_gap_y)
+            .constraints([
+                Constraint::Length(7),
+                Constraint::Length(3),
+                Constraint::Min(13),
+                Constraint::Length(7),
+                Constraint::Min(10),
+            ])
+            .split(area)
+    };
 
     let summary = if ui.viewport.is_compact() {
-        format!("{}\n{}", model.selected_day_label, model.breadcrumb)
+        compact_timeline_summary(model)
     } else {
         format!(
             "{}\n{}\n{}",
             model.summary, model.breadcrumb, model.day_selector
         )
     };
-    frame.render_widget(
-        Paragraph::new(summary)
-            .style(theme.body())
-            .block(chrome::panel(
-                theme,
-                chrome::title_with_badge(
-                    theme,
-                    "Timeline instrument",
-                    &model.selected_day_label,
-                    Tone::Accent,
-                ),
-                PanelKind::Hero,
-            )),
+    let summary_shell = render_panel_shell(
+        frame,
         layout[0],
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Timeline",
+            status: "DAY",
+            status_tone: Tone::Accent,
+            focused: false,
+            expanded: false,
+            kind: PanelKind::Hero,
+        },
+    );
+    let summary_body = if ui.viewport.is_compact() {
+        concise_detail(&summary, usize::from(summary_shell.content_area.width))
+    } else {
+        summary
+    };
+    frame.render_widget(
+        Paragraph::new(summary_body)
+            .wrap(Wrap { trim: true })
+            .style(theme.body()),
+        summary_shell.content_area,
     );
 
-    draw_controls(frame, layout[1], model, theme);
-    draw_chart(frame, layout[2], model, theme);
-    draw_overlay_lane(frame, layout[3], model, theme);
+    draw_controls(
+        frame,
+        layout[1],
+        model,
+        theme,
+        metrics,
+        focused_region,
+        expanded_region,
+    );
+    draw_chart(
+        frame,
+        layout[2],
+        model,
+        theme,
+        metrics,
+        focused_region == FocusRegion::TimelineChart,
+        expanded_region == Some(FocusRegion::TimelineChart),
+    );
+    draw_overlay_lane(
+        frame,
+        layout[3],
+        model,
+        theme,
+        metrics,
+        focused_region == FocusRegion::TimelineLanes,
+        expanded_region == Some(FocusRegion::TimelineLanes),
+    );
 
     let bottom = if ui.viewport.is_compact() {
         Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(2)])
+            .direction(Direction::Horizontal)
+            .spacing(metrics.panel_gap_x)
+            .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
             .split(layout[4])
     } else {
         Layout::default()
             .direction(Direction::Horizontal)
+            .spacing(metrics.panel_gap_x)
             .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
             .split(layout[4])
     };
 
-    frame.render_widget(
-        List::new(
-            std::iter::once(model.selected_detail.clone())
-                .chain(model.event_detail_lines.iter().cloned())
-                .map(ListItem::new),
-        )
-        .block(chrome::panel(
-            theme,
-            chrome::title_with_badge(
-                theme,
-                "Selected detail",
-                if model.selected_event_index.is_some() {
-                    "linked"
-                } else {
-                    "cursor"
-                },
-                Tone::Focus,
-            ),
-            PanelKind::Section,
-        )),
+    let inspector_shell = render_panel_shell(
+        frame,
         bottom[0],
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Inspector",
+            status: if model.selected_event_index.is_some() {
+                "LINKED"
+            } else {
+                "CURSOR"
+            },
+            status_tone: Tone::Focus,
+            focused: focused_region == FocusRegion::TimelineInspector,
+            expanded: expanded_region == Some(FocusRegion::TimelineInspector),
+            kind: PanelKind::Diagnostic,
+        },
     );
+    if ui.viewport.is_compact() {
+        frame.render_widget(
+            Paragraph::new(concise_detail(
+                &compact_inspector_summary(model),
+                usize::from(inspector_shell.content_area.width),
+            )),
+            inspector_shell.content_area,
+        );
+    } else {
+        frame.render_widget(
+            List::new(
+                std::iter::once(model.selected_detail.clone())
+                    .chain(model.event_detail_lines.iter().cloned())
+                    .map(ListItem::new),
+            ),
+            inspector_shell.content_area,
+        );
+    }
 
     let events = if model.events.is_empty() {
         vec![ListItem::new(
@@ -118,56 +188,118 @@ pub fn draw(
             })
             .collect::<Vec<_>>()
     };
-    frame.render_widget(
-        List::new(events).block(chrome::panel(
-            theme,
-            Line::from("Day events"),
-            PanelKind::Section,
-        )),
+    let event_shell = render_panel_shell(
+        frame,
         bottom[1],
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Event feed",
+            status: if model.events.is_empty() {
+                "EMPTY"
+            } else {
+                "LIVE"
+            },
+            status_tone: Tone::Info,
+            focused: focused_region == FocusRegion::TimelineEvents,
+            expanded: expanded_region == Some(FocusRegion::TimelineEvents),
+            kind: PanelKind::Section,
+        },
     );
+    if ui.viewport.is_compact() {
+        frame.render_widget(
+            Paragraph::new(concise_detail(
+                &compact_event_summary(model),
+                usize::from(event_shell.content_area.width),
+            )),
+            event_shell.content_area,
+        );
+    } else {
+        frame.render_widget(List::new(events), event_shell.content_area);
+    }
 }
 
-fn draw_controls(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel, theme: &Theme) {
+fn draw_controls(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &TimelineModel,
+    theme: &Theme,
+    metrics: DashboardMetrics,
+    focused_region: FocusRegion,
+    expanded_region: Option<FocusRegion>,
+) {
+    let controls_focused = focused_region == FocusRegion::TimelineControls;
+    let controls_expanded = expanded_region == Some(FocusRegion::TimelineControls);
     let controls = Layout::default()
         .direction(Direction::Horizontal)
+        .spacing(metrics.panel_gap_x)
         .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
         .split(area);
 
+    let window_shell = render_panel_shell(
+        frame,
+        controls[0],
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Window",
+            status: model
+                .window_presets
+                .get(model.selected_window_preset_index)
+                .map_or("24H", |preset| preset.label),
+            status_tone: Tone::Focus,
+            focused: controls_focused,
+            expanded: controls_expanded,
+            kind: PanelKind::Section,
+        },
+    );
     frame.render_widget(
         Tabs::new(model.window_presets.iter().map(|preset| preset.label))
-            .block(chrome::panel(
-                theme,
-                chrome::title_with_badge(
-                    theme,
-                    "Window presets",
-                    model
-                        .window_presets
-                        .get(model.selected_window_preset_index)
-                        .map_or("24h", |preset| preset.label),
-                    Tone::Focus,
-                ),
-                PanelKind::Section,
-            ))
             .style(theme.annotation())
             .highlight_style(theme.emphasis(Tone::Focus))
             .divider(" ")
             .select(model.selected_window_preset_index),
-        controls[0],
+        window_shell.content_area,
     );
 
-    draw_overlay_tabs(frame, controls[1], &model.overlay_toggles, theme);
+    draw_overlay_tabs(
+        frame,
+        controls[1],
+        &model.overlay_toggles,
+        theme,
+        metrics,
+        false,
+        false,
+    );
 }
 
-fn draw_chart(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel, theme: &Theme) {
+fn draw_chart(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &TimelineModel,
+    theme: &Theme,
+    metrics: DashboardMetrics,
+    focused: bool,
+    expanded: bool,
+) {
     if model.heart_rate.is_empty() {
-        frame.render_widget(
-            Paragraph::new(model.selected_detail.clone()).block(chrome::panel(
-                theme,
-                chrome::title_with_badge(theme, "Heartrate", "no data", Tone::Warning),
-                PanelKind::Hero,
-            )),
+        let shell = render_panel_shell(
+            frame,
             area,
+            theme,
+            metrics,
+            PanelShellSpec {
+                title: "Heart rate",
+                status: TelemetryAvailability::NoData.label(),
+                status_tone: Tone::Warning,
+                focused,
+                expanded,
+                kind: PanelKind::Section,
+            },
+        );
+        frame.render_widget(
+            Paragraph::new(model.selected_detail.clone()),
+            shell.content_area,
         );
         return;
     }
@@ -229,18 +361,22 @@ fn draw_chart(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel, theme: &
         .max()
         .map_or(120.0, |value| f64::from(value.saturating_add(5)));
 
+    let shell = render_panel_shell(
+        frame,
+        area,
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Heart rate",
+            status: &format!("{}H", model.window_hours),
+            status_tone: Tone::Accent,
+            focused,
+            expanded,
+            kind: PanelKind::Section,
+        },
+    );
     frame.render_widget(
         Chart::new(datasets)
-            .block(chrome::panel(
-                theme,
-                chrome::title_with_badge(
-                    theme,
-                    "Heartrate",
-                    &format!("{}h window", model.window_hours),
-                    Tone::Accent,
-                ),
-                PanelKind::Hero,
-            ))
             .x_axis(
                 Axis::default()
                     .title("time")
@@ -266,34 +402,63 @@ fn draw_chart(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel, theme: &
                         Span::raw(format!("{y_max:.0}")),
                     ]),
             ),
-        area,
+        shell.content_area,
     );
 }
 
-fn draw_overlay_lane(frame: &mut Frame<'_>, area: Rect, model: &TimelineModel, theme: &Theme) {
-    let overlay_lines = if model.overlay_groups.is_empty() {
-        vec![ListItem::new(
-            "[quiet] No workouts, tags, or sessions overlap the selected window.",
-        )]
-    } else {
-        render_overlay_lines(
-            area.width.saturating_sub(4),
-            model.window_start_minute,
-            model.window_end_minute,
-            &model.overlay_groups,
-        )
-        .into_iter()
-        .map(ListItem::new)
-        .collect()
-    };
-    frame.render_widget(
-        List::new(overlay_lines).block(chrome::panel(
-            theme,
-            chrome::title_with_badge(theme, "Overlay lanes", "temporal context", Tone::Info),
-            PanelKind::Subtle,
-        )),
+fn draw_overlay_lane(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &TimelineModel,
+    theme: &Theme,
+    metrics: DashboardMetrics,
+    focused: bool,
+    expanded: bool,
+) {
+    let shell = render_panel_shell(
+        frame,
         area,
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Overlay lanes",
+            status: if model.overlay_groups.is_empty() {
+                TelemetryAvailability::NoData.label()
+            } else {
+                "ACTIVE"
+            },
+            status_tone: Tone::Info,
+            focused,
+            expanded,
+            kind: PanelKind::Section,
+        },
     );
+    if area.height <= 3 {
+        frame.render_widget(
+            Paragraph::new(concise_detail(
+                &compact_overlay_summary(model),
+                usize::from(shell.content_area.width),
+            )),
+            shell.content_area,
+        );
+    } else {
+        let overlay_lines = if model.overlay_groups.is_empty() {
+            vec![ListItem::new(
+                "[quiet] No workouts, tags, or sessions overlap the selected window.",
+            )]
+        } else {
+            render_overlay_lines(
+                area.width.saturating_sub(4),
+                model.window_start_minute,
+                model.window_end_minute,
+                &model.overlay_groups,
+            )
+            .into_iter()
+            .map(ListItem::new)
+            .collect()
+        };
+        frame.render_widget(List::new(overlay_lines), shell.content_area);
+    }
 }
 
 fn draw_overlay_tabs(
@@ -301,30 +466,35 @@ fn draw_overlay_tabs(
     area: Rect,
     toggles: &[OverlayToggleView],
     theme: &Theme,
+    metrics: DashboardMetrics,
+    focused: bool,
+    expanded: bool,
 ) {
     let selected_index = toggles
         .iter()
         .position(|toggle| toggle.selected)
         .unwrap_or(0);
+    let shell = render_panel_shell(
+        frame,
+        area,
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: "Overlay filters",
+            status: "FILTER",
+            status_tone: Tone::Info,
+            focused,
+            expanded,
+            kind: PanelKind::Section,
+        },
+    );
     frame.render_widget(
         Tabs::new(toggles.iter().map(overlay_tab_label))
-            .block(chrome::panel(
-                theme,
-                chrome::title_with_badge(
-                    theme,
-                    "Overlay filters",
-                    toggles
-                        .get(selected_index)
-                        .map_or("Workouts", |toggle| toggle.label),
-                    Tone::Info,
-                ),
-                PanelKind::Subtle,
-            ))
             .style(theme.annotation())
             .highlight_style(theme.emphasis(Tone::Focus))
             .divider(" ")
             .select(selected_index),
-        area,
+        shell.content_area,
     );
 }
 
@@ -397,4 +567,174 @@ fn overlay_tab_label(toggle: &OverlayToggleView) -> String {
         toggle.label,
         if toggle.enabled { "on" } else { "off" }
     )
+}
+
+fn compact_timeline_summary(model: &TimelineModel) -> String {
+    format!("{} | {}", model.selected_day_label, model.breadcrumb)
+}
+
+fn compact_overlay_summary(model: &TimelineModel) -> String {
+    if model.overlay_groups.is_empty() {
+        return "[quiet] No workouts, tags, or sessions in window".to_owned();
+    }
+
+    model
+        .overlay_groups
+        .iter()
+        .map(|group| {
+            format!(
+                "[{}] {} {}",
+                group.glyph, group.item_count, group.family_label
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" • ")
+}
+
+fn compact_inspector_summary(model: &TimelineModel) -> String {
+    if model.selected_event_index.is_some() && !model.event_detail_lines.is_empty() {
+        model.event_detail_lines[0].clone()
+    } else {
+        model.selected_detail.clone()
+    }
+}
+
+fn compact_event_summary(model: &TimelineModel) -> String {
+    if model.events.is_empty() {
+        return "[empty] No context events match the current filters".to_owned();
+    }
+
+    let selected_index = model
+        .events
+        .iter()
+        .position(|event| event.selected)
+        .unwrap_or(0);
+    let event = &model.events[selected_index];
+    let extra_count = model.events.len().saturating_sub(1);
+    if extra_count == 0 {
+        format!("[{}] {}", event.glyph, event.headline)
+    } else {
+        format!("[{}] {} | +{extra_count} more", event.glyph, event.headline)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    use super::draw;
+    use crate::{
+        app::{
+            EventListItem, OverlayBlock, OverlayFamilyGroup, OverlayToggleView, TimelineModel,
+            TimelinePoint, TimelineWindowPresetView,
+        },
+        navigation::FocusRegion,
+        ui::{layout::UiContext, theme::Theme},
+    };
+
+    fn base_model() -> TimelineModel {
+        TimelineModel {
+            summary: "Recovery stayed steady overnight.".to_owned(),
+            breadcrumb: "Workout carryover still visible.".to_owned(),
+            day_selector: "Selected day: 2026-04-08".to_owned(),
+            window_presets: vec![TimelineWindowPresetView {
+                label: "24H",
+                selected: true,
+            }],
+            selected_window_preset_index: 0,
+            selected_day_label: "2026-04-08".to_owned(),
+            selected_day_index: 0,
+            heart_rate: vec![TimelinePoint {
+                label: "07:00".to_owned(),
+                recorded_at: "2026-04-08T07:00:00Z".to_owned(),
+                bpm: 53,
+                minute_of_day: 420,
+                gap_before: false,
+            }],
+            selected_point_index: Some(0),
+            window_hours: 24,
+            window_start_minute: 0,
+            window_end_minute: 1439,
+            overlay_toggles: vec![OverlayToggleView {
+                label: "Workouts",
+                key_hint: "W",
+                enabled: true,
+                selected: true,
+            }],
+            overlay_groups: vec![OverlayFamilyGroup {
+                family_label: "Workouts",
+                glyph: 'W',
+                item_count: 1,
+                blocks: vec![OverlayBlock {
+                    id: "block-1".to_owned(),
+                    start_minute: 400,
+                    end_minute: 460,
+                    title: "Lift".to_owned(),
+                    selected: true,
+                }],
+            }],
+            events: vec![EventListItem {
+                id: "event-1".to_owned(),
+                family_label: "Workouts",
+                glyph: 'W',
+                headline: "Lift".to_owned(),
+                detail: "45 min".to_owned(),
+                selected: true,
+            }],
+            selected_event_index: Some(0),
+            selected_detail: "07:00 | 53 bpm".to_owned(),
+            event_detail_lines: vec!["Workout overlap: 45 min".to_owned()],
+        }
+    }
+
+    fn render_lines(model: &TimelineModel, focused_region: FocusRegion) -> Vec<String> {
+        let backend = TestBackend::new(160, 48);
+        let mut terminal = Terminal::new(backend).unwrap_or_else(|error| {
+            panic!("test backend should initialize: {error}");
+        });
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let ui = UiContext::new(area);
+                draw(
+                    frame,
+                    area,
+                    model,
+                    &ui,
+                    &Theme::default(),
+                    focused_region,
+                    None,
+                );
+            })
+            .unwrap_or_else(|error| panic!("timeline draw should succeed: {error}"));
+
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn wide_timeline_summary_keeps_breadcrumb_and_day_selector_visible() {
+        let lines = render_lines(&base_model(), FocusRegion::TimelineControls);
+        let rendered = lines.join("\n");
+
+        assert!(
+            rendered.contains("Workout carryover still visible."),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Selected day: 2026-04-08"), "{rendered}");
+    }
+
+    #[test]
+    fn timeline_lanes_focus_highlights_only_the_lane_panel() {
+        let lines = render_lines(&base_model(), FocusRegion::TimelineLanes);
+
+        assert!(lines.iter().any(|line| line.contains("> OVERLAY LANES")));
+        assert!(!lines.iter().any(|line| line.contains("> OVERLAY FILTERS")));
+    }
 }

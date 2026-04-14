@@ -216,6 +216,12 @@ The app layer is where persisted normalized rows, derived tables, auth diagnosti
 
 The optional AI layer does not bypass this shaping logic. Snapshot exports are built from typed store and derived queries, not from raw SQL dumps or live database inspection.
 
+## Rendering rule
+
+- outer dashboard shells remain constraint-stable for a given viewport; `draw_compact`, `draw_medium`, and `draw_wide` do not reflow in response to content width changes
+- dense dashboard panels and overlays use measurement-driven internal geometry only after their outer `Rect` is assigned
+- support copy in dense panels is bounded to reserved one-line support lanes; fuller detail is surfaced through the footer/inspector path instead of stealing chart rows
+
 Important implemented state concepts:
 
 - `FreshnessKind`:
@@ -514,14 +520,14 @@ Boundary rule:
 
 Component responsibilities today:
 
-- Dashboard renders the editorial front page: “what matters now,” the daily metric band, freshness/capability framing, and drill-down cues
+- Dashboard renders the editorial front page: “what matters now,” the daily metric band, freshness/capability framing, and drill-down cues, including locally persisted HRV, respiratory-rate, and `spo2` physiology panels
 - Timeline renders the chart-first temporal composition, overlay lanes, selected detail, and selected-day event list
 - Trends renders the comparative scanning matrix with windows, deltas, spark hints, and baseline readouts
-- Explain renders a deliberate evidence flow: claim, measured inputs, supporting evidence, context, and uncertainty
+- Explain renders a telemetry-first evidence flow: claim, measured inputs, supporting evidence, context, and uncertainty
 - Timeline, Explain, and Review include lightweight breadcrumbs only when they keep shared day or event context visible
-- Patterns renders grouped associations and interpretive notes distinct from Explain
+- Patterns renders grouped associations, reading guidance, and interpretation through the same telemetry-first panel vocabulary while remaining distinct from Explain
 - Status renders the utilitarian operator console with summary, family status, diagnostics, and warnings without reaching back into the store
-- Review renders ranked briefing cards, bounded investigation detail, and a small read-only AI artifact panel without making network or database calls
+- Review renders ranked briefing cards, bounded investigation detail, warnings, and a small read-only AI artifact panel through the shared telemetry panel language without making network or database calls
 
 ### `src/refresh.rs`
 
@@ -538,6 +544,7 @@ The watch engine is reusable by both `sync watch` and the live TUI worker. It no
 - queued webhook invalidations as first-class work
 - `workout`, `enhanced_tag`, and `session` delete events as explicit local delete side effects
 - `heartrate` as scheduled-only fallback
+- shutdown and ctrl-c as "finish the in-flight durable sync, then exit" once state mutation has started
 
 `sync watch` remains the only long-running invalidation consumer. This preserves the operational split between “receive quickly” and “process carefully.”
 
@@ -656,7 +663,7 @@ Current live sync behavior:
 
 - `auth login` prints an authorization URL, listens on the configured loopback callback, validates CSRF state, exchanges the code server-side, and persists auth/session metadata
 - token secrets live behind the `SecretStore` seam; production defaults to the keyring-backed backend, Linux expects a desktop Secret Service provider, headless users can explicitly opt into a file-backed token store, and tests use in-memory or temp-file stores
-- the capability model now tracks Oura's broader scope surface, including `email`, `spo2`, `ring_configuration`, `stress`, and `heart_health`, so auth and ops surfaces can distinguish between granted, missing, and future-ready access
+- the capability model now tracks Oura's broader scope surface, including `email`, `spo2`, `ring_configuration`, `stress`, and `heart_health`, so auth and ops surfaces can distinguish between granted, missing, and wired local access
 - `ensure_authorized_session` is the single owner for access-token refresh
 - `ReqwestOuraClient` and `FixtureOuraClient` share the same typed fetch surface
 - the webhook admin client uses app credentials for subscription list/create/update/renew/delete flows
@@ -668,7 +675,9 @@ Current live sync behavior:
   - `/v2/usercollection/heartrate`
   - `/v2/usercollection/daily_stress`
   - `/v2/usercollection/daily_resilience`
+  - `/v2/usercollection/sleep`
   - `/v2/usercollection/sleep_time`
+  - `/v2/usercollection/daily_spo2`
   - `/v2/usercollection/daily_cardiovascular_age`
   - `/v2/usercollection/vO2_max`
   - `/v2/usercollection/rest_mode_period`
@@ -677,6 +686,8 @@ Current live sync behavior:
   - sessions
 
 Each family is imported through idempotent upserts and family-specific reconcile windows. Missing scopes are captured explicitly so the product can show “missing capability” rather than pretending the family is simply empty.
+
+Daily syncs may finish in a degraded-but-core-complete state when optional review-support endpoints fail independently. In that case the app keeps the daily family fresh for core data, preserves a retryable daily window for the degraded optional endpoints, and does not force webhook invalidations into endless failure retries.
 
 Successful non-dry-run syncs also refresh the derived context-event, pattern-summary, and review-signal tables over a bounded recent window, so Explain, Timeline overlays, Patterns, and Review stay current without making every background refresh reprocess the entire database. `derive rebuild` remains the explicit full-history recompute path.
 

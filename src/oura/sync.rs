@@ -9,15 +9,17 @@ use crate::oura::auth;
 use crate::oura::client::{FixtureOuraClient, OuraClient, PageFetch, ReqwestOuraClient};
 use crate::oura::models::{
     CapabilityKind, CapabilityReport, DailyActivityDocument, DailyCardiovascularAgeDocument,
-    DailyReadinessDocument, DailyResilienceDocument, DailySleepDocument, DailyStressDocument,
-    RestModePeriodDocument, SleepTimeDocument, Vo2MaxDocument, WorkoutDocument,
+    DailyReadinessDocument, DailyResilienceDocument, DailySleepDocument, DailySpO2Document,
+    DailyStressDocument, RestModePeriodDocument, SleepDocument, SleepTimeDocument, Vo2MaxDocument,
+    WorkoutDocument,
 };
 use crate::refresh::SyncFamily;
 use crate::store::queries::{
     AuthSessionRecord, DailyActivityRecord, DailyCardiovascularAgeRecord, DailyReadinessRecord,
-    DailyResilienceRecord, DailySleepRecord, DailyStressRecord, EnhancedTagRecord,
+    DailyResilienceRecord, DailySleepRecord, DailySpO2Record, DailyStressRecord, EnhancedTagRecord,
     HeartrateSampleRecord, OURA_PROVIDER, PersonalInfoRecord, RestModePeriodRecord, SessionRecord,
-    SleepTimeRecord, SyncRunStatus, SyncStateRecord, Vo2MaxRecord, WorkoutRecord,
+    SleepPeriodRecord, SleepTimeRecord, SyncRunStatus, SyncStateRecord, Vo2MaxRecord,
+    WorkoutRecord,
 };
 use crate::store::{Store, StorePlan};
 
@@ -599,10 +601,28 @@ struct DailySyncWindow {
     end_date: String,
 }
 
+impl DailySyncWindow {
+    fn retry_cursor(&self, overlap_days: i64) -> Result<String> {
+        let start = time::Date::parse(
+            &self.start_date,
+            &time::macros::format_description!("[year]-[month]-[day]"),
+        )
+        .map_err(|error| {
+            AuthError::OAuthFlow(format!(
+                "invalid daily sync window start `{}`: {error}",
+                self.start_date
+            ))
+        })?;
+        Ok((start + Duration::days(overlap_days)).to_string())
+    }
+}
+
 struct DailyPageFetches {
-    sleep_pages: Vec<PageFetch<DailySleepDocument>>,
+    daily_sleep_pages: Vec<PageFetch<DailySleepDocument>>,
+    sleep_period_pages: Vec<PageFetch<SleepDocument>>,
     readiness_pages: Vec<PageFetch<DailyReadinessDocument>>,
     activity_pages: Vec<PageFetch<DailyActivityDocument>>,
+    daily_spo2_pages: Vec<PageFetch<DailySpO2Document>>,
     sleep_time_pages: Vec<PageFetch<SleepTimeDocument>>,
     rest_mode_period_pages: Vec<PageFetch<RestModePeriodDocument>>,
     daily_stress_pages: Vec<PageFetch<DailyStressDocument>>,
@@ -634,11 +654,12 @@ async fn sync_daily(
     }
 
     let window = resolve_daily_sync_window(config, &store_plan, options)?;
-    let pages = fetch_daily_pages(client, &window).await?;
+    let pages = fetch_daily_pages(client, capability_report, &window).await?;
     let imported_at = now_rfc3339()?;
     let persist_store = reopen_store(config, &store_plan)?;
-    persist_daily_pages(&persist_store, &pages, &imported_at, options)?;
+    persist_daily_pages(&persist_store, &window, &pages, &imported_at, options)?;
     let (status, message, last_error, imported_rows) = summarize_daily_sync(&window, &pages);
+    let watermark = daily_sync_watermark(config, &window, &status)?;
     persist_slice_report(
         config,
         &persist_store,
@@ -646,7 +667,7 @@ async fn sync_daily(
             sync_key: DAILY_SYNC_KEY.to_owned(),
             status,
             imported_rows,
-            watermark: Some(window.end_date.clone()),
+            watermark,
             message,
             last_error,
             next_attempt_after: None,
@@ -679,14 +700,31 @@ fn resolve_daily_sync_window(
     })
 }
 
+fn daily_sync_watermark(
+    config: &Config,
+    window: &DailySyncWindow,
+    status: &SyncRunStatus,
+) -> Result<Option<String>> {
+    let watermark = match status {
+        SyncRunStatus::Partial => {
+            window.retry_cursor(i64::from(config.refresh.daily_overlap_days))?
+        }
+        _ => window.end_date.clone(),
+    };
+    Ok(Some(watermark))
+}
+
 async fn fetch_daily_pages(
     client: &dyn OuraClient,
+    capability_report: &CapabilityReport,
     window: &DailySyncWindow,
 ) -> Result<DailyPageFetches> {
     let (
-        sleep_pages_result,
+        daily_sleep_pages_result,
+        sleep_period_pages_result,
         readiness_pages_result,
         activity_pages_result,
+        daily_spo2_pages_result,
         sleep_time_pages_result,
         rest_mode_period_pages_result,
         daily_stress_pages_result,
@@ -695,21 +733,88 @@ async fn fetch_daily_pages(
         vo2_max_pages_result,
     ) = tokio::join!(
         client.fetch_daily_sleep(window.start_date.clone(), window.end_date.clone()),
+        client.fetch_sleep(window.start_date.clone(), window.end_date.clone()),
         client.fetch_daily_readiness(window.start_date.clone(), window.end_date.clone()),
         client.fetch_daily_activity(window.start_date.clone(), window.end_date.clone()),
-        client.fetch_sleep_time(window.start_date.clone(), window.end_date.clone()),
-        client.fetch_rest_mode_periods(window.start_date.clone(), window.end_date.clone()),
-        client.fetch_daily_stress(window.start_date.clone(), window.end_date.clone()),
-        client.fetch_daily_resilience(window.start_date.clone(), window.end_date.clone()),
-        client.fetch_daily_cardiovascular_age(window.start_date.clone(), window.end_date.clone()),
-        client.fetch_vo2_max(window.start_date.clone(), window.end_date.clone()),
+        async {
+            if capability_report.is_granted(CapabilityKind::Spo2) {
+                client
+                    .fetch_daily_spo2(window.start_date.clone(), window.end_date.clone())
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if capability_report.is_granted(CapabilityKind::Stress) {
+                client
+                    .fetch_sleep_time(window.start_date.clone(), window.end_date.clone())
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if capability_report.is_granted(CapabilityKind::Stress) {
+                client
+                    .fetch_rest_mode_periods(window.start_date.clone(), window.end_date.clone())
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if capability_report.is_granted(CapabilityKind::Stress) {
+                client
+                    .fetch_daily_stress(window.start_date.clone(), window.end_date.clone())
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if capability_report.is_granted(CapabilityKind::HeartHealth) {
+                client
+                    .fetch_daily_resilience(window.start_date.clone(), window.end_date.clone())
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if capability_report.is_granted(CapabilityKind::HeartHealth) {
+                client
+                    .fetch_daily_cardiovascular_age(
+                        window.start_date.clone(),
+                        window.end_date.clone(),
+                    )
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if capability_report.is_granted(CapabilityKind::HeartHealth) {
+                client
+                    .fetch_vo2_max(window.start_date.clone(), window.end_date.clone())
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
     );
     let mut optional_failures = Vec::new();
 
     Ok(DailyPageFetches {
-        sleep_pages: sleep_pages_result?,
+        daily_sleep_pages: daily_sleep_pages_result?,
+        sleep_period_pages: sleep_period_pages_result?,
         readiness_pages: readiness_pages_result?,
         activity_pages: activity_pages_result?,
+        daily_spo2_pages: collect_optional_daily_pages(
+            "daily_spo2",
+            daily_spo2_pages_result,
+            &mut optional_failures,
+        ),
         sleep_time_pages: collect_optional_daily_pages(
             "sleep_time",
             sleep_time_pages_result,
@@ -746,6 +851,7 @@ async fn fetch_daily_pages(
 
 fn persist_daily_pages(
     persist_store: &Store,
+    window: &DailySyncWindow,
     pages: &DailyPageFetches,
     imported_at: &str,
     options: &SyncOptions,
@@ -754,9 +860,16 @@ fn persist_daily_pages(
         return Ok(());
     }
 
-    persist_daily_sleep_pages(persist_store, &pages.sleep_pages, imported_at)?;
+    persist_daily_sleep_pages(persist_store, &pages.daily_sleep_pages, imported_at)?;
+    persist_sleep_period_pages(
+        persist_store,
+        window,
+        &pages.sleep_period_pages,
+        imported_at,
+    )?;
     persist_daily_readiness_pages(persist_store, &pages.readiness_pages, imported_at)?;
     persist_daily_activity_pages(persist_store, &pages.activity_pages, imported_at)?;
+    persist_daily_spo2_pages(persist_store, &pages.daily_spo2_pages, imported_at)?;
     persist_sleep_time_pages(persist_store, &pages.sleep_time_pages, imported_at)?;
     persist_rest_mode_period_pages(persist_store, &pages.rest_mode_period_pages, imported_at)?;
     persist_daily_stress_pages(persist_store, &pages.daily_stress_pages, imported_at)?;
@@ -784,6 +897,41 @@ fn persist_daily_sleep_pages(
                     day: document.day.clone(),
                     sleep_score: document.score,
                     sleep_duration_seconds: document.sleep_duration_seconds,
+                    raw_cache_key: Some(page.raw_payload.cache_key.clone()),
+                    updated_at: imported_at.to_owned(),
+                })?;
+        }
+    }
+    Ok(())
+}
+
+fn persist_sleep_period_pages(
+    persist_store: &Store,
+    window: &DailySyncWindow,
+    pages: &[PageFetch<SleepDocument>],
+    imported_at: &str,
+) -> Result<()> {
+    persist_store
+        .imports()
+        .delete_sleep_periods_between_days(&window.start_date, &window.end_date)?;
+
+    for page in pages {
+        persist_store
+            .imports()
+            .upsert_raw_payload(&page.raw_payload)?;
+        for document in &page.documents {
+            persist_store
+                .imports()
+                .upsert_sleep_period(&SleepPeriodRecord {
+                    oura_id: document.id.clone(),
+                    day: document.day.clone(),
+                    bedtime_start: document.bedtime_start.clone(),
+                    bedtime_end: document.bedtime_end.clone(),
+                    sleep_type: document.sleep_type.clone(),
+                    average_heart_rate: document.average_heart_rate,
+                    average_hrv: document.average_hrv,
+                    average_breath: document.average_breath,
+                    total_sleep_duration: document.total_sleep_duration,
                     raw_cache_key: Some(page.raw_payload.cache_key.clone()),
                     updated_at: imported_at.to_owned(),
                 })?;
@@ -837,6 +985,34 @@ fn persist_daily_activity_pages(
                     active_calories: document.active_calories,
                     steps: document.steps,
                     total_calories: document.total_calories,
+                    raw_cache_key: Some(page.raw_payload.cache_key.clone()),
+                    updated_at: imported_at.to_owned(),
+                })?;
+        }
+    }
+    Ok(())
+}
+
+fn persist_daily_spo2_pages(
+    persist_store: &Store,
+    pages: &[PageFetch<DailySpO2Document>],
+    imported_at: &str,
+) -> Result<()> {
+    for page in pages {
+        persist_store
+            .imports()
+            .upsert_raw_payload(&page.raw_payload)?;
+        for document in &page.documents {
+            persist_store
+                .imports()
+                .upsert_daily_spo2(&DailySpO2Record {
+                    oura_id: Some(document.id.clone()),
+                    day: document.day.clone(),
+                    average_spo2: document
+                        .spo2_percentage
+                        .as_ref()
+                        .and_then(|value| value.average),
+                    breathing_disturbance_index: document.breathing_disturbance_index,
                     raw_cache_key: Some(page.raw_payload.cache_key.clone()),
                     updated_at: imported_at.to_owned(),
                 })?;
@@ -1017,9 +1193,11 @@ fn summarize_daily_sync(
     window: &DailySyncWindow,
     pages: &DailyPageFetches,
 ) -> (SyncRunStatus, String, Option<OuraProblem>, usize) {
-    let imported_rows = count_documents(&pages.sleep_pages)
+    let imported_rows = count_documents(&pages.daily_sleep_pages)
+        + count_documents(&pages.sleep_period_pages)
         + count_documents(&pages.readiness_pages)
         + count_documents(&pages.activity_pages)
+        + count_documents(&pages.daily_spo2_pages)
         + count_documents(&pages.sleep_time_pages)
         + count_documents(&pages.rest_mode_period_pages)
         + count_documents(&pages.daily_stress_pages)
@@ -1031,7 +1209,7 @@ fn summarize_daily_sync(
         (
             SyncRunStatus::Success,
             format!(
-                "Imported {imported_rows} daily summary and review-support rows from {} through {}.",
+                "Imported {imported_rows} daily summary, physiology, and review-support rows from {} through {}.",
                 window.start_date, window.end_date
             ),
             None,
@@ -1047,7 +1225,7 @@ fn summarize_daily_sync(
         (
             SyncRunStatus::Partial,
             format!(
-                "Imported {imported_rows} core daily rows from {} through {}; optional review-support endpoints degraded independently: {failure_summary}.",
+                "Imported {imported_rows} core daily and physiology rows from {} through {}; optional review-support endpoints degraded independently: {failure_summary}.",
                 window.start_date, window.end_date
             ),
             pages
@@ -1714,11 +1892,16 @@ mod tests {
         AppPaths, Config, DEFAULT_OURA_API_BASE_URL, DEFAULT_OURA_AUTHORIZE_URL,
         DEFAULT_OURA_TOKEN_URL, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
     };
+    use crate::oura::client::PageFetch;
+    use crate::oura::models::{DailySpO2Document, SleepDocument};
     use crate::refresh::SyncFamily;
     use crate::store::Store;
-    use crate::store::queries::{SyncRunStatus, SyncStateRecord};
+    use crate::store::queries::{
+        RawPayloadRecord, SleepPeriodRecord, SyncRunStatus, SyncStateRecord,
+    };
     use crate::test_support::{ok, some};
     use crate::webhook::default_desired_subscriptions;
+    use serde_json::json;
 
     fn baseline_fixture_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase3")
@@ -2020,6 +2203,13 @@ mod tests {
         .await;
         let report = ok(report, "daily sync should degrade instead of failing");
         let counts = ok(store.views().record_counts(), "record counts should load");
+        let daily_state = some(
+            ok(
+                store.sync_state().get(super::DAILY_SYNC_KEY),
+                "daily state should load",
+            ),
+            "daily state should persist",
+        );
         let daily_slice = some(
             report
                 .slice_reports
@@ -2036,6 +2226,264 @@ mod tests {
         assert_eq!(counts.daily_activity, 7);
         assert_eq!(counts.sleep_time, 0);
         assert!(daily_slice.last_error.is_some());
+        assert_eq!(
+            daily_state.cursor.as_deref(),
+            Some("1970-01-03"),
+            "partial daily syncs should preserve the retry window for degraded optional endpoints",
+        );
+    }
+
+    #[tokio::test]
+    async fn daily_sync_fails_when_sleep_endpoint_fixture_is_malformed() {
+        let store = ok(Store::open_test_store(), "store should open");
+        let config = fixture_config();
+        let tempdir = ok(tempfile::tempdir(), "tempdir should build");
+        let fixture_dir = tempdir.path().join("review-malformed-sleep");
+        copy_fixture_dir(&review_fixture_dir(), &fixture_dir);
+        ok(
+            fs::write(fixture_dir.join("sleep.json"), "{ not valid json"),
+            "core sleep fixture should be rewritable",
+        );
+
+        let report = sync_once(
+            &config,
+            &store,
+            SyncOptions {
+                dry_run: false,
+                fixture_dir: Some(fixture_dir),
+                families: vec![SyncFamily::Daily],
+                trigger_source: Some("periodic_reconcile".to_owned()),
+                trigger_detail: Some("test failed daily sync".to_owned()),
+            },
+        )
+        .await;
+        let report = ok(report, "daily sync should report a persisted failure");
+        let counts = ok(store.views().record_counts(), "record counts should load");
+        let daily_slice = some(
+            report
+                .slice_reports
+                .iter()
+                .find(|slice| slice.sync_key == "oura.daily"),
+            "daily slice should exist",
+        );
+
+        assert_eq!(report.status, SyncRunStatus::Failed);
+        assert_eq!(daily_slice.status, SyncRunStatus::Failed);
+        assert!(daily_slice.message.contains("sleep"));
+        assert!(daily_slice.last_error.is_some());
+        assert_eq!(counts.daily_sleep, 0);
+        assert_eq!(counts.daily_readiness, 0);
+        assert_eq!(counts.daily_activity, 0);
+    }
+
+    #[test]
+    fn persist_sleep_period_pages_writes_metric_samples() {
+        let store = ok(Store::open_test_store(), "store should open");
+        let window = super::DailySyncWindow {
+            start_date: "2026-04-08".to_owned(),
+            end_date: "2026-04-08".to_owned(),
+        };
+        let document: SleepDocument = ok(
+            serde_json::from_value(json!({
+                "id": "sleep_2026-04-08_primary",
+                "day": "2026-04-08",
+                "bedtime_start": "2026-04-08T22:45:00Z",
+                "bedtime_end": "2026-04-09T06:35:00Z",
+                "average_heart_rate": 55.2,
+                "average_hrv": 41.8,
+                "average_breath": 13.4,
+                "total_sleep_duration": 28200,
+                "type": "long_sleep"
+            })),
+            "sleep fixture document should deserialize",
+        );
+        let pages = vec![PageFetch {
+            raw_payload: RawPayloadRecord {
+                cache_key: "sleep-page-2026-04-08".to_owned(),
+                endpoint: "sleep".to_owned(),
+                requested_at: "2026-04-09T06:40:00Z".to_owned(),
+                scope: Some("daily".to_owned()),
+                etag: None,
+                payload: "{\"data\":[]}".to_owned(),
+            },
+            documents: vec![document],
+        }];
+
+        ok(
+            super::persist_sleep_period_pages(&store, &window, &pages, "2026-04-09T06:45:00Z"),
+            "sleep pages should persist",
+        );
+
+        let counts = ok(store.views().record_counts(), "record counts should load");
+        let records = ok(
+            store
+                .views()
+                .sleep_periods_between_days("2026-04-08", "2026-04-08"),
+            "sleep period records should load",
+        );
+
+        assert_eq!(counts.sleep_periods, 1);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].oura_id, "sleep_2026-04-08_primary");
+        assert_eq!(records[0].average_hrv, Some(41.8));
+        assert_eq!(records[0].average_breath, Some(13.4));
+        assert_eq!(records[0].sleep_type.as_deref(), Some("long_sleep"));
+    }
+
+    #[test]
+    fn persist_sleep_period_pages_reconciles_removed_rows_within_the_sync_window() {
+        let store = ok(Store::open_test_store(), "store should open");
+        let imports = store.imports();
+
+        ok(
+            imports.upsert_sleep_period(&SleepPeriodRecord {
+                oura_id: "sleep_2026-04-07_outside".to_owned(),
+                day: "2026-04-07".to_owned(),
+                bedtime_start: Some("2026-04-07T22:30:00Z".to_owned()),
+                bedtime_end: Some("2026-04-08T06:15:00Z".to_owned()),
+                sleep_type: Some("long_sleep".to_owned()),
+                average_heart_rate: Some(54.0),
+                average_hrv: Some(42.0),
+                average_breath: Some(13.0),
+                total_sleep_duration: Some(27_900),
+                raw_cache_key: Some("seed-outside".to_owned()),
+                updated_at: "2026-04-09T05:00:00Z".to_owned(),
+            }),
+            "out-of-window seed row should persist",
+        );
+        ok(
+            imports.upsert_sleep_period(&SleepPeriodRecord {
+                oura_id: "sleep_2026-04-08_removed".to_owned(),
+                day: "2026-04-08".to_owned(),
+                bedtime_start: Some("2026-04-08T21:45:00Z".to_owned()),
+                bedtime_end: Some("2026-04-09T05:45:00Z".to_owned()),
+                sleep_type: Some("long_sleep".to_owned()),
+                average_heart_rate: Some(57.0),
+                average_hrv: Some(30.0),
+                average_breath: Some(14.1),
+                total_sleep_duration: Some(25_200),
+                raw_cache_key: Some("seed-removed".to_owned()),
+                updated_at: "2026-04-09T05:00:00Z".to_owned(),
+            }),
+            "removed in-window row should persist",
+        );
+        ok(
+            imports.upsert_sleep_period(&SleepPeriodRecord {
+                oura_id: "sleep_2026-04-09_removed".to_owned(),
+                day: "2026-04-09".to_owned(),
+                bedtime_start: Some("2026-04-09T22:00:00Z".to_owned()),
+                bedtime_end: Some("2026-04-10T06:00:00Z".to_owned()),
+                sleep_type: Some("long_sleep".to_owned()),
+                average_heart_rate: Some(58.0),
+                average_hrv: Some(29.5),
+                average_breath: Some(14.4),
+                total_sleep_duration: Some(24_600),
+                raw_cache_key: Some("seed-removed-2".to_owned()),
+                updated_at: "2026-04-10T05:00:00Z".to_owned(),
+            }),
+            "second removed in-window row should persist",
+        );
+
+        let window = super::DailySyncWindow {
+            start_date: "2026-04-08".to_owned(),
+            end_date: "2026-04-09".to_owned(),
+        };
+        let replacement: SleepDocument = ok(
+            serde_json::from_value(json!({
+                "id": "sleep_2026-04-08_survives",
+                "day": "2026-04-08",
+                "bedtime_start": "2026-04-08T22:45:00Z",
+                "bedtime_end": "2026-04-09T06:35:00Z",
+                "average_heart_rate": 55.2,
+                "average_hrv": 41.8,
+                "average_breath": 13.4,
+                "total_sleep_duration": 28200,
+                "type": "long_sleep"
+            })),
+            "replacement sleep fixture document should deserialize",
+        );
+        let pages = vec![PageFetch {
+            raw_payload: RawPayloadRecord {
+                cache_key: "sleep-page-2026-04-window".to_owned(),
+                endpoint: "sleep".to_owned(),
+                requested_at: "2026-04-10T06:40:00Z".to_owned(),
+                scope: Some("daily".to_owned()),
+                etag: None,
+                payload: "{\"data\":[]}".to_owned(),
+            },
+            documents: vec![replacement],
+        }];
+
+        ok(
+            super::persist_sleep_period_pages(&store, &window, &pages, "2026-04-10T06:45:00Z"),
+            "sleep pages should reconcile the in-window rows",
+        );
+
+        let counts = ok(store.views().record_counts(), "record counts should load");
+        let records = ok(
+            store
+                .views()
+                .sleep_periods_between_days("2026-04-07", "2026-04-09"),
+            "sleep period records should load after reconciliation",
+        );
+
+        assert_eq!(counts.sleep_periods, 2);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].oura_id, "sleep_2026-04-07_outside");
+        assert_eq!(records[1].oura_id, "sleep_2026-04-08_survives");
+        assert_eq!(records[1].average_hrv, Some(41.8));
+        assert!(
+            records
+                .iter()
+                .all(|record| record.oura_id != "sleep_2026-04-08_removed"
+                    && record.oura_id != "sleep_2026-04-09_removed")
+        );
+    }
+
+    #[test]
+    fn persist_daily_spo2_pages_writes_average_spo2() {
+        let store = ok(Store::open_test_store(), "store should open");
+        let document: DailySpO2Document = ok(
+            serde_json::from_value(json!({
+                "id": "spo2_2026-04-08",
+                "day": "2026-04-08",
+                "spo2_percentage": {
+                    "average": 97.4
+                },
+                "breathing_disturbance_index": 0.6
+            })),
+            "daily_spo2 fixture document should deserialize",
+        );
+        let pages = vec![PageFetch {
+            raw_payload: RawPayloadRecord {
+                cache_key: "daily-spo2-page-2026-04-08".to_owned(),
+                endpoint: "daily_spo2".to_owned(),
+                requested_at: "2026-04-09T06:40:00Z".to_owned(),
+                scope: Some("spo2".to_owned()),
+                etag: None,
+                payload: "{\"data\":[]}".to_owned(),
+            },
+            documents: vec![document],
+        }];
+
+        ok(
+            super::persist_daily_spo2_pages(&store, &pages, "2026-04-09T06:45:00Z"),
+            "daily_spo2 pages should persist",
+        );
+
+        let counts = ok(store.views().record_counts(), "record counts should load");
+        let records = ok(
+            store
+                .views()
+                .daily_spo2_between_days("2026-04-08", "2026-04-08"),
+            "daily_spo2 records should load",
+        );
+
+        assert_eq!(counts.daily_spo2, 1);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].oura_id.as_deref(), Some("spo2_2026-04-08"));
+        assert_eq!(records[0].average_spo2, Some(97.4));
+        assert_eq!(records[0].breathing_disturbance_index, Some(0.6));
     }
 
     #[test]

@@ -11,6 +11,7 @@ const SCREEN_DIGITS: [char; Screen::ALL.len()] = ['1', '2', '3', '4', '5', '6', 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingScope {
+    Always,
     Global,
     Screen(Screen),
     Region(FocusRegion),
@@ -92,7 +93,7 @@ pub fn resolve(event: KeyEvent, context: BindingContext) -> Option<Action> {
 }
 
 #[must_use]
-pub fn footer_hints(context: BindingContext) -> Vec<&'static str> {
+pub fn footer_hints(context: BindingContext, activation_available: bool) -> Vec<&'static str> {
     let active_scopes = resolve_scopes(context);
     let mut seen = BTreeSet::new();
     bindings()
@@ -101,6 +102,7 @@ pub fn footer_hints(context: BindingContext) -> Vec<&'static str> {
             binding.kind == BindingKind::Standard
                 && binding.show_in_footer
                 && active_scopes.contains(&binding.scope)
+                && (activation_available || binding.action != Action::ActivateFocusedRegion)
         })
         .filter_map(|binding| {
             if seen.insert(binding.label) {
@@ -109,7 +111,7 @@ pub fn footer_hints(context: BindingContext) -> Vec<&'static str> {
                 None
             }
         })
-        .take(5)
+        .take(3)
         .collect()
 }
 
@@ -142,7 +144,7 @@ pub fn bindings() -> &'static [Keybinding] {
 
 fn resolve_scopes(context: BindingContext) -> Vec<BindingScope> {
     if let Some(transient) = active_transient_scope(context) {
-        return vec![BindingScope::Transient(transient), BindingScope::Global];
+        return vec![BindingScope::Transient(transient), BindingScope::Always];
     }
 
     vec![
@@ -150,6 +152,7 @@ fn resolve_scopes(context: BindingContext) -> Vec<BindingScope> {
         BindingScope::Region(context.focused_region),
         BindingScope::Screen(context.active_screen),
         BindingScope::Global,
+        BindingScope::Always,
     ]
 }
 
@@ -157,12 +160,15 @@ fn help_scopes(context: BindingContext) -> Vec<BindingScope> {
     let mut scopes = Vec::new();
     if let Some(transient) = active_transient_scope(context) {
         scopes.push(BindingScope::Transient(transient));
+        scopes.push(BindingScope::Always);
+        return scopes;
     }
     scopes.extend([
         BindingScope::ScreenRegion(context.active_screen, context.focused_region),
         BindingScope::Region(context.focused_region),
         BindingScope::Screen(context.active_screen),
         BindingScope::Global,
+        BindingScope::Always,
     ]);
     scopes
 }
@@ -183,20 +189,26 @@ fn build_bindings() -> Vec<Keybinding> {
     use Action::{
         ActivateFocusedRegion, Back, CloseSearch, ConfirmAiPreflight,
         CycleAiPreflightPrivacyProfile, CyclePatternMetric, DismissAiPreflight, FocusNextRegion,
-        FocusPreviousRegion, MoveFocusedRegion, OpenSearch, Quit, RefreshRequested,
-        RequestAiComparePreviousSnapshot, RequestAiGenerateReport, RequestAiGuidedFollowUp,
-        RequestAiLaunch, RequestAiRerunNextModel, RequestAiRerunNextPrivacy, RequestCancelAiRun,
-        RequestJumpToAiEvidence, SearchBackspace, SearchNextResult, SearchPreviousResult,
-        ShowScreen, TimelineZoomIn, TimelineZoomOut, ToggleHelp, ToggleSessionFilter,
-        ToggleTagFilter, ToggleWorkoutFilter,
+        FocusPreviousRegion, MoveFocusedRegion, MoveTransientFocus, NextTrendWindow, OpenSearch,
+        PreviousTrendWindow, Quit, RefreshRequested, RequestAiComparePreviousSnapshot,
+        RequestAiGenerateReport, RequestAiGuidedFollowUp, RequestAiLaunch, RequestAiRerunNextModel,
+        RequestAiRerunNextPrivacy, RequestCancelAiRun, RequestJumpToAiEvidence, SearchBackspace,
+        SearchNextResult, SearchPreviousResult, ShowScreen, TimelineZoomIn, TimelineZoomOut,
+        ToggleHelp, ToggleSessionFilter, ToggleTagFilter, ToggleWorkoutFilter,
     };
     use BindingKind::{Expert, Standard};
-    use BindingScope::{Global, Region, ScreenRegion, Transient};
+    use BindingScope::{Always, Global, Region, ScreenRegion, Transient};
     use ChordKey::{
         BackTab, Backspace, Char, Down, End, Enter, Esc, Home, Left, PageDown, PageUp, Right, Tab,
         Up,
     };
-    use FocusRegion::{ContextPrimary, ContextSecondary, Primary, Secondary, Tertiary, TopNav};
+    use FocusRegion::{
+        ContextPrimary, ContextSecondary, DashboardActivity, DashboardBreakdown,
+        DashboardHeartRate, DashboardHeatmap, DashboardHrv, DashboardReadiness, DashboardRespRate,
+        DashboardSleep, DashboardTemp, OpsCoverage, OpsDiagnostics, OpsSummary, OpsWarnings,
+        Primary, Secondary, Tertiary, TimelineChart, TimelineControls, TimelineEvents,
+        TimelineInspector, TimelineLanes, TopNav, TrendsInspector, TrendsMatrix,
+    };
     use TransientLayer::{AiPreflight, Help, Search};
 
     let mut bindings = vec![
@@ -233,7 +245,7 @@ fn build_bindings() -> Vec<Keybinding> {
             true,
         ),
         key(
-            Global,
+            Always,
             Standard,
             KeyChord::ctrl(Char('c')),
             Quit,
@@ -281,7 +293,7 @@ fn build_bindings() -> Vec<Keybinding> {
             false,
         ),
         key(
-            Global,
+            Always,
             Expert,
             KeyChord::plain(Char('q')),
             Quit,
@@ -378,13 +390,16 @@ fn build_bindings() -> Vec<Keybinding> {
         ),
     ]);
 
-    bindings.extend(list_region_bindings(Screen::Timeline, Secondary));
+    bindings.extend(list_region_bindings(Screen::Timeline, TimelineChart));
+    bindings.extend(list_region_bindings(Screen::Timeline, TimelineEvents));
     bindings.extend(list_region_bindings(Screen::Review, Primary));
     bindings.extend(list_region_bindings(Screen::Ai, Primary));
     bindings.extend(list_region_bindings(Screen::Ai, Secondary));
     bindings.extend(list_region_bindings(Screen::Ai, Tertiary));
+    bindings.extend(list_region_bindings(Screen::Dashboard, DashboardBreakdown));
+    bindings.extend(list_region_bindings(Screen::Dashboard, DashboardHeatmap));
+    bindings.extend(list_region_bindings(Screen::Trends, TrendsMatrix));
 
-    bindings.extend(horizontal_region_bindings(Screen::Trends, ContextPrimary));
     bindings.extend(horizontal_region_bindings(Screen::Explain, ContextPrimary));
     bindings.extend(horizontal_region_bindings(Screen::Patterns, ContextPrimary));
     bindings.extend(horizontal_region_bindings(
@@ -395,11 +410,17 @@ fn build_bindings() -> Vec<Keybinding> {
     bindings.extend(horizontal_region_bindings(Screen::Review, ContextSecondary));
     bindings.extend(horizontal_region_bindings(Screen::Ai, ContextPrimary));
 
-    bindings.extend(horizontal_region_bindings(Screen::Timeline, ContextPrimary));
     bindings.extend(horizontal_region_bindings(
         Screen::Timeline,
-        ContextSecondary,
+        TimelineControls,
     ));
+    bindings.extend(lateral_region_bindings(Screen::Timeline, TimelineChart));
+    bindings.extend(horizontal_region_bindings(Screen::Timeline, TimelineLanes));
+    bindings.extend(lateral_region_bindings(
+        Screen::Dashboard,
+        DashboardBreakdown,
+    ));
+    bindings.extend(lateral_region_bindings(Screen::Dashboard, DashboardHeatmap));
 
     bindings.extend([
         key(
@@ -435,7 +456,7 @@ fn build_bindings() -> Vec<Keybinding> {
             false,
         ),
         key(
-            ScreenRegion(Screen::Timeline, ContextSecondary),
+            ScreenRegion(Screen::Timeline, TimelineLanes),
             Standard,
             KeyChord::plain(Enter),
             ActivateFocusedRegion,
@@ -443,7 +464,7 @@ fn build_bindings() -> Vec<Keybinding> {
             true,
         ),
         key(
-            ScreenRegion(Screen::Timeline, ContextSecondary),
+            ScreenRegion(Screen::Timeline, TimelineLanes),
             Standard,
             KeyChord::plain(Char(' ')),
             ActivateFocusedRegion,
@@ -483,7 +504,7 @@ fn build_bindings() -> Vec<Keybinding> {
             false,
         ),
         key(
-            ScreenRegion(Screen::Timeline, Secondary),
+            ScreenRegion(Screen::Timeline, TimelineEvents),
             Standard,
             KeyChord::plain(Enter),
             ActivateFocusedRegion,
@@ -491,7 +512,7 @@ fn build_bindings() -> Vec<Keybinding> {
             true,
         ),
         key(
-            ScreenRegion(Screen::Timeline, Secondary),
+            ScreenRegion(Screen::Timeline, TimelineEvents),
             Standard,
             KeyChord::plain(Char(' ')),
             ActivateFocusedRegion,
@@ -499,19 +520,19 @@ fn build_bindings() -> Vec<Keybinding> {
             false,
         ),
         key(
-            ScreenRegion(Screen::Timeline, Tertiary),
+            ScreenRegion(Screen::Timeline, TimelineInspector),
             Standard,
             KeyChord::plain(Enter),
             ActivateFocusedRegion,
-            "`Enter` return to events",
-            false,
+            "`Enter` expand selected detail",
+            true,
         ),
         key(
-            ScreenRegion(Screen::Timeline, Tertiary),
+            ScreenRegion(Screen::Timeline, TimelineInspector),
             Standard,
             KeyChord::plain(Char(' ')),
             ActivateFocusedRegion,
-            "`Space` return to events",
+            "`Space` expand selected detail",
             false,
         ),
         key(
@@ -560,6 +581,177 @@ fn build_bindings() -> Vec<Keybinding> {
             KeyChord::plain(Char(' ')),
             ActivateFocusedRegion,
             "`Space` return to cards",
+            false,
+        ),
+        key(
+            ScreenRegion(Screen::Timeline, TimelineChart),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` expand chart",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Timeline, TimelineChart),
+            Standard,
+            KeyChord::plain(Char(' ')),
+            ActivateFocusedRegion,
+            "`Space` expand chart",
+            false,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardReadiness),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` explain readiness",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardSleep),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` open sleep trends",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardActivity),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` open activity timeline",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardHeartRate),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` open heart-rate trends",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardTemp),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` open temperature trends",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardHrv),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` expand HRV panel",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardRespRate),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` expand respiratory panel",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardBreakdown),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` expand breakdown",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardHeatmap),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` open selected day",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Trends, TrendsMatrix),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` expand trend matrix",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Trends, TrendsInspector),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` expand trend detail",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Ops, OpsSummary),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` expand summary",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Ops, OpsCoverage),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` expand coverage",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Ops, OpsDiagnostics),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` expand diagnostics",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Ops, OpsWarnings),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter` expand warnings",
+            true,
+        ),
+    ]);
+
+    bindings.extend([
+        key(
+            ScreenRegion(Screen::Trends, TrendsMatrix),
+            Standard,
+            KeyChord::plain(Left),
+            PreviousTrendWindow,
+            "`Left` previous sort",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Trends, TrendsMatrix),
+            Standard,
+            KeyChord::plain(Right),
+            NextTrendWindow,
+            "`Right` next sort",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Trends, TrendsMatrix),
+            Expert,
+            KeyChord::plain(Char('h')),
+            PreviousTrendWindow,
+            "`h` previous sort",
+            false,
+        ),
+        key(
+            ScreenRegion(Screen::Trends, TrendsMatrix),
+            Expert,
+            KeyChord::plain(Char('l')),
+            NextTrendWindow,
+            "`l` next sort",
             false,
         ),
     ]);
@@ -811,6 +1003,70 @@ fn build_bindings() -> Vec<Keybinding> {
         key(
             Transient(Search),
             Standard,
+            KeyChord::plain(Tab),
+            MoveTransientFocus(crate::navigation::NavMove::Next),
+            "`Tab` next search focus",
+            true,
+        ),
+        key(
+            Transient(Search),
+            Standard,
+            KeyChord::plain(BackTab),
+            MoveTransientFocus(crate::navigation::NavMove::Previous),
+            "`Shift+Tab` previous search focus",
+            true,
+        ),
+        key(
+            Transient(Search),
+            Standard,
+            KeyChord::plain(Left),
+            MoveTransientFocus(crate::navigation::NavMove::Previous),
+            "`Left` previous search focus",
+            false,
+        ),
+        key(
+            Transient(Search),
+            Standard,
+            KeyChord::plain(Right),
+            MoveTransientFocus(crate::navigation::NavMove::Next),
+            "`Right` next search focus",
+            false,
+        ),
+        key(
+            Transient(Search),
+            Standard,
+            KeyChord::plain(Home),
+            MoveTransientFocus(crate::navigation::NavMove::First),
+            "`Home` first search focus",
+            false,
+        ),
+        key(
+            Transient(Search),
+            Standard,
+            KeyChord::plain(End),
+            MoveTransientFocus(crate::navigation::NavMove::Last),
+            "`End` last search focus",
+            false,
+        ),
+        key(
+            Transient(Search),
+            Standard,
+            KeyChord::plain(Up),
+            MoveTransientFocus(crate::navigation::NavMove::Previous),
+            "`Up` previous search focus",
+            false,
+        ),
+        key(
+            Transient(Search),
+            Standard,
+            KeyChord::plain(Down),
+            MoveTransientFocus(crate::navigation::NavMove::Next),
+            "`Down` next search focus",
+            false,
+        ),
+        key(
+            Transient(Search),
+            Standard,
             KeyChord::plain(Enter),
             SearchNextResult,
             "`Enter` next search result",
@@ -843,6 +1099,70 @@ fn build_bindings() -> Vec<Keybinding> {
         key(
             Transient(Help),
             Standard,
+            KeyChord::plain(Tab),
+            MoveTransientFocus(crate::navigation::NavMove::Next),
+            "`Tab` next help focus",
+            true,
+        ),
+        key(
+            Transient(Help),
+            Standard,
+            KeyChord::plain(BackTab),
+            MoveTransientFocus(crate::navigation::NavMove::Previous),
+            "`Shift+Tab` previous help focus",
+            true,
+        ),
+        key(
+            Transient(Help),
+            Standard,
+            KeyChord::plain(Left),
+            MoveTransientFocus(crate::navigation::NavMove::Previous),
+            "`Left` previous help focus",
+            false,
+        ),
+        key(
+            Transient(Help),
+            Standard,
+            KeyChord::plain(Right),
+            MoveTransientFocus(crate::navigation::NavMove::Next),
+            "`Right` next help focus",
+            false,
+        ),
+        key(
+            Transient(Help),
+            Standard,
+            KeyChord::plain(Home),
+            MoveTransientFocus(crate::navigation::NavMove::First),
+            "`Home` first help focus",
+            false,
+        ),
+        key(
+            Transient(Help),
+            Standard,
+            KeyChord::plain(End),
+            MoveTransientFocus(crate::navigation::NavMove::Last),
+            "`End` last help focus",
+            false,
+        ),
+        key(
+            Transient(Help),
+            Standard,
+            KeyChord::plain(Up),
+            MoveTransientFocus(crate::navigation::NavMove::Previous),
+            "`Up` previous help focus",
+            false,
+        ),
+        key(
+            Transient(Help),
+            Standard,
+            KeyChord::plain(Down),
+            MoveTransientFocus(crate::navigation::NavMove::Next),
+            "`Down` next help focus",
+            false,
+        ),
+        key(
+            Transient(Help),
+            Standard,
             KeyChord::plain(Esc),
             ToggleHelp,
             "`Esc` close help",
@@ -860,7 +1180,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Transient(AiPreflight),
             Standard,
             KeyChord::plain(Tab),
-            MoveFocusedRegion(crate::navigation::NavMove::Next),
+            MoveTransientFocus(crate::navigation::NavMove::Next),
             "`Tab` next control",
             true,
         ),
@@ -868,7 +1188,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Transient(AiPreflight),
             Standard,
             KeyChord::plain(BackTab),
-            MoveFocusedRegion(crate::navigation::NavMove::Previous),
+            MoveTransientFocus(crate::navigation::NavMove::Previous),
             "`Shift+Tab` previous control",
             true,
         ),
@@ -876,7 +1196,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Transient(AiPreflight),
             Standard,
             KeyChord::plain(Left),
-            MoveFocusedRegion(crate::navigation::NavMove::Previous),
+            MoveTransientFocus(crate::navigation::NavMove::Previous),
             "`Left` previous control",
             false,
         ),
@@ -884,7 +1204,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Transient(AiPreflight),
             Standard,
             KeyChord::plain(Right),
-            MoveFocusedRegion(crate::navigation::NavMove::Next),
+            MoveTransientFocus(crate::navigation::NavMove::Next),
             "`Right` next control",
             false,
         ),
@@ -892,7 +1212,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Transient(AiPreflight),
             Standard,
             KeyChord::plain(Home),
-            MoveFocusedRegion(crate::navigation::NavMove::First),
+            MoveTransientFocus(crate::navigation::NavMove::First),
             "`Home` first control",
             false,
         ),
@@ -900,7 +1220,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Transient(AiPreflight),
             Standard,
             KeyChord::plain(End),
-            MoveFocusedRegion(crate::navigation::NavMove::Last),
+            MoveTransientFocus(crate::navigation::NavMove::Last),
             "`End` last control",
             false,
         ),
@@ -908,7 +1228,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Transient(AiPreflight),
             Standard,
             KeyChord::plain(Up),
-            MoveFocusedRegion(crate::navigation::NavMove::Previous),
+            MoveTransientFocus(crate::navigation::NavMove::Previous),
             "`Up` previous control",
             false,
         ),
@@ -916,7 +1236,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Transient(AiPreflight),
             Standard,
             KeyChord::plain(Down),
-            MoveFocusedRegion(crate::navigation::NavMove::Next),
+            MoveTransientFocus(crate::navigation::NavMove::Next),
             "`Down` next control",
             false,
         ),
@@ -1011,6 +1331,48 @@ fn horizontal_region_bindings(screen: Screen, region: FocusRegion) -> Vec<Keybin
             MoveFocusedRegion(crate::navigation::NavMove::Last),
             "`End` last option",
             false,
+        ),
+        key(
+            ScreenRegion(screen, region),
+            Expert,
+            KeyChord::plain(Char('h')),
+            MoveFocusedRegion(crate::navigation::NavMove::Previous),
+            "`h` previous option",
+            false,
+        ),
+        key(
+            ScreenRegion(screen, region),
+            Expert,
+            KeyChord::plain(Char('l')),
+            MoveFocusedRegion(crate::navigation::NavMove::Next),
+            "`l` next option",
+            false,
+        ),
+    ]
+}
+
+fn lateral_region_bindings(screen: Screen, region: FocusRegion) -> Vec<Keybinding> {
+    use Action::MoveFocusedRegion;
+    use BindingKind::{Expert, Standard};
+    use BindingScope::ScreenRegion;
+    use ChordKey::{Char, Left, Right};
+
+    vec![
+        key(
+            ScreenRegion(screen, region),
+            Standard,
+            KeyChord::plain(Left),
+            MoveFocusedRegion(crate::navigation::NavMove::Previous),
+            "`Left` previous option",
+            true,
+        ),
+        key(
+            ScreenRegion(screen, region),
+            Standard,
+            KeyChord::plain(Right),
+            MoveFocusedRegion(crate::navigation::NavMove::Next),
+            "`Right` next option",
+            true,
         ),
         key(
             ScreenRegion(screen, region),
@@ -1278,15 +1640,34 @@ mod tests {
 
     #[test]
     fn footer_hints_surface_standard_bindings_only() {
-        let hints = footer_hints(BindingContext {
-            active_screen: Screen::Timeline,
-            focused_region: FocusRegion::Primary,
-            search_open: false,
-            help_open: false,
-            ai_preflight_open: false,
-        });
+        let hints = footer_hints(
+            BindingContext {
+                active_screen: Screen::Timeline,
+                focused_region: FocusRegion::TimelineChart,
+                search_open: false,
+                help_open: false,
+                ai_preflight_open: false,
+            },
+            true,
+        );
         assert!(hints.iter().all(|hint| !hint.contains("`j`")));
         assert!(hints.iter().any(|hint| hint.contains("`Ctrl+F`")));
+    }
+
+    #[test]
+    fn footer_hints_hide_activation_copy_when_enter_is_not_truthful() {
+        let hints = footer_hints(
+            BindingContext {
+                active_screen: Screen::Ai,
+                focused_region: FocusRegion::Tertiary,
+                search_open: false,
+                help_open: false,
+                ai_preflight_open: false,
+            },
+            false,
+        );
+
+        assert!(!hints.iter().any(|hint| hint.contains("Enter")));
     }
 
     #[test]
@@ -1329,6 +1710,25 @@ mod tests {
     }
 
     #[test]
+    fn search_modal_traps_tab_navigation_inside_the_overlay() {
+        let action = super::resolve(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            BindingContext {
+                active_screen: Screen::Review,
+                focused_region: FocusRegion::Primary,
+                search_open: true,
+                help_open: false,
+                ai_preflight_open: false,
+            },
+        );
+
+        assert_eq!(
+            action,
+            Some(Action::MoveTransientFocus(crate::navigation::NavMove::Next))
+        );
+    }
+
+    #[test]
     fn transients_do_not_fall_through_to_screen_shortcuts() {
         let action = super::resolve(
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
@@ -1345,6 +1745,29 @@ mod tests {
     }
 
     #[test]
+    fn search_help_groups_follow_the_visible_transient_scope() {
+        let groups = help_groups(BindingContext {
+            active_screen: Screen::Ai,
+            focused_region: FocusRegion::Secondary,
+            search_open: true,
+            help_open: false,
+            ai_preflight_open: false,
+        });
+
+        let standard = groups
+            .get("Standard")
+            .unwrap_or_else(|| panic!("standard help group should exist"));
+
+        assert!(
+            standard
+                .iter()
+                .any(|label| label.contains("next search focus"))
+        );
+        assert!(standard.iter().any(|label| label.contains("close search")));
+        assert!(!standard.iter().any(|label| label.contains("cancel")));
+    }
+
+    #[test]
     fn transient_scopes_still_allow_global_quit() {
         let action = super::resolve(
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
@@ -1358,6 +1781,78 @@ mod tests {
         );
 
         assert_eq!(action, Some(Action::Quit));
+    }
+
+    #[test]
+    fn help_modal_traps_tab_navigation_inside_the_overlay() {
+        let action = super::resolve(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            BindingContext {
+                active_screen: Screen::Explain,
+                focused_region: FocusRegion::ContextPrimary,
+                search_open: false,
+                help_open: true,
+                ai_preflight_open: false,
+            },
+        );
+
+        assert_eq!(
+            action,
+            Some(Action::MoveTransientFocus(crate::navigation::NavMove::Next))
+        );
+    }
+
+    #[test]
+    fn help_modal_escape_resolves_to_close_help() {
+        let action = super::resolve(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            BindingContext {
+                active_screen: Screen::Dashboard,
+                focused_region: FocusRegion::DashboardReadiness,
+                search_open: false,
+                help_open: true,
+                ai_preflight_open: false,
+            },
+        );
+
+        assert_eq!(action, Some(Action::ToggleHelp));
+    }
+
+    #[test]
+    fn help_modal_blocks_background_refresh_shortcuts() {
+        let action = super::resolve(
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+            BindingContext {
+                active_screen: Screen::Dashboard,
+                focused_region: FocusRegion::DashboardReadiness,
+                search_open: false,
+                help_open: true,
+                ai_preflight_open: false,
+            },
+        );
+
+        assert_eq!(action, None);
+    }
+
+    #[test]
+    fn ai_preflight_uses_transient_focus_actions_for_tabbing() {
+        let action = super::resolve(
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+            BindingContext {
+                active_screen: Screen::Ai,
+                focused_region: FocusRegion::Tertiary,
+                search_open: false,
+                help_open: false,
+                ai_preflight_open: true,
+            },
+        );
+
+        assert_eq!(
+            action,
+            Some(Action::MoveTransientFocus(
+                crate::navigation::NavMove::Previous
+            ))
+        );
     }
 
     #[test]

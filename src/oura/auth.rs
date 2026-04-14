@@ -676,7 +676,7 @@ async fn ensure_authorized_session_with_secret_store(
 ) -> Result<AuthorizedSession> {
     let should_refresh = tokens.refresh_token.is_some()
         && (tokens.access_token.trim().is_empty()
-            || access_token_is_stale(session.access_token_expires_at.as_deref())?);
+            || access_token_refresh_required(session.access_token_expires_at.as_deref())?);
 
     let session = if should_refresh {
         let refresh_token = tokens
@@ -999,9 +999,9 @@ fn persist_authorized_session(
     Ok(())
 }
 
-fn access_token_is_stale(expires_at: Option<&str>) -> Result<bool> {
+fn access_token_refresh_required(expires_at: Option<&str>) -> Result<bool> {
     let Some(expires_at) = expires_at else {
-        return Ok(false);
+        return Ok(true);
     };
     let expires_at = OffsetDateTime::parse(expires_at, &Rfc3339).map_err(|error| {
         AuthError::OAuthFlow(format!("stored access token expiry is invalid: {error}"))
@@ -1512,6 +1512,107 @@ mod tests {
             "session present",
         );
         assert!(auth.last_refresh_at.is_some());
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn missing_access_token_expiry_triggers_refresh_when_refresh_token_exists() {
+        let listener = ok(
+            TcpListener::bind("127.0.0.1:0").await,
+            "listener should bind",
+        );
+        let address = ok(listener.local_addr(), "listener address should resolve");
+        let grants = Arc::new(Mutex::new(VecDeque::from([json!({
+            "access_token": "access-2",
+            "refresh_token": "refresh-2",
+            "token_type": "Bearer",
+            "expires_in": 3600
+        })])));
+        let grants_clone = Arc::clone(&grants);
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/token",
+                post(
+                    move |Form(_): Form<std::collections::HashMap<String, String>>| {
+                        let grants_clone = Arc::clone(&grants_clone);
+                        async move {
+                            let payload = {
+                                let mut queued_grants = grants_clone.lock().unwrap_or_else(|_| {
+                                    unreachable!("refresh grant lock should succeed")
+                                });
+                                some(queued_grants.pop_front(), "refresh response should exist")
+                            };
+                            Json(payload)
+                        }
+                    },
+                ),
+            );
+            ok(
+                axum::serve(listener, app).await,
+                "refresh test server should run",
+            );
+        });
+
+        let config = test_config(format!("http://{address}/token"));
+        let store = ok(Store::open_test_store(), "store should open");
+        let secrets = MemorySecretStore::default();
+        secrets
+            .write_tokens(&StoredTokens {
+                access_token: "still-present-access".to_owned(),
+                refresh_token: Some("refresh-1".to_owned()),
+            })
+            .map_or_else(|error| unreachable!("seed tokens: {error}"), |()| ());
+        store
+            .auth()
+            .upsert(&AuthSessionRecord {
+                provider: OURA_PROVIDER.to_owned(),
+                account_id: None,
+                account_email: None,
+                token_type: "Bearer".to_owned(),
+                granted_scopes: vec!["daily".to_owned(), "heartrate".to_owned()],
+                access_token_expires_at: None,
+                last_authenticated_at: Some("2020-01-01T00:00:00Z".to_owned()),
+                last_refresh_at: None,
+                last_error: None,
+                updated_at: "2020-01-01T00:00:00Z".to_owned(),
+            })
+            .map_or_else(|error| unreachable!("seed auth session: {error}"), |()| ());
+        let seeded_session = some(
+            ok(
+                store.auth().get(OURA_PROVIDER),
+                "seeded session should load",
+            ),
+            "seeded session present",
+        );
+        let seeded_tokens = some(
+            ok(secrets.read_tokens(), "seeded tokens should read"),
+            "seeded tokens present",
+        );
+        let session = ok(
+            ensure_authorized_session_with_secret_store(
+                &config,
+                store.plan().clone(),
+                seeded_session,
+                seeded_tokens,
+                &secrets,
+            )
+            .await,
+            "refresh should succeed without stored expiry",
+        );
+
+        assert_eq!(session.access_token, "access-2");
+        let stored = some(
+            ok(secrets.read_tokens(), "tokens should read"),
+            "tokens stored",
+        );
+        assert_eq!(stored.refresh_token.as_deref(), Some("refresh-2"));
+        let auth = some(
+            ok(store.auth().get(OURA_PROVIDER), "session read"),
+            "session present",
+        );
+        assert!(auth.last_refresh_at.is_some());
+        assert!(auth.access_token_expires_at.is_some());
 
         server.abort();
     }
