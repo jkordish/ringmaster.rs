@@ -657,7 +657,7 @@ async fn sync_daily(
     let pages = fetch_daily_pages(client, capability_report, &window).await?;
     let imported_at = now_rfc3339()?;
     let persist_store = reopen_store(config, &store_plan)?;
-    persist_daily_pages(&persist_store, &pages, &imported_at, options)?;
+    persist_daily_pages(&persist_store, &window, &pages, &imported_at, options)?;
     let (status, message, last_error, imported_rows) = summarize_daily_sync(&window, &pages);
     let watermark = daily_sync_watermark(config, &window, &status)?;
     persist_slice_report(
@@ -851,6 +851,7 @@ async fn fetch_daily_pages(
 
 fn persist_daily_pages(
     persist_store: &Store,
+    window: &DailySyncWindow,
     pages: &DailyPageFetches,
     imported_at: &str,
     options: &SyncOptions,
@@ -860,7 +861,12 @@ fn persist_daily_pages(
     }
 
     persist_daily_sleep_pages(persist_store, &pages.daily_sleep_pages, imported_at)?;
-    persist_sleep_period_pages(persist_store, &pages.sleep_period_pages, imported_at)?;
+    persist_sleep_period_pages(
+        persist_store,
+        window,
+        &pages.sleep_period_pages,
+        imported_at,
+    )?;
     persist_daily_readiness_pages(persist_store, &pages.readiness_pages, imported_at)?;
     persist_daily_activity_pages(persist_store, &pages.activity_pages, imported_at)?;
     persist_daily_spo2_pages(persist_store, &pages.daily_spo2_pages, imported_at)?;
@@ -901,9 +907,14 @@ fn persist_daily_sleep_pages(
 
 fn persist_sleep_period_pages(
     persist_store: &Store,
+    window: &DailySyncWindow,
     pages: &[PageFetch<SleepDocument>],
     imported_at: &str,
 ) -> Result<()> {
+    persist_store
+        .imports()
+        .delete_sleep_periods_between_days(&window.start_date, &window.end_date)?;
+
     for page in pages {
         persist_store
             .imports()
@@ -1885,7 +1896,9 @@ mod tests {
     use crate::oura::models::{DailySpO2Document, SleepDocument};
     use crate::refresh::SyncFamily;
     use crate::store::Store;
-    use crate::store::queries::{RawPayloadRecord, SyncRunStatus, SyncStateRecord};
+    use crate::store::queries::{
+        RawPayloadRecord, SleepPeriodRecord, SyncRunStatus, SyncStateRecord,
+    };
     use crate::test_support::{ok, some};
     use crate::webhook::default_desired_subscriptions;
     use serde_json::json;
@@ -2266,6 +2279,10 @@ mod tests {
     #[test]
     fn persist_sleep_period_pages_writes_metric_samples() {
         let store = ok(Store::open_test_store(), "store should open");
+        let window = super::DailySyncWindow {
+            start_date: "2026-04-08".to_owned(),
+            end_date: "2026-04-08".to_owned(),
+        };
         let document: SleepDocument = ok(
             serde_json::from_value(json!({
                 "id": "sleep_2026-04-08_primary",
@@ -2293,7 +2310,7 @@ mod tests {
         }];
 
         ok(
-            super::persist_sleep_period_pages(&store, &pages, "2026-04-09T06:45:00Z"),
+            super::persist_sleep_period_pages(&store, &window, &pages, "2026-04-09T06:45:00Z"),
             "sleep pages should persist",
         );
 
@@ -2311,6 +2328,116 @@ mod tests {
         assert_eq!(records[0].average_hrv, Some(41.8));
         assert_eq!(records[0].average_breath, Some(13.4));
         assert_eq!(records[0].sleep_type.as_deref(), Some("long_sleep"));
+    }
+
+    #[test]
+    fn persist_sleep_period_pages_reconciles_removed_rows_within_the_sync_window() {
+        let store = ok(Store::open_test_store(), "store should open");
+        let imports = store.imports();
+
+        ok(
+            imports.upsert_sleep_period(&SleepPeriodRecord {
+                oura_id: "sleep_2026-04-07_outside".to_owned(),
+                day: "2026-04-07".to_owned(),
+                bedtime_start: Some("2026-04-07T22:30:00Z".to_owned()),
+                bedtime_end: Some("2026-04-08T06:15:00Z".to_owned()),
+                sleep_type: Some("long_sleep".to_owned()),
+                average_heart_rate: Some(54.0),
+                average_hrv: Some(42.0),
+                average_breath: Some(13.0),
+                total_sleep_duration: Some(27_900),
+                raw_cache_key: Some("seed-outside".to_owned()),
+                updated_at: "2026-04-09T05:00:00Z".to_owned(),
+            }),
+            "out-of-window seed row should persist",
+        );
+        ok(
+            imports.upsert_sleep_period(&SleepPeriodRecord {
+                oura_id: "sleep_2026-04-08_removed".to_owned(),
+                day: "2026-04-08".to_owned(),
+                bedtime_start: Some("2026-04-08T21:45:00Z".to_owned()),
+                bedtime_end: Some("2026-04-09T05:45:00Z".to_owned()),
+                sleep_type: Some("long_sleep".to_owned()),
+                average_heart_rate: Some(57.0),
+                average_hrv: Some(30.0),
+                average_breath: Some(14.1),
+                total_sleep_duration: Some(25_200),
+                raw_cache_key: Some("seed-removed".to_owned()),
+                updated_at: "2026-04-09T05:00:00Z".to_owned(),
+            }),
+            "removed in-window row should persist",
+        );
+        ok(
+            imports.upsert_sleep_period(&SleepPeriodRecord {
+                oura_id: "sleep_2026-04-09_removed".to_owned(),
+                day: "2026-04-09".to_owned(),
+                bedtime_start: Some("2026-04-09T22:00:00Z".to_owned()),
+                bedtime_end: Some("2026-04-10T06:00:00Z".to_owned()),
+                sleep_type: Some("long_sleep".to_owned()),
+                average_heart_rate: Some(58.0),
+                average_hrv: Some(29.5),
+                average_breath: Some(14.4),
+                total_sleep_duration: Some(24_600),
+                raw_cache_key: Some("seed-removed-2".to_owned()),
+                updated_at: "2026-04-10T05:00:00Z".to_owned(),
+            }),
+            "second removed in-window row should persist",
+        );
+
+        let window = super::DailySyncWindow {
+            start_date: "2026-04-08".to_owned(),
+            end_date: "2026-04-09".to_owned(),
+        };
+        let replacement: SleepDocument = ok(
+            serde_json::from_value(json!({
+                "id": "sleep_2026-04-08_survives",
+                "day": "2026-04-08",
+                "bedtime_start": "2026-04-08T22:45:00Z",
+                "bedtime_end": "2026-04-09T06:35:00Z",
+                "average_heart_rate": 55.2,
+                "average_hrv": 41.8,
+                "average_breath": 13.4,
+                "total_sleep_duration": 28200,
+                "type": "long_sleep"
+            })),
+            "replacement sleep fixture document should deserialize",
+        );
+        let pages = vec![PageFetch {
+            raw_payload: RawPayloadRecord {
+                cache_key: "sleep-page-2026-04-window".to_owned(),
+                endpoint: "sleep".to_owned(),
+                requested_at: "2026-04-10T06:40:00Z".to_owned(),
+                scope: Some("daily".to_owned()),
+                etag: None,
+                payload: "{\"data\":[]}".to_owned(),
+            },
+            documents: vec![replacement],
+        }];
+
+        ok(
+            super::persist_sleep_period_pages(&store, &window, &pages, "2026-04-10T06:45:00Z"),
+            "sleep pages should reconcile the in-window rows",
+        );
+
+        let counts = ok(store.views().record_counts(), "record counts should load");
+        let records = ok(
+            store
+                .views()
+                .sleep_periods_between_days("2026-04-07", "2026-04-09"),
+            "sleep period records should load after reconciliation",
+        );
+
+        assert_eq!(counts.sleep_periods, 2);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].oura_id, "sleep_2026-04-07_outside");
+        assert_eq!(records[1].oura_id, "sleep_2026-04-08_survives");
+        assert_eq!(records[1].average_hrv, Some(41.8));
+        assert!(
+            records
+                .iter()
+                .all(|record| record.oura_id != "sleep_2026-04-08_removed"
+                    && record.oura_id != "sleep_2026-04-09_removed")
+        );
     }
 
     #[test]

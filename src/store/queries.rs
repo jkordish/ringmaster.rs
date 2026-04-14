@@ -1177,6 +1177,16 @@ impl<'connection> ImportStore<'connection> {
         Ok(())
     }
 
+    pub fn delete_sleep_periods_between_days(&self, start_day: &str, end_day: &str) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM sleep_periods
+             WHERE day >= ?1 AND day <= ?2",
+            params![start_day, end_day],
+        )?;
+
+        Ok(())
+    }
+
     pub fn delete_daily_sleep(&self, day: &str) -> Result<()> {
         if let Some(day_candidate) = extract_day_suffix(day) {
             self.connection.execute(
