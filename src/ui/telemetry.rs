@@ -1,6 +1,11 @@
 use std::fmt::Write as _;
 
+use ratatui::layout::Rect;
+
+use super::layout::{DashboardChartMetrics, ViewportClass, WeeklyHeatmapMode, WeeklyTrendsLayout};
 use crate::ui::theme::Tone;
+
+pub use super::text_fit::{concise_detail, fit_heatmap_label};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TelemetryAvailability {
@@ -191,33 +196,6 @@ pub fn stacked_profile_rows(values: &[u64], width: usize, height: usize) -> Vec<
 }
 
 #[must_use]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WeeklyHeatmapMode {
-    Standard,
-    DenseHistory,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WeeklyHeatmapLayout {
-    pub label_column_width: usize,
-    pub header_height: usize,
-    pub grid_origin_x: usize,
-    pub cell_width: usize,
-    pub row_height: usize,
-    pub slot_width: usize,
-    pub summary_origin_x: usize,
-    pub legend_origin_x: usize,
-}
-
-impl WeeklyHeatmapLayout {
-    #[must_use]
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub const fn selected_bracket_origin(self, column_index: usize) -> usize {
-        self.grid_origin_x + column_index.saturating_mul(self.slot_width)
-    }
-}
-
-#[must_use]
 pub fn heatmap_day_label(mode: WeeklyHeatmapMode, day: &str) -> String {
     match mode {
         WeeklyHeatmapMode::Standard => day.rsplit_once('-').map_or_else(
@@ -225,33 +203,18 @@ pub fn heatmap_day_label(mode: WeeklyHeatmapMode, day: &str) -> String {
             |(_, day_of_month)| day_of_month.to_owned(),
         ),
         WeeklyHeatmapMode::DenseHistory => day.rsplit_once('-').map_or_else(
-            || day.chars().take(2).collect::<String>(),
-            |(prefix, day_of_month)| {
-                let month = prefix.rsplit_once('-').map_or(prefix, |(_, month)| month);
-                let month_digit = month
-                    .trim_start_matches('0')
+            || {
+                day.chars()
+                    .rev()
+                    .take(2)
+                    .collect::<String>()
                     .chars()
-                    .next()
-                    .unwrap_or_else(|| month.chars().last().unwrap_or('?'));
-                format!("{month_digit}{day_of_month}")
+                    .rev()
+                    .collect()
             },
+            |(_, day_of_month)| day_of_month.to_owned(),
         ),
     }
-}
-
-#[must_use]
-pub fn fit_heatmap_label(label: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-
-    let preferred = match (label, width) {
-        ("Readiness", 1..=6) => "Ready",
-        ("Activity", 1..=6) => "Actv",
-        _ => label,
-    };
-
-    concise_text(preferred, width)
 }
 
 #[must_use]
@@ -266,17 +229,30 @@ pub fn weekly_heatmap_rows(
     row_height: usize,
 ) -> Vec<String> {
     let levels = ['·', '░', '▒', '▓', '█'];
-    let layout = weekly_heatmap_layout(
+    let layout = WeeklyTrendsLayout::for_panel(
+        Rect::new(
+            0,
+            0,
+            u16::try_from(layout_width_for_rows(
+                mode,
+                day_labels.len(),
+                cell_width.max(1),
+            ))
+            .unwrap_or(u16::MAX),
+            u16::try_from(
+                row_height
+                    .max(1)
+                    .saturating_mul(row_labels.len())
+                    .saturating_add(3),
+            )
+            .unwrap_or(u16::MAX),
+        ),
+        DashboardChartMetrics::for_viewport(ViewportClass::Wide),
         mode,
         day_labels.len(),
         row_labels.len(),
-        layout_width_for_rows(mode, day_labels.len(), cell_width.max(1)),
-        row_height
-            .max(1)
-            .saturating_mul(row_labels.len())
-            .saturating_add(1),
     );
-    let header_prefix = " ".repeat(layout.grid_origin_x);
+    let header_prefix = " ".repeat(usize::from(layout.grid_viewport.x));
     let mut output = Vec::new();
     let mut header_cells = String::new();
     for day in day_labels {
@@ -284,7 +260,7 @@ pub fn weekly_heatmap_rows(
         let _ = write!(
             header_cells,
             "{label:^slot_width$}",
-            slot_width = layout.slot_width
+            slot_width = usize::from(layout.slot_width)
         );
     }
     output.push(format!("{header_prefix}{header_cells}"));
@@ -300,7 +276,7 @@ pub fn weekly_heatmap_rows(
                             let band = usize::from(score.min(100)) * (levels.len() - 1) / 100;
                             levels[band]
                         });
-                        let fill = glyph.to_string().repeat(layout.cell_width);
+                        let fill = glyph.to_string().repeat(usize::from(layout.cell_width));
                         if selected == Some((row_index, column_index)) {
                             format!("[{fill}]")
                         } else {
@@ -312,61 +288,18 @@ pub fn weekly_heatmap_rows(
             .unwrap_or_default();
         output.push(format!(
             "{label:<label_width$}{cells}",
-            label = fit_heatmap_label(label, layout.label_column_width),
-            label_width = layout.label_column_width,
+            label = fit_heatmap_label(label, usize::from(layout.label_column_width)),
+            label_width = usize::from(layout.label_column_width),
         ));
         for _ in 1..layout.row_height {
             output.push(format!(
                 "{:label_width$}{cells}",
                 "",
-                label_width = layout.label_column_width
+                label_width = usize::from(layout.label_column_width)
             ));
         }
     }
     output
-}
-
-#[must_use]
-pub fn weekly_heatmap_layout(
-    mode: WeeklyHeatmapMode,
-    day_count: usize,
-    row_count: usize,
-    available_width: usize,
-    available_height: usize,
-) -> WeeklyHeatmapLayout {
-    let label_column_width = match mode {
-        WeeklyHeatmapMode::Standard => 6,
-        WeeklyHeatmapMode::DenseHistory => 4,
-    };
-    let grid_origin_x = label_column_width;
-    let usable_width = available_width.saturating_sub(label_column_width).max(3);
-    let column_count = day_count.max(1);
-    let cell_width = match mode {
-        WeeklyHeatmapMode::DenseHistory => 1,
-        WeeklyHeatmapMode::Standard => usable_width
-            .checked_div(column_count)
-            .unwrap_or(3)
-            .saturating_sub(2)
-            .clamp(1, 6),
-    };
-    let slot_width = cell_width.saturating_add(2);
-    let header_height = 1;
-    let body_rows = available_height.saturating_sub(header_height + 2);
-    let row_height = body_rows
-        .checked_div(row_count.max(1))
-        .unwrap_or(1)
-        .clamp(1, 2);
-
-    WeeklyHeatmapLayout {
-        label_column_width,
-        header_height,
-        grid_origin_x,
-        cell_width,
-        row_height,
-        slot_width,
-        summary_origin_x: grid_origin_x,
-        legend_origin_x: grid_origin_x,
-    }
 }
 
 const fn layout_width_for_rows(
@@ -403,16 +336,6 @@ pub fn footer_inspector(
         format!("{exact} / {delta}")
     };
     format!("{label} | {summary} | {freshness} | {hint}")
-}
-
-#[must_use]
-pub fn concise_text(value: &str, width: usize) -> String {
-    value.chars().take(width.max(1)).collect()
-}
-
-#[must_use]
-pub fn concise_detail(note: &str, width: usize) -> String {
-    concise_text(note.trim_end_matches('.'), width)
 }
 
 #[must_use]
@@ -476,9 +399,10 @@ mod tests {
     use super::{
         MetricPanelState, TelemetryAvailability, WeeklyHeatmapMode, availability_scaffold,
         fit_heatmap_label, footer_inspector, meter_bar, metric_panel_scaffold, micro_histogram,
-        segmented_bar, spark_strip, stacked_profile_rows, weekly_heatmap_layout,
-        weekly_heatmap_rows,
+        segmented_bar, spark_strip, stacked_profile_rows, weekly_heatmap_rows,
     };
+    use crate::ui::layout::{DashboardChartMetrics, ViewportClass, WeeklyTrendsLayout};
+    use ratatui::layout::Rect;
 
     #[test]
     fn segmented_bar_keeps_density_when_partially_filled() {
@@ -584,10 +508,11 @@ mod tests {
             2,
         );
 
-        assert!(rows[0].contains("401"));
-        assert!(rows[0].contains("402"));
+        assert!(rows[0].contains("01"));
+        assert!(rows[0].contains("02"));
+        assert!(rows[0].contains("03"));
         assert!(rows[1].contains("[▒]") || rows[1].contains("[▓]"));
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
     }
 
     #[test]
@@ -628,14 +553,20 @@ mod tests {
 
     #[test]
     fn weekly_heatmap_layout_aligns_grid_and_legend_from_one_origin() {
-        let layout = weekly_heatmap_layout(WeeklyHeatmapMode::Standard, 7, 4, 40, 10);
+        let layout = WeeklyTrendsLayout::for_panel(
+            Rect::new(0, 0, 40, 10),
+            DashboardChartMetrics::for_viewport(ViewportClass::Wide),
+            WeeklyHeatmapMode::Standard,
+            7,
+            4,
+        );
 
-        assert_eq!(layout.grid_origin_x, layout.label_column_width);
-        assert_eq!(layout.summary_origin_x, layout.grid_origin_x);
-        assert_eq!(layout.legend_origin_x, layout.grid_origin_x);
+        assert_eq!(layout.grid_viewport.x, layout.label_column_width);
+        assert_eq!(layout.summary_area.x, layout.grid_viewport.x);
+        assert_eq!(layout.legend_area.x, layout.grid_viewport.x);
         assert_eq!(
             layout.selected_bracket_origin(6),
-            layout.grid_origin_x + (layout.slot_width * 6)
+            layout.grid_viewport.x + (layout.slot_width * 6)
         );
     }
 

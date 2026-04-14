@@ -4239,10 +4239,10 @@ mod tests {
             unreachable!("medium dense-history dashboard snapshot should render: {error}")
         });
 
-        assert!(output.contains("326327328329"));
-        assert!(output.contains("401402403404"));
+        assert!(output.contains("26 27 28 29 30 31 01 02 03 04 05 06 07 08"));
         assert!(output.contains("WEEKLY TRENDS"));
-        assert!(!medium_output.contains("326327328329"));
+        assert!(!output.contains("326327328329"));
+        assert!(!medium_output.contains("26 27 28 29 30 31 01 02 03 04 05 06 07 08"));
     }
 
     #[test]
@@ -4254,11 +4254,94 @@ mod tests {
         let output = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("wide dashboard snapshot should render: {error}"));
 
-        assert!(output.contains("05"));
-        assert!(output.contains("06"));
-        assert!(output.contains("07"));
-        assert!(output.contains("08"));
+        assert!(output.contains("05         06         07         08"));
+        assert!(output.contains("ramp ░▒▓█ higher"));
+        assert!(output.contains("Sleep 76 | 04-08 [good]"));
         assert!(!output.contains("0       0       0       0"));
+    }
+
+    #[test]
+    fn dashboard_bottom_band_medium_snapshot_uses_chart_and_support_lanes() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Dashboard;
+
+        let output = render_snapshot(&app, 120, 36).unwrap_or_else(|error| {
+            unreachable!("medium dashboard snapshot should render: {error}")
+        });
+
+        assert!(
+            output.contains(
+                "factor        signal                                              delta"
+            )
+        );
+        assert!(output.contains("WEEKLY TRENDS"));
+        assert!(output.contains("Sleep 76 | 04-08 [good]"));
+        assert!(output.contains("ramp ░▒▓█ higher"));
+        assert!(output.contains("Today's hrv is 34; there is not enough history"));
+        assert!(!output.contains("focus          "));
+        assert!(!output.contains("Recent score bands for sleep, readines"));
+    }
+
+    #[test]
+    fn dashboard_bottom_band_focus_snapshots_lock_to_panel_titles() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Dashboard;
+
+        while app.focused_region() != FocusRegion::DashboardBreakdown {
+            app.handle(Action::FocusNextRegion);
+        }
+        let breakdown = render_snapshot(&app, 160, 44).unwrap_or_else(|error| {
+            unreachable!("breakdown focus snapshot should render: {error}")
+        });
+        assert!(breakdown.contains("> READINESS BREAKDOWN"));
+        assert!(breakdown.contains("> HRV Balance"));
+
+        while app.focused_region() != FocusRegion::DashboardHeatmap {
+            app.handle(Action::FocusNextRegion);
+        }
+        let weekly = render_snapshot(&app, 160, 44)
+            .unwrap_or_else(|error| unreachable!("weekly focus snapshot should render: {error}"));
+        assert!(weekly.contains("> WEEKLY TRENDS"));
+        assert!(weekly.contains("[█████████]"));
+    }
+
+    #[tokio::test]
+    async fn dashboard_bottom_band_empty_fixture_keeps_scaffold_copy_bounded() {
+        let config = test_config();
+        let states = build_scenario_fixture_snapshot_apps_for_tests(
+            &config,
+            std::path::Path::new("tests/fixtures/phase7"),
+        )
+        .await
+        .unwrap_or_else(|error| unreachable!("scenario fixture apps should build: {error}"));
+
+        let mut app = states
+            .into_iter()
+            .find_map(|(scenario, app)| {
+                (scenario == crate::ui::snapshot::SnapshotScenario::Empty).then_some(app)
+            })
+            .unwrap_or_else(|| unreachable!("empty scenario should exist"));
+        app.active_screen = Screen::Dashboard;
+
+        let medium = render_snapshot(&app, 120, 36).unwrap_or_else(|error| {
+            unreachable!("medium empty dashboard snapshot should render: {error}")
+        });
+        let wide = render_snapshot(&app, 160, 44).unwrap_or_else(|error| {
+            unreachable!("wide empty dashboard snapshot should render: {error}")
+        });
+
+        assert!(medium.contains("READINESS BREAKDOWN"));
+        assert!(medium.contains("WEEKLY TRENDS"));
+        assert!(medium.contains("EMPTY"));
+        assert!(medium.contains("Driver rails explain the top-line recovery state"));
+        assert!(medium.contains("Recent score bands for sleep, readines"));
+
+        assert!(wide.contains("READINESS BREAKDOWN"));
+        assert!(wide.contains("WEEKLY TRENDS"));
+        assert!(wide.contains("EMPTY"));
+        assert!(wide.contains("Recent score bands for sleep, readiness, and activi"));
     }
 
     #[test]
