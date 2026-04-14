@@ -1125,7 +1125,7 @@ fn build_simulated_sync_state(
         last_error_at: slice.last_error.as_ref().map(|_| completed_at.to_owned()),
         last_error_kind: slice.last_error.as_ref().map(|problem| {
             if problem.status == Some(429) {
-                "rate_limited".to_owned()
+                "rate_limit".to_owned()
             } else {
                 "api_error".to_owned()
             }
@@ -1180,12 +1180,14 @@ fn upsert_simulated_sync_state(
 #[cfg(test)]
 mod tests {
     use super::{
-        SyncFamily, WatchOptions, due_families, next_wake_duration, watch_idle_sleep_duration,
+        SyncFamily, WatchOptions, build_simulated_sync_state, due_families, next_wake_duration,
+        watch_idle_sleep_duration,
     };
     use crate::config::{
         AppPaths, Config, DEFAULT_OURA_API_BASE_URL, DEFAULT_OURA_AUTHORIZE_URL,
         DEFAULT_OURA_TOKEN_URL, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
     };
+    use crate::error::OuraProblem;
     use crate::oura::models::CapabilityReport;
     use crate::oura::sync::{SliceReport, SyncReport};
     use crate::refresh::run_watch;
@@ -1553,6 +1555,41 @@ mod tests {
         let next_wake = next_wake_duration(&config, &sync_states, base)
             .unwrap_or_else(|error| unreachable!("next wake should compute: {error}"));
         assert_eq!(next_wake.as_secs(), config.refresh.heartrate_interval_secs);
+    }
+
+    #[test]
+    fn simulated_429_failures_use_canonical_rate_limit_kind() {
+        let config = test_config();
+        let completed_at = "2026-04-08T06:00:00Z";
+        let slice = SliceReport {
+            sync_key: SyncFamily::Heartrate.sync_key().to_owned(),
+            family: SyncFamily::Heartrate,
+            status: SyncRunStatus::Failed,
+            imported_rows: 0,
+            watermark: None,
+            last_successful_sync_end: None,
+            last_reconcile_end: None,
+            oldest_recently_reconciled_at: None,
+            message: "heartrate throttled".to_owned(),
+            last_error: Some(OuraProblem::new(
+                Some(429),
+                "Too Many Requests",
+                Some("back off".to_owned()),
+            )),
+            next_attempt_after: None,
+        };
+
+        let state = build_simulated_sync_state(
+            &config,
+            &[],
+            &slice,
+            completed_at,
+            &["heartrate".to_owned()],
+            "periodic_reconcile",
+            "simulated watch iteration",
+        );
+
+        assert_eq!(state.last_error_kind.as_deref(), Some("rate_limit"));
     }
 
     #[tokio::test]
