@@ -12045,9 +12045,10 @@ mod tests {
     use crate::insights::{MetricPoint, build_metric_insight};
     use crate::navigation::{self, FocusRegion, PreflightControl, SearchScope, TransientLayer};
     use crate::oura::models::{AuthStatus, CapabilityKind, CapabilityReport};
+    use crate::review::engine::ReviewSection;
+    use crate::review::features::ReviewSufficiency;
     use crate::review::{
         InvestigationReport, ReviewCard, ReviewConfidence, ReviewDeck, ReviewFocus, ReviewMode,
-        ReviewSection, ReviewSufficiency,
     };
     use crate::snapshot::PrivacyProfile;
     use crate::store::queries::{

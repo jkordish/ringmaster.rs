@@ -12,7 +12,7 @@ It gives you:
 
 The design goal is simple: useful local insight first, optional external analysis second, and no surprise data sharing.
 
-The crate is app-first. The `lib` target exists to support the binary, tests, and local tooling, and the package is not published as a general-purpose library crate.
+The crate is app-first. The `lib` target exists to support the binary, tests, and local tooling, and the package is not published as a general-purpose library crate. The supported code-facing facade is intentionally narrow: `run_from`, `ringmaster::cli`, and the top-level `Result` / `RingmasterError` re-exports.
 
 ## Start here
 

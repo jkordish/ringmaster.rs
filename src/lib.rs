@@ -5,6 +5,14 @@
 //! internals stay crate-private so the application can evolve without turning
 //! every refactor into a semver promise.
 //!
+//! ```rust
+//! use clap::Parser;
+//! use ringmaster::cli::{Cli, Command};
+//!
+//! let cli = Cli::parse_from(["ringmaster", "doctor"]).unwrap();
+//! assert!(matches!(cli.command, Some(Command::Doctor)));
+//! ```
+//!
 #![forbid(unsafe_code)]
 #![warn(
     clippy::all,
@@ -15,36 +23,36 @@
 )]
 #![allow(clippy::multiple_crate_versions, clippy::too_many_lines)]
 
-pub mod action;
-pub mod ai;
-pub mod ai_prompts;
-pub mod app;
+mod action;
+mod ai;
+mod ai_prompts;
+mod app;
 pub mod cli;
-pub mod components;
-pub mod config;
-pub mod derive;
-pub mod error;
-pub mod eval;
-pub mod evidence;
-pub mod focus;
-pub mod insights;
-pub mod keybindings;
-pub mod navigation;
-pub mod numeric;
-pub mod oura;
-pub mod refresh;
-pub mod report;
-pub mod review;
-pub mod snapshot;
+mod components;
+mod config;
+mod derive;
+mod error;
+mod eval;
+mod evidence;
+mod focus;
+mod insights;
+mod keybindings;
+mod navigation;
+mod numeric;
+mod oura;
+mod refresh;
+mod report;
+mod review;
+mod snapshot;
 mod store;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod time_utils;
-pub mod tui;
+mod tui;
 mod ui;
-pub mod webhook;
+mod webhook;
 
-pub use store::{Store, StorePlan};
+pub use error::{Result, RingmasterError};
 
 use std::collections::HashMap;
 use std::fs;
@@ -65,12 +73,12 @@ use cli::{
     WebhookSubscriptionCommand, WebhookSubscriptionsListArgs, WebhookSubscriptionsSyncArgs,
 };
 use config::{AppPaths, Config};
-use error::{Result, RingmasterError};
 use refresh::{SyncFamily, WatchOptions};
 use review::{
     InvestigationReport, ReviewCard, ReviewDeck, ReviewFocus, ReviewInputs, ReviewMode,
     build_investigation_report, build_review_deck,
 };
+use store::Store;
 use time::{Date, Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
