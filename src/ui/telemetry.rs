@@ -5,7 +5,8 @@ use ratatui::layout::Rect;
 use super::layout::{DashboardChartMetrics, ViewportClass, WeeklyHeatmapMode, WeeklyTrendsLayout};
 use crate::ui::theme::Tone;
 
-pub use super::text_fit::{concise_detail, fit_heatmap_label};
+pub use super::text_fit::concise_detail;
+use super::text_fit::fit_weekly_group_label;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TelemetryAvailability {
@@ -228,7 +229,6 @@ pub fn weekly_heatmap_rows(
     cell_width: usize,
     row_height: usize,
 ) -> Vec<String> {
-    let levels = ['·', '░', '▒', '▓', '█'];
     let layout = WeeklyTrendsLayout::for_panel(
         Rect::new(
             0,
@@ -264,42 +264,83 @@ pub fn weekly_heatmap_rows(
         );
     }
     output.push(format!("{header_prefix}{header_cells}"));
-    for (row_index, label) in row_labels.iter().enumerate() {
-        let cells = rows
-            .get(row_index)
-            .map(|values| {
-                values
-                    .iter()
-                    .enumerate()
-                    .map(|(column_index, value)| {
-                        let glyph = value.map_or('·', |score| {
-                            let band = usize::from(score.min(100)) * (levels.len() - 1) / 100;
-                            levels[band]
-                        });
-                        let fill = glyph.to_string().repeat(usize::from(layout.cell_width));
-                        if selected == Some((row_index, column_index)) {
-                            format!("[{fill}]")
-                        } else {
-                            format!(" {fill} ")
-                        }
-                    })
-                    .collect::<String>()
-            })
-            .unwrap_or_default();
+    let selected_column = selected.map(|(_, column_index)| column_index);
+    for (group_index, label) in row_labels.iter().enumerate() {
+        let top_cells = grouped_heatmap_row(
+            values_for_group(rows, group_index),
+            selected_column,
+            &layout,
+            0,
+        );
         output.push(format!(
-            "{label:<label_width$}{cells}",
-            label = fit_heatmap_label(label, usize::from(layout.label_column_width)),
+            "{:label_width$}{top_cells}",
+            "",
+            label_width = usize::from(layout.label_column_width)
+        ));
+        if layout.subrow_gap > 0 {
+            output.push(format!(
+                "{label:<label_width$}{:grid_width$}",
+                "",
+                label = fit_weekly_group_label(label, usize::from(layout.label_column_width)),
+                label_width = usize::from(layout.label_column_width),
+                grid_width = usize::from(layout.grid_viewport.width),
+            ));
+        }
+        let bottom_cells = grouped_heatmap_row(
+            values_for_group(rows, group_index),
+            selected_column,
+            &layout,
+            1,
+        );
+        output.push(format!(
+            "{label:<label_width$}{bottom_cells}",
+            label = fit_weekly_group_label(label, usize::from(layout.label_column_width)),
             label_width = usize::from(layout.label_column_width),
         ));
-        for _ in 1..layout.row_height {
-            output.push(format!(
-                "{:label_width$}{cells}",
-                "",
-                label_width = usize::from(layout.label_column_width)
-            ));
+        if group_index + 1 < row_labels.len() && group_index < usize::from(layout.group_gap_count) {
+            output.push(String::new());
         }
     }
     output
+}
+
+fn values_for_group(rows: &[Vec<Option<u8>>], group_index: usize) -> &[Option<u8>] {
+    rows.get(group_index).map_or(&[], Vec::as_slice)
+}
+
+fn grouped_heatmap_row(
+    values: &[Option<u8>],
+    selected_column: Option<usize>,
+    layout: &WeeklyTrendsLayout,
+    subrow_index: usize,
+) -> String {
+    let column_count = usize::from(layout.grid_viewport.width / layout.slot_width.max(1));
+    (0..column_count)
+        .map(|column_index| {
+            let value = values.get(column_index).copied().flatten();
+            let glyph = match (
+                subrow_index,
+                value.map_or(0, |score| usize::from(score.min(100)) * 4 / 100 + 1),
+            ) {
+                (_, 0) => '·',
+                (0, 1) => '░',
+                (0, 2) => '▒',
+                (0, 3) => '▓',
+                (_, _) if subrow_index == 0 => '█',
+                (1, 1) => '╶',
+                (1, 2) => '─',
+                (1, 3) => '━',
+                (_, _) if subrow_index == 1 => '█',
+                _ => '·',
+            };
+            let fill = glyph.to_string().repeat(usize::from(layout.cell_width));
+            if selected_column == Some(column_index) {
+                format!("[{fill}]")
+            } else {
+                format!(" {fill} ")
+            }
+        })
+        .collect()
 }
 
 const fn layout_width_for_rows(
@@ -398,10 +439,11 @@ fn resample(values: &[u64], width: usize) -> Vec<u64> {
 mod tests {
     use super::{
         MetricPanelState, TelemetryAvailability, WeeklyHeatmapMode, availability_scaffold,
-        fit_heatmap_label, footer_inspector, meter_bar, metric_panel_scaffold, micro_histogram,
-        segmented_bar, spark_strip, stacked_profile_rows, weekly_heatmap_rows,
+        footer_inspector, meter_bar, metric_panel_scaffold, micro_histogram, segmented_bar,
+        spark_strip, stacked_profile_rows, weekly_heatmap_rows,
     };
     use crate::ui::layout::{DashboardChartMetrics, ViewportClass, WeeklyTrendsLayout};
+    use crate::ui::text_fit::fit_heatmap_label;
     use ratatui::layout::Rect;
 
     #[test]
@@ -473,9 +515,9 @@ mod tests {
         );
 
         assert!(rows[0].contains('M'));
-        assert!(rows[1].contains("Sleep"));
-        assert!(rows[1].contains('['));
-        assert!(rows[1].contains(']'));
+        assert!(rows[2].contains("Sleep"));
+        assert!(rows[1].contains('[') || rows[2].contains('['));
+        assert!(rows[1].contains(']') || rows[2].contains(']'));
     }
 
     #[test]
@@ -558,7 +600,7 @@ mod tests {
             DashboardChartMetrics::for_viewport(ViewportClass::Wide),
             WeeklyHeatmapMode::Standard,
             7,
-            4,
+            3,
         );
 
         assert_eq!(layout.grid_viewport.x, layout.label_column_width);

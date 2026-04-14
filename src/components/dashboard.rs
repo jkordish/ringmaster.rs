@@ -24,7 +24,7 @@ use crate::ui::{
     },
     text_fit::{
         concise_detail, concise_text, fit_badge_label, fit_breakdown_delta, fit_breakdown_label,
-        fit_day_header, fit_heatmap_label, measure_one_line, support_lane_text,
+        fit_day_header, fit_weekly_group_label, measure_one_line, support_lane_text,
     },
     theme::{Theme, Tone},
 };
@@ -1344,7 +1344,7 @@ fn render_breakdown_panel(
     );
 
     for (index, rail) in panel.rails.iter().enumerate() {
-        let row = layout.row_area(index);
+        let row = layout.row_line_area(index);
         let (marker_label, cue_text, cue_tone) = breakdown_rail_cue(rail);
         let label_width = usize::from(layout.label_column_width);
         let rail_label = fit_breakdown_label(&rail.label, label_width.saturating_sub(2));
@@ -1513,16 +1513,32 @@ fn render_heatmap_panel(
         grid.day_labels.len(),
         panel.row_labels.len(),
     );
-    if layout.grid_viewport.height == 0
-        || layout.legend_area.height == 0
-        || layout.summary_area.height == 0
-    {
+    if layout.grid_viewport.height == 0 || layout.grid_viewport.width == 0 {
         render_panel_text(
             frame,
             shell.content_area,
             concise_detail(&panel.note, usize::from(shell.content_area.width)),
             theme,
             Alignment::Left,
+        );
+        return;
+    }
+
+    let last_group_index = panel.row_labels.len().saturating_sub(1);
+    let last_subrow = layout.subrow_area(last_group_index, 1);
+    let content_bottom = shell
+        .content_area
+        .y
+        .saturating_add(shell.content_area.height);
+    if last_subrow.y.saturating_add(last_subrow.height) > content_bottom {
+        render_compact_grouped_heatmap_panel(
+            frame,
+            shell.content_area,
+            panel,
+            grid,
+            theme,
+            mode,
+            layout,
         );
         return;
     }
@@ -1535,45 +1551,104 @@ fn render_heatmap_panel(
         Alignment::Left,
     );
 
-    for (row_index, label) in panel.row_labels.iter().enumerate() {
-        let label_area = layout.row_label_area(row_index);
+    let selected_column = grid.selected_cell.map(|(_, column_index)| column_index);
+    for (group_index, label) in panel.row_labels.iter().enumerate() {
         let label_line = Line::from(Span::styled(
             format!(
                 "{:<width$}",
-                fit_heatmap_label(label, usize::from(layout.label_column_width)),
+                fit_weekly_group_label(label, usize::from(layout.label_column_width)),
                 width = usize::from(layout.label_column_width)
             ),
             theme.section_title(Tone::Muted),
         ));
-        let label_lines = vec![label_line; usize::from(layout.row_height.max(1))];
-        render_panel_lines(frame, label_area, label_lines, theme, Alignment::Left);
-        let row_lines = grid.rows.get(row_index).map_or_else(
-            || vec![Line::from(Span::raw(String::new())); usize::from(layout.row_height.max(1))],
-            |values| heatmap_row_lines(theme, values, row_index, grid.selected_cell, layout),
-        );
-        render_panel_lines(
+        render_line_in_area(
             frame,
-            layout.row_area(row_index),
-            row_lines,
+            layout.group_label_line_area(group_index),
+            label_line,
+            theme,
+            Alignment::Left,
+        );
+        let values = grid.rows.get(group_index);
+        let top_line = values.map_or_else(
+            || heatmap_subrow_line(theme, &[], selected_column, layout, 0),
+            |row| heatmap_subrow_line(theme, row, selected_column, layout, 0),
+        );
+        render_line_in_area(
+            frame,
+            layout.subrow_area(group_index, 0),
+            top_line,
+            theme,
+            Alignment::Left,
+        );
+        let bottom_line = values.map_or_else(
+            || heatmap_subrow_line(theme, &[], selected_column, layout, 1),
+            |row| heatmap_subrow_line(theme, row, selected_column, layout, 1),
+        );
+        render_line_in_area(
+            frame,
+            layout.subrow_area(group_index, 1),
+            bottom_line,
             theme,
             Alignment::Left,
         );
     }
 
-    render_line_in_area(
-        frame,
-        layout.legend_area,
-        heatmap_legend_line(theme, layout),
-        theme,
-        Alignment::Left,
-    );
-    render_line_in_area(
-        frame,
-        layout.summary_area,
-        heatmap_summary_line(theme, grid, &panel.row_labels, &panel.note, layout),
-        theme,
-        Alignment::Left,
-    );
+    if layout.legend_area.height > 0 && layout.legend_area.width > 0 {
+        render_line_in_area(
+            frame,
+            layout.legend_area,
+            heatmap_legend_line(theme, layout),
+            theme,
+            Alignment::Left,
+        );
+    }
+    if layout.summary_area.height > 0 && layout.summary_area.width > 0 {
+        render_line_in_area(
+            frame,
+            layout.summary_area,
+            heatmap_summary_line(theme, grid, &panel.row_labels, &panel.note, layout),
+            theme,
+            Alignment::Left,
+        );
+    }
+}
+
+fn render_compact_grouped_heatmap_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    panel: &DashboardWeeklyHeatmap,
+    grid: &crate::app::DashboardHeatmapGrid,
+    theme: &Theme,
+    mode: WeeklyHeatmapMode,
+    layout: WeeklyTrendsLayout,
+) {
+    let selected_column = grid.selected_cell.map(|(_, column_index)| column_index);
+    let mut lines = Vec::new();
+    lines.push(heatmap_compact_header_line(theme, grid, mode, layout));
+    for (group_index, label) in panel.row_labels.iter().enumerate() {
+        let values = grid.rows.get(group_index).map_or(&[][..], Vec::as_slice);
+        lines.push(heatmap_compact_group_line(
+            theme,
+            label,
+            values,
+            selected_column,
+            layout,
+        ));
+    }
+    if usize::from(area.height) > lines.len() {
+        lines.push(heatmap_compact_legend_line(theme, layout));
+    }
+    if usize::from(area.height) > lines.len() {
+        lines.push(heatmap_compact_summary_line(
+            theme,
+            grid,
+            &panel.row_labels,
+            &panel.note,
+            layout,
+            usize::from(area.width),
+        ));
+    }
+    render_panel_lines(frame, area, lines, theme, Alignment::Left);
 }
 
 const fn metric_panel_has_reading(state: MetricPanelState) -> bool {
@@ -1734,6 +1809,7 @@ fn centered_body_area(area: Rect, line_count: usize) -> Rect {
 }
 
 fn compact_heatmap_row(values: &[Option<u8>], selected_cell: Option<(usize, usize)>) -> String {
+    let selected_column = selected_cell.map(|(_, column_index)| column_index);
     let cells = values
         .iter()
         .enumerate()
@@ -1744,7 +1820,7 @@ fn compact_heatmap_row(values: &[Option<u8>], selected_cell: Option<(usize, usiz
                 Some(2) => '▒',
                 Some(_) => '▓',
             };
-            if selected_cell.is_some_and(|(row, col)| row == 0 && col == index) {
+            if selected_column == Some(index) {
                 format!("[{glyph}]")
             } else {
                 glyph.to_string()
@@ -1752,6 +1828,100 @@ fn compact_heatmap_row(values: &[Option<u8>], selected_cell: Option<(usize, usiz
         })
         .collect::<String>();
     format!("S {cells}")
+}
+
+fn heatmap_compact_header_line(
+    theme: &Theme,
+    grid: &crate::app::DashboardHeatmapGrid,
+    mode: WeeklyHeatmapMode,
+    layout: WeeklyTrendsLayout,
+) -> Line<'static> {
+    let mut spans = vec![Span::raw(
+        " ".repeat(usize::from(layout.label_column_width)),
+    )];
+    for day in &grid.day_labels {
+        let label = fit_day_header(
+            &heatmap_day_label(mode, day),
+            usize::from(layout.slot_width),
+        );
+        spans.push(Span::styled(
+            format!("{label:^width$}", width = usize::from(layout.slot_width)),
+            theme.section_title(Tone::Muted),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn heatmap_compact_group_line(
+    theme: &Theme,
+    label: &str,
+    values: &[Option<u8>],
+    selected_column: Option<usize>,
+    layout: WeeklyTrendsLayout,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        format!(
+            "{:<width$}",
+            fit_weekly_group_label(label, usize::from(layout.label_column_width)),
+            width = usize::from(layout.label_column_width)
+        ),
+        theme.section_title(Tone::Muted),
+    )];
+    for column_index in 0..usize::from(layout.grid_viewport.width / layout.slot_width.max(1)) {
+        let value = values.get(column_index).copied().flatten();
+        let band = value.map(score_band_from_value);
+        let level = value.map_or(0, |score| usize::from(score.min(100)) * 4 / 100 + 1);
+        let fill = heatmap_paired_cell_fill(value, usize::from(layout.cell_width));
+        if selected_column == Some(column_index) {
+            spans.push(Span::styled("[", theme.badge(Tone::Focus)));
+            spans.push(Span::styled(
+                fill,
+                theme.status_marker(score_band_cue_tone(band)),
+            ));
+            spans.push(Span::styled("]", theme.badge(Tone::Focus)));
+        } else {
+            spans.push(Span::raw(" ".repeat(usize::from(layout.cell_gap))));
+            spans.push(Span::styled(fill, theme.chart_ramp(level, 5)));
+            spans.push(Span::raw(" ".repeat(usize::from(layout.cell_gap))));
+        }
+    }
+    Line::from(spans)
+}
+
+fn heatmap_compact_legend_line(theme: &Theme, layout: WeeklyTrendsLayout) -> Line<'static> {
+    let mut spans = vec![Span::raw(
+        " ".repeat(usize::from(layout.label_column_width)),
+    )];
+    spans.extend(heatmap_legend_line(theme, layout).spans);
+    Line::from(spans)
+}
+
+fn heatmap_compact_summary_line(
+    theme: &Theme,
+    grid: &crate::app::DashboardHeatmapGrid,
+    row_labels: &[String],
+    note: &str,
+    layout: WeeklyTrendsLayout,
+    line_width: usize,
+) -> Line<'static> {
+    let (summary, band) =
+        selected_heatmap_summary(grid, row_labels, note).unwrap_or_else(|| (note.to_owned(), None));
+    let label_width = usize::from(layout.label_column_width);
+    let summary_width = line_width.saturating_sub(label_width);
+    let text_budget = summary_width.saturating_sub(if band.is_some() { 10 } else { 0 });
+    let mut spans = vec![Span::raw(" ".repeat(label_width))];
+    spans.push(Span::styled(
+        support_lane_text(&summary, text_budget),
+        theme.body(),
+    ));
+    if band.is_some() {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!("[{}]", score_band_label(band)),
+            theme.badge(score_band_cue_tone(band)),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn render_line_in_area(
@@ -1979,6 +2149,37 @@ fn heatmap_legend_line(theme: &Theme, _layout: WeeklyTrendsLayout) -> Line<'stat
     ])
 }
 
+fn heatmap_cell_fill(value: Option<u8>, cell_width: usize, subrow_index: usize) -> String {
+    let level = value.map_or(0, |score| usize::from(score.min(100)) * 4 / 100 + 1);
+    let glyph = match (subrow_index, level) {
+        (_, 0) => '·',
+        (0, 1) => '░',
+        (0, 2) => '▒',
+        (0, 3) => '▓',
+        (_, _) if subrow_index == 0 => '█',
+        (1, 1) => '╶',
+        (1, 2) => '─',
+        (1, 3) => '━',
+        (_, _) if subrow_index == 1 => '█',
+        _ => '·',
+    };
+    glyph.to_string().repeat(cell_width)
+}
+
+fn heatmap_paired_cell_fill(value: Option<u8>, cell_width: usize) -> String {
+    if cell_width <= 1 {
+        return heatmap_cell_fill(value, cell_width.max(1), 0);
+    }
+
+    let top_width = cell_width.div_ceil(2);
+    let bottom_width = cell_width.saturating_sub(top_width);
+    let mut fill = heatmap_cell_fill(value, top_width, 0);
+    if bottom_width > 0 {
+        fill.push_str(&heatmap_cell_fill(value, bottom_width, 1));
+    }
+    fill
+}
+
 fn breakdown_rail_cue(rail: &DashboardBreakdownRail) -> (String, String, Tone) {
     let cue_text = if availability_has_reading(rail.availability) {
         rail.delta_label.clone()
@@ -2026,26 +2227,20 @@ fn heatmap_header_line(
     Line::from(spans)
 }
 
-fn heatmap_row_lines(
+fn heatmap_subrow_line(
     theme: &Theme,
     values: &[Option<u8>],
-    row_index: usize,
-    selected_cell: Option<(usize, usize)>,
+    selected_column: Option<usize>,
     layout: WeeklyTrendsLayout,
-) -> Vec<Line<'static>> {
+    subrow_index: usize,
+) -> Line<'static> {
     let mut spans = Vec::new();
-    for (column_index, value) in values.iter().enumerate() {
-        let band = (*value).map(score_band_from_value);
-        let level = value.map_or(0, |score| usize::from(score) * 4 / 100 + 1);
-        let glyph = match level {
-            0 => '·',
-            1 => '░',
-            2 => '▒',
-            3 => '▓',
-            _ => '█',
-        };
-        let fill = glyph.to_string().repeat(usize::from(layout.cell_width));
-        if selected_cell == Some((row_index, column_index)) {
+    for column_index in 0..usize::from(layout.grid_viewport.width / layout.slot_width.max(1)) {
+        let value = values.get(column_index).copied().flatten();
+        let band = value.map(score_band_from_value);
+        let level = value.map_or(0, |score| usize::from(score.min(100)) * 4 / 100 + 1);
+        let fill = heatmap_cell_fill(value, usize::from(layout.cell_width), subrow_index);
+        if selected_column == Some(column_index) {
             spans.push(Span::styled("[", theme.badge(Tone::Focus)));
             spans.push(Span::styled(
                 fill,
@@ -2058,6 +2253,5 @@ fn heatmap_row_lines(
             spans.push(Span::raw(" ".repeat(usize::from(layout.cell_gap))));
         }
     }
-    let line = Line::from(spans);
-    vec![line; usize::from(layout.row_height.max(1))]
+    Line::from(spans)
 }

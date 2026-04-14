@@ -4283,6 +4283,9 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("wide dashboard snapshot should render: {error}"));
 
         assert!(output.contains("05         06         07         08"));
+        assert!(output.contains("Sleep  █████████"));
+        assert!(output.contains("Ready  █████████"));
+        assert!(output.contains("Actv   ━━━━━━━━━"));
         assert!(output.contains("ramp ░▒▓█ higher"));
         assert!(output.contains("Sleep 76 | 04-08 [good]"));
         assert!(!output.contains("0       0       0       0"));
@@ -4304,6 +4307,9 @@ mod tests {
             )
         );
         assert!(output.contains("WEEKLY TRENDS"));
+        assert!(output.contains("Sleep  ██████"));
+        assert!(output.contains("Ready  ██████"));
+        assert!(output.contains("Actv   "));
         assert!(output.contains("Sleep 76 | 04-08 [good]"));
         assert!(output.contains("ramp ░▒▓█ higher"));
         assert!(output.contains("Today's hrv is 34; there is not enough history"));

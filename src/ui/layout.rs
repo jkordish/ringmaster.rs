@@ -75,6 +75,15 @@ pub struct PanelContentMetrics {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChartClusterPacking {
+    pub cluster_area: Rect,
+    pub support_area: Rect,
+    pub top_padding: u16,
+    pub bottom_padding: u16,
+    pub gap_before_support: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OverlayLayout {
     pub bounds: Rect,
     pub inner: Rect,
@@ -335,12 +344,6 @@ impl DashboardChartMetrics {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChartPanelZones {
-    pub chart_body: Rect,
-    pub support_lane: Rect,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeeklyHeatmapMode {
     Standard,
     DenseHistory,
@@ -352,6 +355,11 @@ pub struct BreakdownLayout {
     pub support_lane: Rect,
     pub header_area: Rect,
     pub band_area: Rect,
+    pub top_padding: u16,
+    pub bottom_padding: u16,
+    pub gap_before_support: u16,
+    pub row_gap_count: u16,
+    pub band_gap: u16,
     pub label_column_x: u16,
     pub label_column_width: u16,
     pub signal_column_x: u16,
@@ -375,25 +383,38 @@ impl BreakdownLayout {
         preferred_delta_width: u16,
     ) -> Self {
         let row_count = u16::try_from(row_count).unwrap_or(u16::MAX).max(1);
-        let required_body = metrics
+        let minimum_cluster_height = metrics
             .breakdown_header_height
             .saturating_add(row_count)
-            .saturating_add(metrics.breakdown_band_height)
-            .max(1);
-        let support_lane_height = if area.height > required_body {
-            metrics.support_lane_height.min(area.height - required_body)
-        } else {
-            0
-        };
-        let zones = chart_panel_zones(area, support_lane_height);
+            .saturating_add(metrics.breakdown_band_height);
+        let packing = pack_chart_cluster_vertically(
+            area,
+            minimum_cluster_height.max(1),
+            metrics.support_lane_height,
+        );
+        let mut cluster_slack = packing.top_padding.saturating_add(packing.bottom_padding);
+        let mut row_height = 1;
+        if cluster_slack >= row_count {
+            row_height = 2;
+            cluster_slack = cluster_slack.saturating_sub(row_count);
+        }
+        let band_gap = cluster_slack.min(1);
+        cluster_slack = cluster_slack.saturating_sub(band_gap);
+        let row_gap_count = cluster_slack.min(row_count.saturating_sub(1));
+        cluster_slack = cluster_slack.saturating_sub(row_gap_count);
+        let top_padding = cluster_slack / 2;
+        let bottom_padding = cluster_slack.saturating_sub(top_padding);
+        let cluster_top = packing.cluster_area.y.saturating_add(top_padding);
         let header_area = Rect::new(
-            zones.chart_body.x,
-            zones.chart_body.y,
-            zones.chart_body.width,
-            metrics.breakdown_header_height.min(zones.chart_body.height),
+            packing.cluster_area.x,
+            cluster_top,
+            packing.cluster_area.width,
+            metrics
+                .breakdown_header_height
+                .min(packing.cluster_area.height.saturating_sub(top_padding)),
         );
 
-        let available_width = zones.chart_body.width;
+        let available_width = packing.cluster_area.width;
         let reserved_signal = metrics
             .breakdown_signal_badge_width
             .saturating_add(metrics.breakdown_bar_min_width)
@@ -425,7 +446,7 @@ impl BreakdownLayout {
                     .breakdown_signal_badge_width
                     .saturating_add(metrics.breakdown_bar_min_width),
             );
-        let label_column_x = zones.chart_body.x;
+        let label_column_x = packing.cluster_area.x;
         let signal_column_x = label_column_x
             .saturating_add(label_column_width)
             .saturating_add(1);
@@ -444,29 +465,41 @@ impl BreakdownLayout {
         let band_y = header_area
             .y
             .saturating_add(metrics.breakdown_header_height)
-            .saturating_add(row_count);
+            .saturating_add(row_count.saturating_mul(row_height))
+            .saturating_add(row_gap_count)
+            .saturating_add(band_gap);
         let band_area = Rect::new(
-            zones.chart_body.x,
+            packing.cluster_area.x,
             band_y.min(
-                zones
-                    .chart_body
+                packing
+                    .cluster_area
                     .y
-                    .saturating_add(zones.chart_body.height.saturating_sub(1)),
+                    .saturating_add(packing.cluster_area.height.saturating_sub(1)),
             ),
-            zones.chart_body.width,
+            packing.cluster_area.width,
             metrics.breakdown_band_height.min(
-                zones
-                    .chart_body
-                    .height
-                    .saturating_sub(metrics.breakdown_header_height.saturating_add(row_count)),
+                packing.cluster_area.height.saturating_sub(
+                    header_area
+                        .y
+                        .saturating_sub(packing.cluster_area.y)
+                        .saturating_add(metrics.breakdown_header_height)
+                        .saturating_add(row_count)
+                        .saturating_add(row_gap_count)
+                        .saturating_add(band_gap),
+                ),
             ),
         );
 
         Self {
-            chart_body: zones.chart_body,
-            support_lane: zones.support_lane,
+            chart_body: packing.cluster_area,
+            support_lane: packing.support_area,
             header_area,
             band_area,
+            top_padding,
+            bottom_padding,
+            gap_before_support: packing.gap_before_support,
+            row_gap_count,
+            band_gap,
             label_column_x,
             label_column_width,
             signal_column_x,
@@ -476,7 +509,7 @@ impl BreakdownLayout {
             bar_viewport_width,
             delta_column_x,
             delta_column_width,
-            row_height: 1,
+            row_height,
             row_count,
         }
     }
@@ -485,86 +518,50 @@ impl BreakdownLayout {
     pub fn row_area(self, index: usize) -> Rect {
         let clamped_index = index.min(usize::from(self.row_count.saturating_sub(1)));
         let index = u16::try_from(clamped_index).unwrap_or(u16::MAX);
+        let gap_before = index.min(self.row_gap_count);
         Rect::new(
             self.chart_body.x,
             self.header_area
                 .y
                 .saturating_add(self.header_area.height)
-                .saturating_add(index.saturating_mul(self.row_height)),
+                .saturating_add(index.saturating_mul(self.row_height))
+                .saturating_add(gap_before),
             self.chart_body.width,
             self.row_height,
         )
     }
 
     #[must_use]
-    pub const fn label_cell(self, row: Rect) -> Rect {
-        Rect::new(
-            self.label_column_x,
-            row.y,
-            self.label_column_width,
-            row.height,
-        )
-    }
-
-    #[must_use]
-    pub const fn signal_cell(self, row: Rect) -> Rect {
-        Rect::new(
-            self.signal_column_x,
-            row.y,
-            self.signal_column_width,
-            row.height,
-        )
-    }
-
-    #[must_use]
-    pub const fn signal_badge_cell(self, row: Rect) -> Rect {
-        Rect::new(
-            self.signal_column_x,
-            row.y,
-            self.signal_badge_width,
-            row.height,
-        )
-    }
-
-    #[must_use]
-    pub const fn signal_track_cell(self, row: Rect) -> Rect {
-        Rect::new(
-            self.bar_viewport_x,
-            row.y,
-            self.bar_viewport_width,
-            row.height,
-        )
-    }
-
-    #[must_use]
-    pub const fn delta_cell(self, row: Rect) -> Rect {
-        Rect::new(
-            self.delta_column_x,
-            row.y,
-            self.delta_column_width,
-            row.height,
-        )
+    pub fn row_line_area(self, index: usize) -> Rect {
+        let row = self.row_area(index);
+        Rect::new(row.x, row.y.saturating_add(row.height / 2), row.width, 1)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WeeklyTrendsLayout {
     pub chart_body: Rect,
+    pub support_lane: Rect,
     pub header_area: Rect,
     pub header_grid_area: Rect,
     pub grid_viewport: Rect,
     pub legend_area: Rect,
     pub summary_area: Rect,
     pub label_column_width: u16,
-    pub row_height: u16,
-    pub row_gap: u16,
+    pub slot_width: u16,
     pub cell_width: u16,
     pub cell_gap: u16,
-    pub slot_width: u16,
-    row_count: u16,
+    pub group_gap_count: u16,
+    pub subrow_gap: u16,
+    pub top_padding: u16,
+    pub bottom_padding: u16,
+    pub gap_before_support: u16,
+    group_count: u16,
 }
 
 impl WeeklyTrendsLayout {
+    const SUBROWS_PER_GROUP: u16 = 2;
+
     #[must_use]
     pub fn for_panel(
         area: Rect,
@@ -574,36 +571,40 @@ impl WeeklyTrendsLayout {
         row_count: usize,
     ) -> Self {
         let column_count = u16::try_from(day_count).unwrap_or(u16::MAX).max(1);
-        let row_count = u16::try_from(row_count).unwrap_or(u16::MAX).max(1);
-        let reserved_bottom = metrics
-            .weekly_legend_height
-            .saturating_add(metrics.weekly_summary_height);
-        let header_height = metrics.weekly_header_height.min(area.height.max(1));
-        let grid_height = area
-            .height
-            .saturating_sub(header_height)
-            .saturating_sub(reserved_bottom)
-            .max(row_count);
-        let row_height = grid_height
-            .saturating_sub(
-                metrics
-                    .weekly_row_gap
-                    .saturating_mul(row_count.saturating_sub(1)),
-            )
-            .checked_div(row_count)
-            .unwrap_or(1)
-            .clamp(1, 2);
+        let group_count = u16::try_from(row_count).unwrap_or(u16::MAX).max(1);
+        let min_grid_height = group_count.saturating_mul(Self::SUBROWS_PER_GROUP);
+        let minimum_cluster_height = metrics
+            .weekly_header_height
+            .saturating_add(min_grid_height)
+            .saturating_add(metrics.weekly_legend_height);
+        let packing = pack_chart_cluster_vertically(
+            area,
+            minimum_cluster_height.max(1),
+            metrics
+                .weekly_summary_height
+                .min(metrics.support_lane_height.max(1)),
+        );
+        let mut cluster_slack = packing.top_padding.saturating_add(packing.bottom_padding);
+        let group_gap_count = cluster_slack.min(group_count.saturating_sub(1));
+        cluster_slack = cluster_slack.saturating_sub(group_gap_count);
+        let subrow_gap = u16::from(cluster_slack >= group_count);
+        if subrow_gap > 0 {
+            cluster_slack = cluster_slack.saturating_sub(group_count);
+        }
+        let top_padding = cluster_slack / 2;
+        let bottom_padding = cluster_slack.saturating_sub(top_padding);
+
+        let cluster_width = packing.cluster_area.width;
         let label_column_width = match mode {
             WeeklyHeatmapMode::DenseHistory => metrics.weekly_label_min_width,
             WeeklyHeatmapMode::Standard => metrics.weekly_label_max_width,
         }
         .min(
-            area.width
+            cluster_width
                 .saturating_sub(column_count.saturating_mul(metrics.weekly_slot_min_width)),
         )
         .max(metrics.weekly_label_min_width);
-        let usable_width = area
-            .width
+        let usable_width = cluster_width
             .saturating_sub(label_column_width)
             .max(column_count);
         let slot_width = usable_width
@@ -612,54 +613,74 @@ impl WeeklyTrendsLayout {
             .max(metrics.weekly_slot_min_width);
         let cell_gap: u16 = 1;
         let cell_width = slot_width.saturating_sub(cell_gap.saturating_mul(2)).max(1);
-        let grid_viewport = Rect::new(
-            area.x.saturating_add(label_column_width),
-            area.y.saturating_add(header_height),
-            slot_width.saturating_mul(column_count),
-            row_count.saturating_mul(row_height).saturating_add(
-                metrics
-                    .weekly_row_gap
-                    .saturating_mul(row_count.saturating_sub(1)),
+        let cluster_top = packing.cluster_area.y.saturating_add(top_padding);
+
+        let header_area = Rect::new(
+            packing.cluster_area.x,
+            cluster_top,
+            cluster_width,
+            metrics.weekly_header_height.min(
+                packing
+                    .cluster_area
+                    .height
+                    .saturating_sub(top_padding)
+                    .max(1),
             ),
         );
-        let legend_y = grid_viewport.y.saturating_add(grid_viewport.height);
+        let grid_height = min_grid_height
+            .saturating_add(group_gap_count)
+            .saturating_add(group_count.saturating_mul(subrow_gap));
+        let grid_viewport = Rect::new(
+            packing.cluster_area.x.saturating_add(label_column_width),
+            header_area.y.saturating_add(header_area.height),
+            slot_width.saturating_mul(column_count),
+            grid_height,
+        );
         let legend_area = Rect::new(
             grid_viewport.x,
-            legend_y,
+            grid_viewport.y.saturating_add(grid_viewport.height),
             grid_viewport.width,
-            metrics
-                .weekly_legend_height
-                .min(area.height.saturating_sub(legend_y.saturating_sub(area.y))),
-        );
-        let summary_y = legend_area.y.saturating_add(legend_area.height);
-        let summary_area = Rect::new(
-            grid_viewport.x,
-            summary_y,
-            grid_viewport.width,
-            metrics
-                .weekly_summary_height
-                .min(area.height.saturating_sub(summary_y.saturating_sub(area.y))),
+            metrics.weekly_legend_height.min(
+                packing.cluster_area.height.saturating_sub(
+                    grid_viewport
+                        .y
+                        .saturating_sub(packing.cluster_area.y)
+                        .saturating_add(grid_viewport.height),
+                ),
+            ),
         );
 
         Self {
-            chart_body: area,
-            header_area: Rect::new(area.x, area.y, area.width, header_height),
+            chart_body: packing.cluster_area,
+            support_lane: packing.support_area,
+            header_area,
             header_grid_area: Rect::new(
                 grid_viewport.x,
-                area.y,
+                header_area.y,
                 grid_viewport.width,
-                header_height,
+                header_area.height,
             ),
             grid_viewport,
             legend_area,
-            summary_area,
+            summary_area: Rect::new(
+                grid_viewport.x,
+                packing.support_area.y,
+                packing
+                    .support_area
+                    .width
+                    .saturating_sub(label_column_width),
+                packing.support_area.height,
+            ),
             label_column_width,
-            row_height,
-            row_gap: metrics.weekly_row_gap,
+            slot_width,
             cell_width,
             cell_gap,
-            slot_width,
-            row_count,
+            group_gap_count,
+            subrow_gap,
+            top_padding,
+            bottom_padding,
+            gap_before_support: packing.gap_before_support,
+            group_count,
         }
     }
 
@@ -680,37 +701,113 @@ impl WeeklyTrendsLayout {
     }
 
     #[must_use]
-    pub fn row_area(self, row_index: usize) -> Rect {
-        let clamped_index = row_index.min(usize::from(self.row_count.saturating_sub(1)));
-        let row_index = u16::try_from(clamped_index).unwrap_or(u16::MAX);
+    pub fn group_area(self, group_index: usize) -> Rect {
+        let clamped_index = group_index.min(usize::from(self.group_count.saturating_sub(1)));
+        let group_index = u16::try_from(clamped_index).unwrap_or(u16::MAX);
+        let group_height = Self::SUBROWS_PER_GROUP.saturating_add(self.subrow_gap);
         Rect::new(
-            self.grid_viewport.x,
-            self.grid_viewport.y.saturating_add(
-                row_index.saturating_mul(self.row_height.saturating_add(self.row_gap)),
-            ),
-            self.grid_viewport.width,
-            self.row_height,
+            self.chart_body.x,
+            self.grid_viewport
+                .y
+                .saturating_add(group_index.saturating_mul(group_height))
+                .saturating_add(group_index.min(self.group_gap_count)),
+            self.chart_body.width,
+            group_height,
         )
     }
 
     #[must_use]
-    pub fn row_label_area(self, row_index: usize) -> Rect {
-        let row = self.row_area(row_index);
+    pub fn group_label_area(self, group_index: usize) -> Rect {
+        let group = self.group_area(group_index);
         Rect::new(
             self.chart_body.x,
-            row.y,
+            group.y,
             self.label_column_width,
-            row.height,
+            group.height,
+        )
+    }
+
+    #[must_use]
+    pub fn group_label_line_area(self, group_index: usize) -> Rect {
+        let group = self.group_label_area(group_index);
+        Rect::new(
+            group.x,
+            group.y.saturating_add(group.height / 2),
+            group.width,
+            1,
+        )
+    }
+
+    #[must_use]
+    pub fn subrow_area(self, group_index: usize, subrow_index: usize) -> Rect {
+        let group = self.group_area(group_index);
+        let subrow_index = u16::try_from(subrow_index)
+            .unwrap_or(u16::MAX)
+            .min(Self::SUBROWS_PER_GROUP.saturating_sub(1));
+        Rect::new(
+            self.grid_viewport.x,
+            group
+                .y
+                .saturating_add(subrow_index)
+                .saturating_add(subrow_index.min(1).saturating_mul(self.subrow_gap)),
+            self.grid_viewport.width,
+            1,
         )
     }
 }
 
 #[must_use]
-pub const fn chart_panel_zones(area: Rect, support_lane_height: u16) -> ChartPanelZones {
-    let metrics = panel_content_metrics(area, support_lane_height);
-    ChartPanelZones {
-        chart_body: metrics.chart.area,
-        support_lane: metrics.support.area,
+pub const fn pack_chart_cluster_vertically(
+    area: Rect,
+    cluster_min_height: u16,
+    support_lane_height: u16,
+) -> ChartClusterPacking {
+    if area.width == 0 || area.height == 0 {
+        return ChartClusterPacking {
+            cluster_area: area,
+            support_area: Rect::new(area.x, area.y, 0, 0),
+            top_padding: 0,
+            bottom_padding: 0,
+            gap_before_support: 0,
+        };
+    }
+
+    let support_height = if support_lane_height > 0 && area.height > cluster_min_height {
+        let support_budget = area.height.saturating_sub(cluster_min_height);
+        if support_lane_height > support_budget {
+            support_budget
+        } else {
+            support_lane_height
+        }
+    } else {
+        0
+    };
+    let remaining_height = area
+        .height
+        .saturating_sub(cluster_min_height)
+        .saturating_sub(support_height);
+    let gap_before_support = (support_height > 0 && remaining_height > 0) as u16;
+    let cluster_height = area
+        .height
+        .saturating_sub(support_height)
+        .saturating_sub(gap_before_support);
+    let cluster_slack = cluster_height.saturating_sub(cluster_min_height);
+    let top_padding = cluster_slack / 2;
+    let bottom_padding = cluster_slack.saturating_sub(top_padding);
+
+    ChartClusterPacking {
+        cluster_area: Rect::new(area.x, area.y, area.width, cluster_height),
+        support_area: Rect::new(
+            area.x,
+            area.y
+                .saturating_add(cluster_height)
+                .saturating_add(gap_before_support),
+            area.width,
+            support_height,
+        ),
+        top_padding,
+        bottom_padding,
+        gap_before_support,
     }
 }
 
@@ -764,6 +861,58 @@ pub const fn inset(area: Rect, horizontal: u16, vertical: u16) -> Rect {
         width,
         height,
     )
+}
+
+impl BreakdownLayout {
+    #[must_use]
+    pub const fn label_cell(self, row: Rect) -> Rect {
+        Rect::new(
+            self.label_column_x,
+            row.y,
+            self.label_column_width,
+            row.height,
+        )
+    }
+
+    #[must_use]
+    pub const fn signal_cell(self, row: Rect) -> Rect {
+        Rect::new(
+            self.signal_column_x,
+            row.y,
+            self.signal_column_width,
+            row.height,
+        )
+    }
+
+    #[must_use]
+    pub const fn signal_badge_cell(self, row: Rect) -> Rect {
+        Rect::new(
+            self.signal_column_x,
+            row.y,
+            self.signal_badge_width,
+            row.height,
+        )
+    }
+
+    #[must_use]
+    pub const fn signal_track_cell(self, row: Rect) -> Rect {
+        Rect::new(
+            self.bar_viewport_x,
+            row.y,
+            self.bar_viewport_width,
+            row.height,
+        )
+    }
+
+    #[must_use]
+    pub const fn delta_cell(self, row: Rect) -> Rect {
+        Rect::new(
+            self.delta_column_x,
+            row.y,
+            self.delta_column_width,
+            row.height,
+        )
+    }
 }
 
 #[must_use]
@@ -850,7 +999,8 @@ mod tests {
     use super::{
         BreakdownLayout, DEFAULT_NON_INTERACTIVE_VIEWPORT, DashboardChartMetrics, DashboardMetrics,
         ModalLayoutSpec, OverlayLayoutSpec, ViewportClass, WeeklyHeatmapMode, WeeklyTrendsLayout,
-        centered_modal_layout, content_fit_overlay_layout, panel_content_metrics,
+        centered_modal_layout, content_fit_overlay_layout, pack_chart_cluster_vertically,
+        panel_content_metrics,
     };
     use ratatui::layout::Rect;
 
@@ -937,8 +1087,8 @@ mod tests {
             10,
         );
 
-        let first = layout.row_area(0);
-        let last = layout.row_area(3);
+        let first = layout.row_line_area(0);
+        let last = layout.row_line_area(3);
 
         assert_eq!(layout.label_cell(first).x, layout.label_column_x);
         assert_eq!(layout.label_cell(last).x, layout.label_column_x);
@@ -948,9 +1098,23 @@ mod tests {
         assert!(layout.band_area.y >= last.y.saturating_add(last.height));
         assert_eq!(
             layout.support_lane.y,
-            layout.chart_body.y.saturating_add(layout.chart_body.height)
+            layout
+                .chart_body
+                .y
+                .saturating_add(layout.chart_body.height)
+                .saturating_add(layout.gap_before_support)
         );
         assert_eq!(layout.support_lane.height, 1);
+    }
+
+    #[test]
+    fn chart_cluster_packing_keeps_support_lane_close_to_cluster() {
+        let packing = pack_chart_cluster_vertically(Rect::new(0, 0, 48, 10), 7, 1);
+
+        assert_eq!(packing.cluster_area, Rect::new(0, 0, 48, 8));
+        assert_eq!(packing.support_area, Rect::new(0, 9, 48, 1));
+        assert_eq!(packing.gap_before_support, 1);
+        assert_eq!(packing.top_padding + packing.bottom_padding, 1);
     }
 
     #[test]
@@ -968,7 +1132,7 @@ mod tests {
             DashboardChartMetrics::for_viewport(ViewportClass::Wide),
             WeeklyHeatmapMode::Standard,
             7,
-            4,
+            3,
         );
 
         assert_eq!(layout.header_grid_area.x, layout.grid_viewport.x);
@@ -980,7 +1144,14 @@ mod tests {
             layout.slot_width
         );
         assert_eq!(layout.selected_bracket_origin(6), layout.column_origin(6));
-        assert_eq!(layout.row_label_area(0).x, layout.chart_body.x);
-        assert_eq!(layout.row_label_area(3).x, layout.chart_body.x);
+        assert_eq!(layout.group_label_area(0).x, layout.chart_body.x);
+        assert_eq!(layout.group_label_area(2).x, layout.chart_body.x);
+        assert_eq!(
+            layout.group_label_line_area(1).y,
+            layout
+                .group_area(1)
+                .y
+                .saturating_add(layout.group_area(1).height / 2)
+        );
     }
 }

@@ -103,6 +103,28 @@ pub fn support_lane_text(note: &str, width: usize) -> String {
 }
 
 #[must_use]
+pub fn canonical_weekly_group_label(label: &str) -> &str {
+    match label {
+        "Sleep" => "Sleep",
+        "Readiness" => "Ready",
+        "Activity" => "Actv",
+        _ => label,
+    }
+}
+
+#[must_use]
+pub fn canonical_breakdown_label(label: &str) -> Option<&'static str> {
+    match label {
+        "HRV Balance" => Some("HRV Bal"),
+        "Resting HR" => Some("Rest HR"),
+        "Sleep Balance" => Some("Sleep Bal"),
+        "Recovery Index" => Some("Recovery"),
+        _ => None,
+    }
+}
+
+#[must_use]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn fit_heatmap_label(label: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
@@ -121,23 +143,24 @@ pub fn fit_heatmap_label(label: &str, width: usize) -> String {
 }
 
 #[must_use]
+pub fn fit_weekly_group_label(label: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    fit_single_line(canonical_weekly_group_label(label), width).text
+}
+
+#[must_use]
 pub fn fit_breakdown_label(label: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
 
-    fit_single_line_with(
-        label,
-        width,
-        match label {
-            "HRV Balance" => &["HRV Bal"][..],
-            "Resting HR" => &["Rest HR"][..],
-            "Sleep Balance" => &["Sleep Bal"][..],
-            "Recovery Index" => &["Recovery"][..],
-            _ => &[],
-        },
+    canonical_breakdown_label(label).map_or_else(
+        || fit_single_line(label, width).text,
+        |compact| fit_single_line_with(label, width, &[compact]).text,
     )
-    .text
 }
 
 #[must_use]
@@ -197,10 +220,10 @@ fn normalized_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MeasuredText, TextFit, concise_detail, fit_badge_label, fit_breakdown_delta,
-        fit_breakdown_label, fit_day_header, fit_heatmap_label, fit_single_line,
-        fit_single_line_with, measure_one_line, support_lane_text, truncate_plain,
-        truncate_with_ellipsis,
+        MeasuredText, TextFit, canonical_breakdown_label, canonical_weekly_group_label,
+        concise_detail, fit_badge_label, fit_breakdown_delta, fit_breakdown_label, fit_day_header,
+        fit_heatmap_label, fit_single_line, fit_single_line_with, fit_weekly_group_label,
+        measure_one_line, support_lane_text, truncate_plain, truncate_with_ellipsis,
     };
 
     #[test]
@@ -257,12 +280,27 @@ mod tests {
     fn heatmap_and_breakdown_labels_abbreviate_before_truncating() {
         assert_eq!(fit_heatmap_label("Readiness", 6), "Ready");
         assert_eq!(fit_heatmap_label("Activity", 4), "Actv");
+        assert_eq!(fit_weekly_group_label("Readiness", 8), "Ready");
+        assert_eq!(fit_weekly_group_label("Activity", 8), "Actv");
         assert_eq!(fit_breakdown_label("Resting HR", 7), "Rest HR");
         assert_eq!(fit_breakdown_label("Recovery Index", 8), "Recovery");
         assert_eq!(fit_breakdown_delta("vs 7d -13.7", 5), "-13.7");
         assert_eq!(fit_breakdown_delta("d/d +1.2", 4), "+1.2");
         assert_eq!(fit_badge_label("no data", 5), "empty");
         assert_eq!(fit_badge_label("steady", 4), "stdy");
+    }
+
+    #[test]
+    fn canonical_abbreviation_maps_are_deterministic() {
+        assert_eq!(canonical_weekly_group_label("Sleep"), "Sleep");
+        assert_eq!(canonical_weekly_group_label("Readiness"), "Ready");
+        assert_eq!(canonical_weekly_group_label("Activity"), "Actv");
+        assert_eq!(canonical_breakdown_label("HRV Balance"), Some("HRV Bal"));
+        assert_eq!(
+            canonical_breakdown_label("Sleep Balance"),
+            Some("Sleep Bal")
+        );
+        assert_eq!(canonical_breakdown_label("Unknown"), None);
     }
 
     #[test]
