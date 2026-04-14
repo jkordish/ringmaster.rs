@@ -22,10 +22,10 @@ pub fn headline_for_signal(
         (SignalDirectionality::LowerBetter, Some(-1)) => {
             format!("{} is lower than usual.", definition.label)
         }
-        (SignalDirectionality::Neutral | SignalDirectionality::Contextual, Some(1)) => {
+        (SignalDirectionality::Contextual, Some(1)) => {
             format!("{} is above its recent range.", definition.label)
         }
-        (SignalDirectionality::Neutral | SignalDirectionality::Contextual, Some(-1)) => {
+        (SignalDirectionality::Contextual, Some(-1)) => {
             format!("{} is below its recent range.", definition.label)
         }
         _ => match mode {

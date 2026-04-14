@@ -550,6 +550,7 @@ pub struct AiRunRecord {
     pub updated_at: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AiRunRegistryEntry {
     pub run_id: String,
@@ -841,17 +842,6 @@ impl<'connection> MetadataStore<'connection> {
 
         Ok(())
     }
-
-    pub fn get(&self, key: &str) -> Result<Option<String>> {
-        self.connection
-            .query_row(
-                "SELECT value FROM app_metadata WHERE key = ?1",
-                params![key],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(Into::into)
-    }
 }
 
 impl<'connection> SyncStateStore<'connection> {
@@ -928,40 +918,6 @@ impl<'connection> SyncStateStore<'connection> {
         )?;
 
         Ok(())
-    }
-
-    pub fn latest(&self) -> Result<Option<SyncStateRecord>> {
-        self.connection
-            .query_row(
-                "SELECT
-                    sync_key,
-                    family,
-                    status,
-                    cursor,
-                    last_successful_sync_end,
-                    last_attempted_at,
-                    last_completed_at,
-                    last_reconcile_end,
-                    oldest_recently_reconciled_at,
-                    message,
-                    granted_scopes,
-                    last_error_json,
-                    last_error_at,
-                    last_error_kind,
-                    last_error_detail,
-                    failure_count,
-                    next_attempt_after,
-                    last_trigger_source,
-                    last_trigger_detail,
-                    updated_at
-                 FROM sync_state
-                 ORDER BY last_attempted_at DESC
-                 LIMIT 1",
-                [],
-                read_sync_state_row,
-            )
-            .optional()
-            .map_err(Into::into)
     }
 
     pub fn list(&self) -> Result<Vec<SyncStateRecord>> {
@@ -2376,6 +2332,7 @@ impl<'connection> AnalysisStore<'connection> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn latest_ai_artifact(
         &self,
         artifact_kind: &str,
@@ -2824,129 +2781,6 @@ impl<'connection> AnalysisStore<'connection> {
             .map_err(Into::into)
     }
 
-    pub fn ai_runs_with_prefix(&self, run_prefix: &str) -> Result<Vec<AiRunRecord>> {
-        let mut statement = self.connection.prepare(
-            "SELECT
-                run_id,
-                run_kind,
-                run_status,
-                provider,
-                model,
-                reasoning_effort,
-                request_mode,
-                input_transport,
-                run_mode,
-                prompt_version,
-                output_schema_version,
-                privacy_profile,
-                snapshot_scope,
-                snapshot_hash_a,
-                snapshot_hash_b,
-                source_ai_artifact_id,
-                follow_up_kind,
-                request_fingerprint,
-                request_preview_json,
-                artifact_id,
-                error_message,
-                created_at,
-                started_at,
-                ended_at,
-                updated_at
-             FROM ai_runs
-             WHERE run_id LIKE ?1
-             ORDER BY created_at DESC, run_id DESC",
-        )?;
-        let rows = statement.query_map(params![format!("{run_prefix}%")], |row| {
-            Ok(AiRunRecord {
-                run_id: row.get(0)?,
-                run_kind: row.get(1)?,
-                run_status: row.get(2)?,
-                provider: row.get(3)?,
-                model: row.get(4)?,
-                reasoning_effort: row.get(5)?,
-                request_mode: row.get(6)?,
-                input_transport: row.get(7)?,
-                run_mode: row.get(8)?,
-                prompt_version: row.get(9)?,
-                output_schema_version: row.get(10)?,
-                privacy_profile: row.get(11)?,
-                snapshot_scope: row.get(12)?,
-                snapshot_hash_a: row.get(13)?,
-                snapshot_hash_b: row.get(14)?,
-                source_ai_artifact_id: row.get(15)?,
-                follow_up_kind: row.get(16)?,
-                request_fingerprint: row.get(17)?,
-                request_preview_json: row.get(18)?,
-                artifact_id: row.get(19)?,
-                error_message: row.get(20)?,
-                created_at: row.get(21)?,
-                started_at: row.get(22)?,
-                ended_at: row.get(23)?,
-                updated_at: row.get(24)?,
-            })
-        })?;
-        let mut records = Vec::new();
-        for row in rows {
-            records.push(row?);
-        }
-        Ok(records)
-    }
-
-    pub fn list_ai_runs(&self) -> Result<Vec<AiRunRegistryEntry>> {
-        let mut statement = self.connection.prepare(
-            "SELECT
-                run_id,
-                run_kind,
-                run_status,
-                provider,
-                model,
-                prompt_version,
-                output_schema_version,
-                run_mode,
-                privacy_profile,
-                snapshot_scope,
-                snapshot_hash_a,
-                snapshot_hash_b,
-                source_ai_artifact_id,
-                follow_up_kind,
-                artifact_id,
-                error_message,
-                created_at,
-                started_at,
-                ended_at
-             FROM ai_runs
-             ORDER BY created_at DESC, run_id DESC",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok(AiRunRegistryEntry {
-                run_id: row.get(0)?,
-                run_kind: row.get(1)?,
-                run_status: row.get(2)?,
-                provider: row.get(3)?,
-                model: row.get(4)?,
-                prompt_version: row.get(5)?,
-                output_schema_version: row.get(6)?,
-                run_mode: row.get(7)?,
-                privacy_profile: row.get(8)?,
-                snapshot_scope: row.get(9)?,
-                snapshot_hash_a: row.get(10)?,
-                snapshot_hash_b: row.get(11)?,
-                source_ai_artifact_id: row.get(12)?,
-                follow_up_kind: row.get(13)?,
-                artifact_id: row.get(14)?,
-                error_message: row.get(15)?,
-                created_at: row.get(16)?,
-                started_at: row.get(17)?,
-                ended_at: row.get(18)?,
-            })
-        })?;
-        let mut records = Vec::new();
-        for row in rows {
-            records.push(row?);
-        }
-        Ok(records)
-    }
-
     pub fn list_ai_run_records(&self) -> Result<Vec<AiRunRecord>> {
         let mut statement = self.connection.prepare(
             "SELECT
@@ -3014,6 +2848,7 @@ impl<'connection> AnalysisStore<'connection> {
         Ok(records)
     }
 
+    #[cfg(test)]
     pub fn list_ai_runs_for_snapshot(
         &self,
         snapshot_hash: &str,
@@ -3598,54 +3433,6 @@ impl<'connection> ViewStore<'connection> {
         Self { connection }
     }
 
-    pub fn latest_daily_overview(&self) -> Result<Option<DailyOverviewRow>> {
-        let row = self
-            .connection
-            .query_row(
-                r"
-                WITH latest_day AS (
-                    SELECT MAX(day) AS day FROM (
-                        SELECT day FROM daily_sleep
-                        UNION ALL
-                        SELECT day FROM daily_readiness
-                        UNION ALL
-                        SELECT day FROM daily_activity
-                    )
-                )
-                SELECT
-                    latest_day.day,
-                    (SELECT sleep_score FROM daily_sleep WHERE day = latest_day.day),
-                    (SELECT sleep_duration_seconds FROM daily_sleep WHERE day = latest_day.day),
-                    (SELECT readiness_score FROM daily_readiness WHERE day = latest_day.day),
-                    (SELECT activity_score FROM daily_activity WHERE day = latest_day.day),
-                    COALESCE(
-                        (SELECT updated_at FROM daily_sleep WHERE day = latest_day.day),
-                        (SELECT updated_at FROM daily_readiness WHERE day = latest_day.day),
-                        (SELECT updated_at FROM daily_activity WHERE day = latest_day.day)
-                    )
-                FROM latest_day
-                ",
-                [],
-                |row| {
-                    let day = row.get::<_, Option<String>>(0)?;
-                    match day {
-                        Some(day) => Ok(Some(DailyOverviewRow {
-                            day,
-                            sleep_score: parse_optional_score(row.get::<_, Option<i64>>(1)?),
-                            sleep_duration_seconds: row.get(2)?,
-                            readiness_score: parse_optional_score(row.get::<_, Option<i64>>(3)?),
-                            activity_score: parse_optional_score(row.get::<_, Option<i64>>(4)?),
-                            updated_at: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                        })),
-                        None => Ok(None),
-                    }
-                },
-            )
-            .optional()?;
-
-        Ok(row.flatten())
-    }
-
     pub fn daily_history(&self, limit: usize) -> Result<Vec<DailyOverviewRow>> {
         let bounded_limit = usize::min(limit, 366);
         let mut statement = self.connection.prepare(
@@ -3887,43 +3674,6 @@ impl<'connection> ViewStore<'connection> {
             )
             .optional()
             .map_err(Into::into)
-    }
-
-    pub fn recent_heartrate(&self, limit: usize) -> Result<Vec<HeartRatePoint>> {
-        let bounded_limit = usize::min(limit, 240);
-        let mut statement = self.connection.prepare(
-            "SELECT recorded_at, bpm, source_day
-             FROM heartrate_samples
-             ORDER BY recorded_at DESC
-             LIMIT ?1",
-        )?;
-        let rows = statement.query_map(
-            params![crate::numeric::usize_to_i64(bounded_limit)],
-            |row| {
-                let bpm = row.get::<_, i64>(1)?;
-                let bpm = u16::try_from(bpm).map_err(|_| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        1,
-                        rusqlite::types::Type::Integer,
-                        Box::new(std::fmt::Error),
-                    )
-                })?;
-
-                Ok(HeartRatePoint {
-                    recorded_at: row.get(0)?,
-                    bpm,
-                    source_day: row.get(2)?,
-                })
-            },
-        )?;
-
-        let mut points = Vec::new();
-        for row in rows {
-            points.push(row?);
-        }
-        points.reverse();
-
-        Ok(points)
     }
 
     pub fn heartrate_for_day(&self, day: &str) -> Result<Vec<HeartRatePoint>> {
@@ -4470,6 +4220,7 @@ impl<'connection> ViewStore<'connection> {
         Ok(records)
     }
 
+    #[cfg(test)]
     pub fn context_events_for_day(&self, day: &str) -> Result<Vec<ContextEventRecord>> {
         let day_start = format!("{day}T00:00:00Z");
         let day_end = format!("{day}T23:59:59Z");

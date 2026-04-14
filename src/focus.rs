@@ -5,7 +5,6 @@ pub enum FocusInteraction {
     Navigate(&'static str),
     Expand(&'static str),
     Toggle(&'static str),
-    OpenOverlay(&'static str),
     Activate(&'static str),
     None,
 }
@@ -16,25 +15,25 @@ impl FocusInteraction {
         !matches!(self, Self::None)
     }
 
+    #[cfg(test)]
     #[must_use]
     pub const fn kind_label(self) -> &'static str {
         match self {
             Self::Navigate(_) => "navigate",
             Self::Expand(_) => "expand",
             Self::Toggle(_) => "toggle",
-            Self::OpenOverlay(_) => "open overlay",
             Self::Activate(_) => "activate",
             Self::None => "inspect only",
         }
     }
 
+    #[cfg(test)]
     #[must_use]
     pub const fn target_label(self) -> Option<&'static str> {
         match self {
             Self::Navigate(target)
             | Self::Expand(target)
             | Self::Toggle(target)
-            | Self::OpenOverlay(target)
             | Self::Activate(target) => Some(target),
             Self::None => None,
         }
@@ -76,6 +75,7 @@ pub enum TrendsMatrixSubfocus {
 }
 
 impl TrendsMatrixSubfocus {
+    #[cfg(test)]
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {

@@ -345,7 +345,7 @@ fn draw_warnings(frame: &mut Frame<'_>, area: Rect, model: &AiWorkbenchModel, th
     );
 }
 
-pub(crate) fn draw_preflight_overlay(
+pub fn draw_preflight_overlay(
     frame: &mut Frame<'_>,
     area: Rect,
     preflight: &AiPreflightView,

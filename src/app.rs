@@ -187,18 +187,18 @@ pub struct WebhookOpsSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefreshPolicySnapshot {
-    pub personal_interval_secs: u64,
-    pub daily_interval_secs: u64,
-    pub heartrate_interval_secs: u64,
-    pub workout_interval_secs: u64,
-    pub enhanced_tag_interval_secs: u64,
-    pub session_interval_secs: u64,
-    pub personal_stale_after_secs: u64,
-    pub daily_stale_after_secs: u64,
-    pub heartrate_stale_after_secs: u64,
-    pub workout_stale_after_secs: u64,
-    pub enhanced_tag_stale_after_secs: u64,
-    pub session_stale_after_secs: u64,
+    pub sync_intervals: FamilyRefreshPolicy,
+    pub stale_after: FamilyRefreshPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FamilyRefreshPolicy {
+    pub personal: u64,
+    pub daily: u64,
+    pub heartrate: u64,
+    pub workout: u64,
+    pub enhanced_tag: u64,
+    pub session: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,13 +238,6 @@ pub enum AiLaunchIntent {
     ReviewSelectedDay,
     CompareSelectedWeek,
     ChallengeSelectedDay,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrendWindowKind {
-    Days7,
-    Days30,
-    Days90,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,7 +299,6 @@ pub struct AppState {
     selected_timeline_point: usize,
     timeline_window_hours: u16,
     overlay_toggle_focus: OverlayToggleFocusMemory,
-    trends_window: TrendWindowKind,
     trend_sort_mode: TrendSortMode,
     trends_matrix_subfocus: TrendsMatrixSubfocus,
     selected_trend_row_index: usize,
@@ -759,21 +751,6 @@ pub struct AiArtifactSummaryView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScoreCard {
-    pub label: &'static str,
-    pub value: String,
-    pub badge: String,
-    pub subtitle: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CapabilityView {
-    pub label: &'static str,
-    pub available: bool,
-    pub note: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelinePoint {
     pub label: String,
     pub recorded_at: String,
@@ -834,21 +811,6 @@ struct ExplainSupportingEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrendWindow {
-    pub label: &'static str,
-    pub summary: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrendMetricView {
-    pub label: &'static str,
-    pub current_value: String,
-    pub summary: String,
-    pub sparkline: Vec<u64>,
-    pub confidence: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatternFilterTab {
     pub label: &'static str,
     pub selected: bool,
@@ -902,7 +864,6 @@ struct LiveModelOptions {
     explain_overlay_toggle_index: usize,
     patterns_overlay_toggle_index: usize,
     window_hours: u16,
-    trends_window: TrendWindowKind,
     trend_sort_mode: TrendSortMode,
     trends_matrix_subfocus: TrendsMatrixSubfocus,
     selected_trend_row_index: usize,
@@ -1038,8 +999,6 @@ impl AppState {
             | Action::SearchPreviousResult => self.handle_focus_action(&action, &mut emitted),
             Action::Tick
             | Action::Quit
-            | Action::NextScreen
-            | Action::PreviousScreen
             | Action::ShowScreen(_)
             | Action::RefreshRequested
             | Action::RefreshStarted { .. }
@@ -1060,8 +1019,6 @@ impl AppState {
             Action::PreviousTrendWindow
             | Action::NextTrendWindow
             | Action::CyclePatternMetric
-            | Action::CycleReviewMode
-            | Action::CycleReviewFocus
             | Action::PreviousReviewCard
             | Action::NextReviewCard => self.handle_review_action(&action),
             _ => self.handle_ai_action(action),
@@ -1119,20 +1076,6 @@ impl AppState {
             }
             Action::Quit => {
                 self.should_quit = true;
-            }
-            Action::NextScreen => {
-                self.switch_screen(
-                    self.active_screen.next(),
-                    format!("Switched to {}", self.active_screen.next().title()),
-                    false,
-                );
-            }
-            Action::PreviousScreen => {
-                self.switch_screen(
-                    self.active_screen.previous(),
-                    format!("Switched to {}", self.active_screen.previous().title()),
-                    false,
-                );
             }
             Action::ShowScreen(screen) => {
                 self.switch_screen(screen, format!("Switched to {}", screen.title()), false);
@@ -1244,21 +1187,6 @@ impl AppState {
                 self.set_trend_sort_mode(self.trend_sort_mode.next());
             }
             Action::CyclePatternMetric => self.move_pattern_metric(NavMove::Next),
-            Action::CycleReviewMode => {
-                self.review_mode = self.review_mode.next();
-                self.selected_review_card_index = 0;
-                self.status_line = format!("Review mode changed to {}.", self.review_mode.label());
-                self.rebuild_live_model();
-            }
-            Action::CycleReviewFocus => {
-                self.review_focus = self.review_focus.next();
-                self.selected_review_card_index = 0;
-                self.status_line = format!(
-                    "Investigation focus changed to {}.",
-                    self.review_focus.label()
-                );
-                self.rebuild_live_model();
-            }
             Action::PreviousReviewCard => {
                 if self.selected_review_card_index > 0 {
                     self.selected_review_card_index -= 1;
@@ -1368,8 +1296,6 @@ impl AppState {
                 record_id,
                 status_line,
             } => self.handle_jump_to_ai_browser_record(tab, &record_id, status_line),
-            Action::PreviousAiBrowserTab => self.move_ai_browser_tab(AiBrowserTab::previous),
-            Action::NextAiBrowserTab => self.move_ai_browser_tab(AiBrowserTab::next),
             Action::PreviousAiBrowserItem => self.move_ai_browser_item(-1),
             Action::NextAiBrowserItem => self.move_ai_browser_item(1),
             _ => unreachable!("AI handler only receives AI-specific actions"),
@@ -1440,13 +1366,6 @@ impl AppState {
         }
     }
 
-    fn move_ai_browser_tab(&mut self, movement: impl FnOnce(AiBrowserTab) -> AiBrowserTab) {
-        self.ai_browser_tab = movement(self.ai_browser_tab);
-        self.selected_ai_artifact_action_index = 0;
-        self.status_line = format!("AI browser switched to {}.", self.ai_browser_tab.label());
-        self.rebuild_live_model();
-    }
-
     fn move_ai_browser_item(&mut self, delta: isize) {
         if self.adjust_ai_browser_index(delta) {
             self.selected_ai_artifact_action_index = 0;
@@ -1513,11 +1432,6 @@ impl AppState {
     #[must_use]
     pub const fn help_scroll(&self) -> u16 {
         self.help_scroll
-    }
-
-    #[must_use]
-    pub const fn ai_preflight_control(&self) -> PreflightControl {
-        self.ai_preflight_control
     }
 
     #[must_use]
@@ -2020,7 +1934,6 @@ impl AppState {
                     explain_overlay_toggle_index: self.overlay_toggle_focus.explain,
                     patterns_overlay_toggle_index: self.overlay_toggle_focus.patterns,
                     window_hours: self.timeline_window_hours,
-                    trends_window: self.trends_window,
                     trend_sort_mode: self.trend_sort_mode,
                     trends_matrix_subfocus: self.trends_matrix_subfocus,
                     selected_trend_row_index: self.selected_trend_row_index,
@@ -2094,6 +2007,11 @@ impl AppState {
 
     pub(crate) const fn selected_ai_browser_tab(&self) -> AiBrowserTab {
         self.ai_browser_tab
+    }
+
+    #[cfg(test)]
+    pub(crate) fn advance_ai_browser_tab_for_test(&mut self) {
+        self.move_ai_browser_tabs(NavMove::Next);
     }
 
     fn select_ai_browser_record(&mut self, tab: AiBrowserTab, record_id: &str) -> bool {
@@ -3647,26 +3565,6 @@ impl ReviewScreenMode {
     }
 }
 
-impl TrendWindowKind {
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Days7 => "7d",
-            Self::Days30 => "30d",
-            Self::Days90 => "90d",
-        }
-    }
-
-    #[must_use]
-    pub const fn days(self) -> usize {
-        match self {
-            Self::Days7 => 7,
-            Self::Days30 => 30,
-            Self::Days90 => 90,
-        }
-    }
-}
-
 impl TrendSortMode {
     const ALL: [Self; 3] = [Self::Concern, Self::Anomaly, Self::Recovery];
 
@@ -3814,7 +3712,6 @@ pub fn build_state_from_snapshot(
         selected_timeline_point: 0,
         timeline_window_hours: 24,
         overlay_toggle_focus: OverlayToggleFocusMemory::default(),
-        trends_window: TrendWindowKind::Days7,
         trend_sort_mode: TrendSortMode::Concern,
         trends_matrix_subfocus: TrendsMatrixSubfocus::SortTabs,
         selected_trend_row_index: 0,
@@ -3856,7 +3753,7 @@ pub fn build_live_state(
     build_read_only_live_state(config, store, auth_status)
 }
 
-pub(crate) fn build_read_only_live_state(
+pub fn build_read_only_live_state(
     config: &Config,
     store: &Store,
     auth_status: &AuthStatus,
@@ -6336,13 +6233,13 @@ fn eval_has_linked_evidence(eval: &AiEvalRunRecord) -> bool {
     details.cases.iter().any(|case| {
         case.snapshot_hash_a.is_some()
             || case.snapshot_hash_b.is_some()
-            || case.candidate.lineage.ai_run_id.is_some()
-            || case.candidate.lineage.ai_artifact_id.is_some()
-            || case.candidate.lineage.report_id.is_some()
+            || case.candidate.lineage.run.is_some()
+            || case.candidate.lineage.artifact.is_some()
+            || case.candidate.lineage.report.is_some()
             || case.baseline.as_ref().is_some_and(|baseline| {
-                baseline.lineage.ai_run_id.is_some()
-                    || baseline.lineage.ai_artifact_id.is_some()
-                    || baseline.lineage.report_id.is_some()
+                baseline.lineage.run.is_some()
+                    || baseline.lineage.artifact.is_some()
+                    || baseline.lineage.report.is_some()
             })
     })
 }
@@ -6954,19 +6851,19 @@ fn render_eval_artifact_lineage(
     lineage: &EvalArtifactLineage,
 ) -> Vec<String> {
     let mut lines = Vec::new();
-    if let Some(ai_run_id) = &lineage.ai_run_id {
+    if let Some(ai_run_id) = &lineage.run {
         lines.push(format!(
             "  {label}_run: {}",
             resolve_ai_run_reference(snapshot, ai_run_id)
         ));
     }
-    if let Some(report_id) = &lineage.report_id {
+    if let Some(report_id) = &lineage.report {
         lines.push(format!(
             "  {label}_report: {}",
             resolve_report_reference(snapshot, report_id)
         ));
     }
-    if let Some(ai_artifact_id) = &lineage.ai_artifact_id {
+    if let Some(ai_artifact_id) = &lineage.artifact {
         lines.push(format!("  {label}_artifact: {ai_artifact_id}"));
     }
     lines
@@ -7366,7 +7263,6 @@ fn review_empty_message(review_mode: ReviewScreenMode, review_focus: ReviewFocus
 
 fn review_section_label(card: &ReviewCard) -> String {
     match card.section {
-        crate::review::engine::ReviewSection::Observation => "Observation".to_owned(),
         crate::review::engine::ReviewSection::PositiveChange => "Positive".to_owned(),
         crate::review::engine::ReviewSection::NegativeDrift => "Drift".to_owned(),
         crate::review::engine::ReviewSection::UnresolvedAnomaly => "Anomaly".to_owned(),
@@ -7905,6 +7801,7 @@ fn subscription_horizon_summary(snapshot: &LiveSnapshot) -> String {
 
 fn family_delivery_summary(snapshot: &LiveSnapshot) -> String {
     [
+        DataFamily::Personal,
         DataFamily::Daily,
         DataFamily::Workout,
         DataFamily::EnhancedTag,
@@ -10629,52 +10526,56 @@ impl CoverageFamily {
 impl RefreshPolicySnapshot {
     const fn from_config(config: &Config) -> Self {
         Self {
-            personal_interval_secs: config.refresh.personal_interval_secs,
-            daily_interval_secs: config.refresh.daily_interval_secs,
-            heartrate_interval_secs: config.refresh.heartrate_interval_secs,
-            workout_interval_secs: config.refresh.workout_interval_secs,
-            enhanced_tag_interval_secs: config.refresh.enhanced_tag_interval_secs,
-            session_interval_secs: config.refresh.session_interval_secs,
-            personal_stale_after_secs: config.refresh.personal_stale_after_secs,
-            daily_stale_after_secs: config.refresh.daily_stale_after_secs,
-            heartrate_stale_after_secs: config.refresh.heartrate_stale_after_secs,
-            workout_stale_after_secs: config.refresh.workout_stale_after_secs,
-            enhanced_tag_stale_after_secs: config.refresh.enhanced_tag_stale_after_secs,
-            session_stale_after_secs: config.refresh.session_stale_after_secs,
+            sync_intervals: FamilyRefreshPolicy {
+                personal: config.refresh.personal_interval_secs,
+                daily: config.refresh.daily_interval_secs,
+                heartrate: config.refresh.heartrate_interval_secs,
+                workout: config.refresh.workout_interval_secs,
+                enhanced_tag: config.refresh.enhanced_tag_interval_secs,
+                session: config.refresh.session_interval_secs,
+            },
+            stale_after: FamilyRefreshPolicy {
+                personal: config.refresh.personal_stale_after_secs,
+                daily: config.refresh.daily_stale_after_secs,
+                heartrate: config.refresh.heartrate_stale_after_secs,
+                workout: config.refresh.workout_stale_after_secs,
+                enhanced_tag: config.refresh.enhanced_tag_stale_after_secs,
+                session: config.refresh.session_stale_after_secs,
+            },
         }
     }
 
     const fn stale_after_seconds(&self, family: DataFamily) -> u64 {
         match family {
-            DataFamily::Personal => self.personal_stale_after_secs,
-            DataFamily::Daily => self.daily_stale_after_secs,
-            DataFamily::Heartrate => self.heartrate_stale_after_secs,
-            DataFamily::Workout => self.workout_stale_after_secs,
-            DataFamily::EnhancedTag => self.enhanced_tag_stale_after_secs,
-            DataFamily::Session => self.session_stale_after_secs,
+            DataFamily::Personal => self.stale_after.personal,
+            DataFamily::Daily => self.stale_after.daily,
+            DataFamily::Heartrate => self.stale_after.heartrate,
+            DataFamily::Workout => self.stale_after.workout,
+            DataFamily::EnhancedTag => self.stale_after.enhanced_tag,
+            DataFamily::Session => self.stale_after.session,
         }
     }
 
     const fn stale_after_seconds_for_sync_family(&self, family: SyncFamily) -> u64 {
         match family {
-            SyncFamily::Personal => self.personal_stale_after_secs,
-            SyncFamily::Daily | SyncFamily::Spo2 => self.daily_stale_after_secs,
-            SyncFamily::Heartrate => self.heartrate_stale_after_secs,
-            SyncFamily::Workout => self.workout_stale_after_secs,
-            SyncFamily::EnhancedTag => self.enhanced_tag_stale_after_secs,
-            SyncFamily::Session => self.session_stale_after_secs,
+            SyncFamily::Personal => self.stale_after.personal,
+            SyncFamily::Daily | SyncFamily::Spo2 => self.stale_after.daily,
+            SyncFamily::Heartrate => self.stale_after.heartrate,
+            SyncFamily::Workout => self.stale_after.workout,
+            SyncFamily::EnhancedTag => self.stale_after.enhanced_tag,
+            SyncFamily::Session => self.stale_after.session,
         }
     }
 
     fn summary(&self) -> String {
         format!(
             "personal={}s daily={}s heartrate={}s workouts={}s tags={}s sessions={}s",
-            self.personal_interval_secs,
-            self.daily_interval_secs,
-            self.heartrate_interval_secs,
-            self.workout_interval_secs,
-            self.enhanced_tag_interval_secs,
-            self.session_interval_secs
+            self.sync_intervals.personal,
+            self.sync_intervals.daily,
+            self.sync_intervals.heartrate,
+            self.sync_intervals.workout,
+            self.sync_intervals.enhanced_tag,
+            self.sync_intervals.session
         )
     }
 }
@@ -12087,9 +11988,9 @@ fn demo_eval_review_case() -> PersistedEvalCaseDetail {
             prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
             output_schema_version: "ringmaster.ai.review.v3".to_owned(),
             lineage: EvalArtifactLineage {
-                ai_run_id: Some("airun-demo-review-20260408".to_owned()),
-                ai_artifact_id: Some("run-demo-review-20260408".to_owned()),
-                report_id: Some("demo-report-review".to_owned()),
+                run: Some("airun-demo-review-20260408".to_owned()),
+                artifact: Some("run-demo-review-20260408".to_owned()),
+                report: Some("demo-report-review".to_owned()),
             },
         },
         baseline: Some(PersistedEvalArtifactDetail {
@@ -12154,9 +12055,9 @@ fn demo_eval_compare_case() -> PersistedEvalCaseDetail {
             prompt_version: COMPARE_PROMPT_VERSION.to_owned(),
             output_schema_version: "ringmaster.ai.compare.v3".to_owned(),
             lineage: EvalArtifactLineage {
-                ai_run_id: Some("airun-demo-compare-20260408".to_owned()),
-                ai_artifact_id: None,
-                report_id: None,
+                run: Some("airun-demo-compare-20260408".to_owned()),
+                artifact: None,
+                report: None,
             },
         },
         baseline: Some(PersistedEvalArtifactDetail {
@@ -12207,18 +12108,22 @@ fn demo_requested_scopes() -> Vec<String> {
 
 const fn demo_refresh_policy_snapshot() -> RefreshPolicySnapshot {
     RefreshPolicySnapshot {
-        personal_interval_secs: 3_600,
-        daily_interval_secs: 300,
-        heartrate_interval_secs: 60,
-        workout_interval_secs: 600,
-        enhanced_tag_interval_secs: 300,
-        session_interval_secs: 300,
-        personal_stale_after_secs: 72 * 60 * 60,
-        daily_stale_after_secs: 12 * 60 * 60,
-        heartrate_stale_after_secs: 15 * 60,
-        workout_stale_after_secs: 24 * 60 * 60,
-        enhanced_tag_stale_after_secs: 12 * 60 * 60,
-        session_stale_after_secs: 12 * 60 * 60,
+        sync_intervals: FamilyRefreshPolicy {
+            personal: 3_600,
+            daily: 300,
+            heartrate: 60,
+            workout: 600,
+            enhanced_tag: 300,
+            session: 300,
+        },
+        stale_after: FamilyRefreshPolicy {
+            personal: 72 * 60 * 60,
+            daily: 12 * 60 * 60,
+            heartrate: 15 * 60,
+            workout: 24 * 60 * 60,
+            enhanced_tag: 12 * 60 * 60,
+            session: 12 * 60 * 60,
+        },
     }
 }
 
@@ -12253,12 +12158,13 @@ mod tests {
 
     use super::{
         AiBrowserTab, AiLaunchIntent, AiOpsSnapshot, AiPreflightState, AppState,
-        COMPARE_PROMPT_VERSION, DataFamily, HeartRateDay, LiveModelOptions, LiveSnapshot,
-        OverlayFilterState, OverlayToggleFocusMemory, PatternMetricFilter, REVIEW_PROMPT_VERSION,
-        RefreshPolicySnapshot, ReviewScreenMode, RunMode, Screen, TrendSortMode, TrendWindowKind,
-        WebhookOpsSnapshot, build_ai_artifact_summary_view, build_live_model, build_ops_model,
-        build_state_from_snapshot, demo_eval_run_details, empty_investigation_report,
-        newest_day_index, review_card_badges, review_detail_lines, serialize_json,
+        COMPARE_PROMPT_VERSION, DataFamily, FamilyRefreshPolicy, HeartRateDay, LiveModelOptions,
+        LiveSnapshot, OverlayFilterState, OverlayToggleFocusMemory, PatternMetricFilter,
+        REVIEW_PROMPT_VERSION, RefreshPolicySnapshot, ReviewScreenMode, RunMode, Screen,
+        TrendSortMode, WebhookOpsSnapshot, build_ai_artifact_summary_view, build_live_model,
+        build_ops_model, build_state_from_snapshot, demo_eval_run_details,
+        empty_investigation_report, newest_day_index, review_card_badges, review_detail_lines,
+        serialize_json,
     };
     use crate::action::Action;
     use crate::ai::{
@@ -12313,18 +12219,22 @@ mod tests {
 
     fn test_refresh_policy() -> RefreshPolicySnapshot {
         RefreshPolicySnapshot {
-            personal_interval_secs: 3600,
-            daily_interval_secs: 300,
-            heartrate_interval_secs: 60,
-            workout_interval_secs: 600,
-            enhanced_tag_interval_secs: 300,
-            session_interval_secs: 300,
-            personal_stale_after_secs: 72 * 60 * 60,
-            daily_stale_after_secs: 12 * 60 * 60,
-            heartrate_stale_after_secs: 15 * 60,
-            workout_stale_after_secs: 24 * 60 * 60,
-            enhanced_tag_stale_after_secs: 12 * 60 * 60,
-            session_stale_after_secs: 12 * 60 * 60,
+            sync_intervals: FamilyRefreshPolicy {
+                personal: 3600,
+                daily: 300,
+                heartrate: 60,
+                workout: 600,
+                enhanced_tag: 300,
+                session: 300,
+            },
+            stale_after: FamilyRefreshPolicy {
+                personal: 72 * 60 * 60,
+                daily: 12 * 60 * 60,
+                heartrate: 15 * 60,
+                workout: 24 * 60 * 60,
+                enhanced_tag: 12 * 60 * 60,
+                session: 12 * 60 * 60,
+            },
         }
     }
 
@@ -12587,7 +12497,6 @@ mod tests {
             selected_timeline_point: 0,
             timeline_window_hours: 24,
             overlay_toggle_focus: OverlayToggleFocusMemory::default(),
-            trends_window: TrendWindowKind::Days7,
             trend_sort_mode: TrendSortMode::Concern,
             trends_matrix_subfocus: TrendsMatrixSubfocus::SortTabs,
             selected_trend_row_index: 0,
@@ -12847,7 +12756,6 @@ mod tests {
             explain_overlay_toggle_index: 0,
             patterns_overlay_toggle_index: 0,
             window_hours: 24,
-            trends_window: TrendWindowKind::Days7,
             trend_sort_mode: TrendSortMode::Concern,
             trends_matrix_subfocus: TrendsMatrixSubfocus::SortTabs,
             selected_trend_row_index: 0,
@@ -13645,7 +13553,6 @@ mod tests {
                 explain_overlay_toggle_index: 0,
                 patterns_overlay_toggle_index: 0,
                 window_hours: 24,
-                trends_window: TrendWindowKind::Days7,
                 trend_sort_mode: TrendSortMode::Concern,
                 trends_matrix_subfocus: TrendsMatrixSubfocus::SortTabs,
                 selected_trend_row_index: 0,
@@ -13770,7 +13677,6 @@ mod tests {
                 explain_overlay_toggle_index: 0,
                 patterns_overlay_toggle_index: 0,
                 window_hours: 24,
-                trends_window: TrendWindowKind::Days7,
                 trend_sort_mode: TrendSortMode::Concern,
                 trends_matrix_subfocus: TrendsMatrixSubfocus::SortTabs,
                 selected_trend_row_index: 0,
@@ -14530,7 +14436,6 @@ mod tests {
                 explain_overlay_toggle_index: 0,
                 patterns_overlay_toggle_index: 0,
                 window_hours: 24,
-                trends_window: TrendWindowKind::Days7,
                 trend_sort_mode: TrendSortMode::Concern,
                 trends_matrix_subfocus: TrendsMatrixSubfocus::SortTabs,
                 selected_trend_row_index: 0,

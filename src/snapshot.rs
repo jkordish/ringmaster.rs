@@ -1716,8 +1716,8 @@ pub fn validate_snapshot_bundle(bundle: &SnapshotBundleV1) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error if the artifact payload, overview, or rendered briefing cannot be normalized.
-pub fn artifact_record(input: ArtifactRecordInput<'_>) -> Result<AiArtifactRecord> {
-    Ok(AiArtifactRecord {
+pub fn artifact_record(input: ArtifactRecordInput<'_>) -> AiArtifactRecord {
+    AiArtifactRecord {
         artifact_id: input.artifact_id,
         artifact_kind: input.artifact_kind.to_owned(),
         output_schema_version: input.output_schema_version.to_owned(),
@@ -1738,7 +1738,7 @@ pub fn artifact_record(input: ArtifactRecordInput<'_>) -> Result<AiArtifactRecor
         request_fingerprint: input.request_fingerprint.map(ToOwned::to_owned),
         payload_json: input.payload_json,
         rendered_briefing: input.rendered_briefing,
-    })
+    }
 }
 
 fn provenance_record(

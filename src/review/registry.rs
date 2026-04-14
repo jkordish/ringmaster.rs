@@ -19,7 +19,6 @@ pub enum SignalGranularity {
 pub enum SignalDirectionality {
     HigherBetter,
     LowerBetter,
-    Neutral,
     Contextual,
 }
 
@@ -352,17 +351,6 @@ impl ReviewFocus {
             Self::Recovery => "Recovery",
             Self::Stress => "Stress",
             Self::Activity => "Activity",
-        }
-    }
-
-    #[must_use]
-    pub const fn next(self) -> Self {
-        match self {
-            Self::Readiness => Self::Sleep,
-            Self::Sleep => Self::Recovery,
-            Self::Recovery => Self::Stress,
-            Self::Stress => Self::Activity,
-            Self::Activity => Self::Readiness,
         }
     }
 

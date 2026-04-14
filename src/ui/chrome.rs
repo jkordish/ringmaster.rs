@@ -289,7 +289,7 @@ mod tests {
             PanelShellSpec {
                 title: "Readiness",
                 status: "FRESH",
-                status_tone: Tone::Positive,
+                status_tone: Tone::JudgedOk,
                 focused: false,
                 expanded: false,
                 kind: PanelKind::Section,

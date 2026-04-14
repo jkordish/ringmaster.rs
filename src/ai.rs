@@ -182,7 +182,6 @@ pub struct FollowUpArtifactV1 {
 
 #[derive(Debug, Clone)]
 pub struct ReviewRunOutput {
-    pub artifact: ReviewArtifactV1,
     pub payload_json: String,
     pub rendered_briefing: String,
     pub request_preview: AiRequestPreview,
@@ -192,7 +191,6 @@ pub struct ReviewRunOutput {
 
 #[derive(Debug, Clone)]
 pub struct CompareRunOutput {
-    pub artifact: CompareArtifactV1,
     pub payload_json: String,
     pub rendered_briefing: String,
     pub request_preview: AiRequestPreview,
@@ -202,9 +200,6 @@ pub struct CompareRunOutput {
 
 #[derive(Debug, Clone)]
 pub struct FollowUpRunOutput {
-    pub artifact: FollowUpArtifactV1,
-    pub payload_json: String,
-    pub rendered_briefing: String,
     pub request_preview: AiRequestPreview,
     pub request_fingerprint: String,
     pub record: AiArtifactRecord,
@@ -268,10 +263,10 @@ pub struct ReviewProviderRequest<'a> {
 }
 
 pub struct CompareProviderRequest<'a> {
-    pub snapshot_a: &'a SnapshotBundleV1,
-    pub snapshot_a_json: &'a str,
-    pub snapshot_b: &'a SnapshotBundleV1,
-    pub snapshot_b_json: &'a str,
+    pub reference_snapshot: &'a SnapshotBundleV1,
+    pub reference_json: &'a str,
+    pub comparison_snapshot: &'a SnapshotBundleV1,
+    pub comparison_json: &'a str,
 }
 
 pub struct FollowUpProviderRequest<'a> {
@@ -341,7 +336,7 @@ pub fn preview_review_request(
         .map(|plan| plan.preview)
 }
 
-pub(crate) async fn review_snapshot_with_run_identity(
+pub async fn review_snapshot_with_run_identity(
     config: &Config,
     snapshot: &LoadedSnapshotArtifact,
     dry_run: bool,
@@ -392,10 +387,9 @@ pub(crate) async fn review_snapshot_with_run_identity(
         request_fingerprint: Some(&request_plan.request_fingerprint),
         payload_json: payload_json.clone(),
         rendered_briefing: rendered_briefing.clone(),
-    })?;
+    });
 
     Ok(ReviewRunOutput {
-        artifact,
         payload_json,
         rendered_briefing,
         request_preview: request_plan.preview,
@@ -482,7 +476,7 @@ pub fn preview_compare_request(
     .map(|plan| plan.preview)
 }
 
-pub(crate) async fn compare_snapshots_with_run_identity(
+pub async fn compare_snapshots_with_run_identity(
     config: &Config,
     snapshot_a: &LoadedSnapshotArtifact,
     snapshot_b: &LoadedSnapshotArtifact,
@@ -502,10 +496,10 @@ pub(crate) async fn compare_snapshots_with_run_identity(
     apply_provider_metadata_to_preview(&mut request_plan.preview, &metadata);
     let artifact = provider
         .compare(CompareProviderRequest {
-            snapshot_a: &snapshot_a.bundle,
-            snapshot_a_json: &snapshot_a.compact_json,
-            snapshot_b: &snapshot_b.bundle,
-            snapshot_b_json: &snapshot_b.compact_json,
+            reference_snapshot: &snapshot_a.bundle,
+            reference_json: &snapshot_a.compact_json,
+            comparison_snapshot: &snapshot_b.bundle,
+            comparison_json: &snapshot_b.compact_json,
         })
         .await?;
     let created_at = resolve_run_created_at(run_identity_override)?;
@@ -543,10 +537,9 @@ pub(crate) async fn compare_snapshots_with_run_identity(
         request_fingerprint: Some(&request_plan.request_fingerprint),
         payload_json: payload_json.clone(),
         rendered_briefing: rendered_briefing.clone(),
-    })?;
+    });
 
     Ok(CompareRunOutput {
-        artifact,
         payload_json,
         rendered_briefing,
         request_preview: request_plan.preview,
@@ -555,7 +548,7 @@ pub(crate) async fn compare_snapshots_with_run_identity(
     })
 }
 
-pub(crate) async fn follow_up_from_artifact_with_run_identity(
+pub async fn follow_up_from_artifact_with_run_identity(
     config: &Config,
     snapshots: &[LoadedSnapshotArtifact],
     source_record: &AiArtifactRecord,
@@ -589,7 +582,6 @@ pub(crate) async fn follow_up_from_artifact_with_run_identity(
         .await?;
     let created_at = resolve_run_created_at(run_identity_override)?;
     let payload_json = serde_json::to_string_pretty(&artifact)?;
-    let rendered_briefing = render_follow_up_briefing(&artifact);
     let summary_cache = follow_up_summary_cache(&artifact);
     let privacy_profile = merged_snapshot_privacy_profile(snapshots).unwrap_or_else(|| {
         parse_privacy_profile(&source_record.privacy_profile).unwrap_or(PrivacyProfile::Redacted)
@@ -621,13 +613,10 @@ pub(crate) async fn follow_up_from_artifact_with_run_identity(
         summary_cache: &summary_cache,
         request_fingerprint: Some(&request_plan.request_fingerprint),
         payload_json: payload_json.clone(),
-        rendered_briefing: rendered_briefing.clone(),
-    })?;
+        rendered_briefing: render_follow_up_briefing(&artifact),
+    });
 
     Ok(FollowUpRunOutput {
-        artifact,
-        payload_json,
-        rendered_briefing,
         request_preview: request_plan.preview,
         request_fingerprint: request_plan.request_fingerprint,
         record,
@@ -1102,8 +1091,8 @@ impl AiProvider for DryRunProvider {
     ) -> ProviderFuture<'a, CompareArtifactV1> {
         Box::pin(async move {
             Ok(dry_run_compare_artifact(
-                request.snapshot_a,
-                request.snapshot_b,
+                request.reference_snapshot,
+                request.comparison_snapshot,
             ))
         })
     }
@@ -1187,10 +1176,10 @@ impl AiProvider for OpenAiProvider {
         Box::pin(async move {
             let plan = build_compare_request_plan(
                 &self.config,
-                request.snapshot_a,
-                request.snapshot_a_json,
-                request.snapshot_b,
-                request.snapshot_b_json,
+                request.reference_snapshot,
+                request.reference_json,
+                request.comparison_snapshot,
+                request.comparison_json,
             )?;
             self.invoke_structured_output::<CompareArtifactV1>(plan)
                 .await
@@ -2885,11 +2874,12 @@ mod tests {
         )
         .await
         .unwrap_or_else(|error| unreachable!("fixture review should succeed: {error}"));
-        assert_eq!(output.artifact.status, ArtifactStatus::Fixture);
+        let artifact: ReviewArtifactV1 = serde_json::from_str(&output.payload_json)
+            .unwrap_or_else(|error| unreachable!("review output should decode: {error}"));
+        assert_eq!(artifact.status, ArtifactStatus::Fixture);
         assert!(output.payload_json.contains("fixture review"));
         assert_eq!(
-            output
-                .artifact
+            artifact
                 .follow_up_targets
                 .iter()
                 .map(|target| target.command.as_str())

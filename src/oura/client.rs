@@ -546,19 +546,16 @@ impl OuraClient for ReqwestOuraClient {
 }
 
 impl FixtureOuraClient {
-    /// # Errors
-    ///
-    /// Returns an error if the fixture directory cannot be prepared for fixture-backed API reads.
-    pub fn new(config: &Config, fixture_dir: impl Into<PathBuf>) -> Result<Self> {
+    pub fn new(config: &Config, fixture_dir: impl Into<PathBuf>) -> Self {
         let fixture_dir = fixture_dir.into();
         let granted_scopes = available_fixture_scopes(&fixture_dir);
-        Ok(Self {
+        Self {
             fixture_dir,
             capability_report: CapabilityReport::from_scopes(
                 &config.oura.requested_scopes,
                 &granted_scopes,
             ),
-        })
+        }
     }
 
     fn load_json(&self, name: &str) -> Result<String> {

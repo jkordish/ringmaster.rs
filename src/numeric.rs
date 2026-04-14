@@ -77,6 +77,7 @@ pub fn rounded_clamped_f64_to_i16(value: f64, min: f64, max: f64) -> i16 {
     })
 }
 
+#[cfg(test)]
 #[must_use]
 pub fn usize_ratio(value: usize, divisor: usize) -> f64 {
     if divisor == 0 {

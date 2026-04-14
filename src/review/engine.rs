@@ -9,8 +9,8 @@ use crate::evidence::policy::{append_required_disclaimers, guidance_comparison_t
 use crate::oura::models::{AuthStatus, CapabilityKind};
 use crate::review::features::ReviewSufficiency;
 use crate::review::registry::{
-    EvidenceKind, ReviewFocus, SignalDefinition, SignalDirectionality, WeeklyAggregation,
-    signal_definition, signal_definitions,
+    EvidenceKind, SignalDefinition, SignalDirectionality, WeeklyAggregation, signal_definition,
+    signal_definitions,
 };
 use crate::review::templates::{
     confidence_badge, headline_for_signal, sufficiency_line, summary_for_signal, why_this_is_shown,
@@ -31,7 +31,6 @@ pub enum ReviewMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ReviewSection {
-    Observation,
     PositiveChange,
     NegativeDrift,
     UnresolvedAnomaly,
@@ -151,15 +150,6 @@ pub fn build_review_deck(
         unresolved_anomalies,
         warnings,
     })
-}
-
-#[must_use]
-pub fn focus_cards(focus: ReviewFocus, cards: &[ReviewCard]) -> Vec<&ReviewCard> {
-    let focus_keys = focus.primary_signal_keys();
-    cards
-        .iter()
-        .filter(|card| focus_keys.contains(&card.signal_key.as_str()))
-        .collect()
 }
 
 #[must_use]
@@ -703,9 +693,7 @@ fn classify_section(
                 ReviewSection::NegativeDrift
             }
         }
-        SignalDirectionality::Neutral | SignalDirectionality::Contextual => {
-            ReviewSection::UnresolvedAnomaly
-        }
+        SignalDirectionality::Contextual => ReviewSection::UnresolvedAnomaly,
     }
 }
 

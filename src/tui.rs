@@ -2837,14 +2837,14 @@ fn build_eval_jump_action(eval: &AiEvalRunRecord) -> Option<Action> {
                 status_line: format!("Opened snapshot linked from eval case {}.", case.case_id),
             });
         }
-        if let Some(ai_run_id) = &case.candidate.lineage.ai_run_id {
+        if let Some(ai_run_id) = &case.candidate.lineage.run {
             return Some(Action::JumpToAiBrowserRecord {
                 tab: AiBrowserTab::Runs,
                 record_id: ai_run_id.clone(),
                 status_line: format!("Opened AI run linked from eval case {}.", case.case_id),
             });
         }
-        if let Some(report_id) = &case.candidate.lineage.report_id {
+        if let Some(report_id) = &case.candidate.lineage.report {
             return Some(Action::JumpToAiBrowserRecord {
                 tab: AiBrowserTab::Reports,
                 record_id: report_id.clone(),
@@ -2862,7 +2862,7 @@ fn build_eval_jump_action(eval: &AiEvalRunRecord) -> Option<Action> {
             });
         }
         if let Some(baseline) = &case.baseline {
-            if let Some(ai_run_id) = &baseline.lineage.ai_run_id {
+            if let Some(ai_run_id) = &baseline.lineage.run {
                 return Some(Action::JumpToAiBrowserRecord {
                     tab: AiBrowserTab::Runs,
                     record_id: ai_run_id.clone(),
@@ -2872,7 +2872,7 @@ fn build_eval_jump_action(eval: &AiEvalRunRecord) -> Option<Action> {
                     ),
                 });
             }
-            if let Some(report_id) = &baseline.lineage.report_id {
+            if let Some(report_id) = &baseline.lineage.report {
                 return Some(Action::JumpToAiBrowserRecord {
                     tab: AiBrowserTab::Reports,
                     record_id: report_id.clone(),
@@ -4722,20 +4722,20 @@ mod tests {
         let mut app = build_demo_state(&config);
         app.active_screen = Screen::Ai;
 
-        app.handle(Action::NextAiBrowserTab);
+        app.advance_ai_browser_tab_for_test();
         let snapshot_output = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("snapshot browser should render: {error}"));
         assert!(snapshot_output.contains("Snapshot artifact"));
         assert!(snapshot_output.contains("Artifact actions"));
         assert!(snapshot_output.contains("Compare previous snapshot"));
 
-        app.handle(Action::NextAiBrowserTab);
+        app.advance_ai_browser_tab_for_test();
         let report_output = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("report browser should render: {error}"));
         assert!(report_output.contains("Report export"));
         assert!(report_output.contains("Daily review briefing"));
 
-        app.handle(Action::NextAiBrowserTab);
+        app.advance_ai_browser_tab_for_test();
         let eval_output = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("eval browser should render: {error}"));
         assert!(eval_output.contains("Eval run"));

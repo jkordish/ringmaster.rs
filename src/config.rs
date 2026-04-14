@@ -194,11 +194,6 @@ impl GuidanceConfig {
             GuidanceProfileSource::Environment => "environment",
         }
     }
-
-    #[must_use]
-    pub const fn is_explicit(&self) -> bool {
-        !matches!(self.profile_source, GuidanceProfileSource::Default)
-    }
 }
 
 impl Default for GuidanceConfig {
@@ -1058,14 +1053,6 @@ impl OuraSecretBackend {
             ))),
         }
     }
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Keyring => "keyring",
-            Self::File => "file",
-        }
-    }
 }
 
 impl WebhookConfig {
@@ -1153,16 +1140,16 @@ impl AiProviderKind {
             ))),
         }
     }
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::OpenAi => "openai",
-        }
-    }
 }
 
 impl AiRequestMode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stateless => "stateless",
+            Self::Stateful => "stateful",
+        }
+    }
+
     fn parse(value: &str) -> Result<Self> {
         match value {
             "stateless" => Ok(Self::Stateless),
@@ -1172,17 +1159,16 @@ impl AiRequestMode {
             ))),
         }
     }
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Stateless => "stateless",
-            Self::Stateful => "stateful",
-        }
-    }
 }
 
 impl AiInputTransport {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inline => "inline",
+            Self::FileUpload => "file_upload",
+        }
+    }
+
     fn parse(value: &str) -> Result<Self> {
         match value {
             "inline" => Ok(Self::Inline),
@@ -1190,14 +1176,6 @@ impl AiInputTransport {
             other => Err(RingmasterError::Config(format!(
                 "ai.input_transport must be `inline` or `file_upload`, got `{other}`"
             ))),
-        }
-    }
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Inline => "inline",
-            Self::FileUpload => "file_upload",
         }
     }
 }
@@ -1210,14 +1188,6 @@ impl PromptCacheMode {
             other => Err(RingmasterError::Config(format!(
                 "ai.prompt_cache must be `off` or `auto`, got `{other}`"
             ))),
-        }
-    }
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Auto => "auto",
         }
     }
 }

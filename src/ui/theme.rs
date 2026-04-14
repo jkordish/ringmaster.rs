@@ -48,25 +48,13 @@ impl ColorCapability {
 
         Self::Ansi16
     }
-
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::TrueColor => "truecolor",
-            Self::Ansi256 => "ansi256",
-            Self::Ansi16 => "ansi16",
-            Self::Mono => "mono",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
     Default,
     Accent,
-    Positive,
     Warning,
-    Danger,
     Info,
     Muted,
     Focus,
@@ -197,18 +185,13 @@ impl Theme {
     }
 
     #[must_use]
-    pub const fn capability(self) -> ColorCapability {
-        self.capability
-    }
-
-    #[must_use]
     pub const fn tone(self, tone: Tone) -> Color {
         match tone {
             Tone::Default => self.text_secondary,
             Tone::Accent | Tone::Info | Tone::Fresh | Tone::AccentNeutral => self.fresh_cyan,
-            Tone::Positive | Tone::JudgedOk => self.ok_mint,
+            Tone::JudgedOk => self.ok_mint,
             Tone::Warning | Tone::Stale | Tone::JudgedWarn => self.warn_butter,
-            Tone::Danger | Tone::Error | Tone::JudgedAlert => self.alert_rose,
+            Tone::Error | Tone::JudgedAlert => self.alert_rose,
             Tone::Muted => self.text_tertiary,
             Tone::Focus => self.focus_lilac,
             Tone::Unavailable => self.na_gray,
@@ -266,13 +249,6 @@ impl Theme {
     }
 
     #[must_use]
-    pub fn disabled(self) -> Style {
-        Style::default()
-            .fg(self.text_disabled)
-            .add_modifier(Modifier::DIM)
-    }
-
-    #[must_use]
     pub fn badge(self, tone: Tone) -> Style {
         let style = Style::default()
             .fg(self.tone(tone))
@@ -296,9 +272,9 @@ impl Theme {
             Tone::Focus => self.border_focus,
             Tone::Unavailable => self.na_gray,
             Tone::Accent | Tone::Info | Tone::Fresh | Tone::AccentNeutral => self.fresh_cyan,
-            Tone::Positive | Tone::JudgedOk => self.ok_mint,
+            Tone::JudgedOk => self.ok_mint,
             Tone::Warning | Tone::Stale | Tone::JudgedWarn => self.warn_butter,
-            Tone::Danger | Tone::Error | Tone::JudgedAlert => self.alert_rose,
+            Tone::Error | Tone::JudgedAlert => self.alert_rose,
             Tone::DeltaCool => self.delta_cool,
             Tone::DeltaWarm => self.delta_warm,
         };
@@ -401,11 +377,10 @@ impl Theme {
             | Tone::JudgedWarn
             | Tone::DeltaWarm
             | Tone::DeltaCool
-            | Tone::Positive
             | Tone::JudgedOk
             | Tone::Fresh
             | Tone::Info => style.add_modifier(Modifier::BOLD),
-            Tone::Danger | Tone::Error | Tone::JudgedAlert => {
+            Tone::Error | Tone::JudgedAlert => {
                 style.add_modifier(Modifier::BOLD | Modifier::REVERSED)
             }
             Tone::Unavailable | Tone::Muted => style.add_modifier(Modifier::DIM),

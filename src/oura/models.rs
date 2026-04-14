@@ -56,30 +56,8 @@ pub struct AuthStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DailySummary {
-    pub day: String,
-    pub sleep_score: Option<u8>,
-    pub readiness_score: Option<u8>,
-    pub activity_score: Option<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HeartRateSample {
-    pub recorded_at: String,
-    pub bpm: u16,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkoutRecord {
-    pub workout_id: String,
-    pub started_at: String,
-    pub sport: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TagSource {
     Basic,
-    Enhanced,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,13 +66,6 @@ pub struct TagRecord {
     pub day: String,
     pub label: String,
     pub source: TagSource,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionRecord {
-    pub session_id: String,
-    pub started_at: String,
-    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -600,11 +571,6 @@ impl WorkoutDocument {
             .or_else(|| self.sport.clone())
             .or_else(|| self.activity.clone())
             .unwrap_or_else(|| "Workout".to_owned())
-    }
-
-    #[must_use]
-    pub fn subtype(&self) -> Option<String> {
-        self.sport.clone().or_else(|| self.activity.clone())
     }
 }
 

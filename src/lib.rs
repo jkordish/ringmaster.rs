@@ -21,6 +21,9 @@
     clippy::cargo,
     clippy::perf
 )]
+// These are the only remaining crate-wide exceptions needed to keep the repo on a
+// strict `cargo clippy --all-targets --all-features -- -D warnings` gate while the
+// larger dependency-graph and oversized-module follow-up stays scoped outside this pass.
 #![allow(clippy::multiple_crate_versions, clippy::too_many_lines)]
 
 mod action;
@@ -1301,18 +1304,22 @@ const fn normalize_fixture_snapshot_refresh_policy(
     refresh_policy: &mut crate::app::RefreshPolicySnapshot,
 ) {
     *refresh_policy = crate::app::RefreshPolicySnapshot {
-        personal_interval_secs: FIXTURE_SNAPSHOT_PERSONAL_INTERVAL_SECS,
-        daily_interval_secs: FIXTURE_SNAPSHOT_DAILY_INTERVAL_SECS,
-        heartrate_interval_secs: FIXTURE_SNAPSHOT_HEARTRATE_INTERVAL_SECS,
-        workout_interval_secs: FIXTURE_SNAPSHOT_WORKOUT_INTERVAL_SECS,
-        enhanced_tag_interval_secs: FIXTURE_SNAPSHOT_ENHANCED_TAG_INTERVAL_SECS,
-        session_interval_secs: FIXTURE_SNAPSHOT_SESSION_INTERVAL_SECS,
-        personal_stale_after_secs: FIXTURE_SNAPSHOT_PERSONAL_STALE_AFTER_SECS,
-        daily_stale_after_secs: FIXTURE_SNAPSHOT_DAILY_STALE_AFTER_SECS,
-        heartrate_stale_after_secs: FIXTURE_SNAPSHOT_HEARTRATE_STALE_AFTER_SECS,
-        workout_stale_after_secs: FIXTURE_SNAPSHOT_WORKOUT_STALE_AFTER_SECS,
-        enhanced_tag_stale_after_secs: FIXTURE_SNAPSHOT_ENHANCED_TAG_STALE_AFTER_SECS,
-        session_stale_after_secs: FIXTURE_SNAPSHOT_SESSION_STALE_AFTER_SECS,
+        sync_intervals: crate::app::FamilyRefreshPolicy {
+            personal: FIXTURE_SNAPSHOT_PERSONAL_INTERVAL_SECS,
+            daily: FIXTURE_SNAPSHOT_DAILY_INTERVAL_SECS,
+            heartrate: FIXTURE_SNAPSHOT_HEARTRATE_INTERVAL_SECS,
+            workout: FIXTURE_SNAPSHOT_WORKOUT_INTERVAL_SECS,
+            enhanced_tag: FIXTURE_SNAPSHOT_ENHANCED_TAG_INTERVAL_SECS,
+            session: FIXTURE_SNAPSHOT_SESSION_INTERVAL_SECS,
+        },
+        stale_after: crate::app::FamilyRefreshPolicy {
+            personal: FIXTURE_SNAPSHOT_PERSONAL_STALE_AFTER_SECS,
+            daily: FIXTURE_SNAPSHOT_DAILY_STALE_AFTER_SECS,
+            heartrate: FIXTURE_SNAPSHOT_HEARTRATE_STALE_AFTER_SECS,
+            workout: FIXTURE_SNAPSHOT_WORKOUT_STALE_AFTER_SECS,
+            enhanced_tag: FIXTURE_SNAPSHOT_ENHANCED_TAG_STALE_AFTER_SECS,
+            session: FIXTURE_SNAPSHOT_SESSION_STALE_AFTER_SECS,
+        },
     };
 }
 
@@ -2055,7 +2062,7 @@ fn selected_sync_families(selected: &[SyncFamilyArg]) -> Vec<SyncFamily> {
 
     selected
         .iter()
-        .map(|family| match family {
+        .filter_map(|family| match family {
             SyncFamilyArg::All => None,
             SyncFamilyArg::Personal => Some(SyncFamily::Personal),
             SyncFamilyArg::Daily => Some(SyncFamily::Daily),
@@ -2065,7 +2072,6 @@ fn selected_sync_families(selected: &[SyncFamilyArg]) -> Vec<SyncFamily> {
             SyncFamilyArg::Tag => Some(SyncFamily::EnhancedTag),
             SyncFamilyArg::Session => Some(SyncFamily::Session),
         })
-        .flatten()
         .collect()
 }
 
@@ -5557,19 +5563,19 @@ mod tests {
         );
         assert!(snapshot.auth_status.last_error.is_none());
         assert_eq!(
-            snapshot.refresh_policy.personal_interval_secs,
+            snapshot.refresh_policy.sync_intervals.personal,
             super::FIXTURE_SNAPSHOT_PERSONAL_INTERVAL_SECS
         );
         assert_eq!(
-            snapshot.refresh_policy.daily_interval_secs,
+            snapshot.refresh_policy.sync_intervals.daily,
             super::FIXTURE_SNAPSHOT_DAILY_INTERVAL_SECS
         );
         assert_eq!(
-            snapshot.refresh_policy.heartrate_interval_secs,
+            snapshot.refresh_policy.sync_intervals.heartrate,
             super::FIXTURE_SNAPSHOT_HEARTRATE_INTERVAL_SECS
         );
         assert_eq!(
-            snapshot.refresh_policy.personal_stale_after_secs,
+            snapshot.refresh_policy.stale_after.personal,
             super::FIXTURE_SNAPSHOT_PERSONAL_STALE_AFTER_SECS
         );
     }

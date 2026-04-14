@@ -267,7 +267,7 @@ async fn prepare_sync_client_setup(
 ) -> Result<PreparedSyncExecution> {
     match source {
         SyncSourcePlan::Fixture(fixture_dir) => {
-            let client = FixtureOuraClient::new(config, fixture_dir.clone())?;
+            let client = FixtureOuraClient::new(config, fixture_dir.clone());
             let capability_report = client.capability_report();
             Ok(PreparedSyncExecution::Ready(SyncClientSetup {
                 client: Box::new(client),
@@ -559,10 +559,12 @@ async fn sync_personal_info(
         config,
         &store_plan,
         capability_report,
-        CapabilityKind::Personal,
-        SyncFamily::Personal,
-        "`personal` scope is not requested; skipping profile sync.",
-        "Missing `personal` scope; profile data remains unavailable.",
+        FamilyScopeGuard {
+            capability: CapabilityKind::Personal,
+            family: SyncFamily::Personal,
+            not_requested_message: "`personal` scope is not requested; skipping profile sync.",
+            missing_scope_message: "Missing `personal` scope; profile data remains unavailable.",
+        },
         options,
     )? {
         return Ok(report);
@@ -1161,10 +1163,12 @@ async fn sync_daily(
         config,
         &store_plan,
         capability_report,
-        CapabilityKind::Daily,
-        SyncFamily::Daily,
-        "`daily` scope is not requested; skipping daily summary sync.",
-        "Missing `daily` scope; dashboard summary rows remain unavailable.",
+        FamilyScopeGuard {
+            capability: CapabilityKind::Daily,
+            family: SyncFamily::Daily,
+            not_requested_message: "`daily` scope is not requested; skipping daily summary sync.",
+            missing_scope_message: "Missing `daily` scope; dashboard summary rows remain unavailable.",
+        },
         options,
     )? {
         return Ok(report);
@@ -1249,10 +1253,12 @@ async fn sync_spo2(
         config,
         &store_plan,
         capability_report,
-        CapabilityKind::Spo2,
-        SyncFamily::Spo2,
-        "`spo2` scope is not requested; skipping blood oxygen sync.",
-        "Missing `spo2` scope; blood oxygen coverage remains unavailable.",
+        FamilyScopeGuard {
+            capability: CapabilityKind::Spo2,
+            family: SyncFamily::Spo2,
+            not_requested_message: "`spo2` scope is not requested; skipping blood oxygen sync.",
+            missing_scope_message: "Missing `spo2` scope; blood oxygen coverage remains unavailable.",
+        },
         options,
     )? {
         return Ok(report);
@@ -1842,10 +1848,12 @@ async fn sync_heartrate(
         config,
         &store_plan,
         capability_report,
-        CapabilityKind::Heartrate,
-        SyncFamily::Heartrate,
-        "`heartrate` scope is not requested; skipping heartrate sync.",
-        "Missing `heartrate` scope; timeline and trends remain stale.",
+        FamilyScopeGuard {
+            capability: CapabilityKind::Heartrate,
+            family: SyncFamily::Heartrate,
+            not_requested_message: "`heartrate` scope is not requested; skipping heartrate sync.",
+            missing_scope_message: "Missing `heartrate` scope; timeline and trends remain stale.",
+        },
         options,
     )? {
         return Ok(report);
@@ -1906,10 +1914,12 @@ async fn sync_workouts(
         config,
         &store_plan,
         capability_report,
-        CapabilityKind::Workout,
-        SyncFamily::Workout,
-        "`workout` scope is not requested; skipping workout sync.",
-        "Missing `workout` scope; workout overlays and context evidence remain unavailable.",
+        FamilyScopeGuard {
+            capability: CapabilityKind::Workout,
+            family: SyncFamily::Workout,
+            not_requested_message: "`workout` scope is not requested; skipping workout sync.",
+            missing_scope_message: "Missing `workout` scope; workout overlays and context evidence remain unavailable.",
+        },
         options,
     )? {
         return Ok(report);
@@ -1967,10 +1977,12 @@ async fn sync_enhanced_tags(
         config,
         &store_plan,
         capability_report,
-        CapabilityKind::EnhancedTag,
-        SyncFamily::EnhancedTag,
-        "`tag` scope is not requested; skipping tag sync.",
-        "Missing `tag` scope; tag overlays and explainability evidence remain unavailable.",
+        FamilyScopeGuard {
+            capability: CapabilityKind::EnhancedTag,
+            family: SyncFamily::EnhancedTag,
+            not_requested_message: "`tag` scope is not requested; skipping tag sync.",
+            missing_scope_message: "Missing `tag` scope; tag overlays and explainability evidence remain unavailable.",
+        },
         options,
     )? {
         return Ok(report);
@@ -2041,10 +2053,12 @@ async fn sync_sessions(
         config,
         &store_plan,
         capability_report,
-        CapabilityKind::Session,
-        SyncFamily::Session,
-        "`session` scope is not requested; skipping session sync.",
-        "Missing `session` scope; session overlays and explainability evidence remain unavailable.",
+        FamilyScopeGuard {
+            capability: CapabilityKind::Session,
+            family: SyncFamily::Session,
+            not_requested_message: "`session` scope is not requested; skipping session sync.",
+            missing_scope_message: "Missing `session` scope; session overlays and explainability evidence remain unavailable.",
+        },
         options,
     )? {
         return Ok(report);
@@ -2520,17 +2534,22 @@ fn failed_slice_report_family(family: SyncFamily, problem: OuraProblem) -> Slice
     )
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FamilyScopeGuard<'a> {
+    capability: CapabilityKind,
+    family: SyncFamily,
+    not_requested_message: &'a str,
+    missing_scope_message: &'a str,
+}
+
 fn guard_family_scope(
     config: &Config,
     store_plan: &StorePlan,
     capability_report: &CapabilityReport,
-    capability: CapabilityKind,
-    family: SyncFamily,
-    not_requested_message: &str,
-    missing_scope_message: &str,
+    guard: FamilyScopeGuard<'_>,
     options: &SyncOptions,
 ) -> Result<Option<SliceReport>> {
-    let Some(entry) = capability_report.status_for(capability) else {
+    let Some(entry) = capability_report.status_for(guard.capability) else {
         return Ok(None);
     };
     if entry.granted {
@@ -2539,9 +2558,9 @@ fn guard_family_scope(
 
     let persist_store = reopen_store(config, store_plan)?;
     let report = if entry.requested {
-        slice_blocked_family(family, missing_scope_message)
+        slice_blocked_family(guard.family, guard.missing_scope_message)
     } else {
-        slice_success_family(family, not_requested_message)
+        slice_success_family(guard.family, guard.not_requested_message)
     };
     let persisted = persist_slice_report(
         config,

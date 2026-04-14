@@ -251,26 +251,6 @@ pub const fn default_search_scope(screen: Screen) -> Option<SearchScope> {
     }
 }
 
-#[must_use]
-pub fn next_region(screen: Screen, current: FocusRegion) -> FocusRegion {
-    let regions = screen_regions(screen);
-    let index = regions
-        .iter()
-        .position(|region| *region == current)
-        .unwrap_or(0);
-    regions[(index + 1) % regions.len()]
-}
-
-#[must_use]
-pub fn previous_region(screen: Screen, current: FocusRegion) -> FocusRegion {
-    let regions = screen_regions(screen);
-    let index = regions
-        .iter()
-        .position(|region| *region == current)
-        .unwrap_or(0);
-    regions[(index + regions.len() - 1) % regions.len()]
-}
-
 #[cfg(test)]
 mod tests {
     use super::{FocusRegion, SearchScope, default_region, default_search_scope, screen_regions};
