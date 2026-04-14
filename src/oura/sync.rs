@@ -791,7 +791,7 @@ fn summarize_family_status(statuses: &[SyncRunStatus]) -> SyncRunStatus {
 }
 
 fn recent_day_start(days: i64, now: OffsetDateTime) -> time::Date {
-    now.date() - Duration::days(days.saturating_sub(1))
+    now.date() - Duration::days(days.max(1).saturating_sub(1))
 }
 
 fn configured_daily_history_start(
@@ -2746,7 +2746,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use time::OffsetDateTime;
+    use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
     use super::{SyncOptions, sync_once};
     use crate::config::{
@@ -3526,13 +3526,21 @@ mod tests {
     }
 
     #[test]
+    fn recent_day_start_clamps_zero_days_to_today() {
+        let now = OffsetDateTime::parse("2026-04-14T12:00:00Z", &Rfc3339)
+            .unwrap_or_else(|error| panic!("timestamp should parse: {error}"));
+
+        assert_eq!(super::recent_day_start(0, now), now.date());
+    }
+
+    #[test]
     fn steady_state_heartrate_sync_skips_recent_reconcile() {
         let store = ok(Store::open_test_store(), "store should open");
         let config = fixture_config();
         let policy = SyncPolicy::for_family(&config.refresh, SyncFamily::Heartrate);
         let now = OffsetDateTime::now_utc();
         let success_end = ok(
-            super::format_timestamp_marker(now - time::Duration::hours(1)),
+            super::format_timestamp_marker(now - time::Duration::minutes(30)),
             "success watermark should format",
         );
         let reconcile_end = success_end.clone();

@@ -130,7 +130,7 @@ impl Default for RefreshConfig {
             daily_history_days: 90,
             daily_overlap_days: 2,
             heartrate_history_days: 7,
-            heartrate_overlap_minutes: 360,
+            heartrate_overlap_minutes: 60,
             workout_history_days: 90,
             workout_overlap_days: 2,
             enhanced_tag_history_days: 90,
@@ -910,6 +910,72 @@ impl RefreshConfig {
             }
         }
 
+        for (label, value) in [
+            ("refresh.daily_reconcile_days", self.daily_reconcile_days),
+            (
+                "refresh.daily_startup_catchup_days",
+                self.daily_startup_catchup_days,
+            ),
+            (
+                "refresh.daily_backfill_chunk_days",
+                self.daily_backfill_chunk_days,
+            ),
+            (
+                "refresh.heartrate_reconcile_days",
+                self.heartrate_reconcile_days,
+            ),
+            (
+                "refresh.heartrate_startup_catchup_days",
+                self.heartrate_startup_catchup_days,
+            ),
+            (
+                "refresh.heartrate_backfill_chunk_days",
+                self.heartrate_backfill_chunk_days,
+            ),
+            (
+                "refresh.workout_reconcile_days",
+                self.workout_reconcile_days,
+            ),
+            (
+                "refresh.workout_startup_catchup_days",
+                self.workout_startup_catchup_days,
+            ),
+            (
+                "refresh.workout_backfill_chunk_days",
+                self.workout_backfill_chunk_days,
+            ),
+            (
+                "refresh.enhanced_tag_reconcile_days",
+                self.enhanced_tag_reconcile_days,
+            ),
+            (
+                "refresh.enhanced_tag_startup_catchup_days",
+                self.enhanced_tag_startup_catchup_days,
+            ),
+            (
+                "refresh.enhanced_tag_backfill_chunk_days",
+                self.enhanced_tag_backfill_chunk_days,
+            ),
+            (
+                "refresh.session_reconcile_days",
+                self.session_reconcile_days,
+            ),
+            (
+                "refresh.session_startup_catchup_days",
+                self.session_startup_catchup_days,
+            ),
+            (
+                "refresh.session_backfill_chunk_days",
+                self.session_backfill_chunk_days,
+            ),
+        ] {
+            if value == 0 {
+                return Err(RingmasterError::Config(format!(
+                    "{label} must be at least 1"
+                )));
+            }
+        }
+
         if self.max_backoff_secs == 0 {
             return Err(RingmasterError::Config(
                 "refresh.max_backoff_secs must be at least 1".to_owned(),
@@ -1436,6 +1502,7 @@ mod tests {
         assert_eq!(config.refresh.workout_interval_secs, 600);
         assert_eq!(config.refresh.enhanced_tag_interval_secs, 300);
         assert_eq!(config.refresh.session_interval_secs, 300);
+        assert_eq!(config.refresh.heartrate_overlap_minutes, 60);
         assert_eq!(config.ai.provider, AiProviderKind::OpenAi);
         assert_eq!(config.ai.request_mode, AiRequestMode::Stateless);
         assert_eq!(config.ai.input_transport, AiInputTransport::Inline);
@@ -1546,6 +1613,57 @@ mod tests {
             error
                 .to_string()
                 .contains("refresh.daily_history_days must be at least 1")
+        );
+    }
+
+    #[test]
+    fn rejects_zero_gap_safe_sync_windows() {
+        let refresh = RefreshConfig {
+            daily_reconcile_days: 0,
+            demo_fixture_dir: None,
+            ..RefreshConfig::default()
+        };
+
+        let error = refresh
+            .validate()
+            .err()
+            .unwrap_or_else(|| panic!("zero reconcile days should be rejected"));
+        assert!(
+            error
+                .to_string()
+                .contains("refresh.daily_reconcile_days must be at least 1")
+        );
+
+        let refresh = RefreshConfig {
+            heartrate_startup_catchup_days: 0,
+            demo_fixture_dir: None,
+            ..RefreshConfig::default()
+        };
+
+        let error = refresh
+            .validate()
+            .err()
+            .unwrap_or_else(|| panic!("zero startup catchup days should be rejected"));
+        assert!(
+            error
+                .to_string()
+                .contains("refresh.heartrate_startup_catchup_days must be at least 1")
+        );
+
+        let refresh = RefreshConfig {
+            session_backfill_chunk_days: 0,
+            demo_fixture_dir: None,
+            ..RefreshConfig::default()
+        };
+
+        let error = refresh
+            .validate()
+            .err()
+            .unwrap_or_else(|| panic!("zero backfill chunk days should be rejected"));
+        assert!(
+            error
+                .to_string()
+                .contains("refresh.session_backfill_chunk_days must be at least 1")
         );
     }
 

@@ -8888,19 +8888,26 @@ fn availability_from_partial_failure_message(
     saw_rate_limit.then_some(TelemetryAvailability::RateLimited)
 }
 
-fn partial_failure_availability_for_capability(
+fn capability_failure_availability_for_capability(
     snapshot: &LiveSnapshot,
     freshness_family: DataFamily,
     capability: CapabilityKind,
 ) -> Option<TelemetryAvailability> {
     let markers = capability_failure_markers(capability);
-    if markers.is_empty() {
-        return None;
-    }
     let sync_family = sync_family_for_capability(capability, freshness_family);
     let sync_state = sync_state_for_sync_family(&snapshot.sync_states, sync_family)?;
-    if sync_state.status != SyncRunStatus::Partial {
+    if !matches!(
+        sync_state.status,
+        SyncRunStatus::Failed | SyncRunStatus::Partial
+    ) {
         return None;
+    }
+    let problem = sync_state.last_error.as_ref()?;
+    if sync_family != sync_family_for_data_family(freshness_family) {
+        return Some(availability_from_problem(problem));
+    }
+    if markers.is_empty() {
+        return Some(availability_from_problem(problem));
     }
     if let Some(availability) = sync_state
         .message
@@ -8909,7 +8916,6 @@ fn partial_failure_availability_for_capability(
     {
         return Some(availability);
     }
-    let problem = sync_state.last_error.as_ref()?;
     let combined = format!(
         "{} {} {}",
         sync_state.message.as_deref().unwrap_or_default(),
@@ -8951,7 +8957,7 @@ fn telemetry_availability_for_metric(
     match status {
         Some(entry) if entry.granted => {
             if !has_records
-                && let Some(partial_failure) = partial_failure_availability_for_capability(
+                && let Some(partial_failure) = capability_failure_availability_for_capability(
                     snapshot,
                     freshness_family,
                     capability,
@@ -9375,7 +9381,7 @@ fn coverage_availability(snapshot: &LiveSnapshot, family: CoverageFamily) -> Tel
                         })
                         .and_then(|state| state.last_error.as_ref())
                         .map_or(availability, availability_from_problem)
-                } else if let Some(partial_failure) = partial_failure_availability_for_capability(
+                } else if let Some(partial_failure) = capability_failure_availability_for_capability(
                     snapshot,
                     DataFamily::Daily,
                     CapabilityKind::Spo2,
@@ -9434,7 +9440,7 @@ fn coverage_detail(snapshot: &LiveSnapshot, family: CoverageFamily) -> String {
                         let freshness_detail = freshness.detail;
                         if snapshot.daily_spo2.is_empty()
                             && matches!(availability, TelemetryAvailability::Fresh)
-                            && partial_failure_availability_for_capability(
+                            && capability_failure_availability_for_capability(
                                 snapshot,
                                 DataFamily::Daily,
                                 CapabilityKind::Spo2,
@@ -9446,7 +9452,7 @@ fn coverage_detail(snapshot: &LiveSnapshot, family: CoverageFamily) -> String {
                         } else if let Some(sync_state) =
                             sync_state_for_sync_family(&snapshot.sync_states, SyncFamily::Spo2)
                         {
-                            if partial_failure_availability_for_capability(
+                            if capability_failure_availability_for_capability(
                                 snapshot,
                                 DataFamily::Daily,
                                 CapabilityKind::Spo2,
@@ -14003,6 +14009,49 @@ mod tests {
 
         assert_eq!(spo2, TelemetryAvailability::RateLimited);
         assert_eq!(stress, TelemetryAvailability::Error);
+    }
+
+    #[test]
+    fn telemetry_availability_for_metric_surfaces_failed_spo2_family_without_cached_rows() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.auth_status.capability_report = CapabilityReport::from_scopes(
+            &["daily".to_owned(), "spo2".to_owned()],
+            &["daily".to_owned(), "spo2".to_owned()],
+        );
+        snapshot.daily_spo2.clear();
+        snapshot.sync_states = vec![
+            sync_state_fixture(
+                "oura.daily",
+                "daily",
+                SyncRunStatus::Success,
+                &["daily"],
+                "daily sync complete",
+                None,
+                Some("2026-04-08T12:01:00Z"),
+            ),
+            sync_state_fixture(
+                "oura.spo2",
+                "spo2",
+                SyncRunStatus::Failed,
+                &["spo2"],
+                "SpO2 sync failed",
+                Some(OuraProblem::new(
+                    Some(429),
+                    "Too Many Requests",
+                    Some("spo2 rate limited".to_owned()),
+                )),
+                None,
+            ),
+        ];
+
+        let availability = super::telemetry_availability_for_metric(
+            &snapshot,
+            CapabilityKind::Spo2,
+            DataFamily::Daily,
+            false,
+        );
+
+        assert_eq!(availability, TelemetryAvailability::RateLimited);
     }
 
     #[test]

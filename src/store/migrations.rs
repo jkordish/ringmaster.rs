@@ -919,9 +919,14 @@ pub fn run_migrations(connection: &mut rusqlite::Connection) -> Result<Migration
             continue;
         }
 
-        let should_skip_sql = (migration.version == 17
-            && table_has_column(connection, "daily_sleep", "sleep_duration_seconds")?)
-            || (migration.version == 20 && !table_exists(connection, "sync_state")?);
+        let skip_due_to_missing_sync_state =
+            migration.version == 20 && !table_exists(connection, "sync_state")?;
+        if skip_due_to_missing_sync_state {
+            continue;
+        }
+
+        let should_skip_sql = migration.version == 17
+            && table_has_column(connection, "daily_sleep", "sleep_duration_seconds")?;
         let applied_at = now_rfc3339()?;
         let transaction = connection.transaction()?;
         if !should_skip_sql {
@@ -1454,7 +1459,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| unreachable!("phase8 sleep migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![17, 18, 19, 20]);
+        assert_eq!(report.applied_versions, vec![17, 18, 19]);
 
         let duration = connection
             .query_row(
@@ -1702,5 +1707,46 @@ mod tests {
         assert_eq!(success_end.as_deref(), Some("2026-04-08"));
         assert!(error_kind.is_none());
         assert!(error_detail.is_none());
+    }
+
+    #[test]
+    fn phase13_sync_state_migration_is_not_marked_applied_when_sync_state_is_absent() {
+        let mut connection = Connection::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("in-memory db should open: {error}"));
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );",
+            )
+            .unwrap_or_else(|error| unreachable!("schema migrations table should exist: {error}"));
+
+        for version in 1..=19 {
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+                    params![version, format!("phase-{version}"), "2026-04-09T00:00:00Z"],
+                )
+                .unwrap_or_else(|error| unreachable!("migration marker should insert: {error}"));
+        }
+
+        let report = run_migrations(&mut connection).unwrap_or_else(|error| {
+            unreachable!("migration pass should skip missing sync_state cleanly: {error}")
+        });
+        assert!(
+            report.applied_versions.is_empty(),
+            "missing sync_state should not be recorded as an applied migration"
+        );
+
+        let phase20_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 20",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|error| unreachable!("phase 20 marker query should succeed: {error}"));
+        assert_eq!(phase20_count, 0);
     }
 }
