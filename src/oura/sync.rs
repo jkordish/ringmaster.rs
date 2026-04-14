@@ -1881,11 +1881,14 @@ mod tests {
         AppPaths, Config, DEFAULT_OURA_API_BASE_URL, DEFAULT_OURA_AUTHORIZE_URL,
         DEFAULT_OURA_TOKEN_URL, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
     };
+    use crate::oura::client::PageFetch;
+    use crate::oura::models::{DailySpO2Document, SleepDocument};
     use crate::refresh::SyncFamily;
     use crate::store::Store;
-    use crate::store::queries::{SyncRunStatus, SyncStateRecord};
+    use crate::store::queries::{RawPayloadRecord, SyncRunStatus, SyncStateRecord};
     use crate::test_support::{ok, some};
     use crate::webhook::default_desired_subscriptions;
+    use serde_json::json;
 
     fn baseline_fixture_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase3")
@@ -2258,6 +2261,102 @@ mod tests {
         assert_eq!(counts.daily_sleep, 0);
         assert_eq!(counts.daily_readiness, 0);
         assert_eq!(counts.daily_activity, 0);
+    }
+
+    #[test]
+    fn persist_sleep_period_pages_writes_metric_samples() {
+        let store = ok(Store::open_test_store(), "store should open");
+        let document: SleepDocument = ok(
+            serde_json::from_value(json!({
+                "id": "sleep_2026-04-08_primary",
+                "day": "2026-04-08",
+                "bedtime_start": "2026-04-08T22:45:00Z",
+                "bedtime_end": "2026-04-09T06:35:00Z",
+                "average_heart_rate": 55.2,
+                "average_hrv": 41.8,
+                "average_breath": 13.4,
+                "total_sleep_duration": 28200,
+                "type": "long_sleep"
+            })),
+            "sleep fixture document should deserialize",
+        );
+        let pages = vec![PageFetch {
+            raw_payload: RawPayloadRecord {
+                cache_key: "sleep-page-2026-04-08".to_owned(),
+                endpoint: "sleep".to_owned(),
+                requested_at: "2026-04-09T06:40:00Z".to_owned(),
+                scope: Some("daily".to_owned()),
+                etag: None,
+                payload: "{\"data\":[]}".to_owned(),
+            },
+            documents: vec![document],
+        }];
+
+        ok(
+            super::persist_sleep_period_pages(&store, &pages, "2026-04-09T06:45:00Z"),
+            "sleep pages should persist",
+        );
+
+        let counts = ok(store.views().record_counts(), "record counts should load");
+        let records = ok(
+            store
+                .views()
+                .sleep_periods_between_days("2026-04-08", "2026-04-08"),
+            "sleep period records should load",
+        );
+
+        assert_eq!(counts.sleep_periods, 1);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].oura_id, "sleep_2026-04-08_primary");
+        assert_eq!(records[0].average_hrv, Some(41.8));
+        assert_eq!(records[0].average_breath, Some(13.4));
+        assert_eq!(records[0].sleep_type.as_deref(), Some("long_sleep"));
+    }
+
+    #[test]
+    fn persist_daily_spo2_pages_writes_average_spo2() {
+        let store = ok(Store::open_test_store(), "store should open");
+        let document: DailySpO2Document = ok(
+            serde_json::from_value(json!({
+                "id": "spo2_2026-04-08",
+                "day": "2026-04-08",
+                "spo2_percentage": {
+                    "average": 97.4
+                },
+                "breathing_disturbance_index": 0.6
+            })),
+            "daily_spo2 fixture document should deserialize",
+        );
+        let pages = vec![PageFetch {
+            raw_payload: RawPayloadRecord {
+                cache_key: "daily-spo2-page-2026-04-08".to_owned(),
+                endpoint: "daily_spo2".to_owned(),
+                requested_at: "2026-04-09T06:40:00Z".to_owned(),
+                scope: Some("spo2".to_owned()),
+                etag: None,
+                payload: "{\"data\":[]}".to_owned(),
+            },
+            documents: vec![document],
+        }];
+
+        ok(
+            super::persist_daily_spo2_pages(&store, &pages, "2026-04-09T06:45:00Z"),
+            "daily_spo2 pages should persist",
+        );
+
+        let counts = ok(store.views().record_counts(), "record counts should load");
+        let records = ok(
+            store
+                .views()
+                .daily_spo2_between_days("2026-04-08", "2026-04-08"),
+            "daily_spo2 records should load",
+        );
+
+        assert_eq!(counts.daily_spo2, 1);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].oura_id.as_deref(), Some("spo2_2026-04-08"));
+        assert_eq!(records[0].average_spo2, Some(97.4));
+        assert_eq!(records[0].breathing_disturbance_index, Some(0.6));
     }
 
     #[test]

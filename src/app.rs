@@ -4245,10 +4245,9 @@ fn build_dashboard_model(
     let readiness_insight = build_day_metric_insight(snapshot, &selected_day, "readiness", |row| {
         row.readiness_score.map(f64::from)
     });
-    let activity_insight = build_metric_insight(
-        "activity",
-        &metric_points_from_activity(&snapshot.daily_activity),
-    );
+    let activity_points = metric_points_from_activity(&snapshot.daily_activity);
+    let activity_insight =
+        build_metric_insight_from_points(&activity_points, &selected_day, "activity");
     let heartrate_insight = build_metric_insight("heartrate", &snapshot.heartrate_daily_averages);
     let temperature_points = metric_points_from_readiness_temperature(&snapshot.daily_readiness);
     let temperature_insight =
@@ -4463,9 +4462,7 @@ fn build_dashboard_model(
                 .or_else(|| selected_daily.and_then(|row| row.activity_score))
                 .map(dashboard_score_band_for_value),
             delta_label: activity_delta_label(snapshot, &selected_day),
-            trend: values_from_metric_points(&metric_points_from_activity(
-                &snapshot.daily_activity,
-            )),
+            trend: values_from_metric_points(&activity_points),
             ring_fill_percent: selected_activity
                 .and_then(|record| record.activity_score)
                 .map_or_else(
@@ -5124,11 +5121,11 @@ const fn combine_availability(
     secondary: TelemetryAvailability,
 ) -> TelemetryAvailability {
     match (primary, secondary) {
-        (TelemetryAvailability::RateLimited, _) | (_, TelemetryAvailability::RateLimited) => {
-            TelemetryAvailability::RateLimited
-        }
         (TelemetryAvailability::Error, _) | (_, TelemetryAvailability::Error) => {
             TelemetryAvailability::Error
+        }
+        (TelemetryAvailability::RateLimited, _) | (_, TelemetryAvailability::RateLimited) => {
+            TelemetryAvailability::RateLimited
         }
         (TelemetryAvailability::MissingScope, _) | (_, TelemetryAvailability::MissingScope) => {
             TelemetryAvailability::MissingScope
@@ -8646,24 +8643,28 @@ fn metric_points_from_sleep_periods<F>(
 where
     F: FnMut(&SleepPeriodRecord) -> Option<f64>,
 {
-    let mut best_per_day = BTreeMap::<String, &SleepPeriodRecord>::new();
+    let mut best_per_day = BTreeMap::<String, (&SleepPeriodRecord, f64)>::new();
     for record in history
         .iter()
         .filter(|record| is_primary_sleep_type(record.sleep_type.as_deref()))
     {
+        let Some(value) = mapper(record) else {
+            continue;
+        };
         best_per_day
             .entry(record.day.clone())
-            .and_modify(|best| {
+            .and_modify(|(best, best_value)| {
                 if compare_primary_sleep_periods(record, best).is_gt() {
                     *best = record;
+                    *best_value = value;
                 }
             })
-            .or_insert(record);
+            .or_insert((record, value));
     }
 
     best_per_day
         .into_iter()
-        .filter_map(|(day, record)| mapper(record).map(|value| MetricPoint { day, value }))
+        .map(|(day, (_, value))| MetricPoint { day, value })
         .collect()
 }
 
@@ -12051,10 +12052,11 @@ mod tests {
     use crate::snapshot::PrivacyProfile;
     use crate::store::queries::{
         AiArtifactDaySummaryRecord, AiArtifactRecord, AiEvalRunRecord, AiRunRecord,
-        ContextEventFamily, ContextEventRecord, DailySpO2Record, DataSufficiency, EffectDirection,
-        HeartRatePoint, PatternMetric, PatternRelationWindow, PatternSummaryRecord, RecordCounts,
-        ReportExportRecord, RestModePeriodRecord, ReviewSignalDayRecord, SleepPeriodRecord,
-        SleepTimeRecord, SnapshotCatalogEntry, SyncRunStatus, SyncStateRecord, TimeSemantics,
+        ContextEventFamily, ContextEventRecord, DailyActivityRecord, DailySpO2Record,
+        DataSufficiency, EffectDirection, HeartRatePoint, PatternMetric, PatternRelationWindow,
+        PatternSummaryRecord, RecordCounts, ReportExportRecord, RestModePeriodRecord,
+        ReviewSignalDayRecord, SleepPeriodRecord, SleepTimeRecord, SnapshotCatalogEntry,
+        SyncRunStatus, SyncStateRecord, TimeSemantics,
     };
     use crate::test_support::{ok, some};
     use crate::ui::layout::ViewportClass;
@@ -13462,6 +13464,44 @@ mod tests {
     }
 
     #[test]
+    fn sleep_period_metric_points_keep_metric_samples_when_best_period_is_empty() {
+        let history = vec![
+            SleepPeriodRecord {
+                oura_id: "missing-hrv".to_owned(),
+                day: "2026-04-08".to_owned(),
+                bedtime_start: Some("2026-04-08T23:15:00Z".to_owned()),
+                bedtime_end: Some("2026-04-09T07:00:00Z".to_owned()),
+                sleep_type: Some("long_sleep".to_owned()),
+                average_heart_rate: Some(54.0),
+                average_hrv: None,
+                average_breath: Some(13.2),
+                total_sleep_duration: Some(28_000),
+                raw_cache_key: None,
+                updated_at: "2026-04-09T07:05:00Z".to_owned(),
+            },
+            SleepPeriodRecord {
+                oura_id: "with-hrv".to_owned(),
+                day: "2026-04-08".to_owned(),
+                bedtime_start: Some("2026-04-08T22:30:00Z".to_owned()),
+                bedtime_end: Some("2026-04-09T06:15:00Z".to_owned()),
+                sleep_type: Some("sleep".to_owned()),
+                average_heart_rate: Some(56.0),
+                average_hrv: Some(38.0),
+                average_breath: Some(13.6),
+                total_sleep_duration: Some(25_500),
+                raw_cache_key: None,
+                updated_at: "2026-04-09T06:20:00Z".to_owned(),
+            },
+        ];
+
+        let points = super::metric_points_from_sleep_periods(&history, |record| record.average_hrv);
+
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].day, "2026-04-08");
+        assert!((points[0].value - 38.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn telemetry_availability_for_metric_preserves_sync_failures_without_cached_rows() {
         let mut snapshot = make_snapshot(&["2026-04-08"]);
         snapshot.auth_status.capability_report =
@@ -13913,6 +13953,24 @@ mod tests {
     }
 
     #[test]
+    fn combine_availability_prefers_error_over_rate_limit() {
+        assert_eq!(
+            super::combine_availability(
+                TelemetryAvailability::Error,
+                TelemetryAvailability::RateLimited,
+            ),
+            TelemetryAvailability::Error,
+        );
+        assert_eq!(
+            super::combine_availability(
+                TelemetryAvailability::RateLimited,
+                TelemetryAvailability::Error,
+            ),
+            TelemetryAvailability::Error,
+        );
+    }
+
+    #[test]
     fn measurements_availability_prefers_fresh_daily_data_when_heartrate_is_unsupported() {
         let mut snapshot = make_snapshot(&["2026-04-08"]);
         snapshot.auth_status.capability_report =
@@ -13930,6 +13988,45 @@ mod tests {
         );
 
         assert_eq!(availability, TelemetryAvailability::Fresh);
+    }
+
+    #[test]
+    fn dashboard_activity_note_uses_selected_day_window() {
+        let mut snapshot = make_snapshot(&["2026-04-07", "2026-04-08"]);
+        snapshot.daily_activity = vec![
+            DailyActivityRecord {
+                oura_id: Some("activity-2026-04-07".to_owned()),
+                day: "2026-04-07".to_owned(),
+                activity_score: Some(61),
+                active_calories: 410,
+                steps: 5_000,
+                total_calories: 2_050,
+                raw_cache_key: None,
+                updated_at: "2026-04-07T20:00:00Z".to_owned(),
+            },
+            DailyActivityRecord {
+                oura_id: Some("activity-2026-04-08".to_owned()),
+                day: "2026-04-08".to_owned(),
+                activity_score: Some(84),
+                active_calories: 680,
+                steps: 12_000,
+                total_calories: 2_320,
+                raw_cache_key: None,
+                updated_at: "2026-04-08T20:00:00Z".to_owned(),
+            },
+        ];
+
+        let model = super::build_live_model(&snapshot, &base_live_model_options());
+
+        assert!(
+            model
+                .dashboard
+                .activity
+                .note
+                .contains("Activity is 5000 on 2026-04-07"),
+            "activity note should be derived from the selected day window: {}",
+            model.dashboard.activity.note
+        );
     }
 
     #[test]
