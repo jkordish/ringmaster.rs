@@ -1,3 +1,10 @@
+//! App-first public facade for `ringmaster`.
+//!
+//! The supported library surface is intentionally small: `run_from`, CLI parsing
+//! types, and the top-level error/result types. UI, sync, storage, and webhook
+//! internals stay crate-private so the application can evolve without turning
+//! every refactor into a semver promise.
+//!
 #![forbid(unsafe_code)]
 #![warn(
     clippy::all,
@@ -302,6 +309,7 @@ last_authenticated_at: {}
 last_refresh_at: {}
 account_id: {}
 account_email: {}
+auth_last_error: {}
 missing_auth_fields: {}
 capabilities:
 {}",
@@ -331,6 +339,10 @@ capabilities:
             .account_email
             .clone()
             .unwrap_or_else(|| "unknown".to_owned()),
+        auth_status
+            .last_error
+            .as_ref()
+            .map_or_else(|| "none".to_owned(), ToString::to_string),
         if auth_status.missing_fields.is_empty() {
             "none".to_owned()
         } else {
@@ -3591,11 +3603,12 @@ mod tests {
     use crate::config::{
         AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
     };
+    use crate::error::OuraProblem;
     use crate::evidence::evidence_registry_version;
     use crate::store::Store;
     use crate::store::queries::{
-        AiRunRecord, DailyActivityRecord, DailyReadinessRecord, DailySleepRecord,
-        RestModePeriodRecord, SnapshotExportRecord,
+        AiRunRecord, AuthSessionRecord, DailyActivityRecord, DailyReadinessRecord,
+        DailySleepRecord, RestModePeriodRecord, SnapshotExportRecord,
     };
     use crate::store::webhook_store::{
         AcceptedWebhookDeliveryInput, DesiredWebhookSubscriptionRecord, InvalidationInput,
@@ -4031,6 +4044,43 @@ mod tests {
         assert!(report.contains("webhook_runtime_mode: full hybrid"));
         assert!(report.contains("webhook_queue_depth: 1"));
         assert!(report.contains("webhook_remote_healthy: 1"));
+    }
+
+    #[test]
+    fn doctor_reports_auth_last_error() {
+        let (_tempdir, config) = test_config(None, None);
+        let store = Store::open(&config)
+            .unwrap_or_else(|error| panic!("store should open for doctor auth test: {error}"));
+
+        store
+            .auth()
+            .upsert(&AuthSessionRecord {
+                provider: crate::store::queries::OURA_PROVIDER.to_owned(),
+                account_id: Some("fixture-user".to_owned()),
+                account_email: Some("fixture@example.com".to_owned()),
+                token_type: "Bearer".to_owned(),
+                granted_scopes: vec!["daily".to_owned()],
+                access_token_expires_at: None,
+                last_authenticated_at: Some("2026-04-08T12:00:00Z".to_owned()),
+                last_refresh_at: None,
+                last_error: Some(OuraProblem::new(
+                    Some(503),
+                    "Secret backend unavailable",
+                    Some("unlock the keychain".to_owned()),
+                )),
+                updated_at: "2026-04-08T12:00:00Z".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("auth session should seed: {error}"));
+
+        let report = run_doctor(&config)
+            .unwrap_or_else(|error| panic!("doctor should run with auth error: {error}"))
+            .unwrap_or_else(|| panic!("doctor should return output"));
+
+        assert!(
+            report.contains(
+                "auth_last_error: Oura API problem 503: Secret backend unavailable (unlock the keychain)"
+            )
+        );
     }
 
     #[test]

@@ -12,6 +12,8 @@ It gives you:
 
 The design goal is simple: useful local insight first, optional external analysis second, and no surprise data sharing.
 
+The crate is app-first. The `lib` target exists to support the binary, tests, and local tooling, and the package is not published as a general-purpose library crate.
+
 ## Start here
 
 If you just want to see the product:

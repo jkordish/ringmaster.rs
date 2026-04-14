@@ -5664,6 +5664,14 @@ fn build_ops_core_items(snapshot: &LiveSnapshot) -> Vec<OpsItem> {
             snapshot.auth_status.secret_backend.clone(),
         ),
         ops_item(
+            "Last auth error",
+            snapshot
+                .auth_status
+                .last_error
+                .as_ref()
+                .map_or_else(|| "none".to_owned(), ToString::to_string),
+        ),
+        ops_item(
             "Evidence registry",
             snapshot.evidence_registry_version.clone(),
         ),
@@ -13485,6 +13493,27 @@ mod tests {
         );
 
         assert_eq!(availability, TelemetryAvailability::RateLimited);
+    }
+
+    #[test]
+    fn ops_core_items_surface_last_auth_error() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.auth_status.last_error = Some(OuraProblem::new(
+            Some(401),
+            "Authorization required",
+            Some("re-authenticate".to_owned()),
+        ));
+
+        let items = super::build_ops_core_items(&snapshot);
+        let auth_error = items
+            .iter()
+            .find(|item| item.label == "Last auth error")
+            .unwrap_or_else(|| panic!("last auth error item should exist"));
+
+        assert_eq!(
+            auth_error.value,
+            "Oura API problem 401: Authorization required (re-authenticate)"
+        );
     }
 
     #[test]
