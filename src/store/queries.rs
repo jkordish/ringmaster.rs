@@ -23,17 +23,52 @@ pub enum SyncRunStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncStateRecord {
     pub sync_key: String,
+    pub family: String,
     pub status: SyncRunStatus,
     pub cursor: Option<String>,
+    pub last_successful_sync_end: Option<String>,
     pub last_attempted_at: String,
     pub last_completed_at: Option<String>,
+    pub last_reconcile_end: Option<String>,
+    pub oldest_recently_reconciled_at: Option<String>,
     pub message: Option<String>,
     pub granted_scopes: Vec<String>,
     pub last_error: Option<OuraProblem>,
+    pub last_error_at: Option<String>,
+    pub last_error_kind: Option<String>,
+    pub last_error_detail: Option<String>,
     pub failure_count: u32,
     pub next_attempt_after: Option<String>,
     pub last_trigger_source: Option<String>,
     pub last_trigger_detail: Option<String>,
+    pub updated_at: String,
+}
+
+impl Default for SyncStateRecord {
+    fn default() -> Self {
+        Self {
+            sync_key: String::new(),
+            family: String::new(),
+            status: SyncRunStatus::Ready,
+            cursor: None,
+            last_successful_sync_end: None,
+            last_attempted_at: String::new(),
+            last_completed_at: None,
+            last_reconcile_end: None,
+            oldest_recently_reconciled_at: None,
+            message: None,
+            granted_scopes: Vec::new(),
+            last_error: None,
+            last_error_at: None,
+            last_error_kind: None,
+            last_error_detail: None,
+            failure_count: 0,
+            next_attempt_after: None,
+            last_trigger_source: None,
+            last_trigger_detail: None,
+            updated_at: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -828,43 +863,67 @@ impl<'connection> SyncStateStore<'connection> {
         self.connection.execute(
             "INSERT INTO sync_state (
                 sync_key,
+                family,
                 status,
                 cursor,
+                last_successful_sync_end,
                 last_attempted_at,
                 last_completed_at,
+                last_reconcile_end,
+                oldest_recently_reconciled_at,
                 message,
                 granted_scopes,
                 last_error_json,
+                last_error_at,
+                last_error_kind,
+                last_error_detail,
                 failure_count,
                 next_attempt_after,
                 last_trigger_source,
-                last_trigger_detail
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                last_trigger_detail,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
             ON CONFLICT(sync_key) DO UPDATE SET
+                family = excluded.family,
                 status = excluded.status,
                 cursor = excluded.cursor,
+                last_successful_sync_end = excluded.last_successful_sync_end,
                 last_attempted_at = excluded.last_attempted_at,
                 last_completed_at = excluded.last_completed_at,
+                last_reconcile_end = excluded.last_reconcile_end,
+                oldest_recently_reconciled_at = excluded.oldest_recently_reconciled_at,
                 message = excluded.message,
                 granted_scopes = excluded.granted_scopes,
                 last_error_json = excluded.last_error_json,
+                last_error_at = excluded.last_error_at,
+                last_error_kind = excluded.last_error_kind,
+                last_error_detail = excluded.last_error_detail,
                 failure_count = excluded.failure_count,
                 next_attempt_after = excluded.next_attempt_after,
                 last_trigger_source = excluded.last_trigger_source,
-                last_trigger_detail = excluded.last_trigger_detail",
+                last_trigger_detail = excluded.last_trigger_detail,
+                updated_at = excluded.updated_at",
             params![
                 record.sync_key,
+                record.family,
                 record.status.as_str(),
                 record.cursor,
+                record.last_successful_sync_end,
                 record.last_attempted_at,
                 record.last_completed_at,
+                record.last_reconcile_end,
+                record.oldest_recently_reconciled_at,
                 record.message,
                 join_scopes(&record.granted_scopes),
                 encode_problem(record.last_error.as_ref())?,
+                record.last_error_at,
+                record.last_error_kind,
+                record.last_error_detail,
                 i64::from(record.failure_count),
                 record.next_attempt_after,
                 record.last_trigger_source,
                 record.last_trigger_detail,
+                record.updated_at,
             ],
         )?;
 
@@ -876,17 +935,25 @@ impl<'connection> SyncStateStore<'connection> {
             .query_row(
                 "SELECT
                     sync_key,
+                    family,
                     status,
                     cursor,
+                    last_successful_sync_end,
                     last_attempted_at,
                     last_completed_at,
+                    last_reconcile_end,
+                    oldest_recently_reconciled_at,
                     message,
                     granted_scopes,
                     last_error_json,
+                    last_error_at,
+                    last_error_kind,
+                    last_error_detail,
                     failure_count,
                     next_attempt_after,
                     last_trigger_source,
-                    last_trigger_detail
+                    last_trigger_detail,
+                    updated_at
                  FROM sync_state
                  ORDER BY last_attempted_at DESC
                  LIMIT 1",
@@ -901,17 +968,25 @@ impl<'connection> SyncStateStore<'connection> {
         let mut statement = self.connection.prepare(
             "SELECT
                 sync_key,
+                family,
                 status,
                 cursor,
+                last_successful_sync_end,
                 last_attempted_at,
                 last_completed_at,
+                last_reconcile_end,
+                oldest_recently_reconciled_at,
                 message,
                 granted_scopes,
                 last_error_json,
+                last_error_at,
+                last_error_kind,
+                last_error_detail,
                 failure_count,
                 next_attempt_after,
                 last_trigger_source,
-                last_trigger_detail
+                last_trigger_detail,
+                updated_at
              FROM sync_state
              ORDER BY sync_key ASC",
         )?;
@@ -929,17 +1004,25 @@ impl<'connection> SyncStateStore<'connection> {
             .query_row(
                 "SELECT
                     sync_key,
+                    family,
                     status,
                     cursor,
+                    last_successful_sync_end,
                     last_attempted_at,
                     last_completed_at,
+                    last_reconcile_end,
+                    oldest_recently_reconciled_at,
                     message,
                     granted_scopes,
                     last_error_json,
+                    last_error_at,
+                    last_error_kind,
+                    last_error_detail,
                     failure_count,
                     next_attempt_after,
                     last_trigger_source,
-                    last_trigger_detail
+                    last_trigger_detail,
+                    updated_at
                  FROM sync_state
                  WHERE sync_key = ?1",
                 params![sync_key],
@@ -4557,20 +4640,44 @@ impl<'connection> ViewStore<'connection> {
 }
 
 fn read_sync_state_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncStateRecord> {
+    let last_attempted_at = row.get::<_, String>(5)?;
+    let updated_at = row
+        .get::<_, Option<String>>(19)?
+        .unwrap_or_else(|| last_attempted_at.clone());
+
     Ok(SyncStateRecord {
         sync_key: row.get(0)?,
-        status: SyncRunStatus::parse(&row.get::<_, String>(1)?),
-        cursor: row.get(2)?,
-        last_attempted_at: row.get(3)?,
-        last_completed_at: row.get(4)?,
-        message: row.get(5)?,
-        granted_scopes: split_scopes(&row.get::<_, String>(6)?),
-        last_error: decode_problem(row.get::<_, Option<String>>(7)?.as_deref())
+        family: row.get::<_, Option<String>>(1)?.unwrap_or_else(|| {
+            match row.get::<_, String>(0).unwrap_or_default().as_str() {
+                "oura.personal" => "personal".to_owned(),
+                "oura.daily" => "daily".to_owned(),
+                "oura.spo2" => "spo2".to_owned(),
+                "oura.heartrate" => "heartrate".to_owned(),
+                "oura.workouts" => "workout".to_owned(),
+                "oura.enhanced_tags" => "tag".to_owned(),
+                "oura.sessions" => "session".to_owned(),
+                other => other.to_owned(),
+            }
+        }),
+        status: SyncRunStatus::parse(&row.get::<_, String>(2)?),
+        cursor: row.get(3)?,
+        last_successful_sync_end: row.get(4)?,
+        last_attempted_at,
+        last_completed_at: row.get(6)?,
+        last_reconcile_end: row.get(7)?,
+        oldest_recently_reconciled_at: row.get(8)?,
+        message: row.get(9)?,
+        granted_scopes: split_scopes(&row.get::<_, String>(10)?),
+        last_error: decode_problem(row.get::<_, Option<String>>(11)?.as_deref())
             .map_err(json_to_sql_error)?,
-        failure_count: parse_u32(row.get::<_, i64>(8)?, 8)?,
-        next_attempt_after: row.get(9)?,
-        last_trigger_source: row.get(10)?,
-        last_trigger_detail: row.get(11)?,
+        last_error_at: row.get(12)?,
+        last_error_kind: row.get(13)?,
+        last_error_detail: row.get(14)?,
+        failure_count: parse_u32(row.get::<_, i64>(15)?, 15)?,
+        next_attempt_after: row.get(16)?,
+        last_trigger_source: row.get(17)?,
+        last_trigger_detail: row.get(18)?,
+        updated_at,
     })
 }
 
@@ -5061,10 +5168,14 @@ mod tests {
             .sync_state()
             .upsert(&SyncStateRecord {
                 sync_key: "oura.daily".to_owned(),
+                family: "daily".to_owned(),
                 status: SyncRunStatus::Failed,
                 cursor: Some("2026-04-08".to_owned()),
+                last_successful_sync_end: Some("2026-04-08".to_owned()),
                 last_attempted_at: "2026-04-08T06:00:00Z".to_owned(),
                 last_completed_at: Some("2026-04-08T06:00:05Z".to_owned()),
+                last_reconcile_end: Some("2026-04-08".to_owned()),
+                oldest_recently_reconciled_at: Some("2026-03-10".to_owned()),
                 message: Some("rate limited".to_owned()),
                 granted_scopes: vec!["daily".to_owned()],
                 last_error: Some(OuraProblem::new(
@@ -5072,10 +5183,14 @@ mod tests {
                     "rate limited",
                     Some("retry later".to_owned()),
                 )),
+                last_error_at: Some("2026-04-08T06:00:05Z".to_owned()),
+                last_error_kind: Some("rate_limit".to_owned()),
+                last_error_detail: Some("rate limited".to_owned()),
                 failure_count: 3,
                 next_attempt_after: Some("2026-04-08T06:05:00Z".to_owned()),
                 last_trigger_source: Some("periodic_reconcile".to_owned()),
                 last_trigger_detail: Some("daily scheduler".to_owned()),
+                updated_at: "2026-04-08T06:00:05Z".to_owned(),
             })
             .unwrap_or_else(|error| unreachable!("sync state should persist: {error}"));
 

@@ -855,6 +855,50 @@ pub const MIGRATIONS: &[Migration] = &[
         DROP INDEX IF EXISTS idx_daily_spo2_day;
         ",
     },
+    Migration {
+        version: 20,
+        name: "phase13_gap_safe_family_sync_state",
+        sql: r"
+        ALTER TABLE sync_state ADD COLUMN family TEXT;
+        ALTER TABLE sync_state ADD COLUMN last_successful_sync_end TEXT;
+        ALTER TABLE sync_state ADD COLUMN last_reconcile_end TEXT;
+        ALTER TABLE sync_state ADD COLUMN oldest_recently_reconciled_at TEXT;
+        ALTER TABLE sync_state ADD COLUMN last_error_at TEXT;
+        ALTER TABLE sync_state ADD COLUMN last_error_kind TEXT;
+        ALTER TABLE sync_state ADD COLUMN last_error_detail TEXT;
+        ALTER TABLE sync_state ADD COLUMN updated_at TEXT;
+
+        UPDATE sync_state
+        SET
+            family = CASE sync_key
+                WHEN 'oura.personal' THEN 'personal'
+                WHEN 'oura.daily' THEN 'daily'
+                WHEN 'oura.spo2' THEN 'spo2'
+                WHEN 'oura.heartrate' THEN 'heartrate'
+                WHEN 'oura.workouts' THEN 'workout'
+                WHEN 'oura.enhanced_tags' THEN 'tag'
+                WHEN 'oura.sessions' THEN 'session'
+                ELSE sync_key
+            END,
+            last_successful_sync_end = cursor,
+            last_error_at = CASE
+                WHEN last_error_json IS NOT NULL THEN COALESCE(last_completed_at, last_attempted_at)
+                ELSE NULL
+            END,
+            last_error_kind = CASE
+                WHEN last_error_json IS NOT NULL THEN 'api_error'
+                ELSE NULL
+            END,
+            last_error_detail = CASE
+                WHEN message IS NOT NULL THEN substr(message, 1, 512)
+                ELSE NULL
+            END,
+            updated_at = COALESCE(last_completed_at, last_attempted_at);
+
+        CREATE INDEX IF NOT EXISTS idx_sync_state_family
+            ON sync_state(family);
+        ",
+    },
 ];
 
 pub fn run_migrations(connection: &mut rusqlite::Connection) -> Result<MigrationReport> {
@@ -875,8 +919,9 @@ pub fn run_migrations(connection: &mut rusqlite::Connection) -> Result<Migration
             continue;
         }
 
-        let should_skip_sql = migration.version == 17
-            && table_has_column(connection, "daily_sleep", "sleep_duration_seconds")?;
+        let should_skip_sql = (migration.version == 17
+            && table_has_column(connection, "daily_sleep", "sleep_duration_seconds")?)
+            || (migration.version == 20 && !table_exists(connection, "sync_state")?);
         let applied_at = now_rfc3339()?;
         let transaction = connection.transaction()?;
         if !should_skip_sql {
@@ -989,6 +1034,13 @@ fn table_has_column(
     Ok(false)
 }
 
+fn table_exists(connection: &rusqlite::Connection, table_name: &str) -> Result<bool> {
+    let mut statement = connection
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1")?;
+    let mut rows = statement.query(params![table_name])?;
+    Ok(rows.next()?.is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::{Connection, params};
@@ -1005,7 +1057,7 @@ mod tests {
         assert_eq!(
             report.applied_versions,
             vec![
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
             ]
         );
     }
@@ -1115,7 +1167,7 @@ mod tests {
         );
         assert_eq!(
             report.applied_versions,
-            vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+            vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         );
 
         let (workout_day, workout_title): (String, String) = connection
@@ -1192,7 +1244,7 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("phase4 migrations should succeed: {error}"));
         assert_eq!(
             report.applied_versions,
-            vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+            vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         );
 
         let row: (String, String, String) = connection
@@ -1241,7 +1293,7 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("phase4 migration should succeed: {error}"));
         assert_eq!(
             report.applied_versions,
-            vec![9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+            vec![9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         );
 
         let daily_sleep_columns: Vec<String> = {
@@ -1292,7 +1344,7 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("phase5 migration should succeed: {error}"));
         assert_eq!(
             report.applied_versions,
-            vec![10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+            vec![10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         );
 
         let table_names: Vec<String> = {
@@ -1402,7 +1454,7 @@ mod tests {
 
         let report = run_migrations(&mut connection)
             .unwrap_or_else(|error| unreachable!("phase8 sleep migration should succeed: {error}"));
-        assert_eq!(report.applied_versions, vec![17, 18, 19]);
+        assert_eq!(report.applied_versions, vec![17, 18, 19, 20]);
 
         let duration = connection
             .query_row(
@@ -1447,7 +1499,7 @@ mod tests {
         });
         assert_eq!(
             report.applied_versions,
-            vec![11, 12, 13, 14, 15, 16, 17, 18, 19]
+            vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         );
 
         let table_names: Vec<String> = {
@@ -1522,7 +1574,7 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("vo2 history migration should succeed: {error}"));
         assert_eq!(
             report.applied_versions,
-            vec![12, 13, 14, 15, 16, 17, 18, 19]
+            vec![12, 13, 14, 15, 16, 17, 18, 19, 20]
         );
 
         let primary_key_columns: Vec<String> = {

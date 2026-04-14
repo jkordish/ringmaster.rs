@@ -96,6 +96,7 @@ pub async fn rebuild(config: &Config, options: DeriveOptions) -> Result<DeriveRe
                 dry_run: false,
                 fixture_dir: Some(fixture_dir.clone()),
                 families: SyncFamily::ALL.to_vec(),
+                mode: crate::oura::sync::SyncMode::Standard,
                 trigger_source: Some("periodic_reconcile".to_owned()),
                 trigger_detail: Some("derive seed sync".to_owned()),
             },
@@ -1097,30 +1098,11 @@ mod tests {
 
     fn review_refresh_config() -> RefreshConfig {
         RefreshConfig {
-            personal_interval_secs: 3_600,
-            daily_interval_secs: 300,
-            heartrate_interval_secs: 60,
-            workout_interval_secs: 600,
-            enhanced_tag_interval_secs: 300,
-            session_interval_secs: 300,
-            personal_stale_after_secs: 72 * 60 * 60,
-            daily_stale_after_secs: 12 * 60 * 60,
-            heartrate_stale_after_secs: 15 * 60,
-            workout_stale_after_secs: 24 * 60 * 60,
-            enhanced_tag_stale_after_secs: 12 * 60 * 60,
-            session_stale_after_secs: 12 * 60 * 60,
             daily_history_days: 14,
-            daily_overlap_days: 2,
-            heartrate_history_days: 7,
-            heartrate_overlap_minutes: 60,
-            workout_history_days: 90,
-            workout_overlap_days: 2,
             enhanced_tag_history_days: 45,
-            enhanced_tag_overlap_days: 2,
             session_history_days: 30,
-            session_overlap_days: 2,
-            max_backoff_secs: 60 * 60,
             demo_fixture_dir: None,
+            ..RefreshConfig::default()
         }
     }
 

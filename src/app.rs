@@ -5422,39 +5422,21 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
 }
 
 fn build_ops_family_statuses(snapshot: &LiveSnapshot) -> Vec<FamilyStatusView> {
-    [
-        DataFamily::Personal,
-        DataFamily::Daily,
-        DataFamily::Heartrate,
-        DataFamily::Workout,
-        DataFamily::EnhancedTag,
-        DataFamily::Session,
-    ]
-    .into_iter()
-    .map(|family| {
-        let freshness = family_freshness(snapshot, family);
-        let sync_state = sync_state_for(&snapshot.sync_states, family);
-        let scope_label = snapshot
-            .auth_status
-            .capability_report
-            .status_for(family.capability_kind())
-            .map_or_else(
-                || "scope unknown".to_owned(),
-                |entry| {
-                    if entry.granted {
-                        "scope granted".to_owned()
-                    } else if entry.requested {
-                        "scope missing".to_owned()
-                    } else {
-                        "scope not requested".to_owned()
-                    }
-                },
-            );
-        FamilyStatusView {
-            label: family.label(),
-            state_label: freshness_badge(&freshness),
-            scope_label,
-            last_sync: sync_state.map_or_else(
+    SyncFamily::ALL
+        .into_iter()
+        .map(|family| {
+            let sync_state = sync_state_for_sync_family(&snapshot.sync_states, family);
+            let stale_after = snapshot
+                .refresh_policy
+                .stale_after_seconds_for_sync_family(family);
+            let state_label = sync_family_health_label(snapshot, family, sync_state, stale_after);
+            let support_label = if sync_family_supports_webhooks(family) {
+                "webhook-assisted"
+            } else {
+                "periodic-only"
+            };
+            let scope_label = sync_family_scope_label(snapshot, family);
+            let last_sync = sync_state.map_or_else(
                 || "never".to_owned(),
                 |state| {
                     state
@@ -5462,11 +5444,16 @@ fn build_ops_family_statuses(snapshot: &LiveSnapshot) -> Vec<FamilyStatusView> {
                         .clone()
                         .unwrap_or_else(|| state.last_attempted_at.clone())
                 },
-            ),
-            detail: freshness.detail,
-        }
-    })
-    .collect()
+            );
+            FamilyStatusView {
+                label: sync_family_display_label(family),
+                state_label,
+                scope_label: format!("{support_label} | {scope_label}"),
+                last_sync,
+                detail: sync_family_status_detail(snapshot, family, sync_state),
+            }
+        })
+        .collect()
 }
 
 fn ops_queue_oldest(snapshot: &LiveSnapshot) -> String {
@@ -5535,7 +5522,7 @@ fn build_ops_warning_lines(
 ) -> Vec<String> {
     let mut warnings = family_statuses
         .iter()
-        .filter(|status| status.state_label.starts_with("stale"))
+        .filter(|status| status.state_label != "healthy")
         .map(|status| format!("{}: {}", status.label, status.detail))
         .collect::<Vec<_>>();
     if refresh_in_flight {
@@ -8553,6 +8540,201 @@ fn sync_state_for(sync_states: &[SyncStateRecord], family: DataFamily) -> Option
         .find(|state| state.sync_key == family.sync_key())
 }
 
+const fn sync_family_for_data_family(family: DataFamily) -> SyncFamily {
+    match family {
+        DataFamily::Personal => SyncFamily::Personal,
+        DataFamily::Daily => SyncFamily::Daily,
+        DataFamily::Heartrate => SyncFamily::Heartrate,
+        DataFamily::Workout => SyncFamily::Workout,
+        DataFamily::EnhancedTag => SyncFamily::EnhancedTag,
+        DataFamily::Session => SyncFamily::Session,
+    }
+}
+
+const fn sync_family_for_capability(
+    capability: CapabilityKind,
+    freshness_family: DataFamily,
+) -> SyncFamily {
+    match capability {
+        CapabilityKind::Spo2 => SyncFamily::Spo2,
+        _ => sync_family_for_data_family(freshness_family),
+    }
+}
+
+fn sync_state_for_sync_family(
+    sync_states: &[SyncStateRecord],
+    family: SyncFamily,
+) -> Option<&SyncStateRecord> {
+    sync_states.iter().find(|state| {
+        state.sync_key == family.sync_key() || state.family.eq_ignore_ascii_case(family.label())
+    })
+}
+
+const fn sync_family_display_label(family: SyncFamily) -> &'static str {
+    match family {
+        SyncFamily::Personal => "Personal",
+        SyncFamily::Daily => "Daily",
+        SyncFamily::Spo2 => "SpO2",
+        SyncFamily::Heartrate => "Heartrate",
+        SyncFamily::Workout => "Workout",
+        SyncFamily::EnhancedTag => "Tag",
+        SyncFamily::Session => "Session",
+    }
+}
+
+const fn sync_family_supports_webhooks(family: SyncFamily) -> bool {
+    matches!(
+        family,
+        SyncFamily::Daily | SyncFamily::Workout | SyncFamily::EnhancedTag | SyncFamily::Session
+    )
+}
+
+fn sync_family_scope_label(snapshot: &LiveSnapshot, family: SyncFamily) -> String {
+    snapshot
+        .auth_status
+        .capability_report
+        .status_for(family.capability_kind())
+        .map_or_else(
+            || "scope unknown".to_owned(),
+            |entry| {
+                if entry.granted {
+                    "scope granted".to_owned()
+                } else if entry.requested {
+                    "scope missing".to_owned()
+                } else {
+                    "scope not requested".to_owned()
+                }
+            },
+        )
+}
+
+fn sync_family_health_label(
+    snapshot: &LiveSnapshot,
+    family: SyncFamily,
+    sync_state: Option<&SyncStateRecord>,
+    stale_after_seconds: u64,
+) -> String {
+    let capability = snapshot
+        .auth_status
+        .capability_report
+        .status_for(family.capability_kind());
+    if capability.is_some_and(|entry| !entry.granted && entry.requested) {
+        return "missing-scope".to_owned();
+    }
+
+    let Some(sync_state) = sync_state else {
+        return "stale".to_owned();
+    };
+
+    if sync_state.last_error_kind.as_deref() == Some("rate_limit") {
+        return "rate-limited".to_owned();
+    }
+    if matches!(
+        sync_state.status,
+        SyncRunStatus::Failed | SyncRunStatus::Blocked
+    ) || sync_state
+        .last_error_kind
+        .as_deref()
+        .is_some_and(|kind| kind != "rate_limit")
+    {
+        return "error".to_owned();
+    }
+
+    let now = parse_timestamp(&snapshot.captured_at).unwrap_or_else(OffsetDateTime::now_utc);
+    let reference = sync_state
+        .last_completed_at
+        .as_deref()
+        .or(Some(sync_state.last_attempted_at.as_str()));
+    let is_fresh = reference
+        .and_then(parse_timestamp)
+        .is_some_and(|timestamp| {
+            now - timestamp <= time::Duration::seconds(stale_after_seconds.cast_signed())
+        });
+
+    if is_fresh
+        && matches!(
+            sync_state.status,
+            SyncRunStatus::Success | SyncRunStatus::Partial
+        )
+    {
+        "healthy".to_owned()
+    } else {
+        "stale".to_owned()
+    }
+}
+
+fn sync_family_status_detail(
+    snapshot: &LiveSnapshot,
+    family: SyncFamily,
+    sync_state: Option<&SyncStateRecord>,
+) -> String {
+    let capability = snapshot
+        .auth_status
+        .capability_report
+        .status_for(family.capability_kind());
+    if let Some(entry) = capability
+        && !entry.granted
+        && entry.requested
+    {
+        return entry.note.clone();
+    }
+
+    let Some(sync_state) = sync_state else {
+        return format!(
+            "{} has not completed a persisted sync yet.",
+            sync_family_display_label(family)
+        );
+    };
+
+    if sync_state.last_error_kind.as_deref() == Some("rate_limit") {
+        return sync_state
+            .last_error_detail
+            .clone()
+            .or_else(|| sync_state.message.clone())
+            .unwrap_or_else(|| {
+                format!(
+                    "{} is waiting for the Oura rate limit window to clear.",
+                    sync_family_display_label(family)
+                )
+            });
+    }
+
+    if matches!(
+        sync_state.status,
+        SyncRunStatus::Failed | SyncRunStatus::Blocked
+    ) || sync_state.last_error_kind.is_some()
+    {
+        return sync_state
+            .last_error_detail
+            .clone()
+            .or_else(|| sync_state.message.clone())
+            .unwrap_or_else(|| {
+                format!(
+                    "{} encountered an error during the last sync attempt.",
+                    sync_family_display_label(family)
+                )
+            });
+    }
+
+    let source = sync_state
+        .last_trigger_source
+        .clone()
+        .unwrap_or_else(|| "unknown".to_owned());
+    let reconcile = match (
+        sync_state.oldest_recently_reconciled_at.as_deref(),
+        sync_state.last_reconcile_end.as_deref(),
+    ) {
+        (Some(start), Some(end)) => format!("coverage={start}..{end}"),
+        (None, Some(end)) => format!("reconcile_end={end}"),
+        _ => "coverage=pending".to_owned(),
+    };
+    let success_end = sync_state
+        .last_successful_sync_end
+        .clone()
+        .unwrap_or_else(|| "unknown".to_owned());
+    format!("source={source} | success_end={success_end} | {reconcile}")
+}
+
 fn family_has_data(snapshot: &LiveSnapshot, family: DataFamily) -> bool {
     match family {
         DataFamily::Personal => snapshot.personal_info.is_some(),
@@ -8818,7 +9000,8 @@ fn partial_failure_availability_for_capability(
     if markers.is_empty() {
         return None;
     }
-    let sync_state = sync_state_for(&snapshot.sync_states, freshness_family)?;
+    let sync_family = sync_family_for_capability(capability, freshness_family);
+    let sync_state = sync_state_for_sync_family(&snapshot.sync_states, sync_family)?;
     if sync_state.status != SyncRunStatus::Partial {
         return None;
     }
@@ -8847,7 +9030,8 @@ fn sync_failure_availability(
     snapshot: &LiveSnapshot,
     family: DataFamily,
 ) -> Option<TelemetryAvailability> {
-    let sync_state = sync_state_for(&snapshot.sync_states, family)?;
+    let sync_state =
+        sync_state_for_sync_family(&snapshot.sync_states, sync_family_for_data_family(family))?;
     matches!(
         sync_state.status,
         SyncRunStatus::Failed | SyncRunStatus::Partial
@@ -8869,14 +9053,19 @@ fn telemetry_availability_for_metric(
         .status_for(capability);
     match status {
         Some(entry) if entry.granted => {
+            if !has_records
+                && let Some(partial_failure) = partial_failure_availability_for_capability(
+                    snapshot,
+                    freshness_family,
+                    capability,
+                )
+            {
+                return partial_failure;
+            }
             let freshness = family_freshness(snapshot, freshness_family);
             let availability = availability_from_freshness(&freshness);
             if has_records || !matches!(availability, TelemetryAvailability::Fresh) {
                 availability
-            } else if let Some(partial_failure) =
-                partial_failure_availability_for_capability(snapshot, freshness_family, capability)
-            {
-                partial_failure
             } else {
                 TelemetryAvailability::NoData
             }
@@ -9272,12 +9461,38 @@ fn coverage_availability(snapshot: &LiveSnapshot, family: CoverageFamily) -> Tel
                 TelemetryAvailability::Unsupported
             }
         }
-        CoverageFamily::Spo2 => telemetry_availability_for_metric(
-            snapshot,
-            CapabilityKind::Spo2,
-            DataFamily::Daily,
-            !snapshot.daily_spo2.is_empty(),
-        ),
+        CoverageFamily::Spo2 => {
+            let status = snapshot
+                .auth_status
+                .capability_report
+                .status_for(CapabilityKind::Spo2);
+            let freshness = family_freshness(snapshot, DataFamily::Daily);
+            let availability = availability_from_freshness(&freshness);
+            if status.is_some_and(|entry| entry.granted) {
+                if !snapshot.daily_spo2.is_empty()
+                    || !matches!(availability, TelemetryAvailability::Fresh)
+                {
+                    sync_state_for_sync_family(&snapshot.sync_states, SyncFamily::Spo2)
+                        .filter(|state| {
+                            matches!(state.status, SyncRunStatus::Failed | SyncRunStatus::Partial)
+                        })
+                        .and_then(|state| state.last_error.as_ref())
+                        .map_or(availability, availability_from_problem)
+                } else if let Some(partial_failure) = partial_failure_availability_for_capability(
+                    snapshot,
+                    DataFamily::Daily,
+                    CapabilityKind::Spo2,
+                ) {
+                    partial_failure
+                } else {
+                    TelemetryAvailability::NoData
+                }
+            } else if status.is_some_and(|entry| entry.requested) {
+                TelemetryAvailability::MissingScope
+            } else {
+                TelemetryAvailability::Unsupported
+            }
+        }
     }
 }
 
@@ -9332,7 +9547,7 @@ fn coverage_detail(snapshot: &LiveSnapshot, family: CoverageFamily) -> String {
                             "SpO2 scope is granted, but there are no cached SpO2 readings yet."
                                 .to_owned()
                         } else if let Some(sync_state) =
-                            sync_state_for(&snapshot.sync_states, DataFamily::Daily)
+                            sync_state_for_sync_family(&snapshot.sync_states, SyncFamily::Spo2)
                         {
                             if partial_failure_availability_for_capability(
                                 snapshot,
@@ -10437,6 +10652,17 @@ impl RefreshPolicySnapshot {
             DataFamily::Workout => self.workout_stale_after_secs,
             DataFamily::EnhancedTag => self.enhanced_tag_stale_after_secs,
             DataFamily::Session => self.session_stale_after_secs,
+        }
+    }
+
+    const fn stale_after_seconds_for_sync_family(&self, family: SyncFamily) -> u64 {
+        match family {
+            SyncFamily::Personal => self.personal_stale_after_secs,
+            SyncFamily::Daily | SyncFamily::Spo2 => self.daily_stale_after_secs,
+            SyncFamily::Heartrate => self.heartrate_stale_after_secs,
+            SyncFamily::Workout => self.workout_stale_after_secs,
+            SyncFamily::EnhancedTag => self.enhanced_tag_stale_after_secs,
+            SyncFamily::Session => self.session_stale_after_secs,
         }
     }
 
@@ -11999,17 +12225,25 @@ const fn demo_refresh_policy_snapshot() -> RefreshPolicySnapshot {
 fn demo_sync_state(family: SyncFamily, message: &str, status: SyncRunStatus) -> SyncStateRecord {
     SyncStateRecord {
         sync_key: family.sync_key().to_owned(),
+        family: family.label().to_owned(),
         status,
         cursor: None,
+        last_successful_sync_end: Some("2026-04-08T22:01:00Z".to_owned()),
         last_attempted_at: "2026-04-08T22:00:00Z".to_owned(),
         last_completed_at: Some("2026-04-08T22:01:00Z".to_owned()),
+        last_reconcile_end: Some("2026-04-08T22:01:00Z".to_owned()),
+        oldest_recently_reconciled_at: Some("2026-03-09T00:00:00Z".to_owned()),
         message: Some(message.to_owned()),
         granted_scopes: vec![family.capability_kind().scope_name().to_owned()],
         last_error: None,
+        last_error_at: None,
+        last_error_kind: None,
+        last_error_detail: None,
         failure_count: 0,
         next_attempt_after: None,
         last_trigger_source: Some("periodic_reconcile".to_owned()),
         last_trigger_detail: Some("demo snapshot".to_owned()),
+        updated_at: "2026-04-08T22:01:00Z".to_owned(),
     }
 }
 
@@ -12091,6 +12325,52 @@ mod tests {
             workout_stale_after_secs: 24 * 60 * 60,
             enhanced_tag_stale_after_secs: 12 * 60 * 60,
             session_stale_after_secs: 12 * 60 * 60,
+        }
+    }
+
+    fn sync_state_fixture(
+        sync_key: &str,
+        family: &str,
+        status: SyncRunStatus,
+        granted_scopes: &[&str],
+        message: &str,
+        last_error: Option<OuraProblem>,
+        last_completed_at: Option<&str>,
+    ) -> SyncStateRecord {
+        let attempted_at = "2026-04-08T12:00:00Z";
+        let updated_at = last_completed_at.unwrap_or(attempted_at).to_owned();
+        let last_error_kind = last_error.as_ref().map(|problem| {
+            if problem.status == Some(429) {
+                "rate_limit".to_owned()
+            } else {
+                "api_error".to_owned()
+            }
+        });
+
+        SyncStateRecord {
+            sync_key: sync_key.to_owned(),
+            family: family.to_owned(),
+            status,
+            cursor: None,
+            last_successful_sync_end: last_completed_at.map(|_| "2026-04-08".to_owned()),
+            last_attempted_at: attempted_at.to_owned(),
+            last_completed_at: last_completed_at.map(str::to_owned),
+            last_reconcile_end: None,
+            oldest_recently_reconciled_at: None,
+            message: Some(message.to_owned()),
+            granted_scopes: granted_scopes
+                .iter()
+                .map(|scope| (*scope).to_owned())
+                .collect(),
+            last_error_at: last_error.as_ref().map(|_| attempted_at.to_owned()),
+            last_error_kind,
+            last_error_detail: last_error.as_ref().map(|_| message.to_owned()),
+            last_error,
+            failure_count: 1,
+            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
+            last_trigger_source: Some("manual".to_owned()),
+            last_trigger_detail: None,
+            updated_at,
         }
     }
 
@@ -12893,6 +13173,102 @@ mod tests {
     }
 
     #[test]
+    fn ops_family_statuses_include_spo2_support_and_coverage() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        let mut spo2_state = sync_state_fixture(
+            "oura.spo2",
+            "spo2",
+            SyncRunStatus::Success,
+            &["spo2"],
+            "spo2 sync complete",
+            None,
+            Some("2026-04-08T12:01:00Z"),
+        );
+        spo2_state.last_successful_sync_end = Some("2026-04-08".to_owned());
+        spo2_state.last_reconcile_end = Some("2026-04-08".to_owned());
+        spo2_state.oldest_recently_reconciled_at = Some("2026-03-10".to_owned());
+        spo2_state.last_trigger_source = Some("periodic_reconcile".to_owned());
+        snapshot.sync_states = vec![
+            sync_state_fixture(
+                "oura.daily",
+                "daily",
+                SyncRunStatus::Success,
+                &["daily"],
+                "daily sync complete",
+                None,
+                Some("2026-04-08T12:01:00Z"),
+            ),
+            spo2_state,
+        ];
+
+        let model = build_ops_model(&snapshot, false);
+        let daily = model
+            .family_statuses
+            .iter()
+            .find(|row| row.label == "Daily")
+            .unwrap_or_else(|| panic!("daily family row should exist"));
+        let spo2 = model
+            .family_statuses
+            .iter()
+            .find(|row| row.label == "SpO2")
+            .unwrap_or_else(|| panic!("spo2 family row should exist"));
+
+        assert!(daily.scope_label.contains("webhook-assisted"));
+        assert!(spo2.scope_label.contains("periodic-only"));
+        assert!(spo2.detail.contains("coverage=2026-03-10..2026-04-08"));
+        assert!(spo2.detail.contains("success_end=2026-04-08"));
+    }
+
+    #[test]
+    fn ops_family_statuses_surface_missing_scope_and_rate_limits() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.auth_status.capability_report = CapabilityReport::from_scopes(
+            &[
+                "daily".to_owned(),
+                "spo2".to_owned(),
+                "heartrate".to_owned(),
+            ],
+            &["daily".to_owned(), "heartrate".to_owned()],
+        );
+        snapshot.sync_states = vec![sync_state_fixture(
+            "oura.heartrate",
+            "heartrate",
+            SyncRunStatus::Failed,
+            &["heartrate"],
+            "heartrate sync rate limited",
+            Some(OuraProblem::new(
+                Some(429),
+                "Too Many Requests",
+                Some("retry after a minute".to_owned()),
+            )),
+            None,
+        )];
+
+        let model = build_ops_model(&snapshot, false);
+        let spo2 = model
+            .family_statuses
+            .iter()
+            .find(|row| row.label == "SpO2")
+            .unwrap_or_else(|| panic!("spo2 family row should exist"));
+        let heartrate = model
+            .family_statuses
+            .iter()
+            .find(|row| row.label == "Heartrate")
+            .unwrap_or_else(|| panic!("heartrate family row should exist"));
+
+        assert_eq!(spo2.state_label, "missing-scope");
+        assert!(spo2.detail.to_ascii_lowercase().contains("scope"));
+        assert_eq!(heartrate.state_label, "rate-limited");
+        assert!(
+            heartrate
+                .detail
+                .to_ascii_lowercase()
+                .contains("rate limited")
+                || heartrate.detail.contains("429")
+        );
+    }
+
+    #[test]
     fn review_card_badges_keep_sensitive_cautions_visible() {
         let card = make_review_card("spo2-card", "spo2", 80);
 
@@ -13558,24 +13934,19 @@ mod tests {
         let mut snapshot = make_snapshot(&["2026-04-08"]);
         snapshot.auth_status.capability_report =
             CapabilityReport::from_scopes(&["daily".to_owned()], &["daily".to_owned()]);
-        snapshot.sync_states = vec![SyncStateRecord {
-            sync_key: "oura.daily".to_owned(),
-            status: SyncRunStatus::Failed,
-            cursor: None,
-            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
-            last_completed_at: None,
-            message: Some("rate limited".to_owned()),
-            granted_scopes: vec!["daily".to_owned()],
-            last_error: Some(OuraProblem::new(
+        snapshot.sync_states = vec![sync_state_fixture(
+            "oura.daily",
+            "daily",
+            SyncRunStatus::Failed,
+            &["daily"],
+            "rate limited",
+            Some(OuraProblem::new(
                 Some(429),
                 "Too Many Requests",
                 Some("rate limited".to_owned()),
             )),
-            failure_count: 1,
-            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
-            last_trigger_source: Some("manual".to_owned()),
-            last_trigger_detail: None,
-        }];
+            None,
+        )];
 
         let availability = super::telemetry_availability_for_metric(
             &snapshot,
@@ -13615,24 +13986,19 @@ mod tests {
             &["daily".to_owned(), "spo2".to_owned()],
             &["daily".to_owned()],
         );
-        snapshot.sync_states = vec![SyncStateRecord {
-            sync_key: "oura.daily".to_owned(),
-            status: SyncRunStatus::Failed,
-            cursor: None,
-            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
-            last_completed_at: None,
-            message: Some("daily sync failed".to_owned()),
-            granted_scopes: vec!["daily".to_owned()],
-            last_error: Some(OuraProblem::new(
+        snapshot.sync_states = vec![sync_state_fixture(
+            "oura.daily",
+            "daily",
+            SyncRunStatus::Failed,
+            &["daily"],
+            "daily sync failed",
+            Some(OuraProblem::new(
                 Some(500),
                 "Upstream failure",
                 Some("daily sync failed".to_owned()),
             )),
-            failure_count: 1,
-            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
-            last_trigger_source: Some("manual".to_owned()),
-            last_trigger_detail: None,
-        }];
+            None,
+        )];
 
         let availability = super::telemetry_availability_for_metric(
             &snapshot,
@@ -13651,26 +14017,19 @@ mod tests {
             &["daily".to_owned(), "spo2".to_owned()],
             &["daily".to_owned(), "spo2".to_owned()],
         );
-        snapshot.sync_states = vec![SyncStateRecord {
-            sync_key: "oura.daily".to_owned(),
-            status: SyncRunStatus::Partial,
-            cursor: None,
-            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
-            last_completed_at: Some("2026-04-08T12:01:00Z".to_owned()),
-            message: Some(
-                "Imported core daily rows; optional review-support endpoints degraded independently: daily_spo2 (Oura API problem 429: Too Many Requests).".to_owned(),
-            ),
-            granted_scopes: vec!["daily".to_owned(), "spo2".to_owned()],
-            last_error: Some(OuraProblem::new(
+        snapshot.sync_states = vec![sync_state_fixture(
+            "oura.spo2",
+            "spo2",
+            SyncRunStatus::Partial,
+            &["spo2"],
+            "Imported SpO2 rows with a retriable tail gap: daily_spo2 (Oura API problem 429: Too Many Requests).",
+            Some(OuraProblem::new(
                 Some(429),
                 "Too Many Requests",
                 Some("daily_spo2 rate limited".to_owned()),
             )),
-            failure_count: 1,
-            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
-            last_trigger_source: Some("manual".to_owned()),
-            last_trigger_detail: None,
-        }];
+            Some("2026-04-08T12:01:00Z"),
+        )];
 
         let availability = super::telemetry_availability_for_metric(
             &snapshot,
@@ -13686,7 +14045,7 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_availability_for_metric_uses_capability_specific_partial_failures() {
+    fn telemetry_availability_for_metric_uses_capability_specific_family_failures() {
         let mut snapshot = make_snapshot(&["2026-04-08"]);
         snapshot.auth_status.capability_report = CapabilityReport::from_scopes(
             &["daily".to_owned(), "spo2".to_owned(), "stress".to_owned()],
@@ -13694,30 +14053,34 @@ mod tests {
         );
         snapshot.daily_spo2.clear();
         snapshot.daily_stress.clear();
-        snapshot.sync_states = vec![SyncStateRecord {
-            sync_key: "oura.daily".to_owned(),
-            status: SyncRunStatus::Partial,
-            cursor: None,
-            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
-            last_completed_at: Some("2026-04-08T12:01:00Z".to_owned()),
-            message: Some(
-                "Imported core daily rows; optional review-support endpoints degraded independently: daily_spo2 (Oura API problem 429: Too Many Requests); daily_stress (Oura API problem 500: Internal Server Error).".to_owned(),
+        snapshot.sync_states = vec![
+            sync_state_fixture(
+                "oura.spo2",
+                "spo2",
+                SyncRunStatus::Partial,
+                &["spo2"],
+                "SpO2 window degraded independently: daily_spo2 (Oura API problem 429: Too Many Requests).",
+                Some(OuraProblem::new(
+                    Some(429),
+                    "Too Many Requests",
+                    Some("daily_spo2 rate limited".to_owned()),
+                )),
+                Some("2026-04-08T12:01:00Z"),
             ),
-            granted_scopes: vec![
-                "daily".to_owned(),
-                "spo2".to_owned(),
-                "stress".to_owned(),
-            ],
-            last_error: Some(OuraProblem::new(
-                Some(429),
-                "Too Many Requests",
-                Some("daily_spo2 rate limited".to_owned()),
-            )),
-            failure_count: 1,
-            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
-            last_trigger_source: Some("manual".to_owned()),
-            last_trigger_detail: None,
-        }];
+            sync_state_fixture(
+                "oura.daily",
+                "daily",
+                SyncRunStatus::Partial,
+                &["daily", "stress"],
+                "Daily review endpoints degraded independently: daily_stress (Oura API problem 500: Internal Server Error).",
+                Some(OuraProblem::new(
+                    Some(500),
+                    "Internal Server Error",
+                    Some("daily_stress error".to_owned()),
+                )),
+                Some("2026-04-08T12:01:00Z"),
+            ),
+        ];
 
         let spo2 = super::telemetry_availability_for_metric(
             &snapshot,
@@ -13741,24 +14104,19 @@ mod tests {
         let mut snapshot = make_snapshot(&["2026-04-08"]);
         snapshot.auth_status.capability_report =
             CapabilityReport::from_scopes(&["tag".to_owned()], &["tag".to_owned()]);
-        snapshot.sync_states = vec![SyncStateRecord {
-            sync_key: "oura.enhanced_tags".to_owned(),
-            status: SyncRunStatus::Failed,
-            cursor: None,
-            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
-            last_completed_at: None,
-            message: Some("tag sync failed".to_owned()),
-            granted_scopes: vec!["tag".to_owned()],
-            last_error: Some(OuraProblem::new(
+        snapshot.sync_states = vec![sync_state_fixture(
+            "oura.enhanced_tags",
+            "tag",
+            SyncRunStatus::Failed,
+            &["tag"],
+            "tag sync failed",
+            Some(OuraProblem::new(
                 Some(429),
                 "Too Many Requests",
                 Some("tag sync failed".to_owned()),
             )),
-            failure_count: 1,
-            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
-            last_trigger_source: Some("manual".to_owned()),
-            last_trigger_detail: None,
-        }];
+            None,
+        )];
 
         assert_eq!(
             super::coverage_availability(&snapshot, super::CoverageFamily::Tag),
@@ -13777,24 +14135,19 @@ mod tests {
         snapshot.heartrate_daily_averages.clear();
         snapshot.auth_status.capability_report =
             CapabilityReport::from_scopes(&["heartrate".to_owned()], &["heartrate".to_owned()]);
-        snapshot.sync_states = vec![SyncStateRecord {
-            sync_key: "oura.heartrate".to_owned(),
-            status: SyncRunStatus::Failed,
-            cursor: None,
-            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
-            last_completed_at: None,
-            message: Some("heartrate sync failed".to_owned()),
-            granted_scopes: vec!["heartrate".to_owned()],
-            last_error: Some(OuraProblem::new(
+        snapshot.sync_states = vec![sync_state_fixture(
+            "oura.heartrate",
+            "heartrate",
+            SyncRunStatus::Failed,
+            &["heartrate"],
+            "heartrate sync failed",
+            Some(OuraProblem::new(
                 Some(429),
                 "Too Many Requests",
                 Some("heartrate sync failed".to_owned()),
             )),
-            failure_count: 1,
-            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
-            last_trigger_source: Some("manual".to_owned()),
-            last_trigger_detail: None,
-        }];
+            None,
+        )];
 
         let model = super::build_live_model(&snapshot, &base_live_model_options());
         let rail = model
@@ -13816,24 +14169,19 @@ mod tests {
         snapshot.daily_stress.clear();
         snapshot.auth_status.capability_report =
             CapabilityReport::from_scopes(&["daily".to_owned()], &["daily".to_owned()]);
-        snapshot.sync_states = vec![SyncStateRecord {
-            sync_key: "oura.daily".to_owned(),
-            status: SyncRunStatus::Failed,
-            cursor: None,
-            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
-            last_completed_at: None,
-            message: Some("daily sync failed".to_owned()),
-            granted_scopes: vec!["daily".to_owned()],
-            last_error: Some(OuraProblem::new(
+        snapshot.sync_states = vec![sync_state_fixture(
+            "oura.daily",
+            "daily",
+            SyncRunStatus::Failed,
+            &["daily"],
+            "daily sync failed",
+            Some(OuraProblem::new(
                 Some(429),
                 "Too Many Requests",
                 Some("daily sync failed".to_owned()),
             )),
-            failure_count: 1,
-            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
-            last_trigger_source: Some("manual".to_owned()),
-            last_trigger_detail: None,
-        }];
+            None,
+        )];
 
         let model = super::build_live_model(&snapshot, &base_live_model_options());
 
@@ -13855,24 +14203,19 @@ mod tests {
         snapshot.sleep_periods.clear();
         snapshot.auth_status.capability_report =
             CapabilityReport::from_scopes(&["daily".to_owned()], &["daily".to_owned()]);
-        snapshot.sync_states = vec![SyncStateRecord {
-            sync_key: "oura.daily".to_owned(),
-            status: SyncRunStatus::Failed,
-            cursor: None,
-            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
-            last_completed_at: None,
-            message: Some("daily sync failed".to_owned()),
-            granted_scopes: vec!["daily".to_owned()],
-            last_error: Some(OuraProblem::new(
+        snapshot.sync_states = vec![sync_state_fixture(
+            "oura.daily",
+            "daily",
+            SyncRunStatus::Failed,
+            &["daily"],
+            "daily sync failed",
+            Some(OuraProblem::new(
                 Some(429),
                 "Too Many Requests",
                 Some("daily sync failed".to_owned()),
             )),
-            failure_count: 1,
-            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
-            last_trigger_source: Some("manual".to_owned()),
-            last_trigger_detail: None,
-        }];
+            None,
+        )];
 
         let model = super::build_live_model(&snapshot, &base_live_model_options());
         let rail = model
@@ -13898,24 +14241,19 @@ mod tests {
         snapshot.daily_history.clear();
         snapshot.auth_status.capability_report =
             CapabilityReport::from_scopes(&["daily".to_owned()], &["daily".to_owned()]);
-        snapshot.sync_states = vec![SyncStateRecord {
-            sync_key: "oura.daily".to_owned(),
-            status: SyncRunStatus::Failed,
-            cursor: None,
-            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
-            last_completed_at: None,
-            message: Some("daily sync failed".to_owned()),
-            granted_scopes: vec!["daily".to_owned()],
-            last_error: Some(OuraProblem::new(
+        snapshot.sync_states = vec![sync_state_fixture(
+            "oura.daily",
+            "daily",
+            SyncRunStatus::Failed,
+            &["daily"],
+            "daily sync failed",
+            Some(OuraProblem::new(
                 Some(429),
                 "Too Many Requests",
                 Some("daily sync failed".to_owned()),
             )),
-            failure_count: 1,
-            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
-            last_trigger_source: Some("manual".to_owned()),
-            last_trigger_detail: None,
-        }];
+            None,
+        )];
 
         let weekly = super::build_dashboard_weekly_heatmap(&snapshot, "2026-04-08");
 

@@ -96,6 +96,12 @@ pub enum SnapshotCommand {
 pub enum SyncCommand {
     /// Run one poll-first sync cycle.
     Once(SyncOnceArgs),
+    /// Reconcile a recent trailing window for one or more families.
+    Reconcile(SyncReconcileArgs),
+    /// Backfill a recent trailing window for one or more families.
+    Backfill(SyncBackfillArgs),
+    /// Print family-level sync state and policy information.
+    Doctor,
     /// Run the poll-first scheduler without the TUI.
     Watch(SyncWatchArgs),
 }
@@ -292,6 +298,44 @@ pub struct SyncOnceArgs {
     /// Load Oura payloads from a fixture directory instead of the live API.
     #[arg(long)]
     pub fixture_dir: Option<PathBuf>,
+    /// Limit the run to specific sync families.
+    #[arg(long, value_enum)]
+    pub family: Vec<SyncFamilyArg>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct SyncReconcileArgs {
+    /// Fetch and normalize data without mutating `SQLite`.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Load Oura payloads from a fixture directory instead of the live API.
+    #[arg(long)]
+    pub fixture_dir: Option<PathBuf>,
+    /// Reconcile only the selected family or families. Defaults to all.
+    #[arg(long, value_enum)]
+    pub family: Vec<SyncFamilyArg>,
+    /// Size of the trailing reconcile window in days.
+    #[arg(long, default_value_t = 30)]
+    pub days: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct SyncBackfillArgs {
+    /// Fetch and normalize data without mutating `SQLite`.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Load Oura payloads from a fixture directory instead of the live API.
+    #[arg(long)]
+    pub fixture_dir: Option<PathBuf>,
+    /// Backfill only the selected family or families. Defaults to all.
+    #[arg(long, value_enum)]
+    pub family: Vec<SyncFamilyArg>,
+    /// Size of the trailing backfill window in days.
+    #[arg(long, default_value_t = 30)]
+    pub days: u16,
+    /// Override the per-family backfill chunk size in days.
+    #[arg(long)]
+    pub chunk_days: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
@@ -308,6 +352,18 @@ pub struct SyncWatchArgs {
     /// Stop after a bounded number of scheduler iterations.
     #[arg(long)]
     pub max_iterations: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SyncFamilyArg {
+    All,
+    Personal,
+    Daily,
+    Spo2,
+    Heartrate,
+    Workout,
+    Tag,
+    Session,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
@@ -543,9 +599,9 @@ mod tests {
         PrivacyProfileArg, ReportCommand, ReportExportArgs, ReportFormatArg, ReviewCommand,
         ReviewFocusArg, ReviewInvestigateArgs, ReviewTodayArgs, SnapshotColorModeArg,
         SnapshotCommand, SnapshotExportArgs, SnapshotListArgs, SnapshotScreenArg, SnapshotShowArgs,
-        SnapshotSizeArg, SyncCommand, SyncOnceArgs, SyncWatchArgs, UiCommand, UiSnapshotArgs,
-        WebhookCommand, WebhookReplayArgs, WebhookSubscriptionCommand,
-        WebhookSubscriptionsSyncArgs,
+        SnapshotSizeArg, SyncBackfillArgs, SyncCommand, SyncFamilyArg, SyncOnceArgs,
+        SyncReconcileArgs, SyncWatchArgs, UiCommand, UiSnapshotArgs, WebhookCommand,
+        WebhookReplayArgs, WebhookSubscriptionCommand, WebhookSubscriptionsSyncArgs,
     };
     use crate::test_support::ok;
 
@@ -577,8 +633,70 @@ mod tests {
                     SyncCommand::Once(SyncOnceArgs {
                         dry_run: false,
                         fixture_dir: None,
+                        family,
                     }),
-            }) => {}
+            }) => assert!(family.is_empty()),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_sync_reconcile_args() {
+        let cli = ok(
+            Cli::parse_from([
+                "ringmaster",
+                "sync",
+                "reconcile",
+                "--family",
+                "heartrate",
+                "--days",
+                "14",
+            ]),
+            "expected clap parsing to succeed in test",
+        );
+
+        match cli.command {
+            Some(Command::Sync {
+                command:
+                    SyncCommand::Reconcile(SyncReconcileArgs {
+                        dry_run: false,
+                        fixture_dir: None,
+                        family,
+                        days: 14,
+                    }),
+            }) => assert_eq!(family, vec![SyncFamilyArg::Heartrate]),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_sync_backfill_args() {
+        let cli = ok(
+            Cli::parse_from([
+                "ringmaster",
+                "sync",
+                "backfill",
+                "--family",
+                "tag",
+                "--days",
+                "30",
+                "--chunk-days",
+                "7",
+            ]),
+            "expected clap parsing to succeed in test",
+        );
+
+        match cli.command {
+            Some(Command::Sync {
+                command:
+                    SyncCommand::Backfill(SyncBackfillArgs {
+                        dry_run: false,
+                        fixture_dir: None,
+                        family,
+                        days: 30,
+                        chunk_days: Some(7),
+                    }),
+            }) => assert_eq!(family, vec![SyncFamilyArg::Tag]),
             other => panic!("unexpected command: {other:?}"),
         }
     }

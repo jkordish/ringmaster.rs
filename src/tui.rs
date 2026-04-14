@@ -3223,6 +3223,7 @@ async fn run_refresh_sync(config: &Config, families: Vec<SyncFamily>) -> Result<
             dry_run: false,
             fixture_dir: None,
             families,
+            mode: crate::oura::sync::SyncMode::Standard,
             trigger_source: Some("manual_sync".to_owned()),
             trigger_detail: Some("tui refresh".to_owned()),
         },
@@ -3545,30 +3546,8 @@ mod tests {
                 auth_timeout_secs: 120,
             },
             refresh: RefreshConfig {
-                personal_interval_secs: 3_600,
-                daily_interval_secs: 300,
-                heartrate_interval_secs: 60,
-                workout_interval_secs: 600,
-                enhanced_tag_interval_secs: 300,
-                session_interval_secs: 300,
-                personal_stale_after_secs: 72 * 60 * 60,
-                daily_stale_after_secs: 12 * 60 * 60,
-                heartrate_stale_after_secs: 15 * 60,
-                workout_stale_after_secs: 24 * 60 * 60,
-                enhanced_tag_stale_after_secs: 12 * 60 * 60,
-                session_stale_after_secs: 12 * 60 * 60,
-                daily_history_days: 90,
-                daily_overlap_days: 2,
-                heartrate_history_days: 7,
-                heartrate_overlap_minutes: 60,
-                workout_history_days: 90,
-                workout_overlap_days: 2,
-                enhanced_tag_history_days: 90,
-                enhanced_tag_overlap_days: 2,
-                session_history_days: 90,
-                session_overlap_days: 2,
-                max_backoff_secs: 60 * 60,
                 demo_fixture_dir: None,
+                ..RefreshConfig::default()
             },
             webhook: WebhookConfig {
                 bind: "127.0.0.1:8799".parse().unwrap(),
@@ -3688,20 +3667,37 @@ mod tests {
             .sync_state()
             .upsert(&SyncStateRecord {
                 sync_key: sync_key.to_owned(),
+                family: match sync_key {
+                    "oura.personal" => "personal".to_owned(),
+                    "oura.daily" => "daily".to_owned(),
+                    "oura.spo2" => "spo2".to_owned(),
+                    "oura.heartrate" => "heartrate".to_owned(),
+                    "oura.workouts" => "workout".to_owned(),
+                    "oura.enhanced_tags" => "tag".to_owned(),
+                    "oura.sessions" => "session".to_owned(),
+                    _ => "unknown".to_owned(),
+                },
                 status,
                 cursor: None,
+                last_successful_sync_end: Some("2026-04-08T03:41:00Z".to_owned()),
                 last_attempted_at: "2026-04-08T03:40:00Z".to_owned(),
                 last_completed_at: Some("2026-04-08T03:41:00Z".to_owned()),
+                last_reconcile_end: None,
+                oldest_recently_reconciled_at: None,
                 message: Some(message.to_owned()),
                 granted_scopes: granted_scopes
                     .iter()
                     .map(|scope| (*scope).to_owned())
                     .collect(),
                 last_error,
+                last_error_at: None,
+                last_error_kind: None,
+                last_error_detail: None,
                 failure_count: 0,
                 next_attempt_after: None,
                 last_trigger_source: Some("periodic_reconcile".to_owned()),
                 last_trigger_detail: Some("fixture seed".to_owned()),
+                updated_at: "2026-04-08T03:41:00Z".to_owned(),
             })
             .unwrap_or_else(|error| unreachable!("sync state should seed: {error}"));
     }

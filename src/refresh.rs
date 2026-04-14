@@ -24,6 +24,7 @@ const MIN_INVALIDATION_LEASE_SECS: i64 = 5 * 60;
 pub enum SyncFamily {
     Personal,
     Daily,
+    Spo2,
     Heartrate,
     Workout,
     EnhancedTag,
@@ -83,9 +84,10 @@ enum PreparedInvalidationRun {
 }
 
 impl SyncFamily {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Personal,
         Self::Daily,
+        Self::Spo2,
         Self::Heartrate,
         Self::Workout,
         Self::EnhancedTag,
@@ -97,9 +99,10 @@ impl SyncFamily {
         match self {
             Self::Personal => "personal",
             Self::Daily => "daily",
+            Self::Spo2 => "spo2",
             Self::Heartrate => "heartrate",
             Self::Workout => "workout",
-            Self::EnhancedTag => "enhanced_tag",
+            Self::EnhancedTag => "tag",
             Self::Session => "session",
         }
     }
@@ -109,6 +112,7 @@ impl SyncFamily {
         match self {
             Self::Personal => "oura.personal",
             Self::Daily => "oura.daily",
+            Self::Spo2 => "oura.spo2",
             Self::Heartrate => "oura.heartrate",
             Self::Workout => "oura.workouts",
             Self::EnhancedTag => "oura.enhanced_tags",
@@ -121,6 +125,7 @@ impl SyncFamily {
         match self {
             Self::Personal => CapabilityKind::Personal,
             Self::Daily => CapabilityKind::Daily,
+            Self::Spo2 => CapabilityKind::Spo2,
             Self::Heartrate => CapabilityKind::Heartrate,
             Self::Workout => CapabilityKind::Workout,
             Self::EnhancedTag => CapabilityKind::EnhancedTag,
@@ -132,7 +137,7 @@ impl SyncFamily {
     pub const fn interval_secs(self, refresh: &RefreshConfig) -> u64 {
         match self {
             Self::Personal => refresh.personal_interval_secs,
-            Self::Daily => refresh.daily_interval_secs,
+            Self::Daily | Self::Spo2 => refresh.daily_interval_secs,
             Self::Heartrate => refresh.heartrate_interval_secs,
             Self::Workout => refresh.workout_interval_secs,
             Self::EnhancedTag => refresh.enhanced_tag_interval_secs,
@@ -144,7 +149,7 @@ impl SyncFamily {
     pub const fn stale_after_secs(self, refresh: &RefreshConfig) -> u64 {
         match self {
             Self::Personal => refresh.personal_stale_after_secs,
-            Self::Daily => refresh.daily_stale_after_secs,
+            Self::Daily | Self::Spo2 => refresh.daily_stale_after_secs,
             Self::Heartrate => refresh.heartrate_stale_after_secs,
             Self::Workout => refresh.workout_stale_after_secs,
             Self::EnhancedTag => refresh.enhanced_tag_stale_after_secs,
@@ -375,6 +380,7 @@ async fn run_watch_inner(
                     dry_run,
                     fixture_dir: fixture_dir.clone(),
                     families,
+                    mode: crate::oura::sync::SyncMode::Standard,
                     trigger_source: Some("periodic_reconcile".to_owned()),
                     trigger_detail: Some("sync watch scheduler".to_owned()),
                 },
@@ -452,6 +458,7 @@ pub fn process_pending_invalidations_once<'a>(
                         dry_run,
                         fixture_dir,
                         families: families.clone(),
+                        mode: crate::oura::sync::SyncMode::Standard,
                         trigger_source: Some("webhook".to_owned()),
                         trigger_detail: Some(trigger_detail),
                     },
@@ -1104,17 +1111,31 @@ fn build_simulated_sync_state(
 
     SyncStateRecord {
         sync_key: slice.sync_key.clone(),
+        family: slice.family.label().to_owned(),
         status: slice.status.clone(),
         cursor: slice.watermark.clone(),
+        last_successful_sync_end: slice.last_successful_sync_end.clone(),
         last_attempted_at: completed_at.to_owned(),
         last_completed_at: Some(completed_at.to_owned()),
+        last_reconcile_end: slice.last_reconcile_end.clone(),
+        oldest_recently_reconciled_at: slice.oldest_recently_reconciled_at.clone(),
         message: Some(slice.message.clone()),
         granted_scopes: granted_scopes.to_vec(),
         last_error: slice.last_error.clone(),
+        last_error_at: slice.last_error.as_ref().map(|_| completed_at.to_owned()),
+        last_error_kind: slice.last_error.as_ref().map(|problem| {
+            if problem.status == Some(429) {
+                "rate_limited".to_owned()
+            } else {
+                "api_error".to_owned()
+            }
+        }),
+        last_error_detail: slice.last_error.as_ref().map(|_| slice.message.clone()),
         failure_count,
         next_attempt_after,
         last_trigger_source: Some(trigger_source.to_owned()),
         last_trigger_detail: Some(trigger_detail.to_owned()),
+        updated_at: completed_at.to_owned(),
     }
 }
 
@@ -1220,30 +1241,8 @@ mod tests {
                 auth_timeout_secs: 120,
             },
             refresh: RefreshConfig {
-                personal_interval_secs: 3_600,
-                daily_interval_secs: 300,
-                heartrate_interval_secs: 60,
-                workout_interval_secs: 600,
-                enhanced_tag_interval_secs: 300,
-                session_interval_secs: 300,
-                personal_stale_after_secs: 72 * 60 * 60,
-                daily_stale_after_secs: 12 * 60 * 60,
-                heartrate_stale_after_secs: 15 * 60,
-                workout_stale_after_secs: 24 * 60 * 60,
-                enhanced_tag_stale_after_secs: 12 * 60 * 60,
-                session_stale_after_secs: 12 * 60 * 60,
-                daily_history_days: 90,
-                daily_overlap_days: 2,
-                heartrate_history_days: 7,
-                heartrate_overlap_minutes: 60,
-                workout_history_days: 90,
-                workout_overlap_days: 2,
-                enhanced_tag_history_days: 90,
-                enhanced_tag_overlap_days: 2,
-                session_history_days: 90,
-                session_overlap_days: 2,
-                max_backoff_secs: 60 * 60,
                 demo_fixture_dir: None,
+                ..RefreshConfig::default()
             },
             webhook: WebhookConfig {
                 bind: "127.0.0.1:8799".parse().unwrap(),
@@ -1334,13 +1333,20 @@ mod tests {
             &config,
             &[SyncStateRecord {
                 sync_key: SyncFamily::Heartrate.sync_key().to_owned(),
+                family: SyncFamily::Heartrate.label().to_owned(),
                 status: SyncRunStatus::Failed,
                 cursor: None,
+                last_successful_sync_end: None,
                 last_attempted_at: now.format(&Rfc3339).unwrap_or_default(),
                 last_completed_at: None,
+                last_reconcile_end: None,
+                oldest_recently_reconciled_at: None,
                 message: Some("backing off".to_owned()),
                 granted_scopes: vec!["heartrate".to_owned()],
                 last_error: None,
+                last_error_at: Some(now.format(&Rfc3339).unwrap_or_default()),
+                last_error_kind: Some("backoff".to_owned()),
+                last_error_detail: Some("backing off".to_owned()),
                 failure_count: 2,
                 next_attempt_after: Some(
                     (now + Duration::minutes(5))
@@ -1349,6 +1355,7 @@ mod tests {
                 ),
                 last_trigger_source: None,
                 last_trigger_detail: None,
+                updated_at: now.format(&Rfc3339).unwrap_or_default(),
             }],
             now,
             false,
@@ -1383,17 +1390,25 @@ mod tests {
             .into_iter()
             .map(|family| SyncStateRecord {
                 sync_key: family.sync_key().to_owned(),
+                family: family.label().to_owned(),
                 status: SyncRunStatus::Success,
                 cursor: None,
+                last_successful_sync_end: Some(base.format(&Rfc3339).unwrap_or_default()),
                 last_attempted_at: base.format(&Rfc3339).unwrap_or_default(),
                 last_completed_at: Some(base.format(&Rfc3339).unwrap_or_default()),
+                last_reconcile_end: None,
+                oldest_recently_reconciled_at: None,
                 message: Some(format!("{} synced", family.label())),
                 granted_scopes: granted_scopes.clone(),
                 last_error: None,
+                last_error_at: None,
+                last_error_kind: None,
+                last_error_detail: None,
                 failure_count: 0,
                 next_attempt_after: None,
                 last_trigger_source: Some("periodic_reconcile".to_owned()),
                 last_trigger_detail: Some("test idle heartbeat sleep".to_owned()),
+                updated_at: base.format(&Rfc3339).unwrap_or_default(),
             })
             .collect::<Vec<_>>();
         let next_wake = next_wake_duration(&config, &sync_states, base)
@@ -1415,6 +1430,7 @@ mod tests {
         let scopes = vec![
             "personal".to_owned(),
             "daily".to_owned(),
+            "spo2".to_owned(),
             "heartrate".to_owned(),
             "workout".to_owned(),
             "enhanced_tag".to_owned(),
@@ -1430,54 +1446,91 @@ mod tests {
             slice_reports: vec![
                 SliceReport {
                     sync_key: SyncFamily::Personal.sync_key().to_owned(),
+                    family: SyncFamily::Personal,
                     status: SyncRunStatus::Success,
                     imported_rows: 1,
                     watermark: Some(base.format(&Rfc3339).unwrap_or_default()),
+                    last_successful_sync_end: Some(base.format(&Rfc3339).unwrap_or_default()),
+                    last_reconcile_end: None,
+                    oldest_recently_reconciled_at: None,
                     message: "personal synced".to_owned(),
                     last_error: None,
                     next_attempt_after: None,
                 },
                 SliceReport {
                     sync_key: SyncFamily::Daily.sync_key().to_owned(),
+                    family: SyncFamily::Daily,
                     status: SyncRunStatus::Success,
                     imported_rows: 3,
                     watermark: Some("2026-04-08".to_owned()),
+                    last_successful_sync_end: Some("2026-04-08".to_owned()),
+                    last_reconcile_end: None,
+                    oldest_recently_reconciled_at: None,
                     message: "daily synced".to_owned(),
                     last_error: None,
                     next_attempt_after: None,
                 },
                 SliceReport {
+                    sync_key: SyncFamily::Spo2.sync_key().to_owned(),
+                    family: SyncFamily::Spo2,
+                    status: SyncRunStatus::Success,
+                    imported_rows: 1,
+                    watermark: Some("2026-04-08".to_owned()),
+                    last_successful_sync_end: Some("2026-04-08".to_owned()),
+                    last_reconcile_end: None,
+                    oldest_recently_reconciled_at: None,
+                    message: "spo2 synced".to_owned(),
+                    last_error: None,
+                    next_attempt_after: None,
+                },
+                SliceReport {
                     sync_key: SyncFamily::Heartrate.sync_key().to_owned(),
+                    family: SyncFamily::Heartrate,
                     status: SyncRunStatus::Success,
                     imported_rows: 5,
                     watermark: Some(base.format(&Rfc3339).unwrap_or_default()),
+                    last_successful_sync_end: Some(base.format(&Rfc3339).unwrap_or_default()),
+                    last_reconcile_end: None,
+                    oldest_recently_reconciled_at: None,
                     message: "heartrate synced".to_owned(),
                     last_error: None,
                     next_attempt_after: None,
                 },
                 SliceReport {
                     sync_key: SyncFamily::Workout.sync_key().to_owned(),
+                    family: SyncFamily::Workout,
                     status: SyncRunStatus::Success,
                     imported_rows: 2,
                     watermark: Some("2026-04-08".to_owned()),
+                    last_successful_sync_end: Some("2026-04-08".to_owned()),
+                    last_reconcile_end: None,
+                    oldest_recently_reconciled_at: None,
                     message: "workouts synced".to_owned(),
                     last_error: None,
                     next_attempt_after: None,
                 },
                 SliceReport {
                     sync_key: SyncFamily::EnhancedTag.sync_key().to_owned(),
+                    family: SyncFamily::EnhancedTag,
                     status: SyncRunStatus::Success,
                     imported_rows: 2,
                     watermark: Some("2026-04-08".to_owned()),
+                    last_successful_sync_end: Some("2026-04-08".to_owned()),
+                    last_reconcile_end: None,
+                    oldest_recently_reconciled_at: None,
                     message: "enhanced tags synced".to_owned(),
                     last_error: None,
                     next_attempt_after: None,
                 },
                 SliceReport {
                     sync_key: SyncFamily::Session.sync_key().to_owned(),
+                    family: SyncFamily::Session,
                     status: SyncRunStatus::Success,
                     imported_rows: 2,
                     watermark: Some("2026-04-08".to_owned()),
+                    last_successful_sync_end: Some("2026-04-08".to_owned()),
+                    last_reconcile_end: None,
+                    oldest_recently_reconciled_at: None,
                     message: "sessions synced".to_owned(),
                     last_error: None,
                     next_attempt_after: None,
@@ -1803,6 +1856,7 @@ mod tests {
                 dry_run: false,
                 fixture_dir: Some(baseline_fixture_dir()),
                 families: vec![SyncFamily::Workout],
+                mode: crate::oura::sync::SyncMode::Standard,
                 trigger_source: Some("periodic_reconcile".to_owned()),
                 trigger_detail: Some("seed workouts".to_owned()),
             },

@@ -475,9 +475,9 @@ fn draw_family_table(
             family_rows,
             [
                 Constraint::Length(12),
-                Constraint::Length(12),
-                Constraint::Length(16),
-                Constraint::Min(12),
+                Constraint::Length(14),
+                Constraint::Length(28),
+                Constraint::Min(20),
             ],
         )
         .header(
@@ -687,10 +687,7 @@ fn family_summary_text(
 
 fn family_status_lines(status: &FamilyStatusView, width: usize, compact: bool) -> Vec<String> {
     let sync = compact_timestamp(&status.last_sync);
-    let scope = status
-        .scope_label
-        .strip_prefix("scope ")
-        .unwrap_or(&status.scope_label);
+    let scope = status.scope_label.as_str();
     if compact {
         vec![
             format!(

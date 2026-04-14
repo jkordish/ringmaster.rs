@@ -2692,18 +2692,6 @@ mod tests {
                 auth_timeout_secs: 120,
             },
             refresh: RefreshConfig {
-                personal_interval_secs: 3_600,
-                daily_interval_secs: 300,
-                heartrate_interval_secs: 60,
-                workout_interval_secs: 600,
-                enhanced_tag_interval_secs: 300,
-                session_interval_secs: 300,
-                personal_stale_after_secs: 259_200,
-                daily_stale_after_secs: 43_200,
-                heartrate_stale_after_secs: 900,
-                workout_stale_after_secs: 86_400,
-                enhanced_tag_stale_after_secs: 43_200,
-                session_stale_after_secs: 43_200,
                 daily_history_days: 30,
                 daily_overlap_days: 7,
                 heartrate_history_days: 14,
@@ -2716,6 +2704,7 @@ mod tests {
                 session_overlap_days: 7,
                 max_backoff_secs: 3_600,
                 demo_fixture_dir: None,
+                ..RefreshConfig::default()
             },
             webhook: WebhookConfig {
                 bind: "127.0.0.1:8799"

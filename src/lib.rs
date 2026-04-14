@@ -68,11 +68,13 @@ use cli::{
     AiRunsShowArgs, AuthCommand, Cli, Command, DeriveCommand, DeriveRebuildArgs, ReportCommand,
     ReportExportArgs, ReviewCommand, ReviewFocusArg, ReviewInvestigateArgs, ReviewTodayArgs,
     ReviewWeekArgs, SnapshotColorModeArg, SnapshotCommand, SnapshotExportArgs, SnapshotListArgs,
-    SnapshotScreenArg, SnapshotShowArgs, SnapshotSizeArg, SyncCommand, SyncOnceArgs, SyncWatchArgs,
-    TuiArgs, UiCommand, UiSnapshotArgs, WebhookCommand, WebhookReplayArgs, WebhookServeArgs,
+    SnapshotScreenArg, SnapshotShowArgs, SnapshotSizeArg, SyncBackfillArgs, SyncCommand,
+    SyncFamilyArg, SyncOnceArgs, SyncReconcileArgs, SyncWatchArgs, TuiArgs, UiCommand,
+    UiSnapshotArgs, WebhookCommand, WebhookReplayArgs, WebhookServeArgs,
     WebhookSubscriptionCommand, WebhookSubscriptionsListArgs, WebhookSubscriptionsSyncArgs,
 };
 use config::{AppPaths, Config};
+use oura::policy::{SyncPolicy, SyncSupportMode};
 use refresh::{SyncFamily, WatchOptions};
 use review::{
     InvestigationReport, ReviewCard, ReviewDeck, ReviewFocus, ReviewInputs, ReviewMode,
@@ -176,6 +178,9 @@ pub async fn run_cli(cli: Cli) -> Result<Option<String>> {
         } => run_auth_login(&config).await,
         Command::Sync { command } => match command {
             SyncCommand::Once(args) => run_sync_once(&config, args).await,
+            SyncCommand::Reconcile(args) => run_sync_reconcile(&config, args).await,
+            SyncCommand::Backfill(args) => run_sync_backfill(&config, args).await,
+            SyncCommand::Doctor => run_sync_doctor(&config),
             SyncCommand::Watch(args) => run_sync_watch(&config, args).await,
         },
         Command::Webhook { command } => match command {
@@ -373,7 +378,7 @@ sync_slices:
             || "tests/fixtures/phase5".to_owned(),
             |path| path.display().to_string()
         ),
-        doctor_sync_lines(snapshot),
+        doctor_sync_lines(config, snapshot),
     )
 }
 
@@ -543,11 +548,17 @@ fn doctor_refresh_lines(config: &Config) -> String {
     SyncFamily::ALL
         .into_iter()
         .map(|family| {
+            let policy = SyncPolicy::for_family(&config.refresh, family);
             format!(
-                "  - {}: interval={}s stale_after={}s scope={}",
+                "  - {}: interval={}s stale_after={}s overlap={} reconcile={} startup={} chunk={} support={} scope={}",
                 family.label(),
                 family.interval_secs(&config.refresh),
                 family.stale_after_secs(&config.refresh),
+                doctor_duration_label(policy.overlap),
+                doctor_duration_label(policy.reconcile_window),
+                doctor_duration_label(policy.startup_catchup_ceiling),
+                doctor_duration_label(policy.backfill_chunk),
+                doctor_support_mode_label(policy.support_mode),
                 family.capability_kind().scope_name()
             )
         })
@@ -555,37 +566,140 @@ fn doctor_refresh_lines(config: &Config) -> String {
         .join("\n")
 }
 
-fn doctor_sync_lines(snapshot: &app::LiveSnapshot) -> String {
-    if snapshot.sync_states.is_empty() {
-        return "  - none".to_owned();
-    }
-
-    snapshot
-        .sync_states
+fn doctor_sync_lines(config: &Config, snapshot: &app::LiveSnapshot) -> String {
+    SyncFamily::ALL
         .iter()
-        .map(|sync| {
-            let error = sync
-                .last_error
-                .as_ref()
-                .map(|problem| format!(" | error={problem}"))
-                .unwrap_or_default();
-            let backoff = sync
-                .next_attempt_after
-                .as_deref()
-                .map(|value| format!(" | next_attempt_after={value}"))
-                .unwrap_or_default();
+        .map(|family| {
+            let policy = SyncPolicy::for_family(&config.refresh, *family);
+            let sync = snapshot
+                .sync_states
+                .iter()
+                .find(|state| {
+                    state.sync_key == family.sync_key()
+                        || state.family.eq_ignore_ascii_case(family.label())
+                });
+            let scope = snapshot
+                .auth_status
+                .capability_report
+                .status_for(family.capability_kind())
+                .map_or("unknown", |entry| {
+                    if entry.granted {
+                        "granted"
+                    } else if entry.requested {
+                        "missing"
+                    } else {
+                        "not-requested"
+                    }
+                });
+            let last_success = sync
+                .and_then(|state| state.last_successful_sync_end.as_deref())
+                .unwrap_or("never");
+            let last_attempt = sync
+                .map_or("never", |state| state.last_attempted_at.as_str());
+            let reconcile_end = sync
+                .and_then(|state| state.last_reconcile_end.as_deref())
+                .unwrap_or("never");
+            let coverage_start = sync
+                .and_then(|state| state.oldest_recently_reconciled_at.as_deref())
+                .unwrap_or("unknown");
+            let source = sync
+                .and_then(|state| state.last_trigger_source.as_deref())
+                .unwrap_or("unknown");
+            let next_attempt = sync
+                .and_then(|state| state.next_attempt_after.as_deref())
+                .map_or_else(String::new, |value| format!(" | next_attempt={value}"));
+            let error = sync.map_or_else(String::new, |state| {
+                match (
+                    state.last_error_kind.as_deref(),
+                    state.last_error_detail.as_deref(),
+                ) {
+                    (Some(kind), Some(detail)) => format!(" | error={kind}:{detail}"),
+                    (Some(kind), None) => format!(" | error={kind}"),
+                    (None, Some(detail)) => format!(" | error={detail}"),
+                    (None, None) => String::new(),
+                }
+            });
             format!(
-                "  - {}: {} at {} | failures={}{}{}",
-                sync.sync_key,
-                sync.status,
-                sync.last_attempted_at,
-                sync.failure_count,
-                backoff,
+                "  - {}: health={} | support={} | scope={} | last_success={} | last_attempt={} | reconcile_end={} | coverage_start={} | source={}{}{}",
+                family.label(),
+                doctor_sync_health_label(snapshot, config, *family, sync),
+                doctor_support_mode_label(policy.support_mode),
+                scope,
+                last_success,
+                last_attempt,
+                reconcile_end,
+                coverage_start,
+                source,
+                next_attempt,
                 error
             )
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn doctor_duration_label(duration: Duration) -> String {
+    if duration.is_zero() {
+        "n/a".to_owned()
+    } else if duration.whole_days() > 0 && duration.whole_hours() % 24 == 0 {
+        format!("{}d", duration.whole_days())
+    } else if duration.whole_hours() > 0 {
+        format!("{}h", duration.whole_hours())
+    } else {
+        format!("{}m", duration.whole_minutes())
+    }
+}
+
+const fn doctor_support_mode_label(mode: SyncSupportMode) -> &'static str {
+    match mode {
+        SyncSupportMode::PeriodicOnly => "periodic-only",
+        SyncSupportMode::WebhookAssisted => "webhook-assisted",
+    }
+}
+
+fn doctor_sync_health_label(
+    snapshot: &app::LiveSnapshot,
+    config: &Config,
+    family: SyncFamily,
+    sync: Option<&crate::store::queries::SyncStateRecord>,
+) -> &'static str {
+    let capability = snapshot
+        .auth_status
+        .capability_report
+        .status_for(family.capability_kind());
+    if capability.is_some_and(|entry| !entry.granted && entry.requested) {
+        return "missing-scope";
+    }
+
+    let Some(sync) = sync else {
+        return "stale";
+    };
+
+    if sync.last_error_kind.as_deref() == Some("rate_limit") {
+        return "rate-limited";
+    }
+    if matches!(
+        sync.status,
+        crate::store::queries::SyncRunStatus::Failed
+            | crate::store::queries::SyncRunStatus::Blocked
+    ) || sync.last_error_kind.is_some()
+    {
+        return "error";
+    }
+
+    let reference = sync
+        .last_completed_at
+        .as_deref()
+        .or(Some(sync.last_attempted_at.as_str()));
+    let Some(reference) = reference.and_then(doctor_parse_timestamp) else {
+        return "stale";
+    };
+    let stale_after = Duration::seconds(family.stale_after_secs(&config.refresh).cast_signed());
+    if OffsetDateTime::now_utc() - reference <= stale_after {
+        "healthy"
+    } else {
+        "stale"
+    }
 }
 
 fn doctor_webhook_stats(snapshot: &app::LiveSnapshot) -> DoctorWebhookStats {
@@ -1078,6 +1192,7 @@ async fn load_fixture_snapshot(config: &Config, fixture_dir: PathBuf) -> Result<
             dry_run: false,
             fixture_dir: Some(fixture_dir.clone()),
             families: SyncFamily::ALL.to_vec(),
+            mode: oura::sync::SyncMode::Standard,
             trigger_source: Some("periodic_reconcile".to_owned()),
             trigger_detail: Some("ui snapshot fixture seed".to_owned()),
         },
@@ -1546,6 +1661,8 @@ fn apply_error_scenario_overlay(snapshot: &mut app::LiveSnapshot) {
                     "auth required",
                     Some("run `ringmaster auth login` before trying another sync".to_owned()),
                 ));
+                state.last_error_kind = Some("auth".to_owned());
+                state.last_error_detail = state.message.clone();
             }
             "oura.heartrate" => {
                 state.status = crate::store::queries::SyncRunStatus::Blocked;
@@ -1553,24 +1670,32 @@ fn apply_error_scenario_overlay(snapshot: &mut app::LiveSnapshot) {
                     "Missing `heartrate` scope; timeline and trends cannot refresh.".to_owned(),
                 );
                 state.last_error = None;
+                state.last_error_kind = Some("blocked".to_owned());
+                state.last_error_detail = state.message.clone();
             }
             "oura.workouts" => {
                 state.status = crate::store::queries::SyncRunStatus::Blocked;
                 state.message =
                     Some("Missing `workout` scope; workout context stays unavailable.".to_owned());
                 state.last_error = None;
+                state.last_error_kind = Some("blocked".to_owned());
+                state.last_error_detail = state.message.clone();
             }
             "oura.enhanced_tags" => {
                 state.status = crate::store::queries::SyncRunStatus::Blocked;
                 state.message =
                     Some("Missing `tag` scope; tag context stays unavailable.".to_owned());
                 state.last_error = None;
+                state.last_error_kind = Some("blocked".to_owned());
+                state.last_error_detail = state.message.clone();
             }
             "oura.sessions" => {
                 state.status = crate::store::queries::SyncRunStatus::Blocked;
                 state.message =
                     Some("Missing `session` scope; session context stays unavailable.".to_owned());
                 state.last_error = None;
+                state.last_error_kind = Some("blocked".to_owned());
+                state.last_error_detail = state.message.clone();
             }
             _ => {}
         }
@@ -1613,6 +1738,8 @@ fn apply_missing_scope_scenario_overlay(snapshot: &mut app::LiveSnapshot) {
                     "Missing `heartrate` scope; heart-rate panels stay unavailable.".to_owned(),
                 );
                 state.last_error = None;
+                state.last_error_kind = Some("blocked".to_owned());
+                state.last_error_detail = state.message.clone();
                 state.failure_count = 0;
                 state.next_attempt_after = None;
             }
@@ -1621,6 +1748,8 @@ fn apply_missing_scope_scenario_overlay(snapshot: &mut app::LiveSnapshot) {
                 state.message =
                     Some("Missing `workout` scope; activity context stays partial.".to_owned());
                 state.last_error = None;
+                state.last_error_kind = Some("blocked".to_owned());
+                state.last_error_detail = state.message.clone();
                 state.failure_count = 0;
                 state.next_attempt_after = None;
             }
@@ -1629,6 +1758,8 @@ fn apply_missing_scope_scenario_overlay(snapshot: &mut app::LiveSnapshot) {
                 state.message =
                     Some("Missing `tag` scope; tagged context stays unavailable.".to_owned());
                 state.last_error = None;
+                state.last_error_kind = Some("blocked".to_owned());
+                state.last_error_detail = state.message.clone();
                 state.failure_count = 0;
                 state.next_attempt_after = None;
             }
@@ -1638,6 +1769,8 @@ fn apply_missing_scope_scenario_overlay(snapshot: &mut app::LiveSnapshot) {
                     "Missing `session` scope; guided-session context stays unavailable.".to_owned(),
                 );
                 state.last_error = None;
+                state.last_error_kind = Some("blocked".to_owned());
+                state.last_error_detail = state.message.clone();
                 state.failure_count = 0;
                 state.next_attempt_after = None;
             }
@@ -1660,6 +1793,8 @@ fn apply_rate_limited_scenario_overlay(snapshot: &mut app::LiveSnapshot) {
                 "rate limit reached",
                 Some("retry after the minute window resets".to_owned()),
             ));
+            state.last_error_kind = Some("rate_limit".to_owned());
+            state.last_error_detail = state.message.clone();
             state.failure_count = 1;
             state.next_attempt_after = Some("2026-04-09T12:05:00Z".to_owned());
         }
@@ -1717,6 +1852,30 @@ fn normalize_fixture_snapshot_sync_state_timestamps(
         } else {
             Some(completed_at.to_owned())
         };
+        state.updated_at = state
+            .last_completed_at
+            .clone()
+            .unwrap_or_else(|| attempted_at.to_owned());
+        if state.last_error.is_some()
+            || matches!(
+                state.status,
+                crate::store::queries::SyncRunStatus::Failed
+                    | crate::store::queries::SyncRunStatus::Blocked
+            )
+        {
+            state.last_error_at = Some(attempted_at.to_owned());
+        } else {
+            state.last_error_at = None;
+        }
+        normalize_fixture_sync_marker(&mut state.last_successful_sync_end, completed_at);
+        normalize_fixture_sync_marker(&mut state.last_reconcile_end, completed_at);
+        normalize_fixture_sync_marker(&mut state.oldest_recently_reconciled_at, completed_at);
+    }
+}
+
+fn normalize_fixture_sync_marker(marker: &mut Option<String>, replacement: &str) {
+    if marker.as_deref().is_some_and(|value| value.contains('T')) {
+        *marker = Some(replacement.to_owned());
     }
 }
 
@@ -1824,37 +1983,133 @@ async fn run_sync_once(config: &Config, args: SyncOnceArgs) -> Result<Option<Str
         oura::sync::SyncOptions {
             dry_run: args.dry_run,
             fixture_dir: args.fixture_dir,
-            families: SyncFamily::ALL.to_vec(),
+            families: selected_sync_families(&args.family),
+            mode: oura::sync::SyncMode::Standard,
             trigger_source: Some("manual_sync".to_owned()),
             trigger_detail: Some("ringmaster sync once".to_owned()),
         },
     )
     .await?;
-    let notes = report
-        .notes
+    Ok(Some(render_sync_report("ringmaster sync once", &report)))
+}
+
+async fn run_sync_reconcile(config: &Config, args: SyncReconcileArgs) -> Result<Option<String>> {
+    let store = Store::open(config)?;
+    let report = oura::sync::sync_once(
+        config,
+        &store,
+        oura::sync::SyncOptions {
+            dry_run: args.dry_run,
+            fixture_dir: args.fixture_dir,
+            families: selected_sync_families(&args.family),
+            mode: oura::sync::SyncMode::Reconcile { days: args.days },
+            trigger_source: Some("manual_reconcile".to_owned()),
+            trigger_detail: Some(format!("ringmaster sync reconcile --days {}", args.days)),
+        },
+    )
+    .await?;
+    Ok(Some(render_sync_report(
+        "ringmaster sync reconcile",
+        &report,
+    )))
+}
+
+async fn run_sync_backfill(config: &Config, args: SyncBackfillArgs) -> Result<Option<String>> {
+    let store = Store::open(config)?;
+    let report = oura::sync::sync_once(
+        config,
+        &store,
+        oura::sync::SyncOptions {
+            dry_run: args.dry_run,
+            fixture_dir: args.fixture_dir,
+            families: selected_sync_families(&args.family),
+            mode: oura::sync::SyncMode::Backfill {
+                days: args.days,
+                chunk_days: args.chunk_days,
+            },
+            trigger_source: Some("manual_backfill".to_owned()),
+            trigger_detail: Some(format!("ringmaster sync backfill --days {}", args.days)),
+        },
+    )
+    .await?;
+    Ok(Some(render_sync_report(
+        "ringmaster sync backfill",
+        &report,
+    )))
+}
+
+fn run_sync_doctor(config: &Config) -> Result<Option<String>> {
+    let store = Store::open(config)?;
+    let auth_status = oura::auth::inspect_auth(config, &store)?;
+    let snapshot = load_live_snapshot(config, &store, &auth_status)?;
+    Ok(Some(format!(
+        "ringmaster sync doctor\n\n{}",
+        doctor_sync_section(config, &snapshot)
+    )))
+}
+
+fn selected_sync_families(selected: &[SyncFamilyArg]) -> Vec<SyncFamily> {
+    if selected.is_empty() || selected.contains(&SyncFamilyArg::All) {
+        return SyncFamily::ALL.to_vec();
+    }
+
+    selected
         .iter()
-        .map(|note| format!("  - {note}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+        .map(|family| match family {
+            SyncFamilyArg::All => None,
+            SyncFamilyArg::Personal => Some(SyncFamily::Personal),
+            SyncFamilyArg::Daily => Some(SyncFamily::Daily),
+            SyncFamilyArg::Spo2 => Some(SyncFamily::Spo2),
+            SyncFamilyArg::Heartrate => Some(SyncFamily::Heartrate),
+            SyncFamilyArg::Workout => Some(SyncFamily::Workout),
+            SyncFamilyArg::Tag => Some(SyncFamily::EnhancedTag),
+            SyncFamilyArg::Session => Some(SyncFamily::Session),
+        })
+        .flatten()
+        .collect()
+}
+
+fn render_sync_report(title: &str, report: &oura::sync::SyncReport) -> String {
+    let notes = if report.notes.is_empty() {
+        "  - none".to_owned()
+    } else {
+        report
+            .notes
+            .iter()
+            .map(|note| format!("  - {note}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     let slices = report
         .slice_reports
         .iter()
         .map(|slice| {
+            let reconcile = slice.last_reconcile_end.as_deref().map_or_else(
+                || "n/a".to_owned(),
+                |value| {
+                    let coverage_start = slice
+                        .oldest_recently_reconciled_at
+                        .as_deref()
+                        .unwrap_or("unknown");
+                    format!("{coverage_start}..{value}")
+                },
+            );
             format!(
-                "  - {}: {} rows={} watermark={} {}",
+                "  - {}: {} rows={} success_end={} reconcile={} {}",
                 slice.sync_key,
                 slice.status,
                 slice.imported_rows,
-                slice.watermark.as_deref().unwrap_or("n/a"),
+                slice.last_successful_sync_end.as_deref().unwrap_or("n/a"),
+                reconcile,
                 slice.message
             )
         })
         .collect::<Vec<_>>()
         .join("\n");
 
-    let output = format!(
+    format!(
         "\
-ringmaster sync once
+{title}
 
 status: {}
 started_at: {}
@@ -1873,9 +2128,7 @@ notes:
         report.capability_report.available_labels().join(", "),
         slices,
         notes,
-    );
-
-    Ok(Some(output))
+    )
 }
 
 async fn run_sync_watch(config: &Config, args: SyncWatchArgs) -> Result<Option<String>> {
@@ -2810,6 +3063,7 @@ async fn load_review_store_snapshot(
                 dry_run: false,
                 fixture_dir: Some(fixture_dir.clone()),
                 families: SyncFamily::ALL.to_vec(),
+                mode: oura::sync::SyncMode::Standard,
                 trigger_source: Some("review_demo".to_owned()),
                 trigger_detail: Some("review seed sync".to_owned()),
             },
@@ -2866,6 +3120,7 @@ async fn load_snapshot_command_context(
                 dry_run: false,
                 fixture_dir: Some(fixture_dir),
                 families: SyncFamily::ALL.to_vec(),
+                mode: oura::sync::SyncMode::Standard,
                 trigger_source: Some("snapshot_export_demo".to_owned()),
                 trigger_detail: Some("snapshot export seed sync".to_owned()),
             },
@@ -3701,30 +3956,8 @@ mod tests {
                     auth_timeout_secs: 120,
                 },
                 refresh: RefreshConfig {
-                    personal_interval_secs: 3_600,
-                    daily_interval_secs: 300,
-                    heartrate_interval_secs: 60,
-                    workout_interval_secs: 600,
-                    enhanced_tag_interval_secs: 300,
-                    session_interval_secs: 300,
-                    personal_stale_after_secs: 72 * 60 * 60,
-                    daily_stale_after_secs: 12 * 60 * 60,
-                    heartrate_stale_after_secs: 15 * 60,
-                    workout_stale_after_secs: 24 * 60 * 60,
-                    enhanced_tag_stale_after_secs: 12 * 60 * 60,
-                    session_stale_after_secs: 12 * 60 * 60,
-                    daily_history_days: 90,
-                    daily_overlap_days: 2,
-                    heartrate_history_days: 7,
-                    heartrate_overlap_minutes: 60,
-                    workout_history_days: 90,
-                    workout_overlap_days: 2,
-                    enhanced_tag_history_days: 90,
-                    enhanced_tag_overlap_days: 2,
-                    session_history_days: 90,
-                    session_overlap_days: 2,
-                    max_backoff_secs: 60 * 60,
                     demo_fixture_dir: Some(std::path::PathBuf::from("tests/fixtures/phase3")),
+                    ..RefreshConfig::default()
                 },
                 webhook: WebhookConfig {
                     bind: "127.0.0.1:8799".parse().unwrap_or_else(|error| {
@@ -4891,6 +5124,7 @@ mod tests {
                 dry_run: false,
                 fixture_dir: Some(fixture_dir.clone()),
                 families: crate::SyncFamily::ALL.to_vec(),
+                mode: crate::oura::sync::SyncMode::Standard,
                 trigger_source: Some("snapshot_show_test".to_owned()),
                 trigger_detail: Some("seed store for snapshot prefix lookup".to_owned()),
             },
@@ -5169,7 +5403,11 @@ mod tests {
         let missing_scope_snapshot = crate::tui::render_snapshot(&missing_scope_app, 120, 36)
             .unwrap_or_else(|error| panic!("missing-scope snapshot should render: {error}"));
         assert!(missing_scope_snapshot.contains("heartrate  [SCOPE]"));
-        assert!(missing_scope_snapshot.contains("heartrate scope was not granted"));
+        assert!(
+            missing_scope_snapshot
+                .to_ascii_lowercase()
+                .contains("missing scope")
+        );
 
         let mut rate_limited_app = states
             .iter()
@@ -5183,7 +5421,11 @@ mod tests {
         let rate_limited_snapshot = crate::tui::render_snapshot(&rate_limited_app, 120, 36)
             .unwrap_or_else(|error| panic!("rate-limited snapshot should render: {error}"));
         assert!(rate_limited_snapshot.contains("heartrate  [429]"));
-        assert!(rate_limited_snapshot.contains("rate limited"));
+        assert!(
+            rate_limited_snapshot
+                .to_ascii_lowercase()
+                .contains("rate limit")
+        );
     }
 
     #[tokio::test]

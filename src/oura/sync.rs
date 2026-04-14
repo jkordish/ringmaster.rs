@@ -13,6 +13,7 @@ use crate::oura::models::{
     DailyStressDocument, RestModePeriodDocument, SleepDocument, SleepTimeDocument, Vo2MaxDocument,
     WorkoutDocument,
 };
+use crate::oura::policy::SyncPolicy;
 use crate::refresh::SyncFamily;
 use crate::store::queries::{
     AuthSessionRecord, DailyActivityRecord, DailyCardiovascularAgeRecord, DailyReadinessRecord,
@@ -25,15 +26,31 @@ use crate::store::{Store, StorePlan};
 
 const PERSONAL_SYNC_KEY: &str = "oura.personal";
 const DAILY_SYNC_KEY: &str = "oura.daily";
+const SPO2_SYNC_KEY: &str = "oura.spo2";
 const HEARTRATE_SYNC_KEY: &str = "oura.heartrate";
 const WORKOUT_SYNC_KEY: &str = "oura.workouts";
 const ENHANCED_TAG_SYNC_KEY: &str = "oura.enhanced_tags";
 const SESSION_SYNC_KEY: &str = "oura.sessions";
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SyncMode {
+    #[default]
+    Standard,
+    Reconcile {
+        days: u16,
+    },
+    Backfill {
+        days: u16,
+        chunk_days: Option<u16>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SyncOptions {
     pub dry_run: bool,
     pub fixture_dir: Option<PathBuf>,
     pub families: Vec<SyncFamily>,
+    pub mode: SyncMode,
     pub trigger_source: Option<String>,
     pub trigger_detail: Option<String>,
 }
@@ -41,12 +58,34 @@ pub struct SyncOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SliceReport {
     pub sync_key: String,
+    pub family: SyncFamily,
     pub status: SyncRunStatus,
     pub imported_rows: usize,
     pub watermark: Option<String>,
+    pub last_successful_sync_end: Option<String>,
+    pub last_reconcile_end: Option<String>,
+    pub oldest_recently_reconciled_at: Option<String>,
     pub message: String,
     pub last_error: Option<OuraProblem>,
     pub next_attempt_after: Option<String>,
+}
+
+impl Default for SliceReport {
+    fn default() -> Self {
+        Self {
+            sync_key: DAILY_SYNC_KEY.to_owned(),
+            family: SyncFamily::Daily,
+            status: SyncRunStatus::Ready,
+            imported_rows: 0,
+            watermark: None,
+            last_successful_sync_end: None,
+            last_reconcile_end: None,
+            oldest_recently_reconciled_at: None,
+            message: String::new(),
+            last_error: None,
+            next_attempt_after: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +154,7 @@ pub fn sync_once<'a>(
             } else {
                 options.families
             },
+            mode: options.mode,
             trigger_source: options.trigger_source,
             trigger_detail: options.trigger_detail,
         },
@@ -435,6 +475,7 @@ async fn run_sync_family(
         SyncFamily::Daily => {
             sync_daily(config, store_plan, client, capability_report, options).await
         }
+        SyncFamily::Spo2 => sync_spo2(config, store_plan, client, capability_report, options).await,
         SyncFamily::Heartrate => {
             sync_heartrate(config, store_plan, client, capability_report, options).await
         }
@@ -514,18 +555,17 @@ async fn sync_personal_info(
     capability_report: &CapabilityReport,
     options: &SyncOptions,
 ) -> Result<SliceReport> {
-    if !capability_report.is_granted(CapabilityKind::Personal) {
-        let persist_store = reopen_store(config, &store_plan)?;
-        return persist_slice_report(
-            config,
-            &persist_store,
-            slice_blocked(
-                PERSONAL_SYNC_KEY,
-                "Missing `personal` scope; profile data remains unavailable.",
-            ),
-            granted_scopes_from_report(capability_report),
-            options,
-        );
+    if let Some(report) = guard_family_scope(
+        config,
+        &store_plan,
+        capability_report,
+        CapabilityKind::Personal,
+        SyncFamily::Personal,
+        "`personal` scope is not requested; skipping profile sync.",
+        "Missing `personal` scope; profile data remains unavailable.",
+        options,
+    )? {
+        return Ok(report);
     }
 
     let fetched = client.fetch_personal_info().await?;
@@ -575,18 +615,17 @@ async fn sync_personal_info(
     persist_slice_report(
         config,
         &persist_store,
-        SliceReport {
-            sync_key: PERSONAL_SYNC_KEY.to_owned(),
-            status: SyncRunStatus::Success,
-            imported_rows: 1,
-            watermark: Some(imported_at),
-            message: format!(
+        new_slice_report(
+            SyncFamily::Personal,
+            SyncRunStatus::Success,
+            1,
+            Some(imported_at),
+            format!(
                 "Imported personal info for profile {}.",
                 fetched.document.id
             ),
-            last_error: None,
-            next_attempt_after: None,
-        },
+            None,
+        ),
         granted_scopes_from_report(capability_report),
         options,
     )
@@ -596,24 +635,114 @@ fn reopen_store(config: &Config, store_plan: &StorePlan) -> Result<Store> {
     Store::open_with_plan(store_plan.clone(), config.app_name)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DailySyncWindow {
     start_date: String,
     end_date: String,
 }
 
-impl DailySyncWindow {
-    fn retry_cursor(&self, overlap_days: i64) -> Result<String> {
-        let start = time::Date::parse(
-            &self.start_date,
-            &time::macros::format_description!("[year]-[month]-[day]"),
-        )
-        .map_err(|error| {
-            AuthError::OAuthFlow(format!(
-                "invalid daily sync window start `{}`: {error}",
-                self.start_date
-            ))
-        })?;
-        Ok((start + Duration::days(overlap_days)).to_string())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncWindowPurpose {
+    Tail,
+    Reconcile,
+    Backfill,
+}
+
+impl SyncWindowPurpose {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Tail => "tail",
+            Self::Reconcile => "reconcile",
+            Self::Backfill => "backfill",
+        }
+    }
+
+    const fn records_reconcile_coverage(self) -> bool {
+        matches!(self, Self::Reconcile | Self::Backfill)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlannedDailyWindow {
+    purpose: SyncWindowPurpose,
+    window: DailySyncWindow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlannedHeartrateWindow {
+    purpose: SyncWindowPurpose,
+    start: OffsetDateTime,
+    end: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FamilySyncSummary {
+    family: SyncFamily,
+    imported_rows: usize,
+    last_successful_sync_end: Option<String>,
+    last_reconcile_end: Option<String>,
+    oldest_recently_reconciled_at: Option<String>,
+    messages: Vec<String>,
+    last_error: Option<OuraProblem>,
+    statuses: Vec<SyncRunStatus>,
+}
+
+impl FamilySyncSummary {
+    const fn new(family: SyncFamily) -> Self {
+        Self {
+            family,
+            imported_rows: 0,
+            last_successful_sync_end: None,
+            last_reconcile_end: None,
+            oldest_recently_reconciled_at: None,
+            messages: Vec::new(),
+            last_error: None,
+            statuses: Vec::new(),
+        }
+    }
+
+    fn observe(&mut self, report: SliceReport) {
+        self.imported_rows = self.imported_rows.saturating_add(report.imported_rows);
+        self.messages.push(report.message);
+        self.statuses.push(report.status.clone());
+
+        if matches!(
+            report.status,
+            SyncRunStatus::Success | SyncRunStatus::Partial
+        ) {
+            self.last_successful_sync_end = prefer_later_marker(
+                report.last_successful_sync_end,
+                self.last_successful_sync_end.clone(),
+            );
+            self.last_reconcile_end =
+                prefer_later_marker(report.last_reconcile_end, self.last_reconcile_end.clone());
+            self.oldest_recently_reconciled_at = prefer_earlier_marker(
+                report.oldest_recently_reconciled_at,
+                self.oldest_recently_reconciled_at.clone(),
+            );
+        }
+
+        if report.last_error.is_some() {
+            self.last_error = report.last_error;
+        }
+    }
+
+    fn finish(self) -> SliceReport {
+        let status = summarize_family_status(&self.statuses);
+        let message = self.messages.join(" ");
+        SliceReport {
+            sync_key: self.family.sync_key().to_owned(),
+            family: self.family,
+            status,
+            imported_rows: self.imported_rows,
+            watermark: self.last_successful_sync_end.clone(),
+            last_successful_sync_end: self.last_successful_sync_end,
+            last_reconcile_end: self.last_reconcile_end,
+            oldest_recently_reconciled_at: self.oldest_recently_reconciled_at,
+            message,
+            last_error: self.last_error,
+            next_attempt_after: None,
+        }
     }
 }
 
@@ -622,7 +751,6 @@ struct DailyPageFetches {
     sleep_period_pages: Vec<PageFetch<SleepDocument>>,
     readiness_pages: Vec<PageFetch<DailyReadinessDocument>>,
     activity_pages: Vec<PageFetch<DailyActivityDocument>>,
-    daily_spo2_pages: Vec<PageFetch<DailySpO2Document>>,
     sleep_time_pages: Vec<PageFetch<SleepTimeDocument>>,
     rest_mode_period_pages: Vec<PageFetch<RestModePeriodDocument>>,
     daily_stress_pages: Vec<PageFetch<DailyStressDocument>>,
@@ -632,6 +760,342 @@ struct DailyPageFetches {
     optional_failures: Vec<(&'static str, OuraProblem)>,
 }
 
+fn summarize_family_status(statuses: &[SyncRunStatus]) -> SyncRunStatus {
+    if statuses.is_empty() {
+        return SyncRunStatus::Blocked;
+    }
+    if statuses
+        .iter()
+        .all(|status| *status == SyncRunStatus::Success)
+    {
+        return SyncRunStatus::Success;
+    }
+    if statuses
+        .iter()
+        .all(|status| *status == SyncRunStatus::Blocked)
+    {
+        return SyncRunStatus::Blocked;
+    }
+    if statuses.contains(&SyncRunStatus::Failed) {
+        if statuses
+            .iter()
+            .any(|status| matches!(status, SyncRunStatus::Success | SyncRunStatus::Partial))
+        {
+            return SyncRunStatus::Partial;
+        }
+        return SyncRunStatus::Failed;
+    }
+    SyncRunStatus::Partial
+}
+
+fn recent_day_start(days: i64, now: OffsetDateTime) -> time::Date {
+    now.date() - Duration::days(days.saturating_sub(1))
+}
+
+fn parse_date_marker(marker: Option<&str>) -> Result<Option<time::Date>> {
+    marker
+        .map(|value| {
+            time::Date::parse(
+                value,
+                &time::macros::format_description!("[year]-[month]-[day]"),
+            )
+            .map_err(|error| {
+                AuthError::OAuthFlow(format!("invalid stored day watermark `{value}`: {error}"))
+                    .into()
+            })
+        })
+        .transpose()
+}
+
+fn parse_timestamp_marker(marker: Option<&str>) -> Result<Option<OffsetDateTime>> {
+    marker
+        .map(|value| {
+            OffsetDateTime::parse(value, &Rfc3339).map_err(|error| {
+                AuthError::OAuthFlow(format!(
+                    "invalid stored RFC3339 watermark `{value}`: {error}"
+                ))
+                .into()
+            })
+        })
+        .transpose()
+}
+
+fn format_timestamp_marker(timestamp: OffsetDateTime) -> Result<String> {
+    timestamp.format(&Rfc3339).map_err(|error| {
+        AuthError::OAuthFlow(format!("failed to format sync timestamp: {error}")).into()
+    })
+}
+
+fn chunked_daily_windows(
+    start: time::Date,
+    end: time::Date,
+    chunk_days: i64,
+    purpose: SyncWindowPurpose,
+) -> Vec<PlannedDailyWindow> {
+    let mut windows = Vec::new();
+    let mut chunk_start = start;
+    let chunk_days = chunk_days.max(1);
+
+    while chunk_start <= end {
+        let chunk_end = std::cmp::min(chunk_start + Duration::days(chunk_days - 1), end);
+        windows.push(PlannedDailyWindow {
+            purpose,
+            window: DailySyncWindow {
+                start_date: chunk_start.to_string(),
+                end_date: chunk_end.to_string(),
+            },
+        });
+        chunk_start = chunk_end + Duration::days(1);
+    }
+
+    windows
+}
+
+fn chunked_heartrate_windows(
+    start: OffsetDateTime,
+    end: OffsetDateTime,
+    chunk_days: i64,
+    purpose: SyncWindowPurpose,
+) -> Vec<PlannedHeartrateWindow> {
+    let mut windows = Vec::new();
+    let mut chunk_start = start;
+    let chunk_duration = Duration::days(chunk_days.max(1));
+
+    while chunk_start < end {
+        let chunk_end = std::cmp::min(chunk_start + chunk_duration, end);
+        windows.push(PlannedHeartrateWindow {
+            purpose,
+            start: chunk_start,
+            end: chunk_end,
+        });
+        chunk_start = chunk_end;
+    }
+
+    if windows.is_empty() {
+        windows.push(PlannedHeartrateWindow {
+            purpose,
+            start,
+            end,
+        });
+    }
+
+    windows
+}
+
+fn should_run_reconcile(
+    policy: &SyncPolicy,
+    sync_state: Option<&SyncStateRecord>,
+    recent_start: &str,
+    now_marker: &str,
+) -> Result<bool> {
+    let Some(sync_state) = sync_state else {
+        return Ok(true);
+    };
+    let Some(last_reconcile_end) =
+        parse_timestamp_marker(sync_state.last_reconcile_end.as_deref())?
+    else {
+        return Ok(true);
+    };
+    let Some(now_timestamp) = parse_timestamp_marker(Some(now_marker))? else {
+        return Ok(true);
+    };
+    if now_timestamp - last_reconcile_end >= policy.overlap {
+        return Ok(true);
+    }
+    let oldest_recent = sync_state
+        .oldest_recently_reconciled_at
+        .as_deref()
+        .unwrap_or_default();
+    Ok(oldest_recent.is_empty() || oldest_recent > recent_start)
+}
+
+fn plan_daily_windows(
+    config: &Config,
+    store_plan: &StorePlan,
+    family: SyncFamily,
+    options: &SyncOptions,
+    policy: &SyncPolicy,
+) -> Result<Vec<PlannedDailyWindow>> {
+    let now = OffsetDateTime::now_utc();
+    if options.fixture_dir.is_some() {
+        return Ok(vec![PlannedDailyWindow {
+            purpose: SyncWindowPurpose::Tail,
+            window: DailySyncWindow {
+                start_date: "1970-01-01".to_owned(),
+                end_date: now.date().to_string(),
+            },
+        }]);
+    }
+
+    let store = reopen_store(config, store_plan)?;
+    let sync_state = store.sync_state().get(family.sync_key())?;
+    let today = now.date();
+    let startup_start = recent_day_start(policy.startup_catchup_days(), now);
+
+    match options.mode {
+        SyncMode::Standard => {
+            let success_marker = sync_state
+                .as_ref()
+                .and_then(|state| state.last_successful_sync_end.as_deref())
+                .or_else(|| {
+                    sync_state
+                        .as_ref()
+                        .and_then(|state| state.cursor.as_deref())
+                });
+            let tail_start = parse_date_marker(success_marker)?
+                .map_or(startup_start, |cursor| cursor - policy.overlap)
+                .max(startup_start);
+            let mut windows = chunked_daily_windows(
+                tail_start,
+                today,
+                policy.backfill_chunk_days(),
+                SyncWindowPurpose::Tail,
+            );
+            let reconcile_start = recent_day_start(policy.reconcile_days(), now);
+            let tail_covers_reconcile = tail_start <= reconcile_start;
+            let reconcile_start_marker = reconcile_start.to_string();
+            let now_marker = format_timestamp_marker(now)?;
+            if !tail_covers_reconcile
+                && should_run_reconcile(
+                    policy,
+                    sync_state.as_ref(),
+                    &reconcile_start_marker,
+                    &now_marker,
+                )?
+            {
+                windows.extend(chunked_daily_windows(
+                    reconcile_start,
+                    today,
+                    policy.backfill_chunk_days(),
+                    SyncWindowPurpose::Reconcile,
+                ));
+            }
+            Ok(windows)
+        }
+        SyncMode::Reconcile { days } => Ok(chunked_daily_windows(
+            recent_day_start(i64::from(days), now),
+            today,
+            policy.backfill_chunk_days(),
+            SyncWindowPurpose::Reconcile,
+        )),
+        SyncMode::Backfill { days, chunk_days } => Ok(chunked_daily_windows(
+            recent_day_start(i64::from(days), now),
+            today,
+            chunk_days.map_or(policy.backfill_chunk_days(), i64::from),
+            SyncWindowPurpose::Backfill,
+        )),
+    }
+}
+
+fn plan_heartrate_windows(
+    config: &Config,
+    store_plan: &StorePlan,
+    options: &SyncOptions,
+    policy: &SyncPolicy,
+) -> Result<Vec<PlannedHeartrateWindow>> {
+    let now = OffsetDateTime::now_utc();
+    if options.fixture_dir.is_some() {
+        return Ok(vec![PlannedHeartrateWindow {
+            purpose: SyncWindowPurpose::Tail,
+            start: OffsetDateTime::UNIX_EPOCH,
+            end: now,
+        }]);
+    }
+
+    let store = reopen_store(config, store_plan)?;
+    let sync_state = store.sync_state().get(HEARTRATE_SYNC_KEY)?;
+    let startup_start = now - Duration::days(policy.startup_catchup_days());
+
+    match options.mode {
+        SyncMode::Standard => {
+            let success_marker = sync_state
+                .as_ref()
+                .and_then(|state| state.last_successful_sync_end.as_deref())
+                .or_else(|| {
+                    sync_state
+                        .as_ref()
+                        .and_then(|state| state.cursor.as_deref())
+                });
+            let tail_start = parse_timestamp_marker(success_marker)?
+                .map_or(startup_start, |cursor| cursor - policy.overlap)
+                .max(startup_start);
+            let mut windows = chunked_heartrate_windows(
+                tail_start,
+                now,
+                policy.backfill_chunk_days(),
+                SyncWindowPurpose::Tail,
+            );
+            let reconcile_start = now - Duration::days(policy.reconcile_days());
+            let tail_covers_reconcile = tail_start <= reconcile_start;
+            let reconcile_start_marker = reconcile_start.date().to_string();
+            let now_marker = format_timestamp_marker(now)?;
+            if !tail_covers_reconcile
+                && should_run_reconcile(
+                    policy,
+                    sync_state.as_ref(),
+                    &reconcile_start_marker,
+                    &now_marker,
+                )?
+            {
+                windows.extend(chunked_heartrate_windows(
+                    reconcile_start,
+                    now,
+                    policy.backfill_chunk_days(),
+                    SyncWindowPurpose::Reconcile,
+                ));
+            }
+            Ok(windows)
+        }
+        SyncMode::Reconcile { days } => Ok(chunked_heartrate_windows(
+            now - Duration::days(i64::from(days)),
+            now,
+            policy.backfill_chunk_days(),
+            SyncWindowPurpose::Reconcile,
+        )),
+        SyncMode::Backfill { days, chunk_days } => Ok(chunked_heartrate_windows(
+            now - Duration::days(i64::from(days)),
+            now,
+            chunk_days.map_or(policy.backfill_chunk_days(), i64::from),
+            SyncWindowPurpose::Backfill,
+        )),
+    }
+}
+
+const fn retryable_problem(problem: &OuraProblem) -> bool {
+    matches!(problem.status, Some(429 | 500..=599))
+        || (problem.status.is_none() && problem.oauth_error.is_none())
+}
+
+async fn fetch_with_retry<T, F, Fut>(config: &Config, mut fetch: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut attempt = 0_u32;
+    let max_attempts = config.refresh.sync_retry_max_attempts.max(1);
+
+    loop {
+        attempt = attempt.saturating_add(1);
+        match fetch().await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let problem = error_problem(&error);
+                if attempt >= max_attempts || !retryable_problem(&problem) {
+                    return Err(error);
+                }
+                let backoff_multiplier = 1_u64 << attempt.saturating_sub(1).min(6);
+                let backoff_secs = config
+                    .refresh
+                    .sync_retry_base_backoff_secs
+                    .max(1)
+                    .saturating_mul(backoff_multiplier)
+                    .min(config.refresh.max_backoff_secs.max(1));
+                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            }
+        }
+    }
+}
+
 async fn sync_daily(
     config: &Config,
     store_plan: StorePlan,
@@ -639,79 +1103,162 @@ async fn sync_daily(
     capability_report: &CapabilityReport,
     options: &SyncOptions,
 ) -> Result<SliceReport> {
-    if !capability_report.is_granted(CapabilityKind::Daily) {
-        let persist_store = reopen_store(config, &store_plan)?;
-        return persist_slice_report(
+    if let Some(report) = guard_family_scope(
+        config,
+        &store_plan,
+        capability_report,
+        CapabilityKind::Daily,
+        SyncFamily::Daily,
+        "`daily` scope is not requested; skipping daily summary sync.",
+        "Missing `daily` scope; dashboard summary rows remain unavailable.",
+        options,
+    )? {
+        return Ok(report);
+    }
+    let policy = SyncPolicy::for_family(&config.refresh, SyncFamily::Daily);
+    let windows = plan_daily_windows(config, &store_plan, SyncFamily::Daily, options, &policy)?;
+    let mut summary = FamilySyncSummary::new(SyncFamily::Daily);
+
+    for planned in windows {
+        let (status, message, last_error, imported_rows) = execute_daily_window(
             config,
-            &persist_store,
-            slice_blocked(
-                DAILY_SYNC_KEY,
-                "Missing `daily` scope; dashboard summary rows remain unavailable.",
-            ),
-            granted_scopes_from_report(capability_report),
+            &store_plan,
+            client,
+            capability_report,
+            &planned.window,
             options,
-        );
+        )
+        .await?;
+        summary.observe(SliceReport {
+            sync_key: SyncFamily::Daily.sync_key().to_owned(),
+            family: SyncFamily::Daily,
+            status,
+            imported_rows,
+            watermark: Some(planned.window.end_date.clone()),
+            last_successful_sync_end: Some(planned.window.end_date.clone()),
+            last_reconcile_end: planned
+                .purpose
+                .records_reconcile_coverage()
+                .then(|| planned.window.end_date.clone()),
+            oldest_recently_reconciled_at: planned
+                .purpose
+                .records_reconcile_coverage()
+                .then(|| planned.window.start_date.clone()),
+            message: format!("{} window: {message}", planned.purpose.label()),
+            last_error,
+            next_attempt_after: None,
+        });
     }
 
-    let window = resolve_daily_sync_window(config, &store_plan, options)?;
-    let pages = fetch_daily_pages(client, capability_report, &window).await?;
-    let imported_at = now_rfc3339()?;
     let persist_store = reopen_store(config, &store_plan)?;
-    persist_daily_pages(&persist_store, &window, &pages, &imported_at, options)?;
-    let (status, message, last_error, imported_rows) = summarize_daily_sync(&window, &pages);
-    let watermark = daily_sync_watermark(config, &window, &status)?;
     persist_slice_report(
         config,
         &persist_store,
-        SliceReport {
-            sync_key: DAILY_SYNC_KEY.to_owned(),
-            status,
-            imported_rows,
-            watermark,
-            message,
-            last_error,
-            next_attempt_after: None,
-        },
+        summary.finish(),
         granted_scopes_from_report(capability_report),
         options,
     )
 }
 
-fn resolve_daily_sync_window(
+async fn execute_daily_window(
     config: &Config,
     store_plan: &StorePlan,
+    client: &dyn OuraClient,
+    capability_report: &CapabilityReport,
+    window: &DailySyncWindow,
     options: &SyncOptions,
-) -> Result<DailySyncWindow> {
-    let end_date = utc_date_string(OffsetDateTime::now_utc());
-    let start_date = if options.fixture_dir.is_some() {
-        "1970-01-01".to_owned()
-    } else {
-        let overlap_store = reopen_store(config, store_plan)?;
-        overlap_day_window(
-            &overlap_store,
-            DAILY_SYNC_KEY,
-            i64::from(config.refresh.daily_history_days),
-            i64::from(config.refresh.daily_overlap_days),
-        )?
-    };
-    Ok(DailySyncWindow {
-        start_date,
-        end_date,
+) -> Result<(SyncRunStatus, String, Option<OuraProblem>, usize)> {
+    let pages = fetch_with_retry(config, || {
+        fetch_daily_pages(client, capability_report, window)
     })
+    .await?;
+    let imported_at = now_rfc3339()?;
+    let persist_store = reopen_store(config, store_plan)?;
+    persist_daily_pages(&persist_store, window, &pages, &imported_at, options)?;
+    Ok(summarize_daily_sync(window, &pages))
 }
 
-fn daily_sync_watermark(
+async fn sync_spo2(
     config: &Config,
+    store_plan: StorePlan,
+    client: &dyn OuraClient,
+    capability_report: &CapabilityReport,
+    options: &SyncOptions,
+) -> Result<SliceReport> {
+    if let Some(report) = guard_family_scope(
+        config,
+        &store_plan,
+        capability_report,
+        CapabilityKind::Spo2,
+        SyncFamily::Spo2,
+        "`spo2` scope is not requested; skipping blood oxygen sync.",
+        "Missing `spo2` scope; blood oxygen coverage remains unavailable.",
+        options,
+    )? {
+        return Ok(report);
+    }
+    let policy = SyncPolicy::for_family(&config.refresh, SyncFamily::Spo2);
+    let windows = plan_daily_windows(config, &store_plan, SyncFamily::Spo2, options, &policy)?;
+    let mut summary = FamilySyncSummary::new(SyncFamily::Spo2);
+
+    for planned in windows {
+        let (message, imported_rows) =
+            execute_spo2_window(config, &store_plan, client, &planned.window, options).await?;
+        summary.observe(SliceReport {
+            sync_key: SyncFamily::Spo2.sync_key().to_owned(),
+            family: SyncFamily::Spo2,
+            status: SyncRunStatus::Success,
+            imported_rows,
+            watermark: Some(planned.window.end_date.clone()),
+            last_successful_sync_end: Some(planned.window.end_date.clone()),
+            last_reconcile_end: planned
+                .purpose
+                .records_reconcile_coverage()
+                .then(|| planned.window.end_date.clone()),
+            oldest_recently_reconciled_at: planned
+                .purpose
+                .records_reconcile_coverage()
+                .then(|| planned.window.start_date.clone()),
+            message: format!("{} window: {message}", planned.purpose.label()),
+            last_error: None,
+            next_attempt_after: None,
+        });
+    }
+
+    let persist_store = reopen_store(config, &store_plan)?;
+    persist_slice_report(
+        config,
+        &persist_store,
+        summary.finish(),
+        granted_scopes_from_report(capability_report),
+        options,
+    )
+}
+
+async fn execute_spo2_window(
+    config: &Config,
+    store_plan: &StorePlan,
+    client: &dyn OuraClient,
     window: &DailySyncWindow,
-    status: &SyncRunStatus,
-) -> Result<Option<String>> {
-    let watermark = match status {
-        SyncRunStatus::Partial => {
-            window.retry_cursor(i64::from(config.refresh.daily_overlap_days))?
-        }
-        _ => window.end_date.clone(),
-    };
-    Ok(Some(watermark))
+    options: &SyncOptions,
+) -> Result<(String, usize)> {
+    let pages = fetch_with_retry(config, || {
+        client.fetch_daily_spo2(window.start_date.clone(), window.end_date.clone())
+    })
+    .await?;
+    let imported_at = now_rfc3339()?;
+    let persist_store = reopen_store(config, store_plan)?;
+    if !options.dry_run {
+        persist_daily_spo2_pages(&persist_store, &pages, &imported_at)?;
+    }
+    let imported_rows = count_documents(&pages);
+    Ok((
+        format!(
+            "Imported {imported_rows} SpO2 rows from {} through {}.",
+            window.start_date, window.end_date
+        ),
+        imported_rows,
+    ))
 }
 
 async fn fetch_daily_pages(
@@ -724,7 +1271,6 @@ async fn fetch_daily_pages(
         sleep_period_pages_result,
         readiness_pages_result,
         activity_pages_result,
-        daily_spo2_pages_result,
         sleep_time_pages_result,
         rest_mode_period_pages_result,
         daily_stress_pages_result,
@@ -736,15 +1282,6 @@ async fn fetch_daily_pages(
         client.fetch_sleep(window.start_date.clone(), window.end_date.clone()),
         client.fetch_daily_readiness(window.start_date.clone(), window.end_date.clone()),
         client.fetch_daily_activity(window.start_date.clone(), window.end_date.clone()),
-        async {
-            if capability_report.is_granted(CapabilityKind::Spo2) {
-                client
-                    .fetch_daily_spo2(window.start_date.clone(), window.end_date.clone())
-                    .await
-            } else {
-                Ok(Vec::new())
-            }
-        },
         async {
             if capability_report.is_granted(CapabilityKind::Stress) {
                 client
@@ -810,11 +1347,6 @@ async fn fetch_daily_pages(
         sleep_period_pages: sleep_period_pages_result?,
         readiness_pages: readiness_pages_result?,
         activity_pages: activity_pages_result?,
-        daily_spo2_pages: collect_optional_daily_pages(
-            "daily_spo2",
-            daily_spo2_pages_result,
-            &mut optional_failures,
-        ),
         sleep_time_pages: collect_optional_daily_pages(
             "sleep_time",
             sleep_time_pages_result,
@@ -869,7 +1401,6 @@ fn persist_daily_pages(
     )?;
     persist_daily_readiness_pages(persist_store, &pages.readiness_pages, imported_at)?;
     persist_daily_activity_pages(persist_store, &pages.activity_pages, imported_at)?;
-    persist_daily_spo2_pages(persist_store, &pages.daily_spo2_pages, imported_at)?;
     persist_sleep_time_pages(persist_store, &pages.sleep_time_pages, imported_at)?;
     persist_rest_mode_period_pages(persist_store, &pages.rest_mode_period_pages, imported_at)?;
     persist_daily_stress_pages(persist_store, &pages.daily_stress_pages, imported_at)?;
@@ -1197,7 +1728,6 @@ fn summarize_daily_sync(
         + count_documents(&pages.sleep_period_pages)
         + count_documents(&pages.readiness_pages)
         + count_documents(&pages.activity_pages)
-        + count_documents(&pages.daily_spo2_pages)
         + count_documents(&pages.sleep_time_pages)
         + count_documents(&pages.rest_mode_period_pages)
         + count_documents(&pages.daily_stress_pages)
@@ -1244,36 +1774,250 @@ async fn sync_heartrate(
     capability_report: &CapabilityReport,
     options: &SyncOptions,
 ) -> Result<SliceReport> {
-    if !capability_report.is_granted(CapabilityKind::Heartrate) {
-        let persist_store = reopen_store(config, &store_plan)?;
-        return persist_slice_report(
-            config,
-            &persist_store,
-            slice_blocked(
-                HEARTRATE_SYNC_KEY,
-                "Missing `heartrate` scope; timeline and trends remain stale.",
-            ),
-            granted_scopes_from_report(capability_report),
-            options,
-        );
+    if let Some(report) = guard_family_scope(
+        config,
+        &store_plan,
+        capability_report,
+        CapabilityKind::Heartrate,
+        SyncFamily::Heartrate,
+        "`heartrate` scope is not requested; skipping heartrate sync.",
+        "Missing `heartrate` scope; timeline and trends remain stale.",
+        options,
+    )? {
+        return Ok(report);
+    }
+    let policy = SyncPolicy::for_family(&config.refresh, SyncFamily::Heartrate);
+    let windows = plan_heartrate_windows(config, &store_plan, options, &policy)?;
+    let mut summary = FamilySyncSummary::new(SyncFamily::Heartrate);
+
+    for planned in windows {
+        let (message, imported_rows) =
+            execute_heartrate_window(config, &store_plan, client, &planned, options).await?;
+        let end_marker = format_timestamp_marker(planned.end)?;
+        summary.observe(SliceReport {
+            sync_key: SyncFamily::Heartrate.sync_key().to_owned(),
+            family: SyncFamily::Heartrate,
+            status: SyncRunStatus::Success,
+            imported_rows,
+            watermark: Some(end_marker.clone()),
+            last_successful_sync_end: Some(end_marker.clone()),
+            last_reconcile_end: planned
+                .purpose
+                .records_reconcile_coverage()
+                .then_some(end_marker),
+            oldest_recently_reconciled_at: planned
+                .purpose
+                .records_reconcile_coverage()
+                .then(|| planned.start.date().to_string()),
+            message: format!("{} window: {message}", planned.purpose.label()),
+            last_error: None,
+            next_attempt_after: None,
+        });
     }
 
-    let end_datetime = now_rfc3339()?;
-    let start_datetime = if options.fixture_dir.is_some() {
-        "1970-01-01T00:00:00Z".to_owned()
-    } else {
-        let overlap_store = reopen_store(config, &store_plan)?;
-        overlap_heartrate_window(
-            &overlap_store,
-            i64::from(config.refresh.heartrate_history_days),
-            i64::from(config.refresh.heartrate_overlap_minutes),
-        )?
-    };
-    let heartrate_pages = client
-        .fetch_heartrate(start_datetime.clone(), end_datetime.clone())
-        .await?;
-    let imported_at = now_rfc3339()?;
     let persist_store = reopen_store(config, &store_plan)?;
+    persist_slice_report(
+        config,
+        &persist_store,
+        summary.finish(),
+        granted_scopes_from_report(capability_report),
+        options,
+    )
+}
+
+async fn sync_workouts(
+    config: &Config,
+    store_plan: StorePlan,
+    client: &dyn OuraClient,
+    capability_report: &CapabilityReport,
+    options: &SyncOptions,
+) -> Result<SliceReport> {
+    if let Some(report) = guard_family_scope(
+        config,
+        &store_plan,
+        capability_report,
+        CapabilityKind::Workout,
+        SyncFamily::Workout,
+        "`workout` scope is not requested; skipping workout sync.",
+        "Missing `workout` scope; workout overlays and context evidence remain unavailable.",
+        options,
+    )? {
+        return Ok(report);
+    }
+    let policy = SyncPolicy::for_family(&config.refresh, SyncFamily::Workout);
+    let windows = plan_daily_windows(config, &store_plan, SyncFamily::Workout, options, &policy)?;
+    let mut summary = FamilySyncSummary::new(SyncFamily::Workout);
+
+    for planned in windows {
+        let (message, imported_rows) =
+            execute_workout_window(config, &store_plan, client, &planned.window, options).await?;
+        summary.observe(SliceReport {
+            sync_key: SyncFamily::Workout.sync_key().to_owned(),
+            family: SyncFamily::Workout,
+            status: SyncRunStatus::Success,
+            imported_rows,
+            watermark: Some(planned.window.end_date.clone()),
+            last_successful_sync_end: Some(planned.window.end_date.clone()),
+            last_reconcile_end: planned
+                .purpose
+                .records_reconcile_coverage()
+                .then(|| planned.window.end_date.clone()),
+            oldest_recently_reconciled_at: planned
+                .purpose
+                .records_reconcile_coverage()
+                .then(|| planned.window.start_date.clone()),
+            message: format!("{} window: {message}", planned.purpose.label()),
+            last_error: None,
+            next_attempt_after: None,
+        });
+    }
+
+    let persist_store = reopen_store(config, &store_plan)?;
+    persist_slice_report(
+        config,
+        &persist_store,
+        summary.finish(),
+        granted_scopes_from_report(capability_report),
+        options,
+    )
+}
+
+async fn sync_enhanced_tags(
+    config: &Config,
+    store_plan: StorePlan,
+    client: &dyn OuraClient,
+    capability_report: &CapabilityReport,
+    options: &SyncOptions,
+) -> Result<SliceReport> {
+    if let Some(report) = guard_family_scope(
+        config,
+        &store_plan,
+        capability_report,
+        CapabilityKind::EnhancedTag,
+        SyncFamily::EnhancedTag,
+        "`tag` scope is not requested; skipping tag sync.",
+        "Missing `tag` scope; tag overlays and explainability evidence remain unavailable.",
+        options,
+    )? {
+        return Ok(report);
+    }
+    let policy = SyncPolicy::for_family(&config.refresh, SyncFamily::EnhancedTag);
+    let windows = plan_daily_windows(
+        config,
+        &store_plan,
+        SyncFamily::EnhancedTag,
+        options,
+        &policy,
+    )?;
+    let mut summary = FamilySyncSummary::new(SyncFamily::EnhancedTag);
+
+    for planned in windows {
+        let (message, imported_rows) =
+            execute_enhanced_tag_window(config, &store_plan, client, &planned.window, options)
+                .await?;
+        summary.observe(SliceReport {
+            sync_key: SyncFamily::EnhancedTag.sync_key().to_owned(),
+            family: SyncFamily::EnhancedTag,
+            status: SyncRunStatus::Success,
+            imported_rows,
+            watermark: Some(planned.window.end_date.clone()),
+            last_successful_sync_end: Some(planned.window.end_date.clone()),
+            last_reconcile_end: planned
+                .purpose
+                .records_reconcile_coverage()
+                .then(|| planned.window.end_date.clone()),
+            oldest_recently_reconciled_at: planned
+                .purpose
+                .records_reconcile_coverage()
+                .then(|| planned.window.start_date.clone()),
+            message: format!("{} window: {message}", planned.purpose.label()),
+            last_error: None,
+            next_attempt_after: None,
+        });
+    }
+
+    let persist_store = reopen_store(config, &store_plan)?;
+    persist_slice_report(
+        config,
+        &persist_store,
+        summary.finish(),
+        granted_scopes_from_report(capability_report),
+        options,
+    )
+}
+
+async fn sync_sessions(
+    config: &Config,
+    store_plan: StorePlan,
+    client: &dyn OuraClient,
+    capability_report: &CapabilityReport,
+    options: &SyncOptions,
+) -> Result<SliceReport> {
+    if let Some(report) = guard_family_scope(
+        config,
+        &store_plan,
+        capability_report,
+        CapabilityKind::Session,
+        SyncFamily::Session,
+        "`session` scope is not requested; skipping session sync.",
+        "Missing `session` scope; session overlays and explainability evidence remain unavailable.",
+        options,
+    )? {
+        return Ok(report);
+    }
+    let policy = SyncPolicy::for_family(&config.refresh, SyncFamily::Session);
+    let windows = plan_daily_windows(config, &store_plan, SyncFamily::Session, options, &policy)?;
+    let mut summary = FamilySyncSummary::new(SyncFamily::Session);
+
+    for planned in windows {
+        let (message, imported_rows) =
+            execute_session_window(config, &store_plan, client, &planned.window, options).await?;
+        summary.observe(SliceReport {
+            sync_key: SyncFamily::Session.sync_key().to_owned(),
+            family: SyncFamily::Session,
+            status: SyncRunStatus::Success,
+            imported_rows,
+            watermark: Some(planned.window.end_date.clone()),
+            last_successful_sync_end: Some(planned.window.end_date.clone()),
+            last_reconcile_end: planned
+                .purpose
+                .records_reconcile_coverage()
+                .then(|| planned.window.end_date.clone()),
+            oldest_recently_reconciled_at: planned
+                .purpose
+                .records_reconcile_coverage()
+                .then(|| planned.window.start_date.clone()),
+            message: format!("{} window: {message}", planned.purpose.label()),
+            last_error: None,
+            next_attempt_after: None,
+        });
+    }
+
+    let persist_store = reopen_store(config, &store_plan)?;
+    persist_slice_report(
+        config,
+        &persist_store,
+        summary.finish(),
+        granted_scopes_from_report(capability_report),
+        options,
+    )
+}
+
+async fn execute_heartrate_window(
+    config: &Config,
+    store_plan: &StorePlan,
+    client: &dyn OuraClient,
+    planned: &PlannedHeartrateWindow,
+    options: &SyncOptions,
+) -> Result<(String, usize)> {
+    let start_datetime = format_timestamp_marker(planned.start)?;
+    let end_datetime = format_timestamp_marker(planned.end)?;
+    let heartrate_pages = fetch_with_retry(config, || {
+        client.fetch_heartrate(start_datetime.clone(), end_datetime.clone())
+    })
+    .await?;
+    let imported_at = now_rfc3339()?;
+    let persist_store = reopen_store(config, store_plan)?;
 
     if !options.dry_run {
         for page in &heartrate_pages {
@@ -1295,63 +2039,27 @@ async fn sync_heartrate(
     }
 
     let imported_rows = count_documents(&heartrate_pages);
-    persist_slice_report(
-        config,
-        &persist_store,
-        SliceReport {
-            sync_key: HEARTRATE_SYNC_KEY.to_owned(),
-            status: SyncRunStatus::Success,
-            imported_rows,
-            watermark: Some(end_datetime.clone()),
-            message: format!(
-                "Imported {imported_rows} heartrate samples from {start_datetime} through {end_datetime}."
-            ),
-            last_error: None,
-            next_attempt_after: None,
-        },
-        granted_scopes_from_report(capability_report),
-        options,
-    )
+    Ok((
+        format!(
+            "Imported {imported_rows} heartrate samples from {start_datetime} through {end_datetime}."
+        ),
+        imported_rows,
+    ))
 }
 
-async fn sync_workouts(
+async fn execute_workout_window(
     config: &Config,
-    store_plan: StorePlan,
+    store_plan: &StorePlan,
     client: &dyn OuraClient,
-    capability_report: &CapabilityReport,
+    window: &DailySyncWindow,
     options: &SyncOptions,
-) -> Result<SliceReport> {
-    if !capability_report.is_granted(CapabilityKind::Workout) {
-        let persist_store = reopen_store(config, &store_plan)?;
-        return persist_slice_report(
-            config,
-            &persist_store,
-            slice_blocked(
-                WORKOUT_SYNC_KEY,
-                "Missing `workout` scope; workout overlays and context evidence remain unavailable.",
-            ),
-            granted_scopes_from_report(capability_report),
-            options,
-        );
-    }
-
-    let end_date = utc_date_string(OffsetDateTime::now_utc());
-    let start_date = if options.fixture_dir.is_some() {
-        "1970-01-01".to_owned()
-    } else {
-        let overlap_store = reopen_store(config, &store_plan)?;
-        overlap_day_window(
-            &overlap_store,
-            WORKOUT_SYNC_KEY,
-            i64::from(config.refresh.workout_history_days),
-            i64::from(config.refresh.workout_overlap_days),
-        )?
-    };
-    let workout_pages = client
-        .fetch_workouts(start_date.clone(), end_date.clone())
-        .await?;
+) -> Result<(String, usize)> {
+    let workout_pages = fetch_with_retry(config, || {
+        client.fetch_workouts(window.start_date.clone(), window.end_date.clone())
+    })
+    .await?;
     let imported_at = now_rfc3339()?;
-    let persist_store = reopen_store(config, &store_plan)?;
+    let persist_store = reopen_store(config, store_plan)?;
 
     if !options.dry_run {
         for page in &workout_pages {
@@ -1380,63 +2088,28 @@ async fn sync_workouts(
     }
 
     let imported_rows = count_documents(&workout_pages);
-    persist_slice_report(
-        config,
-        &persist_store,
-        SliceReport {
-            sync_key: WORKOUT_SYNC_KEY.to_owned(),
-            status: SyncRunStatus::Success,
-            imported_rows,
-            watermark: Some(end_date.clone()),
-            message: format!(
-                "Imported {imported_rows} workouts from {start_date} through {end_date}."
-            ),
-            last_error: None,
-            next_attempt_after: None,
-        },
-        granted_scopes_from_report(capability_report),
-        options,
-    )
+    Ok((
+        format!(
+            "Imported {imported_rows} workouts from {} through {}.",
+            window.start_date, window.end_date
+        ),
+        imported_rows,
+    ))
 }
 
-async fn sync_enhanced_tags(
+async fn execute_enhanced_tag_window(
     config: &Config,
-    store_plan: StorePlan,
+    store_plan: &StorePlan,
     client: &dyn OuraClient,
-    capability_report: &CapabilityReport,
+    window: &DailySyncWindow,
     options: &SyncOptions,
-) -> Result<SliceReport> {
-    if !capability_report.is_granted(CapabilityKind::EnhancedTag) {
-        let persist_store = reopen_store(config, &store_plan)?;
-        return persist_slice_report(
-            config,
-            &persist_store,
-            slice_blocked(
-                ENHANCED_TAG_SYNC_KEY,
-                "Missing `tag` scope; tag overlays and explainability evidence remain unavailable.",
-            ),
-            granted_scopes_from_report(capability_report),
-            options,
-        );
-    }
-
-    let end_date = utc_date_string(OffsetDateTime::now_utc());
-    let start_date = if options.fixture_dir.is_some() {
-        "1970-01-01".to_owned()
-    } else {
-        let overlap_store = reopen_store(config, &store_plan)?;
-        overlap_day_window(
-            &overlap_store,
-            ENHANCED_TAG_SYNC_KEY,
-            i64::from(config.refresh.enhanced_tag_history_days),
-            i64::from(config.refresh.enhanced_tag_overlap_days),
-        )?
-    };
-    let enhanced_tag_pages = client
-        .fetch_enhanced_tags(start_date.clone(), end_date.clone())
-        .await?;
+) -> Result<(String, usize)> {
+    let enhanced_tag_pages = fetch_with_retry(config, || {
+        client.fetch_enhanced_tags(window.start_date.clone(), window.end_date.clone())
+    })
+    .await?;
     let imported_at = now_rfc3339()?;
-    let persist_store = reopen_store(config, &store_plan)?;
+    let persist_store = reopen_store(config, store_plan)?;
 
     if !options.dry_run {
         for page in &enhanced_tag_pages {
@@ -1463,63 +2136,28 @@ async fn sync_enhanced_tags(
     }
 
     let imported_rows = count_documents(&enhanced_tag_pages);
-    persist_slice_report(
-        config,
-        &persist_store,
-        SliceReport {
-            sync_key: ENHANCED_TAG_SYNC_KEY.to_owned(),
-            status: SyncRunStatus::Success,
-            imported_rows,
-            watermark: Some(end_date.clone()),
-            message: format!(
-                "Imported {imported_rows} enhanced tags from {start_date} through {end_date}."
-            ),
-            last_error: None,
-            next_attempt_after: None,
-        },
-        granted_scopes_from_report(capability_report),
-        options,
-    )
+    Ok((
+        format!(
+            "Imported {imported_rows} enhanced tags from {} through {}.",
+            window.start_date, window.end_date
+        ),
+        imported_rows,
+    ))
 }
 
-async fn sync_sessions(
+async fn execute_session_window(
     config: &Config,
-    store_plan: StorePlan,
+    store_plan: &StorePlan,
     client: &dyn OuraClient,
-    capability_report: &CapabilityReport,
+    window: &DailySyncWindow,
     options: &SyncOptions,
-) -> Result<SliceReport> {
-    if !capability_report.is_granted(CapabilityKind::Session) {
-        let persist_store = reopen_store(config, &store_plan)?;
-        return persist_slice_report(
-            config,
-            &persist_store,
-            slice_blocked(
-                SESSION_SYNC_KEY,
-                "Missing `session` scope; session overlays and explainability evidence remain unavailable.",
-            ),
-            granted_scopes_from_report(capability_report),
-            options,
-        );
-    }
-
-    let end_date = utc_date_string(OffsetDateTime::now_utc());
-    let start_date = if options.fixture_dir.is_some() {
-        "1970-01-01".to_owned()
-    } else {
-        let overlap_store = reopen_store(config, &store_plan)?;
-        overlap_day_window(
-            &overlap_store,
-            SESSION_SYNC_KEY,
-            i64::from(config.refresh.session_history_days),
-            i64::from(config.refresh.session_overlap_days),
-        )?
-    };
-    let session_pages = client
-        .fetch_sessions(start_date.clone(), end_date.clone())
-        .await?;
+) -> Result<(String, usize)> {
+    let session_pages = fetch_with_retry(config, || {
+        client.fetch_sessions(window.start_date.clone(), window.end_date.clone())
+    })
+    .await?;
     let imported_at = now_rfc3339()?;
-    let persist_store = reopen_store(config, &store_plan)?;
+    let persist_store = reopen_store(config, store_plan)?;
 
     if !options.dry_run {
         for page in &session_pages {
@@ -1544,23 +2182,13 @@ async fn sync_sessions(
     }
 
     let imported_rows = count_documents(&session_pages);
-    persist_slice_report(
-        config,
-        &persist_store,
-        SliceReport {
-            sync_key: SESSION_SYNC_KEY.to_owned(),
-            status: SyncRunStatus::Success,
-            imported_rows,
-            watermark: Some(end_date.clone()),
-            message: format!(
-                "Imported {imported_rows} sessions from {start_date} through {end_date}."
-            ),
-            last_error: None,
-            next_attempt_after: None,
-        },
-        granted_scopes_from_report(capability_report),
-        options,
-    )
+    Ok((
+        format!(
+            "Imported {imported_rows} sessions from {} through {}.",
+            window.start_date, window.end_date
+        ),
+        imported_rows,
+    ))
 }
 
 fn persist_blocked_slice_reports(
@@ -1618,6 +2246,17 @@ fn persist_slice_report(
 ) -> Result<SliceReport> {
     if !options.dry_run {
         let previous = store.sync_state().get(&report.sync_key)?;
+        let previous_cursor = previous.as_ref().and_then(|state| state.cursor.clone());
+        let previous_success = previous
+            .as_ref()
+            .and_then(|state| state.last_successful_sync_end.clone())
+            .or_else(|| previous_cursor.clone());
+        let previous_reconcile_end = previous
+            .as_ref()
+            .and_then(|state| state.last_reconcile_end.clone());
+        let previous_reconcile_start = previous
+            .as_ref()
+            .and_then(|state| state.oldest_recently_reconciled_at.clone());
         let failure_count = match report.status {
             SyncRunStatus::Failed => previous
                 .as_ref()
@@ -1626,6 +2265,28 @@ fn persist_slice_report(
         };
         let attempted_at = now_rfc3339()?;
         let completed_at = now_rfc3339()?;
+        let cursor = if matches!(
+            report.status,
+            SyncRunStatus::Success | SyncRunStatus::Partial
+        ) {
+            prefer_later_marker(report.watermark.clone(), previous_cursor)
+        } else {
+            previous_cursor
+        };
+        let last_successful_sync_end = if matches!(
+            report.status,
+            SyncRunStatus::Success | SyncRunStatus::Partial
+        ) {
+            prefer_later_marker(report.last_successful_sync_end.clone(), previous_success)
+        } else {
+            previous_success
+        };
+        let last_reconcile_end =
+            prefer_later_marker(report.last_reconcile_end.clone(), previous_reconcile_end);
+        let oldest_recently_reconciled_at = prefer_earlier_marker(
+            report.oldest_recently_reconciled_at.clone(),
+            previous_reconcile_start,
+        );
         let next_attempt_after = if report.status == SyncRunStatus::Failed {
             report
                 .next_attempt_after
@@ -1634,15 +2295,41 @@ fn persist_slice_report(
         } else {
             None
         };
+        let last_error_at =
+            if report.last_error.is_some() || report.status == SyncRunStatus::Blocked {
+                Some(completed_at.clone())
+            } else {
+                None
+            };
         store.sync_state().upsert(&SyncStateRecord {
             sync_key: report.sync_key.clone(),
+            family: report.family.label().to_owned(),
             status: report.status.clone(),
-            cursor: report.watermark.clone(),
+            cursor,
+            last_successful_sync_end,
             last_attempted_at: attempted_at,
             last_completed_at: Some(completed_at),
+            last_reconcile_end,
+            oldest_recently_reconciled_at,
             message: Some(report.message.clone()),
             granted_scopes,
             last_error: report.last_error.clone(),
+            last_error_at,
+            last_error_kind: report
+                .last_error
+                .as_ref()
+                .map(classify_problem_kind)
+                .map(str::to_owned)
+                .or_else(|| {
+                    (report.status == SyncRunStatus::Blocked).then(|| "blocked".to_owned())
+                }),
+            last_error_detail: if report.last_error.is_some()
+                || report.status == SyncRunStatus::Blocked
+            {
+                Some(bound_sync_detail(&report.message))
+            } else {
+                None
+            },
             failure_count,
             next_attempt_after,
             last_trigger_source: Some(
@@ -1657,101 +2344,169 @@ fn persist_slice_report(
                     .clone()
                     .unwrap_or_else(|| "sync_selected".to_owned()),
             ),
+            updated_at: now_rfc3339()?,
         })?;
     }
 
     Ok(report)
 }
 
-fn slice_blocked(sync_key: &str, message: &str) -> SliceReport {
+fn prefer_later_marker(next: Option<String>, previous: Option<String>) -> Option<String> {
+    match (next, previous) {
+        (Some(next), Some(previous)) => Some(if next >= previous { next } else { previous }),
+        (Some(next), None) => Some(next),
+        (None, Some(previous)) => Some(previous),
+        (None, None) => None,
+    }
+}
+
+fn prefer_earlier_marker(next: Option<String>, previous: Option<String>) -> Option<String> {
+    match (next, previous) {
+        (Some(next), Some(previous)) => Some(if next <= previous { next } else { previous }),
+        (Some(next), None) => Some(next),
+        (None, Some(previous)) => Some(previous),
+        (None, None) => None,
+    }
+}
+
+fn new_slice_report(
+    family: SyncFamily,
+    status: SyncRunStatus,
+    imported_rows: usize,
+    watermark: Option<String>,
+    message: String,
+    last_error: Option<OuraProblem>,
+) -> SliceReport {
+    let last_successful_sync_end =
+        if matches!(status, SyncRunStatus::Success | SyncRunStatus::Partial) {
+            watermark.clone()
+        } else {
+            None
+        };
     SliceReport {
-        sync_key: sync_key.to_owned(),
-        status: SyncRunStatus::Blocked,
-        imported_rows: 0,
-        watermark: None,
-        message: message.to_owned(),
-        last_error: None,
+        sync_key: family.sync_key().to_owned(),
+        family,
+        status,
+        imported_rows,
+        watermark,
+        last_successful_sync_end,
+        last_reconcile_end: None,
+        oldest_recently_reconciled_at: None,
+        message,
+        last_error,
         next_attempt_after: None,
     }
+}
+
+fn slice_blocked_family(family: SyncFamily, message: &str) -> SliceReport {
+    new_slice_report(
+        family,
+        SyncRunStatus::Blocked,
+        0,
+        None,
+        message.to_owned(),
+        None,
+    )
+}
+
+fn slice_success_family(family: SyncFamily, message: &str) -> SliceReport {
+    new_slice_report(
+        family,
+        SyncRunStatus::Success,
+        0,
+        None,
+        message.to_owned(),
+        None,
+    )
+}
+
+fn failed_slice_report_family(family: SyncFamily, problem: OuraProblem) -> SliceReport {
+    let message = format!("{}: {problem}", family.sync_key());
+    new_slice_report(
+        family,
+        SyncRunStatus::Failed,
+        0,
+        None,
+        message,
+        Some(problem),
+    )
+}
+
+fn guard_family_scope(
+    config: &Config,
+    store_plan: &StorePlan,
+    capability_report: &CapabilityReport,
+    capability: CapabilityKind,
+    family: SyncFamily,
+    not_requested_message: &str,
+    missing_scope_message: &str,
+    options: &SyncOptions,
+) -> Result<Option<SliceReport>> {
+    let Some(entry) = capability_report.status_for(capability) else {
+        return Ok(None);
+    };
+    if entry.granted {
+        return Ok(None);
+    }
+
+    let persist_store = reopen_store(config, store_plan)?;
+    let report = if entry.requested {
+        slice_blocked_family(family, missing_scope_message)
+    } else {
+        slice_success_family(family, not_requested_message)
+    };
+    let persisted = persist_slice_report(
+        config,
+        &persist_store,
+        report,
+        granted_scopes_from_report(capability_report),
+        options,
+    )?;
+    Ok(Some(persisted))
+}
+
+const fn classify_problem_kind(problem: &OuraProblem) -> &'static str {
+    match problem.status {
+        Some(401 | 403) => "auth",
+        Some(429) => "rate_limit",
+        Some(500..=599) => "transient_api",
+        Some(_) => "api_error",
+        None if problem.oauth_error.is_some() => "auth",
+        None => "transport",
+    }
+}
+
+fn bound_sync_detail(detail: &str) -> String {
+    const MAX_DETAIL_CHARS: usize = 512;
+    let mut bounded = detail.chars().take(MAX_DETAIL_CHARS).collect::<String>();
+    if detail.chars().count() > MAX_DETAIL_CHARS {
+        bounded.push_str("...");
+    }
+    bounded
+}
+
+fn sync_family_from_key(sync_key: &str) -> Option<SyncFamily> {
+    SyncFamily::ALL
+        .into_iter()
+        .find(|family| family.sync_key() == sync_key)
+}
+
+fn slice_blocked_by_key(sync_key: &str, message: &str) -> SliceReport {
+    let family = sync_family_from_key(sync_key).unwrap_or(SyncFamily::Daily);
+    slice_blocked_family(family, message)
+}
+
+fn failed_slice_report_by_key(sync_key: &str, problem: OuraProblem) -> SliceReport {
+    let family = sync_family_from_key(sync_key).unwrap_or(SyncFamily::Daily);
+    failed_slice_report_family(family, problem)
+}
+
+fn slice_blocked(sync_key: &str, message: &str) -> SliceReport {
+    slice_blocked_by_key(sync_key, message)
 }
 
 fn failed_slice_report(sync_key: &str, problem: OuraProblem) -> SliceReport {
-    let message = format!("{sync_key}: {problem}");
-    SliceReport {
-        sync_key: sync_key.to_owned(),
-        status: SyncRunStatus::Failed,
-        imported_rows: 0,
-        watermark: None,
-        message,
-        last_error: Some(problem),
-        next_attempt_after: None,
-    }
-}
-
-fn overlap_day_window(
-    store: &Store,
-    sync_key: &str,
-    initial_days: i64,
-    overlap_days: i64,
-) -> Result<String> {
-    let fallback = OffsetDateTime::now_utc().date() - Duration::days(initial_days - 1);
-    let Some(sync_state) = store.sync_state().get(sync_key)?.filter(|record| {
-        matches!(
-            record.status,
-            SyncRunStatus::Success | SyncRunStatus::Partial
-        )
-    }) else {
-        return Ok(fallback.to_string());
-    };
-    let Some(cursor) = sync_state.cursor.as_deref() else {
-        return Ok(fallback.to_string());
-    };
-    let date = time::Date::parse(
-        cursor,
-        &time::macros::format_description!("[year]-[month]-[day]"),
-    )
-    .map_err(|error| {
-        AuthError::OAuthFlow(format!("invalid stored day watermark `{cursor}`: {error}"))
-    })?;
-    Ok((date - Duration::days(overlap_days)).to_string())
-}
-
-fn overlap_heartrate_window(
-    store: &Store,
-    initial_days: i64,
-    overlap_minutes: i64,
-) -> Result<String> {
-    let fallback = OffsetDateTime::now_utc() - Duration::days(initial_days);
-    let Some(sync_state) = store
-        .sync_state()
-        .get(HEARTRATE_SYNC_KEY)?
-        .filter(|record| record.status == SyncRunStatus::Success)
-    else {
-        return fallback.format(&Rfc3339).map_err(|error| {
-            AuthError::OAuthFlow(format!(
-                "failed to format heartrate fallback watermark: {error}"
-            ))
-            .into()
-        });
-    };
-    let Some(cursor) = sync_state.cursor.as_deref() else {
-        return fallback.format(&Rfc3339).map_err(|error| {
-            AuthError::OAuthFlow(format!(
-                "failed to format heartrate fallback watermark: {error}"
-            ))
-            .into()
-        });
-    };
-    let parsed = OffsetDateTime::parse(cursor, &Rfc3339).map_err(|error| {
-        AuthError::OAuthFlow(format!(
-            "invalid stored heartrate watermark `{cursor}`: {error}"
-        ))
-    })?;
-    (parsed - Duration::minutes(overlap_minutes))
-        .format(&Rfc3339)
-        .map_err(|error| {
-            AuthError::OAuthFlow(format!("failed to format heartrate watermark: {error}")).into()
-        })
+    failed_slice_report_by_key(sync_key, problem)
 }
 
 fn count_documents<T>(pages: &[crate::oura::client::PageFetch<T>]) -> usize {
@@ -1822,6 +2577,7 @@ fn family_from_sync_key(sync_key: &str) -> Option<SyncFamily> {
     match sync_key {
         PERSONAL_SYNC_KEY => Some(SyncFamily::Personal),
         DAILY_SYNC_KEY => Some(SyncFamily::Daily),
+        SPO2_SYNC_KEY => Some(SyncFamily::Spo2),
         HEARTRATE_SYNC_KEY => Some(SyncFamily::Heartrate),
         WORKOUT_SYNC_KEY => Some(SyncFamily::Workout),
         ENHANCED_TAG_SYNC_KEY => Some(SyncFamily::EnhancedTag),
@@ -1856,10 +2612,6 @@ fn granted_scopes_from_report(report: &CapabilityReport) -> Vec<String> {
         .collect()
 }
 
-fn utc_date_string(timestamp: OffsetDateTime) -> String {
-    timestamp.date().to_string()
-}
-
 fn workout_start_at(document: &WorkoutDocument) -> String {
     document
         .start_datetime
@@ -1887,6 +2639,8 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    use time::OffsetDateTime;
+
     use super::{SyncOptions, sync_once};
     use crate::config::{
         AppPaths, Config, DEFAULT_OURA_API_BASE_URL, DEFAULT_OURA_AUTHORIZE_URL,
@@ -1894,6 +2648,7 @@ mod tests {
     };
     use crate::oura::client::PageFetch;
     use crate::oura::models::{DailySpO2Document, SleepDocument};
+    use crate::oura::policy::SyncPolicy;
     use crate::refresh::SyncFamily;
     use crate::store::Store;
     use crate::store::queries::{
@@ -1975,30 +2730,8 @@ mod tests {
                 auth_timeout_secs: 120,
             },
             refresh: RefreshConfig {
-                personal_interval_secs: 3_600,
-                daily_interval_secs: 300,
-                heartrate_interval_secs: 60,
-                workout_interval_secs: 600,
-                enhanced_tag_interval_secs: 300,
-                session_interval_secs: 300,
-                personal_stale_after_secs: 72 * 60 * 60,
-                daily_stale_after_secs: 12 * 60 * 60,
-                heartrate_stale_after_secs: 15 * 60,
-                workout_stale_after_secs: 24 * 60 * 60,
-                enhanced_tag_stale_after_secs: 12 * 60 * 60,
-                session_stale_after_secs: 12 * 60 * 60,
-                daily_history_days: 90,
-                daily_overlap_days: 2,
-                heartrate_history_days: 7,
-                heartrate_overlap_minutes: 60,
-                workout_history_days: 90,
-                workout_overlap_days: 2,
-                enhanced_tag_history_days: 90,
-                enhanced_tag_overlap_days: 2,
-                session_history_days: 90,
-                session_overlap_days: 2,
-                max_backoff_secs: 60 * 60,
                 demo_fixture_dir: None,
+                ..RefreshConfig::default()
             },
             webhook: WebhookConfig {
                 bind: ok("127.0.0.1:8799".parse(), "webhook bind should parse"),
@@ -2023,6 +2756,7 @@ mod tests {
             dry_run: false,
             fixture_dir: Some(baseline_fixture_dir()),
             families: SyncFamily::ALL.to_vec(),
+            mode: super::SyncMode::Standard,
             trigger_source: Some("periodic_reconcile".to_owned()),
             trigger_detail: Some("test fixture sync".to_owned()),
         };
@@ -2061,6 +2795,7 @@ mod tests {
                 dry_run: true,
                 fixture_dir: Some(baseline_fixture_dir()),
                 families: SyncFamily::ALL.to_vec(),
+                mode: super::SyncMode::Standard,
                 trigger_source: Some("periodic_reconcile".to_owned()),
                 trigger_detail: Some("test dry-run sync".to_owned()),
             },
@@ -2089,6 +2824,7 @@ mod tests {
                 dry_run: false,
                 fixture_dir: Some(review_fixture_dir()),
                 families: SyncFamily::ALL.to_vec(),
+                mode: super::SyncMode::Standard,
                 trigger_source: Some("periodic_reconcile".to_owned()),
                 trigger_detail: Some("test review fixture sync".to_owned()),
             },
@@ -2162,6 +2898,7 @@ mod tests {
                 dry_run: false,
                 fixture_dir: Some(fixture_dir),
                 families: SyncFamily::ALL.to_vec(),
+                mode: super::SyncMode::Standard,
                 trigger_source: Some("periodic_reconcile".to_owned()),
                 trigger_detail: Some("test official enhanced tag fixture sync".to_owned()),
             },
@@ -2196,6 +2933,7 @@ mod tests {
                 dry_run: false,
                 fixture_dir: Some(fixture_dir),
                 families: vec![SyncFamily::Daily],
+                mode: super::SyncMode::Standard,
                 trigger_source: Some("periodic_reconcile".to_owned()),
                 trigger_detail: Some("test degraded optional daily sync".to_owned()),
             },
@@ -2226,10 +2964,16 @@ mod tests {
         assert_eq!(counts.daily_activity, 7);
         assert_eq!(counts.sleep_time, 0);
         assert!(daily_slice.last_error.is_some());
+        let expected_success_end = OffsetDateTime::now_utc().date().to_string();
+        assert_eq!(
+            daily_state.last_successful_sync_end.as_deref(),
+            Some(expected_success_end.as_str()),
+            "partial daily syncs should advance the committed daily window even when an optional endpoint degrades",
+        );
         assert_eq!(
             daily_state.cursor.as_deref(),
-            Some("1970-01-03"),
-            "partial daily syncs should preserve the retry window for degraded optional endpoints",
+            Some(expected_success_end.as_str()),
+            "partial daily syncs should keep the retry cursor aligned with the committed daily window",
         );
     }
 
@@ -2252,6 +2996,7 @@ mod tests {
                 dry_run: false,
                 fixture_dir: Some(fixture_dir),
                 families: vec![SyncFamily::Daily],
+                mode: super::SyncMode::Standard,
                 trigger_source: Some("periodic_reconcile".to_owned()),
                 trigger_detail: Some("test failed daily sync".to_owned()),
             },
@@ -2490,9 +3235,13 @@ mod tests {
     fn partial_daily_slice_still_triggers_derive_rebuild() {
         assert!(super::should_rebuild_derived_state(&[super::SliceReport {
             sync_key: "oura.daily".to_owned(),
+            family: SyncFamily::Daily,
             status: SyncRunStatus::Partial,
             imported_rows: 3,
             watermark: Some("2026-04-08".to_owned()),
+            last_successful_sync_end: Some("2026-04-08".to_owned()),
+            last_reconcile_end: None,
+            oldest_recently_reconciled_at: None,
             message: "partial daily sync".to_owned(),
             last_error: None,
             next_attempt_after: None,
@@ -2500,31 +3249,265 @@ mod tests {
     }
 
     #[test]
-    fn overlap_day_window_reuses_partial_daily_cursor() {
+    fn startup_catchup_daily_limits_to_recent_window() {
         let store = ok(Store::open_test_store(), "store should open");
+        let config = fixture_config();
+        let policy = SyncPolicy::for_family(&config.refresh, SyncFamily::Daily);
+        let windows = ok(
+            super::plan_daily_windows(
+                &config,
+                store.plan(),
+                SyncFamily::Daily,
+                &SyncOptions {
+                    dry_run: false,
+                    fixture_dir: None,
+                    families: vec![SyncFamily::Daily],
+                    mode: super::SyncMode::Standard,
+                    trigger_source: Some("startup".to_owned()),
+                    trigger_detail: Some("planner test".to_owned()),
+                },
+                &policy,
+            ),
+            "daily startup plan should build",
+        );
+
+        let expected_start =
+            super::recent_day_start(policy.startup_catchup_days(), OffsetDateTime::now_utc())
+                .to_string();
+
+        assert!(!windows.is_empty());
+        assert!(
+            windows
+                .iter()
+                .all(|window| window.purpose == super::SyncWindowPurpose::Tail)
+        );
+        assert_eq!(
+            windows
+                .first()
+                .map(|window| window.window.start_date.as_str()),
+            Some(expected_start.as_str())
+        );
+    }
+
+    #[test]
+    fn steady_state_heartrate_sync_skips_recent_reconcile() {
+        let store = ok(Store::open_test_store(), "store should open");
+        let config = fixture_config();
+        let policy = SyncPolicy::for_family(&config.refresh, SyncFamily::Heartrate);
+        let now = OffsetDateTime::now_utc();
+        let success_end = ok(
+            super::format_timestamp_marker(now - time::Duration::hours(1)),
+            "success watermark should format",
+        );
+        let reconcile_end = success_end.clone();
+        let reconcile_start = (now - policy.reconcile_window).date().to_string();
         ok(
             store.sync_state().upsert(&SyncStateRecord {
-                sync_key: "oura.daily".to_owned(),
-                status: SyncRunStatus::Partial,
-                cursor: Some("2026-04-08".to_owned()),
+                sync_key: "oura.heartrate".to_owned(),
+                family: "heartrate".to_owned(),
+                status: SyncRunStatus::Success,
+                cursor: Some(success_end.clone()),
+                last_successful_sync_end: Some(success_end),
                 last_attempted_at: "2026-04-08T06:00:00Z".to_owned(),
                 last_completed_at: Some("2026-04-08T06:00:05Z".to_owned()),
-                message: Some("optional endpoint degraded".to_owned()),
-                granted_scopes: vec!["daily".to_owned()],
+                last_reconcile_end: Some(reconcile_end),
+                oldest_recently_reconciled_at: Some(reconcile_start.clone()),
+                message: Some("recent heartrate sync".to_owned()),
+                granted_scopes: vec!["heartrate".to_owned()],
                 last_error: None,
+                last_error_at: None,
+                last_error_kind: None,
+                last_error_detail: None,
                 failure_count: 0,
                 next_attempt_after: None,
                 last_trigger_source: Some("periodic_reconcile".to_owned()),
-                last_trigger_detail: Some("test overlap reuse".to_owned()),
+                last_trigger_detail: Some("recent heartrate reconcile".to_owned()),
+                updated_at: "2026-04-08T06:00:05Z".to_owned(),
             }),
-            "partial sync state should persist",
+            "heartrate sync state should persist",
         );
 
-        let start_day = ok(
-            super::overlap_day_window(&store, "oura.daily", 30, 2),
-            "window should build",
+        let windows = ok(
+            super::plan_heartrate_windows(
+                &config,
+                store.plan(),
+                &SyncOptions {
+                    dry_run: false,
+                    fixture_dir: None,
+                    families: vec![SyncFamily::Heartrate],
+                    mode: super::SyncMode::Standard,
+                    trigger_source: Some("periodic_reconcile".to_owned()),
+                    trigger_detail: Some("heartrate planner test".to_owned()),
+                },
+                &policy,
+            ),
+            "heartrate sync plan should build",
         );
 
-        assert_eq!(start_day, "2026-04-06");
+        assert!(!windows.is_empty());
+        assert!(
+            windows
+                .iter()
+                .all(|window| window.purpose == super::SyncWindowPurpose::Tail)
+        );
+        assert!(
+            windows
+                .iter()
+                .all(|window| window.end - window.start <= policy.backfill_chunk),
+            "steady-state heartrate sync should stay chunk-bounded"
+        );
+    }
+
+    #[test]
+    fn manual_heartrate_backfill_uses_chunked_windows() {
+        let store = ok(Store::open_test_store(), "store should open");
+        let config = fixture_config();
+        let policy = SyncPolicy::for_family(&config.refresh, SyncFamily::Heartrate);
+        let windows = ok(
+            super::plan_heartrate_windows(
+                &config,
+                store.plan(),
+                &SyncOptions {
+                    dry_run: false,
+                    fixture_dir: None,
+                    families: vec![SyncFamily::Heartrate],
+                    mode: super::SyncMode::Backfill {
+                        days: 30,
+                        chunk_days: None,
+                    },
+                    trigger_source: Some("manual_backfill".to_owned()),
+                    trigger_detail: Some("heartrate backfill planner test".to_owned()),
+                },
+                &policy,
+            ),
+            "manual heartrate backfill should plan",
+        );
+
+        assert!(windows.len() > 1, "30-day heartrate backfill should chunk");
+        assert!(
+            windows
+                .iter()
+                .all(|window| window.purpose == super::SyncWindowPurpose::Backfill)
+        );
+        assert!(
+            windows
+                .iter()
+                .all(|window| window.end - window.start <= policy.backfill_chunk),
+            "heartrate backfill windows should honor the chunk policy"
+        );
+    }
+
+    #[test]
+    fn failed_slice_preserves_last_successful_sync_end() {
+        let store = ok(Store::open_test_store(), "store should open");
+        let config = fixture_config();
+        ok(
+            store.sync_state().upsert(&SyncStateRecord {
+                sync_key: "oura.daily".to_owned(),
+                family: "daily".to_owned(),
+                status: SyncRunStatus::Success,
+                cursor: Some("2026-04-08".to_owned()),
+                last_successful_sync_end: Some("2026-04-08".to_owned()),
+                last_attempted_at: "2026-04-08T06:00:00Z".to_owned(),
+                last_completed_at: Some("2026-04-08T06:00:05Z".to_owned()),
+                last_reconcile_end: Some("2026-04-08".to_owned()),
+                oldest_recently_reconciled_at: Some("2026-03-10".to_owned()),
+                message: Some("previous success".to_owned()),
+                granted_scopes: vec!["daily".to_owned()],
+                last_error: None,
+                last_error_at: None,
+                last_error_kind: None,
+                last_error_detail: None,
+                failure_count: 0,
+                next_attempt_after: None,
+                last_trigger_source: Some("periodic_reconcile".to_owned()),
+                last_trigger_detail: Some("seed success".to_owned()),
+                updated_at: "2026-04-08T06:00:05Z".to_owned(),
+            }),
+            "seed sync state should persist",
+        );
+
+        let persisted = ok(
+            super::persist_slice_report(
+                &config,
+                &store,
+                super::SliceReport {
+                    sync_key: "oura.daily".to_owned(),
+                    family: SyncFamily::Daily,
+                    status: SyncRunStatus::Failed,
+                    imported_rows: 0,
+                    watermark: None,
+                    last_successful_sync_end: None,
+                    last_reconcile_end: None,
+                    oldest_recently_reconciled_at: None,
+                    message: "daily upstream failure".to_owned(),
+                    last_error: Some(crate::error::OuraProblem::new(
+                        Some(500),
+                        "Internal Server Error",
+                        Some("temporary upstream failure".to_owned()),
+                    )),
+                    next_attempt_after: None,
+                },
+                vec!["daily".to_owned()],
+                &SyncOptions {
+                    dry_run: false,
+                    fixture_dir: None,
+                    families: vec![SyncFamily::Daily],
+                    mode: super::SyncMode::Standard,
+                    trigger_source: Some("periodic_reconcile".to_owned()),
+                    trigger_detail: Some("failed slice preservation test".to_owned()),
+                },
+            ),
+            "failed slice should persist without losing coverage",
+        );
+
+        let record = some(
+            ok(
+                store.sync_state().get("oura.daily"),
+                "daily sync state should load",
+            ),
+            "daily sync state should exist",
+        );
+
+        assert_eq!(persisted.status, SyncRunStatus::Failed);
+        assert_eq!(
+            record.last_successful_sync_end.as_deref(),
+            Some("2026-04-08")
+        );
+        assert_eq!(record.cursor.as_deref(), Some("2026-04-08"));
+        assert_eq!(record.failure_count, 1);
+        assert_eq!(record.last_error_kind.as_deref(), Some("transient_api"));
+        assert!(record.next_attempt_after.is_some());
+    }
+
+    #[tokio::test]
+    async fn manual_backfill_remains_idempotent() {
+        let store = ok(Store::open_test_store(), "store should open");
+        let config = fixture_config();
+        let options = SyncOptions {
+            dry_run: false,
+            fixture_dir: Some(baseline_fixture_dir()),
+            families: vec![SyncFamily::Heartrate],
+            mode: super::SyncMode::Backfill {
+                days: 30,
+                chunk_days: Some(1),
+            },
+            trigger_source: Some("manual_backfill".to_owned()),
+            trigger_detail: Some("fixture heartrate backfill".to_owned()),
+        };
+
+        let first = ok(
+            sync_once(&config, &store, options.clone()).await,
+            "first heartrate backfill should succeed",
+        );
+        let second = ok(
+            sync_once(&config, &store, options).await,
+            "second heartrate backfill should stay idempotent",
+        );
+        let counts = ok(store.views().record_counts(), "record counts should load");
+
+        assert_eq!(first.status, SyncRunStatus::Success);
+        assert_eq!(second.status, SyncRunStatus::Success);
+        assert_eq!(counts.heartrate_samples, 12);
     }
 }
