@@ -808,16 +808,25 @@ fn parse_date_marker(marker: Option<&str>) -> Result<Option<time::Date>> {
 }
 
 fn parse_timestamp_marker(marker: Option<&str>) -> Result<Option<OffsetDateTime>> {
-    marker
-        .map(|value| {
-            OffsetDateTime::parse(value, &Rfc3339).map_err(|error| {
-                AuthError::OAuthFlow(format!(
-                    "invalid stored RFC3339 watermark `{value}`: {error}"
-                ))
-                .into()
-            })
-        })
-        .transpose()
+    marker.map(parse_timestamp_value).transpose()
+}
+
+fn parse_timestamp_value(value: &str) -> Result<OffsetDateTime> {
+    if let Ok(timestamp) = OffsetDateTime::parse(value, &Rfc3339) {
+        return Ok(timestamp);
+    }
+
+    if let Ok(date) = time::Date::parse(
+        value,
+        &time::macros::format_description!("[year]-[month]-[day]"),
+    ) {
+        return Ok(date.midnight().assume_utc());
+    }
+
+    Err(AuthError::OAuthFlow(format!(
+        "invalid stored sync marker `{value}`: expected RFC3339 or YYYY-MM-DD"
+    ))
+    .into())
 }
 
 fn format_timestamp_marker(timestamp: OffsetDateTime) -> Result<String> {
@@ -3286,6 +3295,66 @@ mod tests {
                 .first()
                 .map(|window| window.window.start_date.as_str()),
             Some(expected_start.as_str())
+        );
+    }
+
+    #[test]
+    fn steady_state_daily_sync_accepts_date_markers_from_backfill() {
+        let store = ok(Store::open_test_store(), "store should open");
+        let config = fixture_config();
+        let policy = SyncPolicy::for_family(&config.refresh, SyncFamily::Daily);
+        let now = OffsetDateTime::now_utc();
+        let success_end = now.date().to_string();
+        let reconcile_start = super::recent_day_start(policy.reconcile_days(), now).to_string();
+        ok(
+            store.sync_state().upsert(&SyncStateRecord {
+                sync_key: "oura.daily".to_owned(),
+                family: "daily".to_owned(),
+                status: SyncRunStatus::Success,
+                cursor: Some(success_end.clone()),
+                last_successful_sync_end: Some(success_end.clone()),
+                last_attempted_at: "2026-04-08T06:00:00Z".to_owned(),
+                last_completed_at: Some("2026-04-08T06:00:05Z".to_owned()),
+                last_reconcile_end: Some(success_end),
+                oldest_recently_reconciled_at: Some(reconcile_start),
+                message: Some("recent daily backfill".to_owned()),
+                granted_scopes: vec!["daily".to_owned()],
+                last_error: None,
+                last_error_at: None,
+                last_error_kind: None,
+                last_error_detail: None,
+                failure_count: 0,
+                next_attempt_after: None,
+                last_trigger_source: Some("manual_backfill".to_owned()),
+                last_trigger_detail: Some("seed daily backfill".to_owned()),
+                updated_at: "2026-04-08T06:00:05Z".to_owned(),
+            }),
+            "daily sync state should persist",
+        );
+
+        let windows = ok(
+            super::plan_daily_windows(
+                &config,
+                store.plan(),
+                SyncFamily::Daily,
+                &SyncOptions {
+                    dry_run: false,
+                    fixture_dir: None,
+                    families: vec![SyncFamily::Daily],
+                    mode: super::SyncMode::Standard,
+                    trigger_source: Some("periodic_reconcile".to_owned()),
+                    trigger_detail: Some("daily planner test".to_owned()),
+                },
+                &policy,
+            ),
+            "daily sync plan should build",
+        );
+
+        assert!(!windows.is_empty());
+        assert!(
+            windows
+                .iter()
+                .all(|window| window.purpose == super::SyncWindowPurpose::Tail)
         );
     }
 
