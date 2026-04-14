@@ -9589,15 +9589,10 @@ fn build_dashboard_weekly_heatmap(
 }
 
 fn latest_daily_rows(snapshot: &LiveSnapshot, limit: usize) -> Vec<&DailyOverviewRow> {
-    snapshot
-        .daily_history
-        .iter()
-        .rev()
-        .take(limit)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
+    let mut rows = snapshot.daily_history.iter().collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.day.cmp(&right.day));
+    let keep_from = rows.len().saturating_sub(limit);
+    rows.into_iter().skip(keep_from).collect()
 }
 
 fn build_dashboard_heatmap_grid(
@@ -14990,6 +14985,26 @@ mod tests {
                 .len(),
             14
         );
+    }
+
+    #[test]
+    fn latest_daily_rows_prefers_the_newest_days_even_when_history_is_newest_first() {
+        let mut snapshot = make_snapshot(&[
+            "2026-04-14",
+            "2026-04-13",
+            "2026-04-12",
+            "2026-04-11",
+            "2026-04-10",
+            "2026-04-09",
+            "2026-04-08",
+            "2026-04-07",
+        ]);
+        snapshot.daily_history.reverse();
+
+        let rows = super::latest_daily_rows(&snapshot, 3);
+        let days = rows.iter().map(|row| row.day.as_str()).collect::<Vec<_>>();
+
+        assert_eq!(days, vec!["2026-04-12", "2026-04-13", "2026-04-14"]);
     }
 
     #[test]
