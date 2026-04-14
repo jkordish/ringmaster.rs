@@ -1709,10 +1709,7 @@ impl AppState {
             (Screen::Dashboard, FocusRegion::DashboardHrv) => (
                 label,
                 self.model.dashboard.hrv.primary_label.clone(),
-                format!(
-                    "{} | {}",
-                    self.model.dashboard.hrv.baseline_label, self.model.dashboard.hrv.range_label
-                ),
+                self.model.dashboard.hrv.note.clone(),
                 self.dashboard_freshness(self.model.dashboard.hrv.availability.label()),
             ),
             (Screen::Dashboard, FocusRegion::DashboardTemp) => (
@@ -1724,20 +1721,13 @@ impl AppState {
             (Screen::Dashboard, FocusRegion::DashboardHeartRate) => (
                 label,
                 self.model.dashboard.heart_rate.primary_label.clone(),
-                format!(
-                    "{} | {}",
-                    self.model.dashboard.heart_rate.baseline_label,
-                    self.model.dashboard.heart_rate.range_label
-                ),
+                self.model.dashboard.heart_rate.note.clone(),
                 self.dashboard_freshness(self.model.dashboard.heart_rate.availability.label()),
             ),
             (Screen::Dashboard, FocusRegion::DashboardSpo2) => (
                 label,
                 self.model.dashboard.spo2.primary_label.clone(),
-                format!(
-                    "{} | {}",
-                    self.model.dashboard.spo2.baseline_label, self.model.dashboard.spo2.range_label
-                ),
+                self.model.dashboard.spo2.note.clone(),
                 self.dashboard_freshness(self.model.dashboard.spo2.availability.label()),
             ),
             (Screen::Dashboard, FocusRegion::DashboardRespRate) => (
@@ -1763,8 +1753,8 @@ impl AppState {
                     |rail| {
                         (
                             label.clone(),
-                            rail.label.clone(),
-                            rail.delta_label.clone(),
+                            format!("{} | {}", rail.label, rail.delta_label),
+                            rail.note.clone(),
                             self.dashboard_freshness(rail.availability.label()),
                         )
                     },

@@ -216,6 +216,12 @@ The app layer is where persisted normalized rows, derived tables, auth diagnosti
 
 The optional AI layer does not bypass this shaping logic. Snapshot exports are built from typed store and derived queries, not from raw SQL dumps or live database inspection.
 
+## Rendering rule
+
+- outer dashboard shells remain constraint-stable for a given viewport; `draw_compact`, `draw_medium`, and `draw_wide` do not reflow in response to content width changes
+- dense dashboard panels and overlays use measurement-driven internal geometry only after their outer `Rect` is assigned
+- support copy in dense panels is bounded to reserved one-line support lanes; fuller detail is surfaced through the footer/inspector path instead of stealing chart rows
+
 Important implemented state concepts:
 
 - `FreshnessKind`:

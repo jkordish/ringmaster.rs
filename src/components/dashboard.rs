@@ -15,15 +15,16 @@ use crate::ui::{
     chrome::{PanelKind, PanelShellSpec, render_panel_shell},
     layout::{
         BreakdownLayout, DashboardChartMetrics, DashboardMetrics, UiContext, ViewportClass,
-        WeeklyHeatmapMode, WeeklyTrendsLayout,
+        WeeklyHeatmapMode, WeeklyTrendsLayout, panel_content_metrics,
     },
     telemetry::{
         MetricPanelState, TelemetryAvailability, heatmap_day_label, meter_bar,
-        metric_panel_scaffold, micro_histogram, segmented_bar, spark_strip, stacked_profile_rows,
+        metric_panel_scaffold, micro_histogram, placeholder_rule, segmented_bar, spark_strip,
+        stacked_profile_rows,
     },
     text_fit::{
         concise_detail, concise_text, fit_badge_label, fit_breakdown_delta, fit_breakdown_label,
-        fit_day_header, fit_heatmap_label, support_lane_text,
+        fit_day_header, fit_heatmap_label, measure_one_line, support_lane_text,
     },
     theme::{Theme, Tone},
 };
@@ -803,32 +804,27 @@ fn render_sleep_tile(
     }
 
     if !metric_panel_has_reading(tile.availability) {
-        let lines = metric_panel_scaffold(
+        render_metric_scaffold_with_support(
+            frame,
+            shell.content_area,
             tile.availability,
             &tile.strip_note,
-            usize::from(shell.content_area.width),
-        );
-        render_panel_text(
-            frame,
-            centered_body_area(shell.content_area, lines.len()),
-            lines.join("\n"),
             theme,
             Alignment::Center,
+            state.chart_metrics,
         );
         return;
     }
 
-    let width = usize::from(shell.content_area.width);
+    let content = panel_content_metrics(
+        shell.content_area,
+        measured_panel_support_lane(shell.content_area, state.chart_metrics),
+    );
+    let width = usize::from(content.chart.area.width);
     let cue_tone = score_band_cue_tone(tile.score_band);
     let band_width = clamped_instrument_width(width, state.metrics, 12, width.max(12));
-    let capacity = usize::from(shell.content_area.height).max(4);
-    let band_height = capacity
-        .saturating_sub(if state.focused || state.expanded {
-            3
-        } else {
-            2
-        })
-        .clamp(4, 7);
+    let capacity = usize::from(content.chart.area.height).max(4);
+    let band_height = capacity.saturating_sub(2).clamp(4, 7);
     let mut lines = vec![Line::from(vec![
         Span::styled(
             centered_line(width / 2, format!("duration {}", tile.duration_label)),
@@ -856,16 +852,17 @@ fn render_sleep_tile(
         centered_line(width, spark_strip(&tile.trend, band_width)),
         theme.status_marker(cue_tone),
     )));
-    if state.focused || state.expanded {
-        lines.push(Line::from(Span::styled(
-            concise_detail(&tile.strip_note, width),
-            theme.annotation(),
-        )));
-    }
     render_panel_lines(
         frame,
-        centered_body_area(shell.content_area, lines.len()),
+        centered_body_area(content.chart.area, lines.len()),
         lines,
+        theme,
+        Alignment::Center,
+    );
+    render_support_lane(
+        frame,
+        content.support.area,
+        &tile.strip_note,
         theme,
         Alignment::Center,
     );
@@ -935,22 +932,23 @@ fn render_trend_panel(
     }
 
     if !metric_panel_has_reading(panel.availability) {
-        render_panel_text(
+        render_metric_scaffold_with_support(
             frame,
             shell.content_area,
-            metric_panel_scaffold(
-                panel.availability,
-                &panel.note,
-                usize::from(shell.content_area.width),
-            )
-            .join("\n"),
+            panel.availability,
+            &panel.note,
             theme,
             Alignment::Left,
+            state.chart_metrics,
         );
         return;
     }
 
-    let width = usize::from(shell.content_area.width);
+    let content = panel_content_metrics(
+        shell.content_area,
+        measured_panel_support_lane(shell.content_area, state.chart_metrics),
+    );
+    let width = usize::from(content.chart.area.width);
     let mut lines = vec![Line::from(vec![
         Span::styled(
             concise_text(&panel.primary_label, width.saturating_sub(10)),
@@ -983,13 +981,14 @@ fn render_trend_panel(
             theme.annotation(),
         ),
     ]));
-    if state.focused || state.expanded {
-        lines.push(Line::from(Span::styled(
-            concise_detail(&panel.note, width),
-            theme.annotation(),
-        )));
-    }
-    render_panel_lines(frame, shell.content_area, lines, theme, Alignment::Left);
+    render_panel_lines(frame, content.chart.area, lines, theme, Alignment::Left);
+    render_support_lane(
+        frame,
+        content.support.area,
+        &panel.note,
+        theme,
+        Alignment::Left,
+    );
 }
 
 fn render_temp_panel(
@@ -1039,22 +1038,23 @@ fn render_temp_panel(
     }
 
     if !metric_panel_has_reading(panel.availability) {
-        let lines = metric_panel_scaffold(
+        render_metric_scaffold_with_support(
+            frame,
+            shell.content_area,
             panel.availability,
             &panel.note,
-            usize::from(shell.content_area.width),
-        );
-        render_panel_text(
-            frame,
-            centered_body_area(shell.content_area, lines.len()),
-            lines.join("\n"),
             theme,
             Alignment::Center,
+            state.chart_metrics,
         );
         return;
     }
 
-    let width = usize::from(shell.content_area.width);
+    let content = panel_content_metrics(
+        shell.content_area,
+        measured_panel_support_lane(shell.content_area, state.chart_metrics),
+    );
+    let width = usize::from(content.chart.area.width);
     let mut lines = vec![Line::from(vec![
         Span::styled(
             centered_line(
@@ -1079,16 +1079,17 @@ fn render_temp_panel(
                 ))
             }),
     );
-    if state.focused || state.expanded {
-        lines.push(Line::from(Span::styled(
-            centered_line(width, concise_detail(&panel.note, width)),
-            theme.annotation(),
-        )));
-    }
     render_panel_lines(
         frame,
-        centered_body_area(shell.content_area, lines.len()),
+        centered_body_area(content.chart.area, lines.len()),
         lines,
+        theme,
+        Alignment::Center,
+    );
+    render_support_lane(
+        frame,
+        content.support.area,
+        &panel.note,
         theme,
         Alignment::Center,
     );
@@ -1158,22 +1159,23 @@ fn render_histogram_panel(
     }
 
     if !metric_panel_has_reading(panel.availability) {
-        render_panel_text(
+        render_metric_scaffold_with_support(
             frame,
             shell.content_area,
-            metric_panel_scaffold(
-                panel.availability,
-                &panel.note,
-                usize::from(shell.content_area.width),
-            )
-            .join("\n"),
+            panel.availability,
+            &panel.note,
             theme,
             Alignment::Center,
+            state.chart_metrics,
         );
         return;
     }
 
-    let width = usize::from(shell.content_area.width);
+    let content = panel_content_metrics(
+        shell.content_area,
+        measured_panel_support_lane(shell.content_area, state.chart_metrics),
+    );
+    let width = usize::from(content.chart.area.width);
     let instrument_width = clamped_instrument_width(width, state.metrics, 10, width.max(10));
     let mut lines = vec![Line::from(vec![
         Span::styled(
@@ -1208,13 +1210,14 @@ fn render_histogram_panel(
             theme.annotation(),
         ),
     ]));
-    if (state.focused || state.expanded) && shell.content_area.height >= 4 {
-        lines.push(Line::from(Span::styled(
-            concise_detail(&panel.note, width),
-            theme.annotation(),
-        )));
-    }
-    render_panel_lines(frame, shell.content_area, lines, theme, Alignment::Center);
+    render_panel_lines(frame, content.chart.area, lines, theme, Alignment::Center);
+    render_support_lane(
+        frame,
+        content.support.area,
+        &panel.note,
+        theme,
+        Alignment::Center,
+    );
 }
 
 fn render_breakdown_panel(
@@ -1270,17 +1273,14 @@ fn render_breakdown_panel(
     }
 
     if !metric_panel_has_reading(panel.availability) {
-        render_panel_text(
+        render_metric_scaffold_with_support(
             frame,
             shell.content_area,
-            metric_panel_scaffold(
-                panel.availability,
-                &panel.note,
-                usize::from(shell.content_area.width),
-            )
-            .join("\n"),
+            panel.availability,
+            &panel.note,
             theme,
             Alignment::Left,
+            state.chart_metrics,
         );
         return;
     }
@@ -1288,13 +1288,17 @@ fn render_breakdown_panel(
     let preferred_label_width = panel
         .rails
         .iter()
-        .map(|rail| rail.label.len().saturating_add(2))
+        .map(|rail| measure_one_line(&rail.label).width.saturating_add(2))
         .max()
         .unwrap_or(14);
     let preferred_delta_width = panel
         .rails
         .iter()
-        .map(|rail| rail.delta_label.len().max(rail.availability.label().len()))
+        .map(|rail| {
+            measure_one_line(&rail.delta_label)
+                .width
+                .max(rail.availability.label().len())
+        })
         .max()
         .unwrap_or(10);
     let layout = BreakdownLayout::for_panel(
@@ -1483,17 +1487,14 @@ fn render_heatmap_panel(
     }
 
     if !metric_panel_has_reading(panel.availability) {
-        let lines = metric_panel_scaffold(
+        render_metric_scaffold_with_support(
+            frame,
+            shell.content_area,
             panel.availability,
             &panel.note,
-            usize::from(shell.content_area.width),
-        );
-        render_panel_text(
-            frame,
-            centered_body_area(shell.content_area, lines.len()),
-            lines.join("\n"),
             theme,
             Alignment::Left,
+            state.chart_metrics,
         );
         return;
     }
@@ -1644,6 +1645,77 @@ fn render_panel_lines(
             .alignment(alignment),
         area,
     );
+}
+
+const fn measured_panel_support_lane(area: Rect, chart_metrics: DashboardChartMetrics) -> u16 {
+    if area.height >= 5 {
+        chart_metrics.support_lane_height
+    } else {
+        0
+    }
+}
+
+fn render_support_lane(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    note: &str,
+    theme: &Theme,
+    alignment: Alignment,
+) {
+    if area.width == 0 || area.height == 0 || note.is_empty() {
+        return;
+    }
+
+    render_line_in_area(
+        frame,
+        area,
+        Line::from(Span::styled(
+            support_lane_text(note, usize::from(area.width)),
+            theme.annotation(),
+        )),
+        theme,
+        alignment,
+    );
+}
+
+fn render_metric_scaffold_with_support(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: MetricPanelState,
+    reason: &str,
+    theme: &Theme,
+    alignment: Alignment,
+    chart_metrics: DashboardChartMetrics,
+) {
+    let layout = panel_content_metrics(area, measured_panel_support_lane(area, chart_metrics));
+    if layout.support.area.height == 0 {
+        render_panel_text(
+            frame,
+            area,
+            metric_panel_scaffold(state, reason, usize::from(area.width)).join("\n"),
+            theme,
+            alignment,
+        );
+        return;
+    }
+
+    let width = usize::from(layout.chart.area.width).max(10);
+    let body_lines = [
+        match alignment {
+            Alignment::Left => format!("{:<width$}", state.label()),
+            Alignment::Right => format!("{:>width$}", state.label()),
+            Alignment::Center => format!("{:^width$}", state.label()),
+        },
+        placeholder_rule(width),
+    ];
+    render_panel_text(
+        frame,
+        centered_body_area(layout.chart.area, body_lines.len()),
+        body_lines.join("\n"),
+        theme,
+        alignment,
+    );
+    render_support_lane(frame, layout.support.area, reason, theme, alignment);
 }
 
 fn centered_line(width: usize, text: impl AsRef<str>) -> String {

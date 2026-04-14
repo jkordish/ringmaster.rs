@@ -51,10 +51,11 @@ use crate::store::queries::{
 };
 use crate::ui::chrome::{self, PanelKind, PanelShellSpec, render_panel_shell};
 use crate::ui::layout::{
-    DashboardMetrics, HELP_MODAL_MAX_HEIGHT, HELP_MODAL_MAX_WIDTH, ModalLayoutSpec,
-    SEARCH_MODAL_MAX_HEIGHT, SEARCH_MODAL_MAX_WIDTH, UiContext, ViewportClass,
-    centered_modal_layout,
+    DashboardMetrics, HELP_MODAL_MAX_HEIGHT, HELP_MODAL_MAX_WIDTH, HELP_MODAL_VISIBLE_BODY_ROWS,
+    ModalLayoutSpec, OverlayLayoutSpec, SEARCH_MODAL_MAX_HEIGHT, SEARCH_MODAL_MAX_WIDTH, UiContext,
+    ViewportClass, centered_modal_layout, content_fit_overlay_layout,
 };
+use crate::ui::text_fit::measure_one_line;
 use crate::ui::theme::{ColorCapability, Theme, Tone};
 
 enum WorkerCommand {
@@ -762,15 +763,46 @@ fn draw_help_overlay(
 ) {
     let metrics = DashboardMetrics::for_viewport(ViewportClass::from_width(area.width));
     let groups = keybindings::help_groups(context);
-    let overlay = centered_modal_layout(
+    let shortcut_width = groups
+        .values()
+        .flat_map(|entries| entries.iter())
+        .map(|entry| split_help_entry(entry).0.len())
+        .max()
+        .unwrap_or(0)
+        .max(12);
+    let mut help_lines = Vec::new();
+    help_lines.push("Keyboard help is modal while open.".to_owned());
+    for (index, (group, entries)) in groups.iter().enumerate() {
+        if index > 0 {
+            help_lines.push(String::new());
+        }
+        help_lines.push((*group).to_owned());
+        for entry in entries {
+            let (shortcut, description) = split_help_entry(entry);
+            help_lines.push(format!("{shortcut:<shortcut_width$}  {description}",));
+        }
+    }
+    help_lines.push(String::new());
+    help_lines.push("Esc closes this help.".to_owned());
+    let content_width_hint = help_lines
+        .iter()
+        .map(|line| measure_one_line(line).width)
+        .max()
+        .unwrap_or(0);
+    let overlay = content_fit_overlay_layout(
         area,
-        ModalLayoutSpec::new(HELP_MODAL_MAX_WIDTH, HELP_MODAL_MAX_HEIGHT),
-    )
-    .bounds;
-    frame.render_widget(Clear, overlay);
-    let shell = render_panel_shell(
+        metrics,
+        OverlayLayoutSpec::new(HELP_MODAL_MAX_WIDTH, HELP_MODAL_MAX_HEIGHT)
+            .with_min_size(56, 12)
+            .with_content_hints(
+                u16::try_from(content_width_hint).unwrap_or(u16::MAX),
+                HELP_MODAL_VISIBLE_BODY_ROWS,
+            ),
+    );
+    frame.render_widget(Clear, overlay.bounds);
+    let _shell = render_panel_shell(
         frame,
-        overlay,
+        overlay.bounds,
         theme,
         metrics,
         PanelShellSpec {
@@ -782,13 +814,6 @@ fn draw_help_overlay(
             kind: PanelKind::Section,
         },
     );
-    let shortcut_width = groups
-        .values()
-        .flat_map(|entries| entries.iter())
-        .map(|entry| split_help_entry(entry).0.len())
-        .max()
-        .unwrap_or(0)
-        .max(12);
     let mut lines = Vec::new();
     lines.push(Line::from(vec![Span::styled(
         "Keyboard help is modal while open.",
@@ -820,7 +845,7 @@ fn draw_help_overlay(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0)),
-        shell.content_area,
+        overlay.content_area,
     );
 }
 
@@ -3397,9 +3422,12 @@ mod tests {
     };
     use crate::tui::render_snapshot;
     use crate::ui::layout::{
-        HELP_MODAL_MAX_HEIGHT, HELP_MODAL_MAX_WIDTH, ModalLayoutSpec, centered_modal_layout,
+        DashboardMetrics, HELP_MODAL_MAX_HEIGHT, HELP_MODAL_MAX_WIDTH,
+        HELP_MODAL_VISIBLE_BODY_ROWS, ModalLayoutSpec, OverlayLayoutSpec, ViewportClass,
+        centered_modal_layout, content_fit_overlay_layout,
     };
     use crate::ui::telemetry::MetricPanelState;
+    use crate::ui::text_fit::measure_one_line;
     use crate::ui::theme::{ColorCapability, Theme, Tone};
     use crate::webhook::default_desired_subscriptions;
     use std::path::{Path, PathBuf};
@@ -4336,12 +4364,12 @@ mod tests {
         assert!(medium.contains("WEEKLY TRENDS"));
         assert!(medium.contains("EMPTY"));
         assert!(medium.contains("Driver rails explain the top-line recovery state"));
-        assert!(medium.contains("Recent score bands for sleep, readines"));
+        assert!(medium.contains("Recent score bands for sleep, readi..."));
 
         assert!(wide.contains("READINESS BREAKDOWN"));
         assert!(wide.contains("WEEKLY TRENDS"));
         assert!(wide.contains("EMPTY"));
-        assert!(wide.contains("Recent score bands for sleep, readiness, and activi"));
+        assert!(wide.contains("Recent score bands for sleep, readiness, and act..."));
     }
 
     #[test]
@@ -4584,38 +4612,90 @@ mod tests {
     }
 
     #[test]
-    fn help_overlay_uses_centered_modal_bounds() {
+    fn help_overlay_uses_content_fit_bounds_across_viewports() {
         let config = test_config();
-        let mut app = build_demo_state(&config);
-        app.handle(Action::ToggleHelp);
+        let groups = keybindings::help_groups(keybindings::BindingContext {
+            active_screen: Screen::Dashboard,
+            focused_region: FocusRegion::DashboardReadiness,
+            search_open: false,
+            help_open: true,
+            ai_preflight_open: false,
+        });
+        let shortcut_width = groups
+            .values()
+            .flat_map(|entries| entries.iter())
+            .map(|entry| super::split_help_entry(entry).0.len())
+            .max()
+            .unwrap_or(0)
+            .max(12);
+        let mut help_lines = Vec::new();
+        help_lines.push("Keyboard help is modal while open.".to_owned());
+        for (index, (group, entries)) in groups.iter().enumerate() {
+            if index > 0 {
+                help_lines.push(String::new());
+            }
+            help_lines.push((*group).to_owned());
+            for entry in entries {
+                let (shortcut, description) = super::split_help_entry(entry);
+                help_lines.push(format!("{shortcut:<shortcut_width$}  {description}"));
+            }
+        }
+        help_lines.push(String::new());
+        help_lines.push("Esc closes this help.".to_owned());
+        let content_width_hint = help_lines
+            .iter()
+            .map(|line| measure_one_line(line).width)
+            .max()
+            .unwrap_or(0);
 
-        let buffer = super::render_buffer(&app, 160, 44)
-            .unwrap_or_else(|error| unreachable!("help overlay buffer should render: {error}"));
-        let popup = centered_modal_layout(
-            Rect::new(0, 0, 160, 44),
-            ModalLayoutSpec::new(HELP_MODAL_MAX_WIDTH, HELP_MODAL_MAX_HEIGHT),
-        )
-        .bounds;
+        for (width, height) in [(90, 28), (120, 36), (160, 44)] {
+            let mut app = build_demo_state(&config);
+            app.handle(Action::ToggleHelp);
 
-        assert_eq!(buffer[(popup.x, popup.y)].symbol(), "┏");
-        assert_eq!(
-            buffer[(popup.x + popup.width.saturating_sub(1), popup.y)].symbol(),
-            "┓"
-        );
-        assert_eq!(
-            buffer[(popup.x, popup.y + popup.height.saturating_sub(1))].symbol(),
-            "┗"
-        );
-        assert_eq!(
-            buffer[(
-                popup.x + popup.width.saturating_sub(1),
-                popup.y + popup.height.saturating_sub(1)
-            )]
-                .symbol(),
-            "┛"
-        );
-        assert!(popup.x > 0);
-        assert!(popup.y > 0);
+            let buffer = super::render_buffer(&app, width, height).unwrap_or_else(|error| {
+                unreachable!("help overlay buffer should render at {width}x{height}: {error}")
+            });
+            let metrics = DashboardMetrics::for_viewport(ViewportClass::from_width(width));
+            let popup = content_fit_overlay_layout(
+                Rect::new(0, 0, width, height),
+                metrics,
+                OverlayLayoutSpec::new(HELP_MODAL_MAX_WIDTH, HELP_MODAL_MAX_HEIGHT)
+                    .with_min_size(56, 12)
+                    .with_content_hints(
+                        u16::try_from(content_width_hint).unwrap_or(u16::MAX),
+                        HELP_MODAL_VISIBLE_BODY_ROWS,
+                    ),
+            )
+            .bounds;
+
+            assert_eq!(buffer[(popup.x, popup.y)].symbol(), "┏");
+            assert_eq!(
+                buffer[(popup.x + popup.width.saturating_sub(1), popup.y)].symbol(),
+                "┓"
+            );
+            assert_eq!(
+                buffer[(popup.x, popup.y + popup.height.saturating_sub(1))].symbol(),
+                "┗"
+            );
+            assert_eq!(
+                buffer[(
+                    popup.x + popup.width.saturating_sub(1),
+                    popup.y + popup.height.saturating_sub(1)
+                )]
+                    .symbol(),
+                "┛"
+            );
+            assert!(
+                popup.x > 0,
+                "popup should be inset from the left at {width}x{height}"
+            );
+            assert!(
+                popup.y > 0,
+                "popup should be inset from the top at {width}x{height}"
+            );
+            assert!(popup.width <= HELP_MODAL_MAX_WIDTH);
+            assert!(popup.height <= HELP_MODAL_MAX_HEIGHT);
+        }
     }
 
     #[test]

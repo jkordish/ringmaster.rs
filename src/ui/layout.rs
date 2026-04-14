@@ -59,6 +59,85 @@ pub struct ModalLayout {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChartViewport {
+    pub area: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SupportLane {
+    pub area: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PanelContentMetrics {
+    pub chart: ChartViewport,
+    pub support: SupportLane,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlayLayout {
+    pub bounds: Rect,
+    pub inner: Rect,
+    pub title_area: Rect,
+    pub content_area: Rect,
+    pub visible_body_rows: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlayLayoutSpec {
+    pub min_width: u16,
+    pub max_width: u16,
+    pub min_height: u16,
+    pub max_height: u16,
+    pub inset_x: u16,
+    pub inset_y: u16,
+    pub content_width_hint: u16,
+    pub content_height_hint: u16,
+}
+
+impl OverlayLayoutSpec {
+    #[must_use]
+    pub const fn new(max_width: u16, max_height: u16) -> Self {
+        Self {
+            min_width: 40,
+            max_width,
+            min_height: 8,
+            max_height,
+            inset_x: 2,
+            inset_y: 1,
+            content_width_hint: max_width.saturating_sub(6),
+            content_height_hint: max_height.saturating_sub(4),
+        }
+    }
+
+    #[must_use]
+    pub const fn with_min_size(mut self, min_width: u16, min_height: u16) -> Self {
+        self.min_width = min_width;
+        self.min_height = min_height;
+        self
+    }
+
+    #[must_use]
+    #[allow(dead_code)]
+    pub const fn with_insets(mut self, inset_x: u16, inset_y: u16) -> Self {
+        self.inset_x = inset_x;
+        self.inset_y = inset_y;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_content_hints(
+        mut self,
+        content_width_hint: u16,
+        content_height_hint: u16,
+    ) -> Self {
+        self.content_width_hint = content_width_hint;
+        self.content_height_hint = content_height_hint;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModalLayoutSpec {
     pub max_width: u16,
     pub max_height: u16,
@@ -628,22 +707,37 @@ impl WeeklyTrendsLayout {
 
 #[must_use]
 pub const fn chart_panel_zones(area: Rect, support_lane_height: u16) -> ChartPanelZones {
+    let metrics = panel_content_metrics(area, support_lane_height);
+    ChartPanelZones {
+        chart_body: metrics.chart.area,
+        support_lane: metrics.support.area,
+    }
+}
+
+#[must_use]
+pub const fn panel_content_metrics(area: Rect, support_lane_height: u16) -> PanelContentMetrics {
     if support_lane_height == 0 || area.height <= support_lane_height {
-        return ChartPanelZones {
-            chart_body: area,
-            support_lane: Rect::new(area.x, area.y.saturating_add(area.height), area.width, 0),
+        return PanelContentMetrics {
+            chart: ChartViewport { area },
+            support: SupportLane {
+                area: Rect::new(area.x, area.y.saturating_add(area.height), area.width, 0),
+            },
         };
     }
 
     let chart_body_height = area.height.saturating_sub(support_lane_height);
-    ChartPanelZones {
-        chart_body: Rect::new(area.x, area.y, area.width, chart_body_height),
-        support_lane: Rect::new(
-            area.x,
-            area.y.saturating_add(chart_body_height),
-            area.width,
-            support_lane_height,
-        ),
+    PanelContentMetrics {
+        chart: ChartViewport {
+            area: Rect::new(area.x, area.y, area.width, chart_body_height),
+        },
+        support: SupportLane {
+            area: Rect::new(
+                area.x,
+                area.y.saturating_add(chart_body_height),
+                area.width,
+                support_lane_height,
+            ),
+        },
     }
 }
 
@@ -691,12 +785,72 @@ pub fn centered_modal_layout(area: Rect, spec: ModalLayoutSpec) -> ModalLayout {
     }
 }
 
+#[must_use]
+pub fn content_fit_overlay_layout(
+    area: Rect,
+    metrics: DashboardMetrics,
+    spec: OverlayLayoutSpec,
+) -> OverlayLayout {
+    let available_width = area
+        .width
+        .saturating_sub(spec.inset_x.saturating_mul(2))
+        .max(1);
+    let available_height = area
+        .height
+        .saturating_sub(spec.inset_y.saturating_mul(2))
+        .max(1);
+    let horizontal_shell = 2u16.saturating_add(metrics.panel_pad_x.saturating_mul(2));
+    let vertical_shell = 2u16.saturating_add(metrics.content_top_inset);
+
+    let preferred_width = spec.content_width_hint.saturating_add(horizontal_shell);
+    let preferred_height = spec.content_height_hint.saturating_add(vertical_shell);
+    let popup_width = preferred_width
+        .clamp(spec.min_width, spec.max_width)
+        .min(available_width)
+        .max(1);
+    let popup_height = preferred_height
+        .clamp(spec.min_height, spec.max_height)
+        .min(available_height)
+        .max(1);
+    let bounds = Rect::new(
+        area.x + area.width.saturating_sub(popup_width) / 2,
+        area.y + area.height.saturating_sub(popup_height) / 2,
+        popup_width,
+        popup_height,
+    );
+    let inner = inset(bounds, 1, 1);
+    let title_height = metrics.title_row_height.min(inner.height);
+    let title_area = Rect::new(inner.x, inner.y, inner.width, title_height);
+    let body_top = if inner.height > metrics.content_top_inset {
+        inner.y.saturating_add(metrics.content_top_inset)
+    } else {
+        inner.y.saturating_add(title_height)
+    };
+    let body_height = inner
+        .height
+        .saturating_sub(body_top.saturating_sub(inner.y))
+        .max(1);
+    let content_area = inset(
+        Rect::new(inner.x, body_top, inner.width, body_height),
+        metrics.panel_pad_x,
+        metrics.panel_pad_y,
+    );
+
+    OverlayLayout {
+        bounds,
+        inner,
+        title_area,
+        content_area,
+        visible_body_rows: content_area.height,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         BreakdownLayout, DEFAULT_NON_INTERACTIVE_VIEWPORT, DashboardChartMetrics, DashboardMetrics,
-        ModalLayoutSpec, ViewportClass, WeeklyHeatmapMode, WeeklyTrendsLayout,
-        centered_modal_layout,
+        ModalLayoutSpec, OverlayLayoutSpec, ViewportClass, WeeklyHeatmapMode, WeeklyTrendsLayout,
+        centered_modal_layout, content_fit_overlay_layout, panel_content_metrics,
     };
     use ratatui::layout::Rect;
 
@@ -756,6 +910,24 @@ mod tests {
     }
 
     #[test]
+    fn overlay_layout_centers_and_preserves_visible_body_rows() {
+        let layout = content_fit_overlay_layout(
+            Rect::new(0, 0, 120, 36),
+            DashboardMetrics::for_viewport(ViewportClass::Medium),
+            OverlayLayoutSpec::new(78, 20)
+                .with_min_size(56, 12)
+                .with_content_hints(68, 14),
+        );
+
+        assert_eq!(layout.bounds.width, 72);
+        assert_eq!(layout.bounds.height, 18);
+        assert_eq!(layout.bounds.x, 24);
+        assert_eq!(layout.bounds.y, 9);
+        assert_eq!(layout.content_area.height, 14);
+        assert_eq!(layout.visible_body_rows, 14);
+    }
+
+    #[test]
     fn breakdown_layout_keeps_rows_columns_and_support_lane_separate() {
         let layout = BreakdownLayout::for_panel(
             Rect::new(0, 0, 64, 8),
@@ -779,6 +951,14 @@ mod tests {
             layout.chart_body.y.saturating_add(layout.chart_body.height)
         );
         assert_eq!(layout.support_lane.height, 1);
+    }
+
+    #[test]
+    fn panel_content_metrics_keeps_support_lane_out_of_chart_body() {
+        let metrics = panel_content_metrics(Rect::new(0, 0, 24, 6), 1);
+
+        assert_eq!(metrics.chart.area, Rect::new(0, 0, 24, 5));
+        assert_eq!(metrics.support.area, Rect::new(0, 5, 24, 1));
     }
 
     #[test]

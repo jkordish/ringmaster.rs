@@ -1,3 +1,67 @@
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeasuredText {
+    pub normalized: String,
+    pub width: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextFit {
+    pub text: String,
+    pub width: usize,
+    pub truncated: bool,
+}
+
+#[must_use]
+pub fn measure_one_line(value: &str) -> MeasuredText {
+    let normalized = normalized_text(value);
+    let width = normalized.chars().count();
+    MeasuredText { normalized, width }
+}
+
+#[must_use]
+pub fn fit_single_line(value: &str, width: usize) -> TextFit {
+    fit_single_line_with(value, width, &[])
+}
+
+#[must_use]
+pub fn fit_single_line_with(value: &str, width: usize, compact_fallbacks: &[&str]) -> TextFit {
+    if width == 0 {
+        return TextFit {
+            text: String::new(),
+            width: 0,
+            truncated: !value.trim().is_empty(),
+        };
+    }
+
+    let measured = measure_one_line(value);
+    if measured.width <= width {
+        return TextFit {
+            text: measured.normalized,
+            width: measured.width,
+            truncated: false,
+        };
+    }
+
+    for fallback in compact_fallbacks {
+        let measured_fallback = measure_one_line(fallback);
+        if measured_fallback.width <= width {
+            return TextFit {
+                text: measured_fallback.normalized,
+                width: measured_fallback.width,
+                truncated: true,
+            };
+        }
+    }
+
+    let text = truncate_with_ellipsis(&measured.normalized, width);
+    let width = text.chars().count();
+    TextFit {
+        text,
+        width,
+        truncated: true,
+    }
+}
+
 #[must_use]
 pub fn truncate_plain(value: &str, width: usize) -> String {
     value.chars().take(width.max(1)).collect()
@@ -9,16 +73,16 @@ pub fn truncate_with_ellipsis(value: &str, width: usize) -> String {
         return String::new();
     }
 
-    let normalized = normalized_text(value);
-    if normalized.chars().count() <= width {
-        return normalized;
+    let measured = measure_one_line(value);
+    if measured.width <= width {
+        return measured.normalized;
     }
 
     if width <= 3 {
-        return truncate_plain(&normalized, width);
+        return truncate_plain(&measured.normalized, width);
     }
 
-    let prefix = truncate_plain(&normalized, width.saturating_sub(3));
+    let prefix = truncate_plain(&measured.normalized, width.saturating_sub(3));
     format!("{prefix}...")
 }
 
@@ -29,12 +93,13 @@ pub fn concise_text(value: &str, width: usize) -> String {
 
 #[must_use]
 pub fn concise_detail(note: &str, width: usize) -> String {
-    truncate_plain(&normalized_text(note.trim_end_matches('.')), width)
+    let measured = measure_one_line(note.trim_end_matches('.'));
+    truncate_plain(&measured.normalized, width)
 }
 
 #[must_use]
 pub fn support_lane_text(note: &str, width: usize) -> String {
-    truncate_with_ellipsis(&normalized_text(note.trim_end_matches('.')), width)
+    fit_single_line(note.trim_end_matches('.'), width).text
 }
 
 #[must_use]
@@ -43,13 +108,16 @@ pub fn fit_heatmap_label(label: &str, width: usize) -> String {
         return String::new();
     }
 
-    let preferred = match (label, width) {
-        ("Readiness", 1..=6) => "Ready",
-        ("Activity", 1..=6) => "Actv",
-        _ => label,
-    };
-
-    truncate_with_ellipsis(preferred, width)
+    fit_single_line_with(
+        label,
+        width,
+        match label {
+            "Readiness" => &["Ready"][..],
+            "Activity" => &["Actv"][..],
+            _ => &[],
+        },
+    )
+    .text
 }
 
 #[must_use]
@@ -58,15 +126,18 @@ pub fn fit_breakdown_label(label: &str, width: usize) -> String {
         return String::new();
     }
 
-    let preferred = match (label, width) {
-        ("HRV Balance", 1..=9) => "HRV Bal",
-        ("Resting HR", 1..=9) => "Rest HR",
-        ("Sleep Balance", 1..=10) => "Sleep Bal",
-        ("Recovery Index", 1..=11) => "Recovery",
-        _ => label,
-    };
-
-    truncate_with_ellipsis(preferred, width)
+    fit_single_line_with(
+        label,
+        width,
+        match label {
+            "HRV Balance" => &["HRV Bal"][..],
+            "Resting HR" => &["Rest HR"][..],
+            "Sleep Balance" => &["Sleep Bal"][..],
+            "Recovery Index" => &["Recovery"][..],
+            _ => &[],
+        },
+    )
+    .text
 }
 
 #[must_use]
@@ -102,13 +173,16 @@ pub fn fit_badge_label(label: &str, width: usize) -> String {
     }
 
     let normalized = normalized_text(label);
-    let preferred = match (normalized.as_str(), width) {
-        ("no data", 1..=5) => "empty",
-        ("steady", 1..=5) => "stdy",
-        _ => normalized.as_str(),
-    };
-
-    truncate_with_ellipsis(preferred, width)
+    fit_single_line_with(
+        &normalized,
+        width,
+        match normalized.as_str() {
+            "no data" => &["empty"][..],
+            "steady" => &["stdy"][..],
+            _ => &[],
+        },
+    )
+    .text
 }
 
 #[must_use]
@@ -123,9 +197,42 @@ fn normalized_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        concise_detail, fit_badge_label, fit_breakdown_delta, fit_breakdown_label, fit_day_header,
-        fit_heatmap_label, support_lane_text, truncate_plain, truncate_with_ellipsis,
+        MeasuredText, TextFit, concise_detail, fit_badge_label, fit_breakdown_delta,
+        fit_breakdown_label, fit_day_header, fit_heatmap_label, fit_single_line,
+        fit_single_line_with, measure_one_line, support_lane_text, truncate_plain,
+        truncate_with_ellipsis,
     };
+
+    #[test]
+    fn measured_text_normalizes_whitespace_and_counts_width() {
+        assert_eq!(
+            measure_one_line("Weekly\n Trends  "),
+            MeasuredText {
+                normalized: "Weekly Trends".to_owned(),
+                width: 13,
+            }
+        );
+    }
+
+    #[test]
+    fn single_line_fit_reports_when_compact_fallbacks_or_ellipsis_were_used() {
+        assert_eq!(
+            fit_single_line_with("Readiness", 5, &["Ready"]),
+            TextFit {
+                text: "Ready".to_owned(),
+                width: 5,
+                truncated: true,
+            }
+        );
+        assert_eq!(
+            fit_single_line("Readiness Breakdown", 10),
+            TextFit {
+                text: "Readine...".to_owned(),
+                width: 10,
+                truncated: true,
+            }
+        );
+    }
 
     #[test]
     fn ellipsis_is_deterministic_for_long_copy() {
