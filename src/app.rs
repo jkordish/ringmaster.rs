@@ -9721,7 +9721,7 @@ fn previous_daily_day(snapshot: &LiveSnapshot, day: &str) -> Option<String> {
         .iter()
         .filter(|row| row.day.as_str() < day)
         .map(|row| row.day.clone())
-        .next_back()
+        .max()
 }
 
 const fn overlay_filter_matches(filters: &OverlayFilterState, family: ContextEventFamily) -> bool {
@@ -13297,6 +13297,62 @@ mod tests {
                 .any(|line| line.contains("Carryover from 2026-04-07"))
         );
         assert!(model.explain.breadcrumb.contains("carryover"));
+    }
+
+    #[test]
+    fn explain_uses_the_immediately_previous_day_for_carryover_context() {
+        let mut snapshot = make_snapshot(&["2026-04-06", "2026-04-07", "2026-04-08"]);
+        snapshot.daily_history.reverse();
+        snapshot.context_events.extend([
+            ContextEventRecord {
+                context_event_id: "session:older".to_owned(),
+                family: ContextEventFamily::Session,
+                source_id: "older-session".to_owned(),
+                anchor_day: "2026-04-06".to_owned(),
+                start_at: "2026-04-06T19:30:00Z".to_owned(),
+                end_at: Some("2026-04-06T20:15:00Z".to_owned()),
+                time_semantics: TimeSemantics::Interval,
+                title: "Older session".to_owned(),
+                subtype: Some("focus".to_owned()),
+                notes: Some("older carryover".to_owned()),
+                intensity: Some("light".to_owned()),
+                metadata_json: "{}".to_owned(),
+                updated_at: "2026-04-06T20:20:00Z".to_owned(),
+            },
+            ContextEventRecord {
+                context_event_id: "session:nearest".to_owned(),
+                family: ContextEventFamily::Session,
+                source_id: "nearest-session".to_owned(),
+                anchor_day: "2026-04-07".to_owned(),
+                start_at: "2026-04-07T19:30:00Z".to_owned(),
+                end_at: Some("2026-04-07T20:15:00Z".to_owned()),
+                time_semantics: TimeSemantics::Interval,
+                title: "Nearest session".to_owned(),
+                subtype: Some("focus".to_owned()),
+                notes: Some("nearest carryover".to_owned()),
+                intensity: Some("light".to_owned()),
+                metadata_json: "{}".to_owned(),
+                updated_at: "2026-04-07T20:20:00Z".to_owned(),
+            },
+        ]);
+
+        let supporting = super::supporting_events_for_explain(
+            &snapshot,
+            "2026-04-08",
+            &OverlayFilterState::all(),
+            None,
+        );
+
+        assert!(
+            supporting
+                .iter()
+                .any(|event| event.source_day == "2026-04-07" && event.carried_forward)
+        );
+        assert!(
+            !supporting
+                .iter()
+                .any(|event| event.source_day == "2026-04-06" && event.carried_forward)
+        );
     }
 
     #[test]
