@@ -538,6 +538,7 @@ The watch engine is reusable by both `sync watch` and the live TUI worker. It no
 - queued webhook invalidations as first-class work
 - `workout`, `enhanced_tag`, and `session` delete events as explicit local delete side effects
 - `heartrate` as scheduled-only fallback
+- shutdown and ctrl-c as "finish the in-flight durable sync, then exit" once state mutation has started
 
 `sync watch` remains the only long-running invalidation consumer. This preserves the operational split between “receive quickly” and “process carefully.”
 
@@ -679,6 +680,8 @@ Current live sync behavior:
   - sessions
 
 Each family is imported through idempotent upserts and family-specific reconcile windows. Missing scopes are captured explicitly so the product can show “missing capability” rather than pretending the family is simply empty.
+
+Daily syncs may finish in a degraded-but-core-complete state when optional review-support endpoints fail independently. In that case the app keeps the daily family fresh for core data, preserves a retryable daily window for the degraded optional endpoints, and does not force webhook invalidations into endless failure retries.
 
 Successful non-dry-run syncs also refresh the derived context-event, pattern-summary, and review-signal tables over a bounded recent window, so Explain, Timeline overlays, Patterns, and Review stay current without making every background refresh reprocess the entire database. `derive rebuild` remains the explicit full-history recompute path.
 

@@ -601,6 +601,22 @@ struct DailySyncWindow {
     end_date: String,
 }
 
+impl DailySyncWindow {
+    fn retry_cursor(&self, overlap_days: i64) -> Result<String> {
+        let start = time::Date::parse(
+            &self.start_date,
+            &time::macros::format_description!("[year]-[month]-[day]"),
+        )
+        .map_err(|error| {
+            AuthError::OAuthFlow(format!(
+                "invalid daily sync window start `{}`: {error}",
+                self.start_date
+            ))
+        })?;
+        Ok((start + Duration::days(overlap_days)).to_string())
+    }
+}
+
 struct DailyPageFetches {
     daily_sleep_pages: Vec<PageFetch<DailySleepDocument>>,
     sleep_period_pages: Vec<PageFetch<SleepDocument>>,
@@ -643,6 +659,7 @@ async fn sync_daily(
     let persist_store = reopen_store(config, &store_plan)?;
     persist_daily_pages(&persist_store, &pages, &imported_at, options)?;
     let (status, message, last_error, imported_rows) = summarize_daily_sync(&window, &pages);
+    let watermark = daily_sync_watermark(config, &window, &status)?;
     persist_slice_report(
         config,
         &persist_store,
@@ -650,7 +667,7 @@ async fn sync_daily(
             sync_key: DAILY_SYNC_KEY.to_owned(),
             status,
             imported_rows,
-            watermark: Some(window.end_date.clone()),
+            watermark,
             message,
             last_error,
             next_attempt_after: None,
@@ -681,6 +698,20 @@ fn resolve_daily_sync_window(
         start_date,
         end_date,
     })
+}
+
+fn daily_sync_watermark(
+    config: &Config,
+    window: &DailySyncWindow,
+    status: &SyncRunStatus,
+) -> Result<Option<String>> {
+    let watermark = match status {
+        SyncRunStatus::Partial => {
+            window.retry_cursor(i64::from(config.refresh.daily_overlap_days))?
+        }
+        _ => window.end_date.clone(),
+    };
+    Ok(Some(watermark))
 }
 
 async fn fetch_daily_pages(
@@ -2156,6 +2187,13 @@ mod tests {
         .await;
         let report = ok(report, "daily sync should degrade instead of failing");
         let counts = ok(store.views().record_counts(), "record counts should load");
+        let daily_state = some(
+            ok(
+                store.sync_state().get(super::DAILY_SYNC_KEY),
+                "daily state should load",
+            ),
+            "daily state should persist",
+        );
         let daily_slice = some(
             report
                 .slice_reports
@@ -2172,6 +2210,11 @@ mod tests {
         assert_eq!(counts.daily_activity, 7);
         assert_eq!(counts.sleep_time, 0);
         assert!(daily_slice.last_error.is_some());
+        assert_eq!(
+            daily_state.cursor.as_deref(),
+            Some("1970-01-03"),
+            "partial daily syncs should preserve the retry window for degraded optional endpoints",
+        );
     }
 
     #[tokio::test]

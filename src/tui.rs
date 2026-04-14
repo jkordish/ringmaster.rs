@@ -66,8 +66,8 @@ enum InFlightRefreshResult<T> {
     Completed {
         result: T,
         queued_manual_refresh: bool,
+        shutdown_requested: bool,
     },
-    Shutdown,
 }
 
 #[derive(Debug, Clone)]
@@ -3176,10 +3176,12 @@ async fn perform_refresh_cycle(
     let InFlightRefreshResult::Completed {
         result,
         queued_manual_refresh,
-    } = refresh_result
-    else {
+        shutdown_requested,
+    } = refresh_result;
+
+    if shutdown_requested {
         return RefreshCycleOutcome::Shutdown;
-    };
+    }
 
     translate_refresh_result(config, action_tx, result, manual);
     RefreshCycleOutcome::Completed {
@@ -3254,6 +3256,7 @@ where
 {
     let mut sync_future = std::pin::pin!(sync_future);
     let mut queued_manual_refresh = false;
+    let mut shutdown_requested = false;
 
     loop {
         tokio::select! {
@@ -3261,13 +3264,16 @@ where
                 return InFlightRefreshResult::Completed {
                     result,
                     queued_manual_refresh,
+                    shutdown_requested,
                 };
             }
-            command = command_rx.recv() => match command {
+            command = command_rx.recv(), if !shutdown_requested => match command {
                 Some(WorkerCommand::ManualRefresh) => {
                     queued_manual_refresh = true;
                 }
-                Some(WorkerCommand::Shutdown) | None => return InFlightRefreshResult::Shutdown,
+                Some(WorkerCommand::Shutdown) | None => {
+                    shutdown_requested = true;
+                }
             }
         }
     }
@@ -3366,7 +3372,6 @@ mod tests {
     use ratatui::layout::{Constraint, Direction, Layout, Rect};
     use ratatui::style::Modifier;
     use std::collections::HashMap;
-    use std::future::pending;
     use std::time::Duration;
     use tokio::sync::mpsc::unbounded_channel;
 
@@ -5366,13 +5371,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_preempts_inflight_refresh() {
+    async fn shutdown_waits_for_inflight_refresh_completion() {
         let (command_tx, mut command_rx) = unbounded_channel();
         let send_result = command_tx.send(super::WorkerCommand::Shutdown);
         assert!(send_result.is_ok());
 
-        let result = super::await_inflight_refresh(&mut command_rx, pending::<usize>()).await;
-        assert!(matches!(result, super::InFlightRefreshResult::Shutdown));
+        let result = super::await_inflight_refresh(&mut command_rx, async {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            7usize
+        })
+        .await;
+
+        match result {
+            super::InFlightRefreshResult::Completed {
+                result,
+                queued_manual_refresh,
+                shutdown_requested,
+            } => {
+                assert_eq!(result, 7);
+                assert!(!queued_manual_refresh);
+                assert!(shutdown_requested);
+            }
+        }
     }
 
     #[tokio::test]
@@ -5398,12 +5418,11 @@ mod tests {
             super::InFlightRefreshResult::Completed {
                 result,
                 queued_manual_refresh,
+                shutdown_requested,
             } => {
                 assert_eq!(result, 7);
                 assert!(queued_manual_refresh);
-            }
-            super::InFlightRefreshResult::Shutdown => {
-                unreachable!("refresh should complete instead of shutting down")
+                assert!(!shutdown_requested);
             }
         }
     }
