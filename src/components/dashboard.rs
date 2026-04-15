@@ -387,7 +387,7 @@ fn dashboard_detail_spec(
     region: FocusRegion,
     width: usize,
 ) -> DashboardDetailSpec {
-    let instrument_width = width.clamp(12, 42);
+    let instrument_width = if width == 0 { 1 } else { width.min(42) };
     match region {
         FocusRegion::DashboardReadiness => {
             let tile = &model.readiness;
@@ -2728,7 +2728,10 @@ fn trend_instrument_lines(title: &str, panel: &DashboardTrendPanel, width: usize
         "SpO2" => vec![
             centered_line(
                 width,
-                meter_bar(fill_percent(&panel.values), width.clamp(10, 18)),
+                meter_bar(
+                    fill_percent(&panel.values),
+                    if width == 0 { 1 } else { width.min(18) },
+                ),
             ),
             spark_strip(&panel.values, width.max(8)),
         ],
@@ -2937,6 +2940,8 @@ fn compact_heatmap_summary(
     grid.selected_cell
         .and_then(|(row_index, column_index)| {
             let _ = row_labels.get(row_index)?;
+            let row = grid.rows.get(row_index)?;
+            row.get(column_index).copied().flatten()?;
             let day_label = grid.day_labels.get(column_index)?;
             Some(format!("Selected {day_label}"))
         })
@@ -3065,4 +3070,61 @@ fn heatmap_subrow_line(
         }
     }
     Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compact_heatmap_summary, trend_instrument_lines};
+    use crate::app::{
+        DashboardDeltaState, DashboardHeatmapGrid, DashboardTileFallback, DashboardTileState,
+        DashboardTrendPanel,
+    };
+    use crate::ui::telemetry::MetricPanelState;
+
+    #[test]
+    fn compact_heatmap_summary_uses_note_when_selected_cell_has_no_value() {
+        let labels = vec!["Readiness".to_owned()];
+        let missing_value_grid = DashboardHeatmapGrid {
+            day_labels: vec!["04-08".to_owned()],
+            rows: vec![vec![None]],
+            selected_cell: Some((0, 0)),
+        };
+
+        assert_eq!(
+            compact_heatmap_summary(&missing_value_grid, &labels, "No data yet"),
+            Some("No data yet".to_owned())
+        );
+
+        let populated_grid = DashboardHeatmapGrid {
+            day_labels: vec!["04-08".to_owned()],
+            rows: vec![vec![Some(82)]],
+            selected_cell: Some((0, 0)),
+        };
+
+        assert_eq!(
+            compact_heatmap_summary(&populated_grid, &labels, "No data yet"),
+            Some("Selected 04-08".to_owned())
+        );
+    }
+
+    #[test]
+    fn spo2_trend_instrument_lines_respect_small_widths() {
+        let panel = DashboardTrendPanel {
+            availability: MetricPanelState::Fresh,
+            tile_state: DashboardTileState::Fresh,
+            primary_label: "97%".to_owned(),
+            baseline_label: "30d 97.2%".to_owned(),
+            range_label: "96-99%".to_owned(),
+            delta_state: DashboardDeltaState::Neutral,
+            judged_state: None,
+            values: vec![96, 97, 97, 98],
+            note: "Stable overnight readings.".to_owned(),
+            fallback: DashboardTileFallback::default(),
+        };
+
+        let lines = trend_instrument_lines("SpO2", &panel, 4);
+
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].chars().count() <= 4);
+    }
 }

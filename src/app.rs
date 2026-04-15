@@ -9448,16 +9448,13 @@ fn dashboard_review_support_line(headline: &str) -> String {
     let normalized = headline.trim_end_matches('.');
     let subject = normalized
         .split_once(" is ")
-        .map_or(normalized, |(prefix, _)| prefix)
+        .map_or(normalized, |(prefix, _)| prefix);
+    let subject = subject
         .split_once(" was ")
-        .map_or_else(
-            || {
-                normalized
-                    .split_once(':')
-                    .map_or(normalized, |(prefix, _)| prefix)
-            },
-            |(prefix, _)| prefix,
-        )
+        .map_or(subject, |(prefix, _)| prefix);
+    let subject = subject
+        .split_once(':')
+        .map_or(subject, |(prefix, _)| prefix)
         .trim();
     let compact_subject = if subject == normalized && measure_words(subject) > 3 {
         subject
@@ -9473,6 +9470,27 @@ fn dashboard_review_support_line(headline: &str) -> String {
         "Review detail available".to_owned()
     } else {
         format!("Review: {compact_subject}")
+    }
+}
+
+#[cfg(test)]
+mod dashboard_review_support_line_tests {
+    use super::dashboard_review_support_line;
+
+    #[test]
+    fn prefers_concise_subject_prefixes() {
+        assert_eq!(
+            dashboard_review_support_line("Readiness is below baseline after travel."),
+            "Review: Readiness"
+        );
+        assert_eq!(
+            dashboard_review_support_line("Sleep was shorter after a late meal."),
+            "Review: Sleep"
+        );
+        assert_eq!(
+            dashboard_review_support_line("Activity: more incomplete than usual."),
+            "Review: Activity"
+        );
     }
 }
 

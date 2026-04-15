@@ -107,7 +107,7 @@ pub fn footer_hints(context: BindingContext, activation_available: bool) -> Vec<
                 .map(|binding| (footer_hint_priority(binding), binding.label)),
         );
     }
-    matched.sort_by_key(|(priority, _)| *priority);
+    matched.sort_by_key(|(priority, label)| (*priority, *label));
     matched
         .into_iter()
         .filter_map(|(_, label)| seen.insert(label).then_some(label))
@@ -1951,6 +1951,19 @@ mod tests {
         let hints = footer_hints(context(Screen::Ai, FocusRegion::Tertiary, None), false);
 
         assert!(!hints.iter().any(|hint| hint.contains("Enter")));
+    }
+
+    #[test]
+    fn footer_hints_break_priority_ties_deterministically() {
+        let hints = footer_hints(
+            context(Screen::Dashboard, FocusRegion::DashboardSpo2, None),
+            false,
+        );
+
+        assert_eq!(
+            hints,
+            vec!["`?` help", "`Ctrl+F` find", "`Shift+Tab` previous region"]
+        );
     }
 
     #[test]
