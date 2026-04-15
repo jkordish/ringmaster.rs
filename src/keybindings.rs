@@ -1362,7 +1362,7 @@ fn dashboard_heatmap_week_bindings() -> Vec<Keybinding> {
             ScreenRegion(Screen::Dashboard, FocusRegion::DashboardHeatmap),
             Standard,
             KeyChord::plain(Left),
-            MoveFocusedRegion(crate::navigation::NavMove::Previous),
+            MoveFocusedRegion(crate::navigation::NavMove::PageBackward),
             "`Left` older week",
             true,
         ),
@@ -1370,7 +1370,7 @@ fn dashboard_heatmap_week_bindings() -> Vec<Keybinding> {
             ScreenRegion(Screen::Dashboard, FocusRegion::DashboardHeatmap),
             Standard,
             KeyChord::plain(Right),
-            MoveFocusedRegion(crate::navigation::NavMove::Next),
+            MoveFocusedRegion(crate::navigation::NavMove::PageForward),
             "`Right` newer week",
             true,
         ),
@@ -1378,7 +1378,7 @@ fn dashboard_heatmap_week_bindings() -> Vec<Keybinding> {
             ScreenRegion(Screen::Dashboard, FocusRegion::DashboardHeatmap),
             Expert,
             KeyChord::plain(Char('h')),
-            MoveFocusedRegion(crate::navigation::NavMove::Previous),
+            MoveFocusedRegion(crate::navigation::NavMove::PageBackward),
             "`h` older week",
             false,
         ),
@@ -1386,7 +1386,7 @@ fn dashboard_heatmap_week_bindings() -> Vec<Keybinding> {
             ScreenRegion(Screen::Dashboard, FocusRegion::DashboardHeatmap),
             Expert,
             KeyChord::plain(Char('l')),
-            MoveFocusedRegion(crate::navigation::NavMove::Next),
+            MoveFocusedRegion(crate::navigation::NavMove::PageForward),
             "`l` newer week",
             false,
         ),
@@ -2115,5 +2115,40 @@ mod tests {
         );
 
         assert_eq!(action, None);
+    }
+
+    #[test]
+    fn dashboard_heatmap_week_shortcuts_page_by_week() {
+        let context = BindingContext {
+            active_screen: Screen::Dashboard,
+            focused_region: FocusRegion::DashboardHeatmap,
+            search_open: false,
+            help_open: false,
+            ai_preflight_open: false,
+        };
+
+        for key in [
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+        ] {
+            assert_eq!(
+                super::resolve(key, context),
+                Some(Action::MoveFocusedRegion(
+                    crate::navigation::NavMove::PageBackward
+                ))
+            );
+        }
+
+        for key in [
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+        ] {
+            assert_eq!(
+                super::resolve(key, context),
+                Some(Action::MoveFocusedRegion(
+                    crate::navigation::NavMove::PageForward
+                ))
+            );
+        }
     }
 }
