@@ -61,7 +61,7 @@ PR #12 should:
 - [x] Close the late review follow-ups around duplicate families, test-only scaffolds, and daily retry cursor semantics
 - [x] Close the final reconcile-coverage truthfulness gap for upsert-only families
 - [x] Re-run compile, lint, test, and doctor verification
-- [ ] Resolve the remaining actionable PR review threads
+- [x] Resolve the remaining actionable PR review threads
 
 ## Verification
 
@@ -72,4 +72,4 @@ PR #12 should:
 
 ## Follow-up work
 
-- None planned beyond resolving the last review thread once verification is green.
+- None.

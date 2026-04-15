@@ -1002,6 +1002,7 @@ fn observe_failed_chunk(
 
 fn should_run_reconcile(
     policy: &SyncPolicy,
+    tracks_reconcile_coverage: bool,
     sync_state: Option<&SyncStateRecord>,
     recent_start: &str,
     now_marker: &str,
@@ -1019,6 +1020,9 @@ fn should_run_reconcile(
     };
     if now_timestamp - last_reconcile_end >= policy.reconcile_window {
         return Ok(true);
+    }
+    if !tracks_reconcile_coverage {
+        return Ok(false);
     }
     let oldest_recent = sync_state
         .oldest_recently_reconciled_at
@@ -1077,6 +1081,7 @@ fn plan_daily_windows(
             if !tail_covers_reconcile
                 && should_run_reconcile(
                     policy,
+                    family.supports_window_reconcile_coverage(),
                     sync_state.as_ref(),
                     &reconcile_start_marker,
                     &now_marker,
@@ -1153,6 +1158,7 @@ fn plan_heartrate_windows(
             if !tail_covers_reconcile
                 && should_run_reconcile(
                     policy,
+                    SyncFamily::Heartrate.supports_window_reconcile_coverage(),
                     sync_state.as_ref(),
                     &reconcile_start_marker,
                     &now_marker,
@@ -2475,18 +2481,16 @@ fn persist_slice_report(
         } else {
             previous_success
         };
-        let (last_reconcile_end, oldest_recently_reconciled_at) =
-            if report.family.supports_window_reconcile_coverage() {
-                (
-                    prefer_later_marker(report.last_reconcile_end.clone(), previous_reconcile_end),
-                    prefer_earlier_marker(
-                        report.oldest_recently_reconciled_at.clone(),
-                        previous_reconcile_start,
-                    ),
-                )
-            } else {
-                (None, None)
-            };
+        let last_reconcile_end =
+            prefer_later_marker(report.last_reconcile_end.clone(), previous_reconcile_end);
+        let oldest_recently_reconciled_at = if report.family.supports_window_reconcile_coverage() {
+            prefer_earlier_marker(
+                report.oldest_recently_reconciled_at.clone(),
+                previous_reconcile_start,
+            )
+        } else {
+            None
+        };
         let next_attempt_after = if report.status == SyncRunStatus::Failed {
             report
                 .next_attempt_after
@@ -3856,6 +3860,7 @@ mod tests {
         let should_run = ok(
             super::should_run_reconcile(
                 &policy,
+                true,
                 Some(&SyncStateRecord {
                     sync_key: "oura.heartrate".to_owned(),
                     family: "heartrate".to_owned(),
@@ -3887,6 +3892,59 @@ mod tests {
         assert!(
             !should_run,
             "reconcile should not rerun just because overlap elapsed when the broader reconcile window is still fresh"
+        );
+    }
+
+    #[test]
+    fn should_run_reconcile_uses_last_reconcile_end_as_cadence_for_daily_families() {
+        let config = fixture_config();
+        let policy = SyncPolicy::for_family(&config.refresh, SyncFamily::Daily);
+        let now = OffsetDateTime::parse("2026-04-14T12:00:00Z", &Rfc3339)
+            .unwrap_or_else(|error| panic!("timestamp should parse: {error}"));
+        let last_reconcile_end = ok(
+            super::format_timestamp_marker(now - time::Duration::hours(6)),
+            "recent daily reconcile marker should format",
+        );
+        let now_marker = ok(
+            super::format_timestamp_marker(now),
+            "current timestamp marker should format",
+        );
+
+        let should_run = ok(
+            super::should_run_reconcile(
+                &policy,
+                false,
+                Some(&SyncStateRecord {
+                    sync_key: "oura.daily".to_owned(),
+                    family: "daily".to_owned(),
+                    status: SyncRunStatus::Success,
+                    cursor: Some("2026-04-14".to_owned()),
+                    last_successful_sync_end: Some("2026-04-14".to_owned()),
+                    last_attempted_at: now_marker.clone(),
+                    last_completed_at: Some(now_marker.clone()),
+                    last_reconcile_end: Some(last_reconcile_end),
+                    oldest_recently_reconciled_at: None,
+                    message: Some("recent daily reconcile completed".to_owned()),
+                    granted_scopes: vec!["daily".to_owned()],
+                    last_error: None,
+                    last_error_at: None,
+                    last_error_kind: None,
+                    last_error_detail: None,
+                    failure_count: 0,
+                    next_attempt_after: None,
+                    last_trigger_source: Some("periodic_reconcile".to_owned()),
+                    last_trigger_detail: Some("daily cadence test".to_owned()),
+                    updated_at: now_marker.clone(),
+                }),
+                "2026-03-15",
+                &now_marker,
+            ),
+            "daily reconcile cadence check should succeed",
+        );
+
+        assert!(
+            !should_run,
+            "upsert-only families should respect recent reconcile cadence without claiming range coverage"
         );
     }
 
@@ -4121,6 +4179,82 @@ mod tests {
         assert_eq!(record.failure_count, 0);
         assert_eq!(record.last_error_kind.as_deref(), Some("transient_api"));
         assert!(record.last_error_detail.is_some());
+    }
+
+    #[test]
+    fn persist_slice_report_keeps_daily_reconcile_cadence_without_range_coverage() {
+        let store = ok(Store::open_test_store(), "store should open");
+        let config = fixture_config();
+        ok(
+            store.sync_state().upsert(&SyncStateRecord {
+                sync_key: "oura.daily".to_owned(),
+                family: "daily".to_owned(),
+                status: SyncRunStatus::Success,
+                cursor: Some("2026-04-08".to_owned()),
+                last_successful_sync_end: Some("2026-04-08".to_owned()),
+                last_attempted_at: "2026-04-08T06:00:00Z".to_owned(),
+                last_completed_at: Some("2026-04-08T06:00:05Z".to_owned()),
+                last_reconcile_end: Some("2026-04-08T06:00:05Z".to_owned()),
+                oldest_recently_reconciled_at: Some("2026-03-10".to_owned()),
+                message: Some("previous daily reconcile".to_owned()),
+                granted_scopes: vec!["daily".to_owned()],
+                last_error: None,
+                last_error_at: None,
+                last_error_kind: None,
+                last_error_detail: None,
+                failure_count: 0,
+                next_attempt_after: None,
+                last_trigger_source: Some("periodic_reconcile".to_owned()),
+                last_trigger_detail: Some("seed cadence marker".to_owned()),
+                updated_at: "2026-04-08T06:00:05Z".to_owned(),
+            }),
+            "seed sync state should persist",
+        );
+
+        let persisted = ok(
+            super::persist_slice_report(
+                &config,
+                &store,
+                super::SliceReport {
+                    sync_key: "oura.daily".to_owned(),
+                    family: SyncFamily::Daily,
+                    status: SyncRunStatus::Success,
+                    imported_rows: 4,
+                    watermark: Some("2026-04-09".to_owned()),
+                    last_successful_sync_end: Some("2026-04-09".to_owned()),
+                    last_reconcile_end: None,
+                    oldest_recently_reconciled_at: None,
+                    message: "daily tail sync".to_owned(),
+                    last_error: None,
+                    next_attempt_after: None,
+                },
+                vec!["daily".to_owned()],
+                &SyncOptions {
+                    dry_run: false,
+                    fixture_dir: None,
+                    families: vec![SyncFamily::Daily],
+                    mode: super::SyncMode::Standard,
+                    trigger_source: Some("periodic_sync".to_owned()),
+                    trigger_detail: Some("preserve daily cadence marker".to_owned()),
+                },
+            ),
+            "tail sync should preserve daily reconcile cadence metadata",
+        );
+
+        let record = some(
+            ok(
+                store.sync_state().get("oura.daily"),
+                "daily sync state should load",
+            ),
+            "daily sync state should exist",
+        );
+
+        assert_eq!(persisted.status, SyncRunStatus::Success);
+        assert_eq!(
+            record.last_reconcile_end.as_deref(),
+            Some("2026-04-08T06:00:05Z")
+        );
+        assert!(record.oldest_recently_reconciled_at.is_none());
     }
 
     #[tokio::test]
