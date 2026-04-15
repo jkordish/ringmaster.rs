@@ -196,14 +196,11 @@ pub fn fit_badge_label(label: &str, width: usize) -> String {
     }
 
     let normalized = normalized_text(label);
+    let lookup = normalized.to_ascii_lowercase();
     fit_single_line_with(
         &normalized,
         width,
-        match normalized.as_str() {
-            "no data" => &["empty"][..],
-            "steady" => &["stdy"][..],
-            _ => &[],
-        },
+        canonical_badge_abbreviations(label, &lookup),
     )
     .text
 }
@@ -215,6 +212,39 @@ pub fn fit_day_header(label: &str, width: usize) -> String {
 
 fn normalized_text(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn canonical_badge_abbreviations(label: &str, lookup: &str) -> &'static [&'static str] {
+    match (uses_uppercase_badge(label), lookup) {
+        (true, "baseline" | "baseline only") => &["BASE"],
+        (false, "baseline" | "baseline only") => &["base"],
+        (true, "no current sample") => &["SAMPLE"],
+        (false, "no current sample") => &["sample"],
+        (true, "historical only") => &["HISTORY"],
+        (false, "historical only") => &["history"],
+        (true, "missing scope") => &["SCOPE"],
+        (false, "missing scope") => &["scope"],
+        (true, "unavailable") => &["N/A"],
+        (false, "unavailable") => &["n/a"],
+        (true, "no data") => &["EMPTY"],
+        (false, "no data") => &["empty"],
+        (true, "steady") => &["STDY"],
+        (false, "steady") => &["stdy"],
+        _ => &[],
+    }
+}
+
+fn uses_uppercase_badge(label: &str) -> bool {
+    let mut saw_alpha = false;
+    for ch in label.chars() {
+        if ch.is_ascii_alphabetic() {
+            saw_alpha = true;
+            if !ch.is_ascii_uppercase() {
+                return false;
+            }
+        }
+    }
+    saw_alpha
 }
 
 #[cfg(test)]
@@ -288,6 +318,10 @@ mod tests {
         assert_eq!(fit_breakdown_delta("d/d +1.2", 4), "+1.2");
         assert_eq!(fit_badge_label("no data", 5), "empty");
         assert_eq!(fit_badge_label("steady", 4), "stdy");
+        assert_eq!(fit_badge_label("baseline", 4), "base");
+        assert_eq!(fit_badge_label("unavailable", 3), "n/a");
+        assert_eq!(fit_badge_label("BASELINE", 4), "BASE");
+        assert_eq!(fit_badge_label("MISSING SCOPE", 5), "SCOPE");
     }
 
     #[test]

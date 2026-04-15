@@ -223,7 +223,7 @@ impl DashboardMetrics {
                 title_separator_gap: 0,
                 content_top_inset: 1,
                 major_inset_x: 2,
-                badge_width: 7,
+                badge_width: 6,
                 focus_gutter_width: 2,
                 footer_hint_limit: 1,
             },
@@ -238,7 +238,7 @@ impl DashboardMetrics {
                 title_separator_gap: 1,
                 content_top_inset: 2,
                 major_inset_x: 3,
-                badge_width: 7,
+                badge_width: 8,
                 focus_gutter_width: 2,
                 footer_hint_limit: 2,
             },
@@ -253,7 +253,7 @@ impl DashboardMetrics {
                 title_separator_gap: 1,
                 content_top_inset: 2,
                 major_inset_x: 4,
-                badge_width: 7,
+                badge_width: 8,
                 focus_gutter_width: 2,
                 footer_hint_limit: 2,
             },
@@ -288,7 +288,7 @@ impl DashboardChartMetrics {
             ViewportClass::Compact => Self {
                 support_lane_height: 1,
                 breakdown_header_height: 1,
-                breakdown_band_height: 1,
+                breakdown_band_height: 0,
                 breakdown_label_min_width: 8,
                 breakdown_label_max_width: 12,
                 breakdown_delta_min_width: 7,
@@ -306,7 +306,7 @@ impl DashboardChartMetrics {
             ViewportClass::Medium => Self {
                 support_lane_height: 1,
                 breakdown_header_height: 1,
-                breakdown_band_height: 1,
+                breakdown_band_height: 0,
                 breakdown_label_min_width: 9,
                 breakdown_label_max_width: 13,
                 breakdown_delta_min_width: 8,
@@ -324,7 +324,7 @@ impl DashboardChartMetrics {
             ViewportClass::Wide => Self {
                 support_lane_height: 1,
                 breakdown_header_height: 1,
-                breakdown_band_height: 1,
+                breakdown_band_height: 0,
                 breakdown_label_min_width: 10,
                 breakdown_label_max_width: 14,
                 breakdown_delta_min_width: 8,
@@ -346,6 +346,7 @@ impl DashboardChartMetrics {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeeklyHeatmapMode {
     Standard,
+    #[cfg_attr(not(test), allow(dead_code))]
     DenseHistory,
 }
 
@@ -1028,7 +1029,9 @@ mod tests {
         assert_eq!(medium.major_inset_x, 3);
         assert_eq!(wide.panel_pad_x, 2);
         assert_eq!(wide.major_inset_x, 4);
-        assert_eq!(wide.badge_width, 7);
+        assert_eq!(compact.badge_width, 6);
+        assert_eq!(medium.badge_width, 8);
+        assert_eq!(wide.badge_width, 8);
         assert_eq!(wide.focus_gutter_width, 2);
         assert_eq!(wide.footer_hint_limit, 2);
     }

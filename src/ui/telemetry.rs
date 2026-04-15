@@ -376,7 +376,16 @@ pub fn footer_inspector(
     } else {
         format!("{exact} / {delta}")
     };
-    format!("{label} | {summary} | {freshness} | {hint}")
+    [
+        Some(label),
+        (!summary.is_empty()).then_some(summary.as_str()),
+        (!freshness.is_empty()).then_some(freshness),
+        (!hint.is_empty()).then_some(hint),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" | ")
 }
 
 #[must_use]
@@ -385,7 +394,7 @@ pub fn placeholder_rule(width: usize) -> String {
 }
 
 #[must_use]
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub fn availability_scaffold(
     availability: TelemetryAvailability,
     reason: &str,
@@ -400,6 +409,7 @@ pub fn availability_scaffold(
 }
 
 #[must_use]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn metric_panel_scaffold(state: MetricPanelState, reason: &str, width: usize) -> Vec<String> {
     let width = width.max(10);
     vec![

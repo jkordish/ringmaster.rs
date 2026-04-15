@@ -19,8 +19,6 @@ pub enum Action {
     SearchBackspace,
     SearchNextResult,
     SearchPreviousResult,
-    NextScreen,
-    PreviousScreen,
     ShowScreen(Screen),
     RefreshRequested,
     RefreshStarted {
@@ -51,8 +49,6 @@ pub enum Action {
     PreviousTrendWindow,
     NextTrendWindow,
     CyclePatternMetric,
-    CycleReviewMode,
-    CycleReviewFocus,
     PreviousReviewCard,
     NextReviewCard,
     RequestAiLaunch(AiLaunchIntent),
@@ -83,8 +79,6 @@ pub enum Action {
         record_id: String,
         status_line: String,
     },
-    PreviousAiBrowserTab,
-    NextAiBrowserTab,
     PreviousAiBrowserItem,
     NextAiBrowserItem,
 }

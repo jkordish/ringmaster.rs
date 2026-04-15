@@ -2,7 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration as StdDuration;
 
 use axum::{
@@ -34,6 +34,11 @@ const ACCESS_TOKEN_REFRESH_SKEW_SECS: i64 = 60;
 
 type OAuthClient =
     BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
+
+fn auth_refresh_guard() -> &'static tokio::sync::Mutex<()> {
+    static GUARD: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    GUARD.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginReport {
@@ -679,31 +684,55 @@ async fn ensure_authorized_session_with_secret_store(
             || access_token_refresh_required(session.access_token_expires_at.as_deref())?);
 
     let session = if should_refresh {
-        let refresh_token = tokens
-            .refresh_token
-            .clone()
-            .ok_or(AuthError::MissingRefreshToken)?;
-        let oauth_client = build_oauth_client(config, &config.oura.callback_url())?;
-        let http_client = oauth_http_client()?;
-        let refreshed = refresh_access_token(&oauth_client, &http_client, refresh_token).await?;
+        let _guard = auth_refresh_guard().lock().await;
         let store = reopen_store(config, &store_plan)?;
-        persist_authorized_session(
-            &store,
-            secret_store,
-            &refreshed,
-            session.account_email.clone(),
-            true,
-        )?;
-        tokens = StoredTokens {
-            access_token: refreshed.access_token,
-            refresh_token: refreshed.refresh_token,
-        };
-        store.auth().get(OURA_PROVIDER)?.ok_or_else(|| {
-            AuthError::OAuthFlow("auth session disappeared after refresh".to_owned())
-        })?
+        let latest_session = store.auth().get(OURA_PROVIDER)?.ok_or_else(|| {
+            AuthError::OAuthFlow("no persisted Oura auth session is available".to_owned())
+        })?;
+        let latest_tokens = secret_store
+            .read_tokens()
+            .map_err(AuthError::from)?
+            .ok_or(AuthError::MissingAccessToken)?;
+        let latest_should_refresh = latest_tokens.refresh_token.is_some()
+            && (latest_tokens.access_token.trim().is_empty()
+                || access_token_refresh_required(
+                    latest_session.access_token_expires_at.as_deref(),
+                )?);
+
+        if latest_should_refresh {
+            let refresh_token = latest_tokens
+                .refresh_token
+                .clone()
+                .ok_or(AuthError::MissingRefreshToken)?;
+            let oauth_client = build_oauth_client(config, &config.oura.callback_url())?;
+            let http_client = oauth_http_client()?;
+            let refreshed =
+                refresh_access_token(&oauth_client, &http_client, refresh_token).await?;
+            persist_authorized_session(
+                &store,
+                secret_store,
+                &refreshed,
+                latest_session.account_email.clone(),
+                true,
+            )?;
+            tokens = StoredTokens {
+                access_token: refreshed.access_token,
+                refresh_token: refreshed.refresh_token,
+            };
+            store.auth().get(OURA_PROVIDER)?.ok_or_else(|| {
+                AuthError::OAuthFlow("auth session disappeared after refresh".to_owned())
+            })?
+        } else {
+            tokens = latest_tokens;
+            latest_session
+        }
     } else {
         session
     };
+
+    if tokens.access_token.trim().is_empty() {
+        return Err(AuthError::MissingAccessToken.into());
+    }
 
     Ok(AuthorizedSession {
         access_token: tokens.access_token,
@@ -1082,6 +1111,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -1165,30 +1195,8 @@ mod tests {
                 auth_timeout_secs: 5,
             },
             refresh: RefreshConfig {
-                personal_interval_secs: 3_600,
-                daily_interval_secs: 300,
-                heartrate_interval_secs: 60,
-                workout_interval_secs: 600,
-                enhanced_tag_interval_secs: 300,
-                session_interval_secs: 300,
-                personal_stale_after_secs: 72 * 60 * 60,
-                daily_stale_after_secs: 12 * 60 * 60,
-                heartrate_stale_after_secs: 15 * 60,
-                workout_stale_after_secs: 24 * 60 * 60,
-                enhanced_tag_stale_after_secs: 12 * 60 * 60,
-                session_stale_after_secs: 12 * 60 * 60,
-                daily_history_days: 90,
-                daily_overlap_days: 2,
-                heartrate_history_days: 7,
-                heartrate_overlap_minutes: 60,
-                workout_history_days: 90,
-                workout_overlap_days: 2,
-                enhanced_tag_history_days: 90,
-                enhanced_tag_overlap_days: 2,
-                session_history_days: 90,
-                session_overlap_days: 2,
-                max_backoff_secs: 60 * 60,
                 demo_fixture_dir: None,
+                ..RefreshConfig::default()
             },
             webhook: WebhookConfig {
                 bind: ok("127.0.0.1:8799".parse(), "webhook bind should parse"),
@@ -1517,6 +1525,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blank_access_token_without_refresh_token_returns_missing_access_token() {
+        let config = test_config("http://127.0.0.1:9999/token".to_owned());
+        let store = ok(Store::open_test_store(), "store should open");
+        let secrets = MemorySecretStore::default();
+        let session = AuthSessionRecord {
+            provider: OURA_PROVIDER.to_owned(),
+            account_id: Some("acct-1".to_owned()),
+            account_email: Some("blank@example.com".to_owned()),
+            token_type: "Bearer".to_owned(),
+            granted_scopes: vec!["daily".to_owned()],
+            access_token_expires_at: None,
+            last_authenticated_at: Some("2026-04-11T00:00:00Z".to_owned()),
+            last_refresh_at: None,
+            last_error: None,
+            updated_at: "2026-04-11T00:00:00Z".to_owned(),
+        };
+
+        let error = ensure_authorized_session_with_secret_store(
+            &config,
+            store.plan().clone(),
+            session,
+            StoredTokens {
+                access_token: "   ".to_owned(),
+                refresh_token: None,
+            },
+            &secrets,
+        )
+        .await
+        .expect_err("blank tokens should fail closed");
+
+        assert!(matches!(
+            error,
+            crate::error::RingmasterError::Auth(AuthError::MissingAccessToken)
+        ));
+    }
+
+    #[tokio::test]
     async fn missing_access_token_expiry_triggers_refresh_when_refresh_token_exists() {
         let listener = ok(
             TcpListener::bind("127.0.0.1:0").await,
@@ -1613,6 +1658,114 @@ mod tests {
         );
         assert!(auth.last_refresh_at.is_some());
         assert!(auth.access_token_expires_at.is_some());
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn concurrent_refresh_uses_one_refresh_path() {
+        let listener = ok(
+            TcpListener::bind("127.0.0.1:0").await,
+            "listener should bind",
+        );
+        let address = ok(listener.local_addr(), "listener address should resolve");
+        let grants = Arc::new(Mutex::new(VecDeque::from([json!({
+            "access_token": "access-2",
+            "refresh_token": "refresh-2",
+            "token_type": "Bearer",
+            "expires_in": 3600
+        })])));
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let grants_clone = Arc::clone(&grants);
+        let request_count_clone = Arc::clone(&request_count);
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/token",
+                post(
+                    move |Form(_): Form<std::collections::HashMap<String, String>>| {
+                        let grants_clone = Arc::clone(&grants_clone);
+                        let request_count_clone = Arc::clone(&request_count_clone);
+                        async move {
+                            request_count_clone.fetch_add(1, Ordering::SeqCst);
+                            let payload = {
+                                let mut queued_grants = grants_clone.lock().unwrap_or_else(|_| {
+                                    unreachable!("refresh grant lock should succeed")
+                                });
+                                some(queued_grants.pop_front(), "refresh response should exist")
+                            };
+                            Json(payload)
+                        }
+                    },
+                ),
+            );
+            ok(
+                axum::serve(listener, app).await,
+                "refresh test server should run",
+            );
+        });
+
+        let config = test_config(format!("http://{address}/token"));
+        let store = ok(Store::open_test_store(), "store should open");
+        let secrets = MemorySecretStore::default();
+        secrets
+            .write_tokens(&StoredTokens {
+                access_token: "expired-access".to_owned(),
+                refresh_token: Some("refresh-1".to_owned()),
+            })
+            .map_or_else(|error| unreachable!("seed tokens: {error}"), |()| ());
+        store
+            .auth()
+            .upsert(&AuthSessionRecord {
+                provider: OURA_PROVIDER.to_owned(),
+                account_id: None,
+                account_email: Some("refresh@example.com".to_owned()),
+                token_type: "Bearer".to_owned(),
+                granted_scopes: vec!["daily".to_owned(), "heartrate".to_owned()],
+                access_token_expires_at: Some("2020-01-01T00:00:00Z".to_owned()),
+                last_authenticated_at: Some("2020-01-01T00:00:00Z".to_owned()),
+                last_refresh_at: None,
+                last_error: None,
+                updated_at: "2020-01-01T00:00:00Z".to_owned(),
+            })
+            .map_or_else(|error| unreachable!("seed auth session: {error}"), |()| ());
+        let seeded_session = some(
+            ok(
+                store.auth().get(OURA_PROVIDER),
+                "seeded session should load",
+            ),
+            "seeded session present",
+        );
+        let seeded_tokens = some(
+            ok(secrets.read_tokens(), "seeded tokens should read"),
+            "seeded tokens present",
+        );
+
+        let first = ensure_authorized_session_with_secret_store(
+            &config,
+            store.plan().clone(),
+            seeded_session.clone(),
+            seeded_tokens.clone(),
+            &secrets,
+        );
+        let second = ensure_authorized_session_with_secret_store(
+            &config,
+            store.plan().clone(),
+            seeded_session,
+            seeded_tokens,
+            &secrets,
+        );
+        let (first, second) = tokio::join!(first, second);
+        let first = ok(first, "first refresh should succeed");
+        let second = ok(second, "second refresh should reuse refreshed state");
+
+        assert_eq!(first.access_token, "access-2");
+        assert_eq!(second.access_token, "access-2");
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+        let stored = some(
+            ok(secrets.read_tokens(), "tokens should read"),
+            "tokens stored",
+        );
+        assert_eq!(stored.refresh_token.as_deref(), Some("refresh-2"));
 
         server.abort();
     }

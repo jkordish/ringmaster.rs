@@ -179,13 +179,110 @@ fn configure_connection(connection: &Connection) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use crate::store::db::Store;
+    use crate::store::queries::{SyncRunStatus, SyncStateRecord};
     use crate::test_support::ok;
 
     #[test]
     fn opens_isolated_test_store() {
         let store = ok(Store::open_test_store(), "store should open");
 
-        assert_eq!(store.migration_report().current_version, 19);
+        assert_eq!(store.migration_report().current_version, 20);
+    }
+
+    #[test]
+    fn sync_state_survives_reopen_and_stays_per_family() {
+        let tempdir = ok(tempdir(), "tempdir should build");
+        let plan = super::StorePlan {
+            data_dir: tempdir.path().to_path_buf(),
+            db_path: tempdir.path().join("ringmaster-test.db"),
+        };
+        let store = ok(
+            Store::open_with_plan(plan.clone(), "ringmaster"),
+            "store should open",
+        );
+
+        ok(
+            store.sync_state().upsert(&SyncStateRecord {
+                sync_key: "oura.daily".to_owned(),
+                family: "daily".to_owned(),
+                status: SyncRunStatus::Success,
+                cursor: Some("2026-04-08".to_owned()),
+                last_successful_sync_end: Some("2026-04-08".to_owned()),
+                last_attempted_at: "2026-04-08T06:00:00Z".to_owned(),
+                last_completed_at: Some("2026-04-08T06:00:05Z".to_owned()),
+                last_reconcile_end: Some("2026-04-08".to_owned()),
+                oldest_recently_reconciled_at: Some("2026-03-10".to_owned()),
+                message: Some("daily sync complete".to_owned()),
+                granted_scopes: vec!["daily".to_owned()],
+                last_error: None,
+                last_error_at: None,
+                last_error_kind: None,
+                last_error_detail: None,
+                failure_count: 0,
+                next_attempt_after: None,
+                last_trigger_source: Some("periodic_reconcile".to_owned()),
+                last_trigger_detail: Some("daily seed".to_owned()),
+                updated_at: "2026-04-08T06:00:05Z".to_owned(),
+            }),
+            "daily sync state should persist",
+        );
+        ok(
+            store.sync_state().upsert(&SyncStateRecord {
+                sync_key: "oura.heartrate".to_owned(),
+                family: "heartrate".to_owned(),
+                status: SyncRunStatus::Success,
+                cursor: Some("2026-04-08T05:45:00Z".to_owned()),
+                last_successful_sync_end: Some("2026-04-08T05:45:00Z".to_owned()),
+                last_attempted_at: "2026-04-08T06:10:00Z".to_owned(),
+                last_completed_at: Some("2026-04-08T06:10:05Z".to_owned()),
+                last_reconcile_end: Some("2026-04-08T06:10:05Z".to_owned()),
+                oldest_recently_reconciled_at: Some("2026-04-01".to_owned()),
+                message: Some("heartrate sync complete".to_owned()),
+                granted_scopes: vec!["heartrate".to_owned()],
+                last_error: None,
+                last_error_at: None,
+                last_error_kind: None,
+                last_error_detail: None,
+                failure_count: 0,
+                next_attempt_after: None,
+                last_trigger_source: Some("startup".to_owned()),
+                last_trigger_detail: Some("heartrate seed".to_owned()),
+                updated_at: "2026-04-08T06:10:05Z".to_owned(),
+            }),
+            "heartrate sync state should persist",
+        );
+
+        drop(store);
+
+        let reopened = ok(
+            Store::open_with_plan(plan, "ringmaster"),
+            "store should reopen from the same plan",
+        );
+        let states = ok(
+            reopened.sync_state().list(),
+            "reopened sync states should load",
+        );
+        let daily = states
+            .iter()
+            .find(|state| state.sync_key == "oura.daily")
+            .unwrap_or_else(|| panic!("daily sync state should exist"));
+        let heartrate = states
+            .iter()
+            .find(|state| state.sync_key == "oura.heartrate")
+            .unwrap_or_else(|| panic!("heartrate sync state should exist"));
+
+        assert_eq!(daily.family, "daily");
+        assert_eq!(
+            daily.last_successful_sync_end.as_deref(),
+            Some("2026-04-08")
+        );
+        assert_eq!(heartrate.family, "heartrate");
+        assert_eq!(
+            heartrate.last_successful_sync_end.as_deref(),
+            Some("2026-04-08T05:45:00Z")
+        );
     }
 }

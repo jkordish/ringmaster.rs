@@ -28,6 +28,8 @@ If you want to check your local setup:
 cargo run -- doctor
 ```
 
+`doctor` is safe to paste into issue threads or review comments: it keeps auth, sync, AI, and webhook diagnostics visible without printing raw stored account identifiers.
+
 If you want to connect your own Oura account:
 
 ```bash

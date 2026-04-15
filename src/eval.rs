@@ -74,9 +74,12 @@ pub struct EvalExpectations {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct EvalArtifactLineage {
-    pub ai_run_id: Option<String>,
-    pub ai_artifact_id: Option<String>,
-    pub report_id: Option<String>,
+    #[serde(rename = "ai_run_id")]
+    pub run: Option<String>,
+    #[serde(rename = "ai_artifact_id")]
+    pub artifact: Option<String>,
+    #[serde(rename = "report_id")]
+    pub report: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -1310,7 +1313,7 @@ mod tests {
             Some("32bebf1f9c33fabb49b5e11ffe4a2ba0f454d0341dac33894a6428366fe0ea79")
         );
         assert_eq!(
-            details.cases[0].candidate.lineage.ai_run_id.as_deref(),
+            details.cases[0].candidate.lineage.run.as_deref(),
             Some("fixture-run-review-candidate")
         );
     }

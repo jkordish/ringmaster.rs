@@ -182,7 +182,6 @@ pub struct FollowUpArtifactV1 {
 
 #[derive(Debug, Clone)]
 pub struct ReviewRunOutput {
-    pub artifact: ReviewArtifactV1,
     pub payload_json: String,
     pub rendered_briefing: String,
     pub request_preview: AiRequestPreview,
@@ -192,7 +191,6 @@ pub struct ReviewRunOutput {
 
 #[derive(Debug, Clone)]
 pub struct CompareRunOutput {
-    pub artifact: CompareArtifactV1,
     pub payload_json: String,
     pub rendered_briefing: String,
     pub request_preview: AiRequestPreview,
@@ -202,9 +200,6 @@ pub struct CompareRunOutput {
 
 #[derive(Debug, Clone)]
 pub struct FollowUpRunOutput {
-    pub artifact: FollowUpArtifactV1,
-    pub payload_json: String,
-    pub rendered_briefing: String,
     pub request_preview: AiRequestPreview,
     pub request_fingerprint: String,
     pub record: AiArtifactRecord,
@@ -268,10 +263,10 @@ pub struct ReviewProviderRequest<'a> {
 }
 
 pub struct CompareProviderRequest<'a> {
-    pub snapshot_a: &'a SnapshotBundleV1,
-    pub snapshot_a_json: &'a str,
-    pub snapshot_b: &'a SnapshotBundleV1,
-    pub snapshot_b_json: &'a str,
+    pub reference_snapshot: &'a SnapshotBundleV1,
+    pub reference_json: &'a str,
+    pub comparison_snapshot: &'a SnapshotBundleV1,
+    pub comparison_json: &'a str,
 }
 
 pub struct FollowUpProviderRequest<'a> {
@@ -341,7 +336,7 @@ pub fn preview_review_request(
         .map(|plan| plan.preview)
 }
 
-pub(crate) async fn review_snapshot_with_run_identity(
+pub async fn review_snapshot_with_run_identity(
     config: &Config,
     snapshot: &LoadedSnapshotArtifact,
     dry_run: bool,
@@ -392,10 +387,9 @@ pub(crate) async fn review_snapshot_with_run_identity(
         request_fingerprint: Some(&request_plan.request_fingerprint),
         payload_json: payload_json.clone(),
         rendered_briefing: rendered_briefing.clone(),
-    })?;
+    });
 
     Ok(ReviewRunOutput {
-        artifact,
         payload_json,
         rendered_briefing,
         request_preview: request_plan.preview,
@@ -482,7 +476,7 @@ pub fn preview_compare_request(
     .map(|plan| plan.preview)
 }
 
-pub(crate) async fn compare_snapshots_with_run_identity(
+pub async fn compare_snapshots_with_run_identity(
     config: &Config,
     snapshot_a: &LoadedSnapshotArtifact,
     snapshot_b: &LoadedSnapshotArtifact,
@@ -502,10 +496,10 @@ pub(crate) async fn compare_snapshots_with_run_identity(
     apply_provider_metadata_to_preview(&mut request_plan.preview, &metadata);
     let artifact = provider
         .compare(CompareProviderRequest {
-            snapshot_a: &snapshot_a.bundle,
-            snapshot_a_json: &snapshot_a.compact_json,
-            snapshot_b: &snapshot_b.bundle,
-            snapshot_b_json: &snapshot_b.compact_json,
+            reference_snapshot: &snapshot_a.bundle,
+            reference_json: &snapshot_a.compact_json,
+            comparison_snapshot: &snapshot_b.bundle,
+            comparison_json: &snapshot_b.compact_json,
         })
         .await?;
     let created_at = resolve_run_created_at(run_identity_override)?;
@@ -543,10 +537,9 @@ pub(crate) async fn compare_snapshots_with_run_identity(
         request_fingerprint: Some(&request_plan.request_fingerprint),
         payload_json: payload_json.clone(),
         rendered_briefing: rendered_briefing.clone(),
-    })?;
+    });
 
     Ok(CompareRunOutput {
-        artifact,
         payload_json,
         rendered_briefing,
         request_preview: request_plan.preview,
@@ -555,7 +548,7 @@ pub(crate) async fn compare_snapshots_with_run_identity(
     })
 }
 
-pub(crate) async fn follow_up_from_artifact_with_run_identity(
+pub async fn follow_up_from_artifact_with_run_identity(
     config: &Config,
     snapshots: &[LoadedSnapshotArtifact],
     source_record: &AiArtifactRecord,
@@ -589,7 +582,6 @@ pub(crate) async fn follow_up_from_artifact_with_run_identity(
         .await?;
     let created_at = resolve_run_created_at(run_identity_override)?;
     let payload_json = serde_json::to_string_pretty(&artifact)?;
-    let rendered_briefing = render_follow_up_briefing(&artifact);
     let summary_cache = follow_up_summary_cache(&artifact);
     let privacy_profile = merged_snapshot_privacy_profile(snapshots).unwrap_or_else(|| {
         parse_privacy_profile(&source_record.privacy_profile).unwrap_or(PrivacyProfile::Redacted)
@@ -621,13 +613,10 @@ pub(crate) async fn follow_up_from_artifact_with_run_identity(
         summary_cache: &summary_cache,
         request_fingerprint: Some(&request_plan.request_fingerprint),
         payload_json: payload_json.clone(),
-        rendered_briefing: rendered_briefing.clone(),
-    })?;
+        rendered_briefing: render_follow_up_briefing(&artifact),
+    });
 
     Ok(FollowUpRunOutput {
-        artifact,
-        payload_json,
-        rendered_briefing,
         request_preview: request_plan.preview,
         request_fingerprint: request_plan.request_fingerprint,
         record,
@@ -1102,8 +1091,8 @@ impl AiProvider for DryRunProvider {
     ) -> ProviderFuture<'a, CompareArtifactV1> {
         Box::pin(async move {
             Ok(dry_run_compare_artifact(
-                request.snapshot_a,
-                request.snapshot_b,
+                request.reference_snapshot,
+                request.comparison_snapshot,
             ))
         })
     }
@@ -1187,10 +1176,10 @@ impl AiProvider for OpenAiProvider {
         Box::pin(async move {
             let plan = build_compare_request_plan(
                 &self.config,
-                request.snapshot_a,
-                request.snapshot_a_json,
-                request.snapshot_b,
-                request.snapshot_b_json,
+                request.reference_snapshot,
+                request.reference_json,
+                request.comparison_snapshot,
+                request.comparison_json,
             )?;
             self.invoke_structured_output::<CompareArtifactV1>(plan)
                 .await
@@ -2173,7 +2162,175 @@ fn schema_value<T>() -> Result<Value>
 where
     T: JsonSchema,
 {
-    serde_json::to_value(schema_for!(T)).map_err(Into::into)
+    let mut schema = serde_json::to_value(schema_for!(T))?;
+    normalize_openai_schema(&mut schema);
+    Ok(schema)
+}
+
+fn normalize_openai_schema(node: &mut Value) {
+    match node {
+        Value::Object(object) => {
+            object.remove("$schema");
+            object.remove("default");
+
+            if let Some(defs) = object.get_mut("$defs").and_then(Value::as_object_mut) {
+                for definition in defs.values_mut() {
+                    normalize_openai_schema(definition);
+                }
+            }
+            if let Some(defs) = object.get_mut("definitions").and_then(Value::as_object_mut) {
+                for definition in defs.values_mut() {
+                    normalize_openai_schema(definition);
+                }
+            }
+            if let Some(items) = object.get_mut("items") {
+                normalize_openai_schema(items);
+            }
+
+            for composition_key in ["anyOf", "oneOf", "allOf"] {
+                if let Some(branches) = object.get_mut(composition_key) {
+                    normalize_openai_schema(branches);
+                }
+            }
+
+            if object.contains_key("properties") {
+                let property_names = object
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let existing_required = object
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .map(|required| {
+                        required
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(ToOwned::to_owned)
+                            .collect::<BTreeSet<_>>()
+                    })
+                    .unwrap_or_default();
+                let object_type_is_object =
+                    object.get("type") == Some(&Value::String("object".to_owned()));
+
+                let mut optional_property_names = Vec::new();
+                if let Some(properties) =
+                    object.get_mut("properties").and_then(Value::as_object_mut)
+                {
+                    for (property_name, property_schema) in properties.iter_mut() {
+                        normalize_openai_schema(property_schema);
+                        if !existing_required.contains(property_name) {
+                            optional_property_names.push(property_name.clone());
+                        }
+                    }
+                }
+
+                if !property_names.is_empty() || object_type_is_object {
+                    object.insert(
+                        "required".to_owned(),
+                        Value::Array(
+                            property_names
+                                .iter()
+                                .cloned()
+                                .map(Value::String)
+                                .collect::<Vec<_>>(),
+                        ),
+                    );
+                    object.insert("additionalProperties".to_owned(), Value::Bool(false));
+                }
+
+                if let Some(properties) =
+                    object.get_mut("properties").and_then(Value::as_object_mut)
+                {
+                    for property_name in optional_property_names {
+                        if let Some(property_schema) = properties.get_mut(&property_name) {
+                            ensure_schema_is_nullable(property_schema);
+                        }
+                    }
+                }
+            } else if object.get("type") == Some(&Value::String("object".to_owned())) {
+                object.insert("required".to_owned(), Value::Array(Vec::new()));
+                object.insert("additionalProperties".to_owned(), Value::Bool(false));
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                normalize_openai_schema(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn ensure_schema_is_nullable(schema: &mut Value) {
+    if schema_allows_null(schema) {
+        return;
+    }
+
+    if let Some(object) = schema.as_object_mut()
+        && let Some(type_value) = object.get_mut("type")
+    {
+        match type_value {
+            Value::String(current) => {
+                let current = current.clone();
+                *type_value = Value::Array(vec![
+                    Value::String(current),
+                    Value::String("null".to_owned()),
+                ]);
+                return;
+            }
+            Value::Array(types) => {
+                if !types.iter().any(|value| value.as_str() == Some("null")) {
+                    types.push(Value::String("null".to_owned()));
+                }
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    let original = schema.take();
+    *schema = json!({
+        "anyOf": [
+            original,
+            { "type": "null" }
+        ]
+    });
+    normalize_openai_schema(schema);
+}
+
+fn schema_allows_null(schema: &Value) -> bool {
+    let Some(object) = schema.as_object() else {
+        return false;
+    };
+
+    if object
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|schema_type| schema_type == "null")
+    {
+        return true;
+    }
+
+    if object
+        .get("type")
+        .and_then(Value::as_array)
+        .is_some_and(|types| types.iter().any(|value| value.as_str() == Some("null")))
+    {
+        return true;
+    }
+
+    for composition_key in ["anyOf", "oneOf"] {
+        if object
+            .get(composition_key)
+            .and_then(Value::as_array)
+            .is_some_and(|branches| branches.iter().any(schema_allows_null))
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn extract_output_text(value: &Value) -> Result<String> {
@@ -2497,7 +2654,7 @@ impl SufficiencyLevel {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::PathBuf;
 
@@ -2692,18 +2849,6 @@ mod tests {
                 auth_timeout_secs: 120,
             },
             refresh: RefreshConfig {
-                personal_interval_secs: 3_600,
-                daily_interval_secs: 300,
-                heartrate_interval_secs: 60,
-                workout_interval_secs: 600,
-                enhanced_tag_interval_secs: 300,
-                session_interval_secs: 300,
-                personal_stale_after_secs: 259_200,
-                daily_stale_after_secs: 43_200,
-                heartrate_stale_after_secs: 900,
-                workout_stale_after_secs: 86_400,
-                enhanced_tag_stale_after_secs: 43_200,
-                session_stale_after_secs: 43_200,
                 daily_history_days: 30,
                 daily_overlap_days: 7,
                 heartrate_history_days: 14,
@@ -2716,6 +2861,7 @@ mod tests {
                 session_overlap_days: 7,
                 max_backoff_secs: 3_600,
                 demo_fixture_dir: None,
+                ..RefreshConfig::default()
             },
             webhook: WebhookConfig {
                 bind: "127.0.0.1:8799"
@@ -2896,11 +3042,12 @@ mod tests {
         )
         .await
         .unwrap_or_else(|error| unreachable!("fixture review should succeed: {error}"));
-        assert_eq!(output.artifact.status, ArtifactStatus::Fixture);
+        let artifact: ReviewArtifactV1 = serde_json::from_str(&output.payload_json)
+            .unwrap_or_else(|error| unreachable!("review output should decode: {error}"));
+        assert_eq!(artifact.status, ArtifactStatus::Fixture);
         assert!(output.payload_json.contains("fixture review"));
         assert_eq!(
-            output
-                .artifact
+            artifact
                 .follow_up_targets
                 .iter()
                 .map(|target| target.command.as_str())
@@ -3143,6 +3290,7 @@ mod tests {
         let schema = schema_value::<ReviewArtifactV1>()
             .unwrap_or_else(|error| unreachable!("schema generation should succeed: {error}"));
         assert!(schema.to_string().contains("headline_findings"));
+        assert_openai_strict_schema(&schema, "$");
     }
 
     #[test]
@@ -3150,6 +3298,34 @@ mod tests {
         let schema = schema_value::<CompareArtifactV1>()
             .unwrap_or_else(|error| unreachable!("schema generation should succeed: {error}"));
         assert!(schema.to_string().contains("material_differences"));
+        assert_openai_strict_schema(&schema, "$");
+    }
+
+    #[test]
+    fn optional_finding_fields_become_required_and_nullable() {
+        let schema = schema_value::<CompareArtifactV1>()
+            .unwrap_or_else(|error| unreachable!("schema generation should succeed: {error}"));
+        let finding_schema = schema_definition(&schema, "ArtifactFinding");
+        let required = finding_schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| unreachable!("artifact finding should declare required fields"))
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<BTreeSet<_>>();
+        assert!(
+            required.contains("claim_key"),
+            "optional Rust fields should become required in OpenAI strict schemas"
+        );
+        let claim_key_schema = finding_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|properties| properties.get("claim_key"))
+            .unwrap_or_else(|| unreachable!("claim_key schema should exist"));
+        assert!(
+            super::schema_allows_null(claim_key_schema),
+            "claim_key should be represented as nullable in the emitted schema"
+        );
     }
 
     #[test]
@@ -3192,6 +3368,113 @@ mod tests {
         assert_eq!(output.request_preview.provider, "dry_run");
         assert_eq!(output.request_preview.model, "deterministic");
         assert!(output.request_preview.stateless);
+    }
+
+    fn assert_openai_strict_schema(schema: &serde_json::Value, path: &str) {
+        match schema {
+            serde_json::Value::Object(object) => {
+                let is_object_schema = object.contains_key("properties")
+                    || object.get("type") == Some(&serde_json::Value::String("object".to_owned()));
+                if is_object_schema {
+                    assert_eq!(
+                        object.get("additionalProperties"),
+                        Some(&serde_json::Value::Bool(false)),
+                        "OpenAI strict schemas require additionalProperties=false at {path}"
+                    );
+                    let property_names = object
+                        .get("properties")
+                        .and_then(serde_json::Value::as_object)
+                        .map(|properties| properties.keys().cloned().collect::<BTreeSet<_>>())
+                        .unwrap_or_default();
+                    let required_names = object
+                        .get("required")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|required| {
+                            required
+                                .iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .map(ToOwned::to_owned)
+                                .collect::<BTreeSet<_>>()
+                        })
+                        .unwrap_or_default();
+                    assert_eq!(
+                        property_names, required_names,
+                        "OpenAI strict schemas require all object properties to be required at {path}"
+                    );
+                }
+
+                if let Some(properties) = object
+                    .get("properties")
+                    .and_then(serde_json::Value::as_object)
+                {
+                    for (name, property_schema) in properties {
+                        assert_openai_strict_schema(
+                            property_schema,
+                            &format!("{path}.properties.{name}"),
+                        );
+                    }
+                }
+                if let Some(defs) = object.get("$defs").and_then(serde_json::Value::as_object) {
+                    for (name, definition_schema) in defs {
+                        assert_openai_strict_schema(
+                            definition_schema,
+                            &format!("{path}.$defs.{name}"),
+                        );
+                    }
+                }
+                if let Some(defs) = object
+                    .get("definitions")
+                    .and_then(serde_json::Value::as_object)
+                {
+                    for (name, definition_schema) in defs {
+                        assert_openai_strict_schema(
+                            definition_schema,
+                            &format!("{path}.definitions.{name}"),
+                        );
+                    }
+                }
+                if let Some(items) = object.get("items") {
+                    assert_openai_strict_schema(items, &format!("{path}.items"));
+                }
+                for composition_key in ["anyOf", "oneOf", "allOf"] {
+                    if let Some(branches) = object
+                        .get(composition_key)
+                        .and_then(serde_json::Value::as_array)
+                    {
+                        for (index, branch) in branches.iter().enumerate() {
+                            assert_openai_strict_schema(
+                                branch,
+                                &format!("{path}.{composition_key}[{index}]"),
+                            );
+                        }
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    assert_openai_strict_schema(item, &format!("{path}[{index}]"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn schema_definition<'a>(
+        schema: &'a serde_json::Value,
+        name: &str,
+    ) -> &'a serde_json::Map<String, serde_json::Value> {
+        schema
+            .get("$defs")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|defs| defs.get(name))
+            .or_else(|| {
+                schema
+                    .get("definitions")
+                    .and_then(serde_json::Value::as_object)
+                    .and_then(|defs| defs.get(name))
+            })
+            .and_then(serde_json::Value::as_object)
+            .unwrap_or_else(|| unreachable!("schema definition `{name}` should exist"))
     }
 
     #[test]

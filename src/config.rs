@@ -91,8 +91,73 @@ pub struct RefreshConfig {
     pub enhanced_tag_overlap_days: u16,
     pub session_history_days: u16,
     pub session_overlap_days: u16,
+    pub daily_reconcile_days: u16,
+    pub daily_startup_catchup_days: u16,
+    pub daily_backfill_chunk_days: u16,
+    pub heartrate_reconcile_days: u16,
+    pub heartrate_startup_catchup_days: u16,
+    pub heartrate_backfill_chunk_days: u16,
+    pub workout_reconcile_days: u16,
+    pub workout_startup_catchup_days: u16,
+    pub workout_backfill_chunk_days: u16,
+    pub enhanced_tag_reconcile_days: u16,
+    pub enhanced_tag_startup_catchup_days: u16,
+    pub enhanced_tag_backfill_chunk_days: u16,
+    pub session_reconcile_days: u16,
+    pub session_startup_catchup_days: u16,
+    pub session_backfill_chunk_days: u16,
+    pub sync_retry_max_attempts: u32,
+    pub sync_retry_base_backoff_secs: u64,
     pub max_backoff_secs: u64,
     pub demo_fixture_dir: Option<PathBuf>,
+}
+
+impl Default for RefreshConfig {
+    fn default() -> Self {
+        Self {
+            personal_interval_secs: 3_600,
+            daily_interval_secs: 300,
+            heartrate_interval_secs: 60,
+            workout_interval_secs: 600,
+            enhanced_tag_interval_secs: 300,
+            session_interval_secs: 300,
+            personal_stale_after_secs: 72 * 60 * 60,
+            daily_stale_after_secs: 12 * 60 * 60,
+            heartrate_stale_after_secs: 15 * 60,
+            workout_stale_after_secs: 24 * 60 * 60,
+            enhanced_tag_stale_after_secs: 12 * 60 * 60,
+            session_stale_after_secs: 12 * 60 * 60,
+            daily_history_days: 90,
+            daily_overlap_days: 2,
+            heartrate_history_days: 7,
+            heartrate_overlap_minutes: 60,
+            workout_history_days: 90,
+            workout_overlap_days: 2,
+            enhanced_tag_history_days: 90,
+            enhanced_tag_overlap_days: 2,
+            session_history_days: 90,
+            session_overlap_days: 2,
+            daily_reconcile_days: 30,
+            daily_startup_catchup_days: 30,
+            daily_backfill_chunk_days: 30,
+            heartrate_reconcile_days: 7,
+            heartrate_startup_catchup_days: 30,
+            heartrate_backfill_chunk_days: 1,
+            workout_reconcile_days: 30,
+            workout_startup_catchup_days: 30,
+            workout_backfill_chunk_days: 30,
+            enhanced_tag_reconcile_days: 30,
+            enhanced_tag_startup_catchup_days: 30,
+            enhanced_tag_backfill_chunk_days: 30,
+            session_reconcile_days: 30,
+            session_startup_catchup_days: 30,
+            session_backfill_chunk_days: 30,
+            sync_retry_max_attempts: 3,
+            sync_retry_base_backoff_secs: 2,
+            max_backoff_secs: 60 * 60,
+            demo_fixture_dir: Some(PathBuf::from("tests/fixtures/phase3")),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -128,11 +193,6 @@ impl GuidanceConfig {
             GuidanceProfileSource::ConfigFile => "config",
             GuidanceProfileSource::Environment => "environment",
         }
-    }
-
-    #[must_use]
-    pub const fn is_explicit(&self) -> bool {
-        !matches!(self.profile_source, GuidanceProfileSource::Default)
     }
 }
 
@@ -237,6 +297,23 @@ struct FileRefreshConfig {
     enhanced_tag_overlap_days: Option<u16>,
     session_history_days: Option<u16>,
     session_overlap_days: Option<u16>,
+    daily_reconcile_days: Option<u16>,
+    daily_startup_catchup_days: Option<u16>,
+    daily_backfill_chunk_days: Option<u16>,
+    heartrate_reconcile_days: Option<u16>,
+    heartrate_startup_catchup_days: Option<u16>,
+    heartrate_backfill_chunk_days: Option<u16>,
+    workout_reconcile_days: Option<u16>,
+    workout_startup_catchup_days: Option<u16>,
+    workout_backfill_chunk_days: Option<u16>,
+    enhanced_tag_reconcile_days: Option<u16>,
+    enhanced_tag_startup_catchup_days: Option<u16>,
+    enhanced_tag_backfill_chunk_days: Option<u16>,
+    session_reconcile_days: Option<u16>,
+    session_startup_catchup_days: Option<u16>,
+    session_backfill_chunk_days: Option<u16>,
+    sync_retry_max_attempts: Option<u32>,
+    sync_retry_base_backoff_secs: Option<u64>,
     max_backoff_secs: Option<u64>,
     demo_fixture_dir: Option<PathBuf>,
 }
@@ -570,6 +647,91 @@ impl Config {
                     .as_ref()
                     .and_then(|refresh| refresh.session_overlap_days)
                     .unwrap_or(2),
+                daily_reconcile_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.daily_reconcile_days)
+                    .unwrap_or(30),
+                daily_startup_catchup_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.daily_startup_catchup_days)
+                    .unwrap_or(30),
+                daily_backfill_chunk_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.daily_backfill_chunk_days)
+                    .unwrap_or(30),
+                heartrate_reconcile_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.heartrate_reconcile_days)
+                    .unwrap_or(7),
+                heartrate_startup_catchup_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.heartrate_startup_catchup_days)
+                    .unwrap_or(30),
+                heartrate_backfill_chunk_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.heartrate_backfill_chunk_days)
+                    .unwrap_or(1),
+                workout_reconcile_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.workout_reconcile_days)
+                    .unwrap_or(30),
+                workout_startup_catchup_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.workout_startup_catchup_days)
+                    .unwrap_or(30),
+                workout_backfill_chunk_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.workout_backfill_chunk_days)
+                    .unwrap_or(30),
+                enhanced_tag_reconcile_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.enhanced_tag_reconcile_days)
+                    .unwrap_or(30),
+                enhanced_tag_startup_catchup_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.enhanced_tag_startup_catchup_days)
+                    .unwrap_or(30),
+                enhanced_tag_backfill_chunk_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.enhanced_tag_backfill_chunk_days)
+                    .unwrap_or(30),
+                session_reconcile_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.session_reconcile_days)
+                    .unwrap_or(30),
+                session_startup_catchup_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.session_startup_catchup_days)
+                    .unwrap_or(30),
+                session_backfill_chunk_days: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.session_backfill_chunk_days)
+                    .unwrap_or(30),
+                sync_retry_max_attempts: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.sync_retry_max_attempts)
+                    .unwrap_or(3),
+                sync_retry_base_backoff_secs: file_config
+                    .refresh
+                    .as_ref()
+                    .and_then(|refresh| refresh.sync_retry_base_backoff_secs)
+                    .unwrap_or(2),
                 max_backoff_secs: file_config
                     .refresh
                     .as_ref()
@@ -748,6 +910,72 @@ impl RefreshConfig {
             }
         }
 
+        for (label, value) in [
+            ("refresh.daily_reconcile_days", self.daily_reconcile_days),
+            (
+                "refresh.daily_startup_catchup_days",
+                self.daily_startup_catchup_days,
+            ),
+            (
+                "refresh.daily_backfill_chunk_days",
+                self.daily_backfill_chunk_days,
+            ),
+            (
+                "refresh.heartrate_reconcile_days",
+                self.heartrate_reconcile_days,
+            ),
+            (
+                "refresh.heartrate_startup_catchup_days",
+                self.heartrate_startup_catchup_days,
+            ),
+            (
+                "refresh.heartrate_backfill_chunk_days",
+                self.heartrate_backfill_chunk_days,
+            ),
+            (
+                "refresh.workout_reconcile_days",
+                self.workout_reconcile_days,
+            ),
+            (
+                "refresh.workout_startup_catchup_days",
+                self.workout_startup_catchup_days,
+            ),
+            (
+                "refresh.workout_backfill_chunk_days",
+                self.workout_backfill_chunk_days,
+            ),
+            (
+                "refresh.enhanced_tag_reconcile_days",
+                self.enhanced_tag_reconcile_days,
+            ),
+            (
+                "refresh.enhanced_tag_startup_catchup_days",
+                self.enhanced_tag_startup_catchup_days,
+            ),
+            (
+                "refresh.enhanced_tag_backfill_chunk_days",
+                self.enhanced_tag_backfill_chunk_days,
+            ),
+            (
+                "refresh.session_reconcile_days",
+                self.session_reconcile_days,
+            ),
+            (
+                "refresh.session_startup_catchup_days",
+                self.session_startup_catchup_days,
+            ),
+            (
+                "refresh.session_backfill_chunk_days",
+                self.session_backfill_chunk_days,
+            ),
+        ] {
+            if value == 0 {
+                return Err(RingmasterError::Config(format!(
+                    "{label} must be at least 1"
+                )));
+            }
+        }
+
         if self.max_backoff_secs == 0 {
             return Err(RingmasterError::Config(
                 "refresh.max_backoff_secs must be at least 1".to_owned(),
@@ -891,14 +1119,6 @@ impl OuraSecretBackend {
             ))),
         }
     }
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Keyring => "keyring",
-            Self::File => "file",
-        }
-    }
 }
 
 impl WebhookConfig {
@@ -986,16 +1206,16 @@ impl AiProviderKind {
             ))),
         }
     }
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::OpenAi => "openai",
-        }
-    }
 }
 
 impl AiRequestMode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stateless => "stateless",
+            Self::Stateful => "stateful",
+        }
+    }
+
     fn parse(value: &str) -> Result<Self> {
         match value {
             "stateless" => Ok(Self::Stateless),
@@ -1005,17 +1225,16 @@ impl AiRequestMode {
             ))),
         }
     }
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Stateless => "stateless",
-            Self::Stateful => "stateful",
-        }
-    }
 }
 
 impl AiInputTransport {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inline => "inline",
+            Self::FileUpload => "file_upload",
+        }
+    }
+
     fn parse(value: &str) -> Result<Self> {
         match value {
             "inline" => Ok(Self::Inline),
@@ -1023,14 +1242,6 @@ impl AiInputTransport {
             other => Err(RingmasterError::Config(format!(
                 "ai.input_transport must be `inline` or `file_upload`, got `{other}`"
             ))),
-        }
-    }
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Inline => "inline",
-            Self::FileUpload => "file_upload",
         }
     }
 }
@@ -1043,14 +1254,6 @@ impl PromptCacheMode {
             other => Err(RingmasterError::Config(format!(
                 "ai.prompt_cache must be `off` or `auto`, got `{other}`"
             ))),
-        }
-    }
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Auto => "auto",
         }
     }
 }
@@ -1299,6 +1502,7 @@ mod tests {
         assert_eq!(config.refresh.workout_interval_secs, 600);
         assert_eq!(config.refresh.enhanced_tag_interval_secs, 300);
         assert_eq!(config.refresh.session_interval_secs, 300);
+        assert_eq!(config.refresh.heartrate_overlap_minutes, 60);
         assert_eq!(config.ai.provider, AiProviderKind::OpenAi);
         assert_eq!(config.ai.request_mode, AiRequestMode::Stateless);
         assert_eq!(config.ai.input_transport, AiInputTransport::Inline);
@@ -1395,30 +1599,9 @@ mod tests {
     #[test]
     fn rejects_zero_daily_history_days() {
         let refresh = RefreshConfig {
-            personal_interval_secs: 3_600,
-            daily_interval_secs: 300,
-            heartrate_interval_secs: 60,
-            workout_interval_secs: 600,
-            enhanced_tag_interval_secs: 300,
-            session_interval_secs: 300,
-            personal_stale_after_secs: 72 * 60 * 60,
-            daily_stale_after_secs: 12 * 60 * 60,
-            heartrate_stale_after_secs: 15 * 60,
-            workout_stale_after_secs: 24 * 60 * 60,
-            enhanced_tag_stale_after_secs: 12 * 60 * 60,
-            session_stale_after_secs: 12 * 60 * 60,
             daily_history_days: 0,
-            daily_overlap_days: 2,
-            heartrate_history_days: 7,
-            heartrate_overlap_minutes: 60,
-            workout_history_days: 90,
-            workout_overlap_days: 2,
-            enhanced_tag_history_days: 90,
-            enhanced_tag_overlap_days: 2,
-            session_history_days: 90,
-            session_overlap_days: 2,
-            max_backoff_secs: 60 * 60,
             demo_fixture_dir: None,
+            ..RefreshConfig::default()
         };
 
         let error = refresh
@@ -1430,6 +1613,57 @@ mod tests {
             error
                 .to_string()
                 .contains("refresh.daily_history_days must be at least 1")
+        );
+    }
+
+    #[test]
+    fn rejects_zero_gap_safe_sync_windows() {
+        let refresh = RefreshConfig {
+            daily_reconcile_days: 0,
+            demo_fixture_dir: None,
+            ..RefreshConfig::default()
+        };
+
+        let error = refresh
+            .validate()
+            .err()
+            .unwrap_or_else(|| panic!("zero reconcile days should be rejected"));
+        assert!(
+            error
+                .to_string()
+                .contains("refresh.daily_reconcile_days must be at least 1")
+        );
+
+        let refresh = RefreshConfig {
+            heartrate_startup_catchup_days: 0,
+            demo_fixture_dir: None,
+            ..RefreshConfig::default()
+        };
+
+        let error = refresh
+            .validate()
+            .err()
+            .unwrap_or_else(|| panic!("zero startup catchup days should be rejected"));
+        assert!(
+            error
+                .to_string()
+                .contains("refresh.heartrate_startup_catchup_days must be at least 1")
+        );
+
+        let refresh = RefreshConfig {
+            session_backfill_chunk_days: 0,
+            demo_fixture_dir: None,
+            ..RefreshConfig::default()
+        };
+
+        let error = refresh
+            .validate()
+            .err()
+            .unwrap_or_else(|| panic!("zero backfill chunk days should be rejected"));
+        assert!(
+            error
+                .to_string()
+                .contains("refresh.session_backfill_chunk_days must be at least 1")
         );
     }
 

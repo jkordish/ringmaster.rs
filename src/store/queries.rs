@@ -23,17 +23,52 @@ pub enum SyncRunStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncStateRecord {
     pub sync_key: String,
+    pub family: String,
     pub status: SyncRunStatus,
     pub cursor: Option<String>,
+    pub last_successful_sync_end: Option<String>,
     pub last_attempted_at: String,
     pub last_completed_at: Option<String>,
+    pub last_reconcile_end: Option<String>,
+    pub oldest_recently_reconciled_at: Option<String>,
     pub message: Option<String>,
     pub granted_scopes: Vec<String>,
     pub last_error: Option<OuraProblem>,
+    pub last_error_at: Option<String>,
+    pub last_error_kind: Option<String>,
+    pub last_error_detail: Option<String>,
     pub failure_count: u32,
     pub next_attempt_after: Option<String>,
     pub last_trigger_source: Option<String>,
     pub last_trigger_detail: Option<String>,
+    pub updated_at: String,
+}
+
+impl Default for SyncStateRecord {
+    fn default() -> Self {
+        Self {
+            sync_key: String::new(),
+            family: String::new(),
+            status: SyncRunStatus::Ready,
+            cursor: None,
+            last_successful_sync_end: None,
+            last_attempted_at: String::new(),
+            last_completed_at: None,
+            last_reconcile_end: None,
+            oldest_recently_reconciled_at: None,
+            message: None,
+            granted_scopes: Vec::new(),
+            last_error: None,
+            last_error_at: None,
+            last_error_kind: None,
+            last_error_detail: None,
+            failure_count: 0,
+            next_attempt_after: None,
+            last_trigger_source: None,
+            last_trigger_detail: None,
+            updated_at: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -515,6 +550,7 @@ pub struct AiRunRecord {
     pub updated_at: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AiRunRegistryEntry {
     pub run_id: String,
@@ -806,17 +842,6 @@ impl<'connection> MetadataStore<'connection> {
 
         Ok(())
     }
-
-    pub fn get(&self, key: &str) -> Result<Option<String>> {
-        self.connection
-            .query_row(
-                "SELECT value FROM app_metadata WHERE key = ?1",
-                params![key],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(Into::into)
-    }
 }
 
 impl<'connection> SyncStateStore<'connection> {
@@ -828,90 +853,96 @@ impl<'connection> SyncStateStore<'connection> {
         self.connection.execute(
             "INSERT INTO sync_state (
                 sync_key,
+                family,
                 status,
                 cursor,
+                last_successful_sync_end,
                 last_attempted_at,
                 last_completed_at,
+                last_reconcile_end,
+                oldest_recently_reconciled_at,
                 message,
                 granted_scopes,
                 last_error_json,
+                last_error_at,
+                last_error_kind,
+                last_error_detail,
                 failure_count,
                 next_attempt_after,
                 last_trigger_source,
-                last_trigger_detail
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                last_trigger_detail,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
             ON CONFLICT(sync_key) DO UPDATE SET
+                family = excluded.family,
                 status = excluded.status,
                 cursor = excluded.cursor,
+                last_successful_sync_end = excluded.last_successful_sync_end,
                 last_attempted_at = excluded.last_attempted_at,
                 last_completed_at = excluded.last_completed_at,
+                last_reconcile_end = excluded.last_reconcile_end,
+                oldest_recently_reconciled_at = excluded.oldest_recently_reconciled_at,
                 message = excluded.message,
                 granted_scopes = excluded.granted_scopes,
                 last_error_json = excluded.last_error_json,
+                last_error_at = excluded.last_error_at,
+                last_error_kind = excluded.last_error_kind,
+                last_error_detail = excluded.last_error_detail,
                 failure_count = excluded.failure_count,
                 next_attempt_after = excluded.next_attempt_after,
                 last_trigger_source = excluded.last_trigger_source,
-                last_trigger_detail = excluded.last_trigger_detail",
+                last_trigger_detail = excluded.last_trigger_detail,
+                updated_at = excluded.updated_at",
             params![
                 record.sync_key,
+                record.family,
                 record.status.as_str(),
                 record.cursor,
+                record.last_successful_sync_end,
                 record.last_attempted_at,
                 record.last_completed_at,
+                record.last_reconcile_end,
+                record.oldest_recently_reconciled_at,
                 record.message,
                 join_scopes(&record.granted_scopes),
                 encode_problem(record.last_error.as_ref())?,
+                record.last_error_at,
+                record.last_error_kind,
+                record.last_error_detail,
                 i64::from(record.failure_count),
                 record.next_attempt_after,
                 record.last_trigger_source,
                 record.last_trigger_detail,
+                record.updated_at,
             ],
         )?;
 
         Ok(())
     }
 
-    pub fn latest(&self) -> Result<Option<SyncStateRecord>> {
-        self.connection
-            .query_row(
-                "SELECT
-                    sync_key,
-                    status,
-                    cursor,
-                    last_attempted_at,
-                    last_completed_at,
-                    message,
-                    granted_scopes,
-                    last_error_json,
-                    failure_count,
-                    next_attempt_after,
-                    last_trigger_source,
-                    last_trigger_detail
-                 FROM sync_state
-                 ORDER BY last_attempted_at DESC
-                 LIMIT 1",
-                [],
-                read_sync_state_row,
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
     pub fn list(&self) -> Result<Vec<SyncStateRecord>> {
         let mut statement = self.connection.prepare(
             "SELECT
                 sync_key,
+                family,
                 status,
                 cursor,
+                last_successful_sync_end,
                 last_attempted_at,
                 last_completed_at,
+                last_reconcile_end,
+                oldest_recently_reconciled_at,
                 message,
                 granted_scopes,
                 last_error_json,
+                last_error_at,
+                last_error_kind,
+                last_error_detail,
                 failure_count,
                 next_attempt_after,
                 last_trigger_source,
-                last_trigger_detail
+                last_trigger_detail,
+                updated_at
              FROM sync_state
              ORDER BY sync_key ASC",
         )?;
@@ -929,17 +960,25 @@ impl<'connection> SyncStateStore<'connection> {
             .query_row(
                 "SELECT
                     sync_key,
+                    family,
                     status,
                     cursor,
+                    last_successful_sync_end,
                     last_attempted_at,
                     last_completed_at,
+                    last_reconcile_end,
+                    oldest_recently_reconciled_at,
                     message,
                     granted_scopes,
                     last_error_json,
+                    last_error_at,
+                    last_error_kind,
+                    last_error_detail,
                     failure_count,
                     next_attempt_after,
                     last_trigger_source,
-                    last_trigger_detail
+                    last_trigger_detail,
+                    updated_at
                  FROM sync_state
                  WHERE sync_key = ?1",
                 params![sync_key],
@@ -2293,6 +2332,7 @@ impl<'connection> AnalysisStore<'connection> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn latest_ai_artifact(
         &self,
         artifact_kind: &str,
@@ -2741,129 +2781,6 @@ impl<'connection> AnalysisStore<'connection> {
             .map_err(Into::into)
     }
 
-    pub fn ai_runs_with_prefix(&self, run_prefix: &str) -> Result<Vec<AiRunRecord>> {
-        let mut statement = self.connection.prepare(
-            "SELECT
-                run_id,
-                run_kind,
-                run_status,
-                provider,
-                model,
-                reasoning_effort,
-                request_mode,
-                input_transport,
-                run_mode,
-                prompt_version,
-                output_schema_version,
-                privacy_profile,
-                snapshot_scope,
-                snapshot_hash_a,
-                snapshot_hash_b,
-                source_ai_artifact_id,
-                follow_up_kind,
-                request_fingerprint,
-                request_preview_json,
-                artifact_id,
-                error_message,
-                created_at,
-                started_at,
-                ended_at,
-                updated_at
-             FROM ai_runs
-             WHERE run_id LIKE ?1
-             ORDER BY created_at DESC, run_id DESC",
-        )?;
-        let rows = statement.query_map(params![format!("{run_prefix}%")], |row| {
-            Ok(AiRunRecord {
-                run_id: row.get(0)?,
-                run_kind: row.get(1)?,
-                run_status: row.get(2)?,
-                provider: row.get(3)?,
-                model: row.get(4)?,
-                reasoning_effort: row.get(5)?,
-                request_mode: row.get(6)?,
-                input_transport: row.get(7)?,
-                run_mode: row.get(8)?,
-                prompt_version: row.get(9)?,
-                output_schema_version: row.get(10)?,
-                privacy_profile: row.get(11)?,
-                snapshot_scope: row.get(12)?,
-                snapshot_hash_a: row.get(13)?,
-                snapshot_hash_b: row.get(14)?,
-                source_ai_artifact_id: row.get(15)?,
-                follow_up_kind: row.get(16)?,
-                request_fingerprint: row.get(17)?,
-                request_preview_json: row.get(18)?,
-                artifact_id: row.get(19)?,
-                error_message: row.get(20)?,
-                created_at: row.get(21)?,
-                started_at: row.get(22)?,
-                ended_at: row.get(23)?,
-                updated_at: row.get(24)?,
-            })
-        })?;
-        let mut records = Vec::new();
-        for row in rows {
-            records.push(row?);
-        }
-        Ok(records)
-    }
-
-    pub fn list_ai_runs(&self) -> Result<Vec<AiRunRegistryEntry>> {
-        let mut statement = self.connection.prepare(
-            "SELECT
-                run_id,
-                run_kind,
-                run_status,
-                provider,
-                model,
-                prompt_version,
-                output_schema_version,
-                run_mode,
-                privacy_profile,
-                snapshot_scope,
-                snapshot_hash_a,
-                snapshot_hash_b,
-                source_ai_artifact_id,
-                follow_up_kind,
-                artifact_id,
-                error_message,
-                created_at,
-                started_at,
-                ended_at
-             FROM ai_runs
-             ORDER BY created_at DESC, run_id DESC",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok(AiRunRegistryEntry {
-                run_id: row.get(0)?,
-                run_kind: row.get(1)?,
-                run_status: row.get(2)?,
-                provider: row.get(3)?,
-                model: row.get(4)?,
-                prompt_version: row.get(5)?,
-                output_schema_version: row.get(6)?,
-                run_mode: row.get(7)?,
-                privacy_profile: row.get(8)?,
-                snapshot_scope: row.get(9)?,
-                snapshot_hash_a: row.get(10)?,
-                snapshot_hash_b: row.get(11)?,
-                source_ai_artifact_id: row.get(12)?,
-                follow_up_kind: row.get(13)?,
-                artifact_id: row.get(14)?,
-                error_message: row.get(15)?,
-                created_at: row.get(16)?,
-                started_at: row.get(17)?,
-                ended_at: row.get(18)?,
-            })
-        })?;
-        let mut records = Vec::new();
-        for row in rows {
-            records.push(row?);
-        }
-        Ok(records)
-    }
-
     pub fn list_ai_run_records(&self) -> Result<Vec<AiRunRecord>> {
         let mut statement = self.connection.prepare(
             "SELECT
@@ -2931,6 +2848,7 @@ impl<'connection> AnalysisStore<'connection> {
         Ok(records)
     }
 
+    #[cfg(test)]
     pub fn list_ai_runs_for_snapshot(
         &self,
         snapshot_hash: &str,
@@ -3515,54 +3433,6 @@ impl<'connection> ViewStore<'connection> {
         Self { connection }
     }
 
-    pub fn latest_daily_overview(&self) -> Result<Option<DailyOverviewRow>> {
-        let row = self
-            .connection
-            .query_row(
-                r"
-                WITH latest_day AS (
-                    SELECT MAX(day) AS day FROM (
-                        SELECT day FROM daily_sleep
-                        UNION ALL
-                        SELECT day FROM daily_readiness
-                        UNION ALL
-                        SELECT day FROM daily_activity
-                    )
-                )
-                SELECT
-                    latest_day.day,
-                    (SELECT sleep_score FROM daily_sleep WHERE day = latest_day.day),
-                    (SELECT sleep_duration_seconds FROM daily_sleep WHERE day = latest_day.day),
-                    (SELECT readiness_score FROM daily_readiness WHERE day = latest_day.day),
-                    (SELECT activity_score FROM daily_activity WHERE day = latest_day.day),
-                    COALESCE(
-                        (SELECT updated_at FROM daily_sleep WHERE day = latest_day.day),
-                        (SELECT updated_at FROM daily_readiness WHERE day = latest_day.day),
-                        (SELECT updated_at FROM daily_activity WHERE day = latest_day.day)
-                    )
-                FROM latest_day
-                ",
-                [],
-                |row| {
-                    let day = row.get::<_, Option<String>>(0)?;
-                    match day {
-                        Some(day) => Ok(Some(DailyOverviewRow {
-                            day,
-                            sleep_score: parse_optional_score(row.get::<_, Option<i64>>(1)?),
-                            sleep_duration_seconds: row.get(2)?,
-                            readiness_score: parse_optional_score(row.get::<_, Option<i64>>(3)?),
-                            activity_score: parse_optional_score(row.get::<_, Option<i64>>(4)?),
-                            updated_at: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                        })),
-                        None => Ok(None),
-                    }
-                },
-            )
-            .optional()?;
-
-        Ok(row.flatten())
-    }
-
     pub fn daily_history(&self, limit: usize) -> Result<Vec<DailyOverviewRow>> {
         let bounded_limit = usize::min(limit, 366);
         let mut statement = self.connection.prepare(
@@ -3804,43 +3674,6 @@ impl<'connection> ViewStore<'connection> {
             )
             .optional()
             .map_err(Into::into)
-    }
-
-    pub fn recent_heartrate(&self, limit: usize) -> Result<Vec<HeartRatePoint>> {
-        let bounded_limit = usize::min(limit, 240);
-        let mut statement = self.connection.prepare(
-            "SELECT recorded_at, bpm, source_day
-             FROM heartrate_samples
-             ORDER BY recorded_at DESC
-             LIMIT ?1",
-        )?;
-        let rows = statement.query_map(
-            params![crate::numeric::usize_to_i64(bounded_limit)],
-            |row| {
-                let bpm = row.get::<_, i64>(1)?;
-                let bpm = u16::try_from(bpm).map_err(|_| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        1,
-                        rusqlite::types::Type::Integer,
-                        Box::new(std::fmt::Error),
-                    )
-                })?;
-
-                Ok(HeartRatePoint {
-                    recorded_at: row.get(0)?,
-                    bpm,
-                    source_day: row.get(2)?,
-                })
-            },
-        )?;
-
-        let mut points = Vec::new();
-        for row in rows {
-            points.push(row?);
-        }
-        points.reverse();
-
-        Ok(points)
     }
 
     pub fn heartrate_for_day(&self, day: &str) -> Result<Vec<HeartRatePoint>> {
@@ -4387,6 +4220,7 @@ impl<'connection> ViewStore<'connection> {
         Ok(records)
     }
 
+    #[cfg(test)]
     pub fn context_events_for_day(&self, day: &str) -> Result<Vec<ContextEventRecord>> {
         let day_start = format!("{day}T00:00:00Z");
         let day_end = format!("{day}T23:59:59Z");
@@ -4557,20 +4391,46 @@ impl<'connection> ViewStore<'connection> {
 }
 
 fn read_sync_state_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncStateRecord> {
+    let sync_key: String = row.get(0)?;
+    let last_attempted_at = row.get::<_, String>(5)?;
+    let updated_at = row
+        .get::<_, Option<String>>(19)?
+        .unwrap_or_else(|| last_attempted_at.clone());
+    let family = row
+        .get::<_, Option<String>>(1)?
+        .unwrap_or_else(|| match sync_key.as_str() {
+            "oura.personal" => "personal".to_owned(),
+            "oura.daily" => "daily".to_owned(),
+            "oura.spo2" => "spo2".to_owned(),
+            "oura.heartrate" => "heartrate".to_owned(),
+            "oura.workouts" => "workout".to_owned(),
+            "oura.enhanced_tags" => "tag".to_owned(),
+            "oura.sessions" => "session".to_owned(),
+            other => other.to_owned(),
+        });
+
     Ok(SyncStateRecord {
-        sync_key: row.get(0)?,
-        status: SyncRunStatus::parse(&row.get::<_, String>(1)?),
-        cursor: row.get(2)?,
-        last_attempted_at: row.get(3)?,
-        last_completed_at: row.get(4)?,
-        message: row.get(5)?,
-        granted_scopes: split_scopes(&row.get::<_, String>(6)?),
-        last_error: decode_problem(row.get::<_, Option<String>>(7)?.as_deref())
+        sync_key,
+        family,
+        status: SyncRunStatus::parse(&row.get::<_, String>(2)?),
+        cursor: row.get(3)?,
+        last_successful_sync_end: row.get(4)?,
+        last_attempted_at,
+        last_completed_at: row.get(6)?,
+        last_reconcile_end: row.get(7)?,
+        oldest_recently_reconciled_at: row.get(8)?,
+        message: row.get(9)?,
+        granted_scopes: split_scopes(&row.get::<_, String>(10)?),
+        last_error: decode_problem(row.get::<_, Option<String>>(11)?.as_deref())
             .map_err(json_to_sql_error)?,
-        failure_count: parse_u32(row.get::<_, i64>(8)?, 8)?,
-        next_attempt_after: row.get(9)?,
-        last_trigger_source: row.get(10)?,
-        last_trigger_detail: row.get(11)?,
+        last_error_at: row.get(12)?,
+        last_error_kind: row.get(13)?,
+        last_error_detail: row.get(14)?,
+        failure_count: parse_u32(row.get::<_, i64>(15)?, 15)?,
+        next_attempt_after: row.get(16)?,
+        last_trigger_source: row.get(17)?,
+        last_trigger_detail: row.get(18)?,
+        updated_at,
     })
 }
 
@@ -4838,6 +4698,7 @@ fn now_rfc3339() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{AiEvalRunRecord, ReportExportRecord};
+    use rusqlite::params;
 
     use crate::error::OuraProblem;
     use crate::review::features::ReviewSufficiency;
@@ -5061,10 +4922,14 @@ mod tests {
             .sync_state()
             .upsert(&SyncStateRecord {
                 sync_key: "oura.daily".to_owned(),
+                family: "daily".to_owned(),
                 status: SyncRunStatus::Failed,
                 cursor: Some("2026-04-08".to_owned()),
+                last_successful_sync_end: Some("2026-04-08".to_owned()),
                 last_attempted_at: "2026-04-08T06:00:00Z".to_owned(),
                 last_completed_at: Some("2026-04-08T06:00:05Z".to_owned()),
+                last_reconcile_end: Some("2026-04-08".to_owned()),
+                oldest_recently_reconciled_at: Some("2026-03-10".to_owned()),
                 message: Some("rate limited".to_owned()),
                 granted_scopes: vec!["daily".to_owned()],
                 last_error: Some(OuraProblem::new(
@@ -5072,10 +4937,14 @@ mod tests {
                     "rate limited",
                     Some("retry later".to_owned()),
                 )),
+                last_error_at: Some("2026-04-08T06:00:05Z".to_owned()),
+                last_error_kind: Some("rate_limit".to_owned()),
+                last_error_detail: Some("rate limited".to_owned()),
                 failure_count: 3,
                 next_attempt_after: Some("2026-04-08T06:05:00Z".to_owned()),
                 last_trigger_source: Some("periodic_reconcile".to_owned()),
                 last_trigger_detail: Some("daily scheduler".to_owned()),
+                updated_at: "2026-04-08T06:00:05Z".to_owned(),
             })
             .unwrap_or_else(|error| unreachable!("sync state should persist: {error}"));
 
@@ -5091,6 +4960,58 @@ mod tests {
             Some("2026-04-08T06:05:00Z")
         );
         assert_eq!(record.status, SyncRunStatus::Failed);
+    }
+
+    #[test]
+    fn sync_state_family_falls_back_from_sync_key_without_re_reading_the_row() {
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
+
+        store
+            .sync_state()
+            .connection
+            .execute(
+                "INSERT INTO sync_state (
+                    sync_key,
+                    family,
+                    status,
+                    cursor,
+                    last_successful_sync_end,
+                    last_attempted_at,
+                    last_completed_at,
+                    last_reconcile_end,
+                    oldest_recently_reconciled_at,
+                    message,
+                    granted_scopes,
+                    last_error_json,
+                    last_error_at,
+                    last_error_kind,
+                    last_error_detail,
+                    failure_count,
+                    next_attempt_after,
+                    last_trigger_source,
+                    last_trigger_detail,
+                    updated_at
+                ) VALUES (
+                    ?1, NULL, ?2, NULL, NULL, ?3, NULL, NULL, NULL, NULL, '', NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, ?4
+                )",
+                params![
+                    "oura.spo2",
+                    SyncRunStatus::Success.as_str(),
+                    "2026-04-08T06:00:00Z",
+                    "2026-04-08T06:00:00Z",
+                ],
+            )
+            .unwrap_or_else(|error| unreachable!("sync state row should insert: {error}"));
+
+        let record = store
+            .sync_state()
+            .get("oura.spo2")
+            .unwrap_or_else(|error| unreachable!("sync state should read: {error}"))
+            .unwrap_or_else(|| unreachable!("sync state should exist"));
+
+        assert_eq!(record.sync_key, "oura.spo2");
+        assert_eq!(record.family, "spo2");
     }
 
     #[test]

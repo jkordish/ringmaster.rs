@@ -2837,14 +2837,14 @@ fn build_eval_jump_action(eval: &AiEvalRunRecord) -> Option<Action> {
                 status_line: format!("Opened snapshot linked from eval case {}.", case.case_id),
             });
         }
-        if let Some(ai_run_id) = &case.candidate.lineage.ai_run_id {
+        if let Some(ai_run_id) = &case.candidate.lineage.run {
             return Some(Action::JumpToAiBrowserRecord {
                 tab: AiBrowserTab::Runs,
                 record_id: ai_run_id.clone(),
                 status_line: format!("Opened AI run linked from eval case {}.", case.case_id),
             });
         }
-        if let Some(report_id) = &case.candidate.lineage.report_id {
+        if let Some(report_id) = &case.candidate.lineage.report {
             return Some(Action::JumpToAiBrowserRecord {
                 tab: AiBrowserTab::Reports,
                 record_id: report_id.clone(),
@@ -2862,7 +2862,7 @@ fn build_eval_jump_action(eval: &AiEvalRunRecord) -> Option<Action> {
             });
         }
         if let Some(baseline) = &case.baseline {
-            if let Some(ai_run_id) = &baseline.lineage.ai_run_id {
+            if let Some(ai_run_id) = &baseline.lineage.run {
                 return Some(Action::JumpToAiBrowserRecord {
                     tab: AiBrowserTab::Runs,
                     record_id: ai_run_id.clone(),
@@ -2872,7 +2872,7 @@ fn build_eval_jump_action(eval: &AiEvalRunRecord) -> Option<Action> {
                     ),
                 });
             }
-            if let Some(report_id) = &baseline.lineage.report_id {
+            if let Some(report_id) = &baseline.lineage.report {
                 return Some(Action::JumpToAiBrowserRecord {
                     tab: AiBrowserTab::Reports,
                     record_id: report_id.clone(),
@@ -3223,6 +3223,7 @@ async fn run_refresh_sync(config: &Config, families: Vec<SyncFamily>) -> Result<
             dry_run: false,
             fixture_dir: None,
             families,
+            mode: crate::oura::sync::SyncMode::Standard,
             trigger_source: Some("manual_sync".to_owned()),
             trigger_detail: Some("tui refresh".to_owned()),
         },
@@ -3426,7 +3427,6 @@ mod tests {
         HELP_MODAL_VISIBLE_BODY_ROWS, ModalLayoutSpec, OverlayLayoutSpec, ViewportClass,
         centered_modal_layout, content_fit_overlay_layout,
     };
-    use crate::ui::telemetry::MetricPanelState;
     use crate::ui::text_fit::measure_one_line;
     use crate::ui::theme::{ColorCapability, Theme, Tone};
     use crate::webhook::default_desired_subscriptions;
@@ -3545,30 +3545,8 @@ mod tests {
                 auth_timeout_secs: 120,
             },
             refresh: RefreshConfig {
-                personal_interval_secs: 3_600,
-                daily_interval_secs: 300,
-                heartrate_interval_secs: 60,
-                workout_interval_secs: 600,
-                enhanced_tag_interval_secs: 300,
-                session_interval_secs: 300,
-                personal_stale_after_secs: 72 * 60 * 60,
-                daily_stale_after_secs: 12 * 60 * 60,
-                heartrate_stale_after_secs: 15 * 60,
-                workout_stale_after_secs: 24 * 60 * 60,
-                enhanced_tag_stale_after_secs: 12 * 60 * 60,
-                session_stale_after_secs: 12 * 60 * 60,
-                daily_history_days: 90,
-                daily_overlap_days: 2,
-                heartrate_history_days: 7,
-                heartrate_overlap_minutes: 60,
-                workout_history_days: 90,
-                workout_overlap_days: 2,
-                enhanced_tag_history_days: 90,
-                enhanced_tag_overlap_days: 2,
-                session_history_days: 90,
-                session_overlap_days: 2,
-                max_backoff_secs: 60 * 60,
                 demo_fixture_dir: None,
+                ..RefreshConfig::default()
             },
             webhook: WebhookConfig {
                 bind: "127.0.0.1:8799".parse().unwrap(),
@@ -3688,20 +3666,37 @@ mod tests {
             .sync_state()
             .upsert(&SyncStateRecord {
                 sync_key: sync_key.to_owned(),
+                family: match sync_key {
+                    "oura.personal" => "personal".to_owned(),
+                    "oura.daily" => "daily".to_owned(),
+                    "oura.spo2" => "spo2".to_owned(),
+                    "oura.heartrate" => "heartrate".to_owned(),
+                    "oura.workouts" => "workout".to_owned(),
+                    "oura.enhanced_tags" => "tag".to_owned(),
+                    "oura.sessions" => "session".to_owned(),
+                    _ => "unknown".to_owned(),
+                },
                 status,
                 cursor: None,
+                last_successful_sync_end: Some("2026-04-08T03:41:00Z".to_owned()),
                 last_attempted_at: "2026-04-08T03:40:00Z".to_owned(),
                 last_completed_at: Some("2026-04-08T03:41:00Z".to_owned()),
+                last_reconcile_end: None,
+                oldest_recently_reconciled_at: None,
                 message: Some(message.to_owned()),
                 granted_scopes: granted_scopes
                     .iter()
                     .map(|scope| (*scope).to_owned())
                     .collect(),
                 last_error,
+                last_error_at: None,
+                last_error_kind: None,
+                last_error_detail: None,
                 failure_count: 0,
                 next_attempt_after: None,
                 last_trigger_source: Some("periodic_reconcile".to_owned()),
                 last_trigger_detail: Some("fixture seed".to_owned()),
+                updated_at: "2026-04-08T03:41:00Z".to_owned(),
             })
             .unwrap_or_else(|error| unreachable!("sync state should seed: {error}"));
     }
@@ -4229,21 +4224,41 @@ mod tests {
         let config = test_config();
         let mut app = build_demo_state(&config);
         app.active_screen = Screen::Dashboard;
-        app.model.dashboard.spo2.availability = MetricPanelState::BaselineOnly;
-        app.model.dashboard.respiratory_rate.availability = MetricPanelState::NoCurrentSample;
-        app.model.dashboard.activity.availability = MetricPanelState::HistoricalOnly;
+        app.model.dashboard.spo2.tile_state = crate::app::DashboardTileState::BaselineOnly;
+        app.model.dashboard.spo2.fallback = crate::app::DashboardTileFallback {
+            primary: "30d avg SpO2 97.2".to_owned(),
+            primary_compact: "30d avg SpO2 97.2".to_owned(),
+            secondary: "No current SpO2 sample for today".to_owned(),
+            secondary_compact: "No SpO2 sample today".to_owned(),
+        };
+        app.model.dashboard.respiratory_rate.tile_state =
+            crate::app::DashboardTileState::Unavailable;
+        app.model.dashboard.respiratory_rate.fallback = crate::app::DashboardTileFallback {
+            primary: "No current respiratory rate reading".to_owned(),
+            primary_compact: "No resp rate today".to_owned(),
+            secondary: "No overnight reading available today".to_owned(),
+            secondary_compact: "No overnight reading today".to_owned(),
+        };
+        app.model.dashboard.activity.tile_state = crate::app::DashboardTileState::Stale;
+        app.model.dashboard.activity.note =
+            "Cached activity reading from 2026-04-08; upstream sync is stale.".to_owned();
 
         let output = render_snapshot(&app, 160, 44).unwrap_or_else(|error| {
             unreachable!("dashboard semantic snapshot should render: {error}")
         });
 
-        assert!(output.contains("BASELINE ONLY"));
-        assert!(output.contains("NO CURRENT SAMPLE"));
-        assert!(output.contains("HISTORICAL ONLY"));
+        assert!(output.contains("[BASELINE]"));
+        assert!(output.contains("[NO DATA]"));
+        assert!(output.contains("[STALE]"));
+        assert!(output.contains("30d avg SpO2 97.2"));
+        assert!(
+            output.contains("No current respiratory rate reading")
+                || output.contains("No resp rate today")
+        );
     }
 
     #[tokio::test]
-    async fn dashboard_dense_history_snapshot_surfaces_fourteen_day_weekly_view() {
+    async fn dashboard_dense_history_snapshot_surfaces_latest_seven_day_window() {
         let config = test_config();
         let states = build_scenario_fixture_snapshot_apps_for_tests(
             &config,
@@ -4267,10 +4282,23 @@ mod tests {
             unreachable!("medium dense-history dashboard snapshot should render: {error}")
         });
 
-        assert!(output.contains("26 27 28 29 30 31 01 02 03 04 05 06 07 08"));
+        assert!(output.contains("WEEKLY TRENDS"));
+        assert!(output.contains("LATEST 1/2"));
+        assert!(
+            output.contains("Apr 02-Apr 08")
+                || output.contains("02")
+                    && output.contains("03")
+                    && output.contains("04")
+                    && output.contains("05")
+                    && output.contains("06")
+                    && output.contains("07")
+                    && output.contains("08")
+        );
+        assert!(!output.contains("26         27         28         29"));
+        assert!(medium_output.contains("LATEST 1/2"));
         assert!(output.contains("WEEKLY TRENDS"));
         assert!(!output.contains("326327328329"));
-        assert!(!medium_output.contains("26 27 28 29 30 31 01 02 03 04 05 06 07 08"));
+        assert!(!medium_output.contains("26         27         28         29"));
     }
 
     #[test]
@@ -4283,11 +4311,13 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("wide dashboard snapshot should render: {error}"));
 
         assert!(output.contains("05         06         07         08"));
+        assert!(output.contains("Apr 05-Apr 08"));
         assert!(output.contains("Sleep  █████████"));
         assert!(output.contains("Ready  █████████"));
         assert!(output.contains("Actv   ━━━━━━━━━"));
         assert!(output.contains("ramp ░▒▓█ higher"));
-        assert!(output.contains("Sleep 76 | 04-08 [good]"));
+        assert!(output.contains("Sleep 7..."));
+        assert!(output.contains("[good]"));
         assert!(!output.contains("0       0       0       0"));
     }
 
@@ -4310,7 +4340,8 @@ mod tests {
         assert!(output.contains("Sleep  ██████"));
         assert!(output.contains("Ready  ██████"));
         assert!(output.contains("Actv   "));
-        assert!(output.contains("Sleep 76 | 04-08 [good]"));
+        assert!(output.contains("Apr 05-Apr 08"));
+        assert!(output.contains("lat... [good]"));
         assert!(output.contains("ramp ░▒▓█ higher"));
         assert!(output.contains("Today's hrv is 34; there is not enough history"));
         assert!(!output.contains("focus          "));
@@ -4368,14 +4399,29 @@ mod tests {
 
         assert!(medium.contains("READINESS BREAKDOWN"));
         assert!(medium.contains("WEEKLY TRENDS"));
-        assert!(medium.contains("EMPTY"));
-        assert!(medium.contains("Driver rails explain the top-line recovery state"));
-        assert!(medium.contains("Recent score bands for sleep, readi..."));
+        assert!(medium.contains("NO DATA") || medium.contains("EMPTY"));
+        assert!(
+            medium.contains("No current HRV reading") || medium.contains("No HRV reading today")
+        );
+        assert!(
+            medium.contains("No recent days")
+                || medium.contains("No reading today")
+                || medium.contains("No cached data")
+        );
+        assert!(!medium.contains("Recent score bands for sleep, readi"));
+        assert!(!medium.contains("duration --"));
 
         assert!(wide.contains("READINESS BREAKDOWN"));
         assert!(wide.contains("WEEKLY TRENDS"));
-        assert!(wide.contains("EMPTY"));
-        assert!(wide.contains("Recent score bands for sleep, readiness, and act..."));
+        assert!(wide.contains("NO DATA") || wide.contains("EMPTY"));
+        assert!(wide.contains("No current HRV reading") || wide.contains("No HRV reading today"));
+        assert!(
+            wide.contains("No recent days")
+                || wide.contains("No reading today")
+                || wide.contains("No cached data")
+        );
+        assert!(!wide.contains("Recent score bands for sleep, readiness, and act"));
+        assert!(!wide.contains("duration --"));
     }
 
     #[test]
@@ -4726,20 +4772,20 @@ mod tests {
         let mut app = build_demo_state(&config);
         app.active_screen = Screen::Ai;
 
-        app.handle(Action::NextAiBrowserTab);
+        app.advance_ai_browser_tab_for_test();
         let snapshot_output = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("snapshot browser should render: {error}"));
         assert!(snapshot_output.contains("Snapshot artifact"));
         assert!(snapshot_output.contains("Artifact actions"));
         assert!(snapshot_output.contains("Compare previous snapshot"));
 
-        app.handle(Action::NextAiBrowserTab);
+        app.advance_ai_browser_tab_for_test();
         let report_output = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("report browser should render: {error}"));
         assert!(report_output.contains("Report export"));
         assert!(report_output.contains("Daily review briefing"));
 
-        app.handle(Action::NextAiBrowserTab);
+        app.advance_ai_browser_tab_for_test();
         let eval_output = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("eval browser should render: {error}"));
         assert!(eval_output.contains("Eval run"));

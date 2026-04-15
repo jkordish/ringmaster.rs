@@ -187,18 +187,18 @@ pub struct WebhookOpsSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefreshPolicySnapshot {
-    pub personal_interval_secs: u64,
-    pub daily_interval_secs: u64,
-    pub heartrate_interval_secs: u64,
-    pub workout_interval_secs: u64,
-    pub enhanced_tag_interval_secs: u64,
-    pub session_interval_secs: u64,
-    pub personal_stale_after_secs: u64,
-    pub daily_stale_after_secs: u64,
-    pub heartrate_stale_after_secs: u64,
-    pub workout_stale_after_secs: u64,
-    pub enhanced_tag_stale_after_secs: u64,
-    pub session_stale_after_secs: u64,
+    pub sync_intervals: FamilyRefreshPolicy,
+    pub stale_after: FamilyRefreshPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FamilyRefreshPolicy {
+    pub personal: u64,
+    pub daily: u64,
+    pub heartrate: u64,
+    pub workout: u64,
+    pub enhanced_tag: u64,
+    pub session: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,13 +238,6 @@ pub enum AiLaunchIntent {
     ReviewSelectedDay,
     CompareSelectedWeek,
     ChallengeSelectedDay,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrendWindowKind {
-    Days7,
-    Days30,
-    Days90,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,7 +299,6 @@ pub struct AppState {
     selected_timeline_point: usize,
     timeline_window_hours: u16,
     overlay_toggle_focus: OverlayToggleFocusMemory,
-    trends_window: TrendWindowKind,
     trend_sort_mode: TrendSortMode,
     trends_matrix_subfocus: TrendsMatrixSubfocus,
     selected_trend_row_index: usize,
@@ -491,9 +483,38 @@ pub enum DashboardJudgedState {
     Alert,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DashboardTileState {
+    Fresh,
+    BaselineOnly,
+    Stale,
+    Unavailable,
+}
+
+impl DashboardTileState {
+    #[must_use]
+    pub const fn badge_label(self) -> &'static str {
+        match self {
+            Self::Fresh => "FRESH",
+            Self::BaselineOnly => "BASELINE",
+            Self::Stale => "STALE",
+            Self::Unavailable => "NO DATA",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DashboardTileFallback {
+    pub primary: String,
+    pub primary_compact: String,
+    pub secondary: String,
+    pub secondary_compact: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardScoreTile {
     pub availability: MetricPanelState,
+    pub tile_state: DashboardTileState,
     pub primary_value: String,
     pub score_band: Option<DashboardScoreBand>,
     pub secondary_lines: Vec<String>,
@@ -501,21 +522,25 @@ pub struct DashboardScoreTile {
     pub trend: Vec<u64>,
     pub ring_fill_percent: u16,
     pub note: String,
+    pub fallback: DashboardTileFallback,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardSleepTile {
     pub availability: MetricPanelState,
+    pub tile_state: DashboardTileState,
     pub duration_label: String,
     pub score_label: String,
     pub score_band: Option<DashboardScoreBand>,
     pub trend: Vec<u64>,
     pub strip_note: String,
+    pub fallback: DashboardTileFallback,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardTrendPanel {
     pub availability: MetricPanelState,
+    pub tile_state: DashboardTileState,
     pub primary_label: String,
     pub baseline_label: String,
     pub range_label: String,
@@ -523,21 +548,25 @@ pub struct DashboardTrendPanel {
     pub judged_state: Option<DashboardJudgedState>,
     pub values: Vec<u64>,
     pub note: String,
+    pub fallback: DashboardTileFallback,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardThermometerPanel {
     pub availability: MetricPanelState,
+    pub tile_state: DashboardTileState,
     pub deviation_tenths: Option<i16>,
     pub value_label: String,
     pub delta_state: DashboardDeltaState,
     pub judged_state: Option<DashboardJudgedState>,
     pub note: String,
+    pub fallback: DashboardTileFallback,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardHistogramPanel {
     pub availability: MetricPanelState,
+    pub tile_state: DashboardTileState,
     pub primary_label: String,
     pub delta_label: String,
     pub range_label: String,
@@ -545,13 +574,13 @@ pub struct DashboardHistogramPanel {
     pub judged_state: Option<DashboardJudgedState>,
     pub bars: Vec<u64>,
     pub note: String,
+    pub fallback: DashboardTileFallback,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardBreakdownPanel {
     pub availability: MetricPanelState,
     pub rails: Vec<DashboardBreakdownRail>,
-    pub waveform: Vec<u64>,
     pub note: String,
 }
 
@@ -581,16 +610,14 @@ pub struct DashboardWeeklyHeatmap {
     pub recent: DashboardHeatmapGrid,
     pub history: DashboardHeatmapGrid,
     pub note: String,
+    pub window_label: String,
+    pub window_page_label: String,
 }
 
 impl DashboardWeeklyHeatmap {
     #[must_use]
-    pub const fn grid_for_viewport(&self, viewport: ViewportClass) -> &DashboardHeatmapGrid {
-        if viewport.is_wide() && self.history.day_labels.len() > self.recent.day_labels.len() {
-            &self.history
-        } else {
-            &self.recent
-        }
+    pub const fn grid_for_viewport(&self, _viewport: ViewportClass) -> &DashboardHeatmapGrid {
+        &self.recent
     }
 
     #[must_use]
@@ -759,21 +786,6 @@ pub struct AiArtifactSummaryView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScoreCard {
-    pub label: &'static str,
-    pub value: String,
-    pub badge: String,
-    pub subtitle: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CapabilityView {
-    pub label: &'static str,
-    pub available: bool,
-    pub note: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelinePoint {
     pub label: String,
     pub recorded_at: String,
@@ -834,21 +846,6 @@ struct ExplainSupportingEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrendWindow {
-    pub label: &'static str,
-    pub summary: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrendMetricView {
-    pub label: &'static str,
-    pub current_value: String,
-    pub summary: String,
-    pub sparkline: Vec<u64>,
-    pub confidence: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatternFilterTab {
     pub label: &'static str,
     pub selected: bool,
@@ -902,7 +899,6 @@ struct LiveModelOptions {
     explain_overlay_toggle_index: usize,
     patterns_overlay_toggle_index: usize,
     window_hours: u16,
-    trends_window: TrendWindowKind,
     trend_sort_mode: TrendSortMode,
     trends_matrix_subfocus: TrendsMatrixSubfocus,
     selected_trend_row_index: usize,
@@ -1038,8 +1034,6 @@ impl AppState {
             | Action::SearchPreviousResult => self.handle_focus_action(&action, &mut emitted),
             Action::Tick
             | Action::Quit
-            | Action::NextScreen
-            | Action::PreviousScreen
             | Action::ShowScreen(_)
             | Action::RefreshRequested
             | Action::RefreshStarted { .. }
@@ -1060,8 +1054,6 @@ impl AppState {
             Action::PreviousTrendWindow
             | Action::NextTrendWindow
             | Action::CyclePatternMetric
-            | Action::CycleReviewMode
-            | Action::CycleReviewFocus
             | Action::PreviousReviewCard
             | Action::NextReviewCard => self.handle_review_action(&action),
             _ => self.handle_ai_action(action),
@@ -1119,20 +1111,6 @@ impl AppState {
             }
             Action::Quit => {
                 self.should_quit = true;
-            }
-            Action::NextScreen => {
-                self.switch_screen(
-                    self.active_screen.next(),
-                    format!("Switched to {}", self.active_screen.next().title()),
-                    false,
-                );
-            }
-            Action::PreviousScreen => {
-                self.switch_screen(
-                    self.active_screen.previous(),
-                    format!("Switched to {}", self.active_screen.previous().title()),
-                    false,
-                );
             }
             Action::ShowScreen(screen) => {
                 self.switch_screen(screen, format!("Switched to {}", screen.title()), false);
@@ -1244,21 +1222,6 @@ impl AppState {
                 self.set_trend_sort_mode(self.trend_sort_mode.next());
             }
             Action::CyclePatternMetric => self.move_pattern_metric(NavMove::Next),
-            Action::CycleReviewMode => {
-                self.review_mode = self.review_mode.next();
-                self.selected_review_card_index = 0;
-                self.status_line = format!("Review mode changed to {}.", self.review_mode.label());
-                self.rebuild_live_model();
-            }
-            Action::CycleReviewFocus => {
-                self.review_focus = self.review_focus.next();
-                self.selected_review_card_index = 0;
-                self.status_line = format!(
-                    "Investigation focus changed to {}.",
-                    self.review_focus.label()
-                );
-                self.rebuild_live_model();
-            }
             Action::PreviousReviewCard => {
                 if self.selected_review_card_index > 0 {
                     self.selected_review_card_index -= 1;
@@ -1368,8 +1331,6 @@ impl AppState {
                 record_id,
                 status_line,
             } => self.handle_jump_to_ai_browser_record(tab, &record_id, status_line),
-            Action::PreviousAiBrowserTab => self.move_ai_browser_tab(AiBrowserTab::previous),
-            Action::NextAiBrowserTab => self.move_ai_browser_tab(AiBrowserTab::next),
             Action::PreviousAiBrowserItem => self.move_ai_browser_item(-1),
             Action::NextAiBrowserItem => self.move_ai_browser_item(1),
             _ => unreachable!("AI handler only receives AI-specific actions"),
@@ -1440,13 +1401,6 @@ impl AppState {
         }
     }
 
-    fn move_ai_browser_tab(&mut self, movement: impl FnOnce(AiBrowserTab) -> AiBrowserTab) {
-        self.ai_browser_tab = movement(self.ai_browser_tab);
-        self.selected_ai_artifact_action_index = 0;
-        self.status_line = format!("AI browser switched to {}.", self.ai_browser_tab.label());
-        self.rebuild_live_model();
-    }
-
     fn move_ai_browser_item(&mut self, delta: isize) {
         if self.adjust_ai_browser_index(delta) {
             self.selected_ai_artifact_action_index = 0;
@@ -1513,11 +1467,6 @@ impl AppState {
     #[must_use]
     pub const fn help_scroll(&self) -> u16 {
         self.help_scroll
-    }
-
-    #[must_use]
-    pub const fn ai_preflight_control(&self) -> PreflightControl {
-        self.ai_preflight_control
     }
 
     #[must_use]
@@ -1686,57 +1635,202 @@ impl AppState {
             ),
             (Screen::Dashboard, FocusRegion::DashboardReadiness) => (
                 label,
-                format!("score {}", self.model.dashboard.readiness.primary_value),
-                self.model.dashboard.readiness.delta_label.clone(),
-                self.dashboard_freshness(self.model.dashboard.readiness.availability.label()),
+                if matches!(
+                    self.model.dashboard.readiness.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    format!("score {}", self.model.dashboard.readiness.primary_value)
+                } else {
+                    self.model.dashboard.readiness.fallback.primary.clone()
+                },
+                if matches!(
+                    self.model.dashboard.readiness.tile_state,
+                    DashboardTileState::Fresh
+                ) {
+                    self.model.dashboard.readiness.delta_label.clone()
+                } else if matches!(
+                    self.model.dashboard.readiness.tile_state,
+                    DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.readiness.note.clone()
+                } else {
+                    self.model.dashboard.readiness.fallback.secondary.clone()
+                },
+                self.dashboard_freshness(),
             ),
             (Screen::Dashboard, FocusRegion::DashboardSleep) => (
                 label,
-                format!(
-                    "{} | {}",
-                    self.model.dashboard.sleep.duration_label,
-                    self.model.dashboard.sleep.score_label
-                ),
-                self.model.dashboard.sleep.strip_note.clone(),
-                self.dashboard_freshness(self.model.dashboard.sleep.availability.label()),
+                if matches!(
+                    self.model.dashboard.sleep.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    format!(
+                        "{} | {}",
+                        self.model.dashboard.sleep.duration_label,
+                        self.model.dashboard.sleep.score_label
+                    )
+                } else {
+                    self.model.dashboard.sleep.fallback.primary.clone()
+                },
+                if matches!(
+                    self.model.dashboard.sleep.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.sleep.strip_note.clone()
+                } else {
+                    self.model.dashboard.sleep.fallback.secondary.clone()
+                },
+                self.dashboard_freshness(),
             ),
             (Screen::Dashboard, FocusRegion::DashboardActivity) => (
                 label,
-                format!("activity {}", self.model.dashboard.activity.primary_value),
-                self.model.dashboard.activity.delta_label.clone(),
-                self.dashboard_freshness(self.model.dashboard.activity.availability.label()),
+                if matches!(
+                    self.model.dashboard.activity.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    format!("activity {}", self.model.dashboard.activity.primary_value)
+                } else {
+                    self.model.dashboard.activity.fallback.primary.clone()
+                },
+                if matches!(
+                    self.model.dashboard.activity.tile_state,
+                    DashboardTileState::Fresh
+                ) {
+                    self.model.dashboard.activity.delta_label.clone()
+                } else if matches!(
+                    self.model.dashboard.activity.tile_state,
+                    DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.activity.note.clone()
+                } else {
+                    self.model.dashboard.activity.fallback.secondary.clone()
+                },
+                self.dashboard_freshness(),
             ),
             (Screen::Dashboard, FocusRegion::DashboardHrv) => (
                 label,
-                self.model.dashboard.hrv.primary_label.clone(),
-                self.model.dashboard.hrv.note.clone(),
-                self.dashboard_freshness(self.model.dashboard.hrv.availability.label()),
+                if matches!(
+                    self.model.dashboard.hrv.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.hrv.primary_label.clone()
+                } else {
+                    self.model.dashboard.hrv.fallback.primary.clone()
+                },
+                if matches!(
+                    self.model.dashboard.hrv.tile_state,
+                    DashboardTileState::Fresh
+                ) {
+                    self.model.dashboard.hrv.baseline_label.clone()
+                } else if matches!(
+                    self.model.dashboard.hrv.tile_state,
+                    DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.hrv.note.clone()
+                } else {
+                    self.model.dashboard.hrv.fallback.secondary.clone()
+                },
+                self.dashboard_freshness(),
             ),
             (Screen::Dashboard, FocusRegion::DashboardTemp) => (
                 label,
-                self.model.dashboard.body_temp.value_label.clone(),
-                self.model.dashboard.body_temp.note.clone(),
-                self.dashboard_freshness(self.model.dashboard.body_temp.availability.label()),
+                if matches!(
+                    self.model.dashboard.body_temp.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.body_temp.value_label.clone()
+                } else {
+                    self.model.dashboard.body_temp.fallback.primary.clone()
+                },
+                if matches!(
+                    self.model.dashboard.body_temp.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.body_temp.note.clone()
+                } else {
+                    self.model.dashboard.body_temp.fallback.secondary.clone()
+                },
+                self.dashboard_freshness(),
             ),
             (Screen::Dashboard, FocusRegion::DashboardHeartRate) => (
                 label,
-                self.model.dashboard.heart_rate.primary_label.clone(),
-                self.model.dashboard.heart_rate.note.clone(),
-                self.dashboard_freshness(self.model.dashboard.heart_rate.availability.label()),
+                if matches!(
+                    self.model.dashboard.heart_rate.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.heart_rate.primary_label.clone()
+                } else {
+                    self.model.dashboard.heart_rate.fallback.primary.clone()
+                },
+                if matches!(
+                    self.model.dashboard.heart_rate.tile_state,
+                    DashboardTileState::Fresh
+                ) {
+                    self.model.dashboard.heart_rate.baseline_label.clone()
+                } else if matches!(
+                    self.model.dashboard.heart_rate.tile_state,
+                    DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.heart_rate.note.clone()
+                } else {
+                    self.model.dashboard.heart_rate.fallback.secondary.clone()
+                },
+                self.dashboard_freshness(),
             ),
             (Screen::Dashboard, FocusRegion::DashboardSpo2) => (
                 label,
-                self.model.dashboard.spo2.primary_label.clone(),
-                self.model.dashboard.spo2.note.clone(),
-                self.dashboard_freshness(self.model.dashboard.spo2.availability.label()),
+                if matches!(
+                    self.model.dashboard.spo2.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.spo2.primary_label.clone()
+                } else {
+                    self.model.dashboard.spo2.fallback.primary.clone()
+                },
+                if matches!(
+                    self.model.dashboard.spo2.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.spo2.note.clone()
+                } else {
+                    self.model.dashboard.spo2.fallback.secondary.clone()
+                },
+                self.dashboard_freshness(),
             ),
             (Screen::Dashboard, FocusRegion::DashboardRespRate) => (
                 label,
-                self.model.dashboard.respiratory_rate.primary_label.clone(),
-                self.model.dashboard.respiratory_rate.note.clone(),
-                self.dashboard_freshness(
-                    self.model.dashboard.respiratory_rate.availability.label(),
-                ),
+                if matches!(
+                    self.model.dashboard.respiratory_rate.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.respiratory_rate.primary_label.clone()
+                } else {
+                    self.model
+                        .dashboard
+                        .respiratory_rate
+                        .fallback
+                        .primary
+                        .clone()
+                },
+                if matches!(
+                    self.model.dashboard.respiratory_rate.tile_state,
+                    DashboardTileState::Fresh
+                ) {
+                    self.model.dashboard.respiratory_rate.delta_label.clone()
+                } else if matches!(
+                    self.model.dashboard.respiratory_rate.tile_state,
+                    DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.respiratory_rate.note.clone()
+                } else {
+                    self.model
+                        .dashboard
+                        .respiratory_rate
+                        .fallback
+                        .secondary
+                        .clone()
+                },
+                self.dashboard_freshness(),
             ),
             (Screen::Dashboard, FocusRegion::DashboardBreakdown) => {
                 self.focused_dashboard_breakdown_rail().map_or_else(
@@ -1745,9 +1839,7 @@ impl AppState {
                             label.clone(),
                             self.model.dashboard.breakdown.note.clone(),
                             "Δ --".to_owned(),
-                            self.dashboard_freshness(
-                                self.model.dashboard.breakdown.availability.label(),
-                            ),
+                            self.dashboard_freshness(),
                         )
                     },
                     |rail| {
@@ -1755,24 +1847,20 @@ impl AppState {
                             label.clone(),
                             format!("{} | {}", rail.label, rail.delta_label),
                             rail.note.clone(),
-                            self.dashboard_freshness(rail.availability.label()),
+                            self.dashboard_freshness(),
                         )
                     },
                 )
             }
-            (Screen::Dashboard, FocusRegion::DashboardHeatmap) => {
-                let exact = self
-                    .model
+            (Screen::Dashboard, FocusRegion::DashboardHeatmap) => (
+                label,
+                self.model.dashboard.weekly.window_label.clone(),
+                self.model
                     .dashboard
                     .weekly
-                    .selected_summary_for_viewport(viewport);
-                (
-                    label,
-                    exact,
-                    self.model.dashboard.weekly.note.clone(),
-                    self.dashboard_freshness(self.model.dashboard.weekly.availability.label()),
-                )
-            }
+                    .selected_summary_for_viewport(viewport),
+                self.model.dashboard.weekly.window_page_label.clone(),
+            ),
             (Screen::Timeline, FocusRegion::TimelineControls) => (
                 label,
                 format!(
@@ -1941,11 +2029,12 @@ impl AppState {
         self.model.trends.rows.iter().find(|row| row.selected)
     }
 
-    fn dashboard_freshness(&self, label: &str) -> String {
-        format!(
-            "{} | {}",
-            self.model.dashboard.header.freshness_badge, label
-        )
+    fn dashboard_freshness(&self) -> String {
+        if self.refresh_in_flight {
+            "refreshing".to_owned()
+        } else {
+            String::new()
+        }
     }
 
     fn coverage_footer(&self, family: CoverageFamily) -> String {
@@ -2020,7 +2109,6 @@ impl AppState {
                     explain_overlay_toggle_index: self.overlay_toggle_focus.explain,
                     patterns_overlay_toggle_index: self.overlay_toggle_focus.patterns,
                     window_hours: self.timeline_window_hours,
-                    trends_window: self.trends_window,
                     trend_sort_mode: self.trend_sort_mode,
                     trends_matrix_subfocus: self.trends_matrix_subfocus,
                     selected_trend_row_index: self.selected_trend_row_index,
@@ -2094,6 +2182,11 @@ impl AppState {
 
     pub(crate) const fn selected_ai_browser_tab(&self) -> AiBrowserTab {
         self.ai_browser_tab
+    }
+
+    #[cfg(test)]
+    pub(crate) fn advance_ai_browser_tab_for_test(&mut self) {
+        self.move_ai_browser_tabs(NavMove::Next);
     }
 
     fn select_ai_browser_record(&mut self, tab: AiBrowserTab, record_id: &str) -> bool {
@@ -3647,26 +3740,6 @@ impl ReviewScreenMode {
     }
 }
 
-impl TrendWindowKind {
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Days7 => "7d",
-            Self::Days30 => "30d",
-            Self::Days90 => "90d",
-        }
-    }
-
-    #[must_use]
-    pub const fn days(self) -> usize {
-        match self {
-            Self::Days7 => 7,
-            Self::Days30 => 30,
-            Self::Days90 => 90,
-        }
-    }
-}
-
 impl TrendSortMode {
     const ALL: [Self; 3] = [Self::Concern, Self::Anomaly, Self::Recovery];
 
@@ -3814,7 +3887,6 @@ pub fn build_state_from_snapshot(
         selected_timeline_point: 0,
         timeline_window_hours: 24,
         overlay_toggle_focus: OverlayToggleFocusMemory::default(),
-        trends_window: TrendWindowKind::Days7,
         trend_sort_mode: TrendSortMode::Concern,
         trends_matrix_subfocus: TrendsMatrixSubfocus::SortTabs,
         selected_trend_row_index: 0,
@@ -3856,7 +3928,7 @@ pub fn build_live_state(
     build_read_only_live_state(config, store, auth_status)
 }
 
-pub(crate) fn build_read_only_live_state(
+pub fn build_read_only_live_state(
     config: &Config,
     store: &Store,
     auth_status: &AuthStatus,
@@ -4376,6 +4448,238 @@ fn build_dashboard_model(
         metric_panel_baseline_reference(&readiness_insight).is_some(),
         metric_panel_has_history(&readiness_insight),
     );
+    let readiness_tile_state = dashboard_tile_state(readiness_state);
+    let sleep_tile_state = dashboard_tile_state(sleep_state);
+    let activity_tile_state = dashboard_tile_state(activity_state);
+    let hrv_tile_state = dashboard_tile_state(hrv_state);
+    let body_temp_tile_state = dashboard_tile_state(body_temp_state);
+    let heart_rate_tile_state = dashboard_tile_state(heart_rate_state);
+    let spo2_tile_state = dashboard_tile_state(spo2_state);
+    let respiratory_tile_state = dashboard_tile_state(respiratory_state);
+    let readiness_fallback = fallback_for_metric(MetricFallbackSpec {
+        metric: "readiness",
+        compact_metric: "readiness",
+        selected_day: &selected_day,
+        state: readiness_state,
+        baseline_primary: baseline_summary(
+            "readiness",
+            metric_panel_baseline_reference(&readiness_insight),
+        ),
+        baseline_primary_compact: baseline_summary(
+            "ready",
+            metric_panel_baseline_reference(&readiness_insight),
+        ),
+        baseline_secondary: "No readiness score available today",
+        baseline_secondary_compact: "No readiness today",
+    });
+    let sleep_fallback = fallback_for_metric(MetricFallbackSpec {
+        metric: "sleep",
+        compact_metric: "sleep",
+        selected_day: &selected_day,
+        state: sleep_state,
+        baseline_primary: baseline_summary(
+            "sleep score",
+            metric_panel_baseline_reference(&sleep_insight),
+        ),
+        baseline_primary_compact: baseline_summary(
+            "sleep",
+            metric_panel_baseline_reference(&sleep_insight),
+        ),
+        baseline_secondary: "No sleep session recorded for today",
+        baseline_secondary_compact: "No sleep session today",
+    });
+    let activity_fallback = fallback_for_metric(MetricFallbackSpec {
+        metric: "activity",
+        compact_metric: "activity",
+        selected_day: &selected_day,
+        state: activity_state,
+        baseline_primary: baseline_summary(
+            "activity",
+            metric_panel_baseline_reference(&activity_insight),
+        ),
+        baseline_primary_compact: baseline_summary(
+            "activity",
+            metric_panel_baseline_reference(&activity_insight),
+        ),
+        baseline_secondary: "No current activity score yet today",
+        baseline_secondary_compact: "No activity score today",
+    });
+    let hrv_fallback = if matches!(hrv_tile_state, DashboardTileState::BaselineOnly) {
+        dashboard_tile_fallback(
+            "No current HRV reading",
+            "No HRV reading today",
+            baseline_summary(
+                "trailing baseline",
+                metric_panel_baseline_reference(&hrv_insight),
+            ),
+            baseline_summary("baseline", metric_panel_baseline_reference(&hrv_insight)),
+        )
+    } else {
+        let (secondary, secondary_compact) = dashboard_missing_reason(hrv_state);
+        dashboard_tile_fallback(
+            "No current HRV reading",
+            "No HRV reading today",
+            secondary,
+            secondary_compact,
+        )
+    };
+    let spo2_fallback = fallback_for_metric(MetricFallbackSpec {
+        metric: "SpO2",
+        compact_metric: "SpO2",
+        selected_day: &selected_day,
+        state: spo2_state,
+        baseline_primary: baseline_summary("SpO2", metric_panel_baseline_reference(&spo2_insight)),
+        baseline_primary_compact: baseline_summary(
+            "SpO2",
+            metric_panel_baseline_reference(&spo2_insight),
+        ),
+        baseline_secondary: "No current SpO2 sample for today",
+        baseline_secondary_compact: "No SpO2 sample today",
+    });
+    let respiratory_fallback = fallback_for_metric(MetricFallbackSpec {
+        metric: "respiratory rate",
+        compact_metric: "resp rate",
+        selected_day: &selected_day,
+        state: respiratory_state,
+        baseline_primary: baseline_summary(
+            "respiratory rate",
+            metric_panel_baseline_reference(&respiratory_insight),
+        ),
+        baseline_primary_compact: baseline_summary(
+            "resp rate",
+            metric_panel_baseline_reference(&respiratory_insight),
+        ),
+        baseline_secondary: "No overnight reading available today",
+        baseline_secondary_compact: "No overnight reading today",
+    });
+    let body_temp_fallback = fallback_for_metric(MetricFallbackSpec {
+        metric: "temperature",
+        compact_metric: "temp",
+        selected_day: &selected_day,
+        state: body_temp_state,
+        baseline_primary: baseline_summary(
+            "temperature dev",
+            metric_panel_baseline_reference(&temperature_insight),
+        ),
+        baseline_primary_compact: baseline_summary(
+            "temp dev",
+            metric_panel_baseline_reference(&temperature_insight),
+        ),
+        baseline_secondary: "No temperature deviation available today",
+        baseline_secondary_compact: "No temp reading today",
+    });
+    let heart_rate_fallback = fallback_for_metric(MetricFallbackSpec {
+        metric: "heart rate",
+        compact_metric: "heart rate",
+        selected_day: &selected_day,
+        state: heart_rate_state,
+        baseline_primary: baseline_summary(
+            "heart rate",
+            metric_panel_baseline_reference(&heartrate_insight),
+        ),
+        baseline_primary_compact: baseline_summary(
+            "HR",
+            metric_panel_baseline_reference(&heartrate_insight),
+        ),
+        baseline_secondary: "No current heart-rate reading for today",
+        baseline_secondary_compact: "No heart-rate today",
+    });
+    let readiness_note = match readiness_tile_state {
+        DashboardTileState::Fresh => today_review.observations.first().map_or_else(
+            || selected_day_baseline_sentence("Readiness", &selected_day, &readiness_insight),
+            |card| format!("Review: {}", card.headline),
+        ),
+        DashboardTileState::Stale => stale_note("readiness", &selected_day),
+        DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
+            readiness_fallback.secondary.clone()
+        }
+    };
+    let sleep_note = match sleep_tile_state {
+        DashboardTileState::Fresh => {
+            selected_day_baseline_sentence("Sleep", &selected_day, &sleep_insight)
+        }
+        DashboardTileState::Stale => stale_note("sleep", &selected_day),
+        DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
+            sleep_fallback.secondary.clone()
+        }
+    };
+    let activity_note = match activity_tile_state {
+        DashboardTileState::Fresh => {
+            selected_day_baseline_sentence("Activity", &selected_day, &activity_insight)
+        }
+        DashboardTileState::Stale => stale_note("activity", &selected_day),
+        DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
+            activity_fallback.secondary.clone()
+        }
+    };
+    let hrv_note = match hrv_tile_state {
+        DashboardTileState::Fresh => selected_metric_note(
+            "HRV",
+            &selected_day,
+            selected_sleep_period
+                .and_then(|record| record.average_hrv)
+                .is_some(),
+            &hrv_insight,
+        ),
+        DashboardTileState::Stale => stale_note("HRV", &selected_day),
+        DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
+            hrv_fallback.secondary.clone()
+        }
+    };
+    let body_temp_note = match body_temp_tile_state {
+        DashboardTileState::Fresh => selected_readiness
+            .and_then(|row| row.temperature_trend_deviation)
+            .map_or_else(
+                || "deviation vs baseline pending".to_owned(),
+                |value| format!("trend {value:+.1}°C"),
+            ),
+        DashboardTileState::Stale => stale_note("temperature", &selected_day),
+        DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
+            body_temp_fallback.secondary.clone()
+        }
+    };
+    let heart_rate_note = match heart_rate_tile_state {
+        DashboardTileState::Fresh => heartrate_insight.summary.clone(),
+        DashboardTileState::Stale => stale_note("heart-rate", &selected_day),
+        DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
+            heart_rate_fallback.secondary.clone()
+        }
+    };
+    let spo2_note = match spo2_tile_state {
+        DashboardTileState::Fresh => selected_spo2
+            .and_then(|record| record.breathing_disturbance_index)
+            .map_or_else(
+                || {
+                    selected_metric_note(
+                        "SpO2",
+                        &selected_day,
+                        selected_spo2
+                            .and_then(|record| record.average_spo2)
+                            .is_some(),
+                        &spo2_insight,
+                    )
+                },
+                |value| format!("BDI {value:.1} | {}", spo2_insight.summary),
+            ),
+        DashboardTileState::Stale => stale_note("SpO2", &selected_day),
+        DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
+            spo2_fallback.secondary.clone()
+        }
+    };
+    let respiratory_note = match respiratory_tile_state {
+        DashboardTileState::Fresh => selected_metric_note(
+            "respiratory-rate",
+            &selected_day,
+            selected_sleep_period
+                .and_then(|record| record.average_breath)
+                .is_some(),
+            &respiratory_insight,
+        ),
+        DashboardTileState::Stale => stale_note("respiratory rate", &selected_day),
+        DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
+            respiratory_fallback.secondary.clone()
+        }
+    };
 
     DashboardModel {
         header: HeaderStripModel {
@@ -4393,6 +4697,7 @@ fn build_dashboard_model(
         selected_day_label: selected_day.clone(),
         readiness: DashboardScoreTile {
             availability: readiness_state,
+            tile_state: readiness_tile_state,
             primary_value: selected_daily
                 .and_then(|row| row.readiness_score)
                 .map_or_else(|| "--".to_owned(), |value| value.to_string()),
@@ -4416,13 +4721,12 @@ fn build_dashboard_model(
             ring_fill_percent: selected_daily
                 .and_then(|row| row.readiness_score)
                 .map_or(0, u16::from),
-            note: today_review.observations.first().map_or_else(
-                || selected_day_baseline_sentence("Readiness", &selected_day, &readiness_insight),
-                |card| format!("Review: {}", card.headline),
-            ),
+            note: readiness_note,
+            fallback: readiness_fallback,
         },
         sleep: DashboardSleepTile {
             availability: sleep_state,
+            tile_state: sleep_tile_state,
             duration_label: selected_daily
                 .and_then(|row| row.sleep_duration_seconds)
                 .map_or_else(|| "--".to_owned(), format_duration_compact),
@@ -4436,10 +4740,12 @@ fn build_dashboard_model(
                 &snapshot.daily_history,
                 |row| row.sleep_duration_seconds.map(crate::numeric::i64_to_f64),
             )),
-            strip_note: selected_day_baseline_sentence("Sleep", &selected_day, &sleep_insight),
+            strip_note: sleep_note,
+            fallback: sleep_fallback,
         },
         activity: DashboardScoreTile {
             availability: activity_state,
+            tile_state: activity_tile_state,
             primary_value: selected_activity.map_or_else(
                 || {
                     selected_daily
@@ -4473,10 +4779,12 @@ fn build_dashboard_model(
                     },
                     u16::from,
                 ),
-            note: selected_day_baseline_sentence("Activity", &selected_day, &activity_insight),
+            note: activity_note,
+            fallback: activity_fallback,
         },
         hrv: DashboardTrendPanel {
             availability: hrv_state,
+            tile_state: hrv_tile_state,
             primary_label: selected_sleep_period
                 .and_then(|record| record.average_hrv)
                 .map_or_else(|| "--".to_owned(), |value| format!("{value:.0} ms")),
@@ -4485,17 +4793,12 @@ fn build_dashboard_model(
             delta_state: dashboard_delta_state_for_insight(&hrv_insight),
             judged_state: None,
             values: values_from_metric_points(&hrv_points),
-            note: selected_metric_note(
-                "HRV",
-                &selected_day,
-                selected_sleep_period
-                    .and_then(|record| record.average_hrv)
-                    .is_some(),
-                &hrv_insight,
-            ),
+            note: hrv_note,
+            fallback: hrv_fallback,
         },
         body_temp: DashboardThermometerPanel {
             availability: body_temp_state,
+            tile_state: body_temp_tile_state,
             deviation_tenths: selected_readiness
                 .and_then(|row| row.temperature_deviation)
                 .map(|value| {
@@ -4515,25 +4818,24 @@ fn build_dashboard_model(
             judged_state: dashboard_temp_judged_state(
                 selected_readiness.and_then(|row| row.temperature_deviation),
             ),
-            note: selected_readiness
-                .and_then(|row| row.temperature_trend_deviation)
-                .map_or_else(
-                    || "deviation vs baseline pending".to_owned(),
-                    |value| format!("trend {value:+.1}°C"),
-                ),
+            note: body_temp_note,
+            fallback: body_temp_fallback,
         },
         heart_rate: DashboardTrendPanel {
             availability: heart_rate_state,
+            tile_state: heart_rate_tile_state,
             primary_label: heart_rate_primary_label(snapshot, &selected_day),
             baseline_label: metric_delta_label(&heartrate_insight),
             range_label: metric_range_label(&snapshot.heartrate_daily_averages),
             delta_state: dashboard_delta_state_for_insight(&heartrate_insight),
             judged_state: dashboard_rhr_judged_state(&heartrate_insight),
             values: values_from_metric_points(&snapshot.heartrate_daily_averages),
-            note: heartrate_insight.summary.clone(),
+            note: heart_rate_note,
+            fallback: heart_rate_fallback,
         },
         spo2: DashboardTrendPanel {
             availability: spo2_state,
+            tile_state: spo2_tile_state,
             primary_label: selected_spo2
                 .and_then(|record| record.average_spo2)
                 .map_or_else(|| "--".to_owned(), |value| format!("{value:.1}%")),
@@ -4542,24 +4844,12 @@ fn build_dashboard_model(
             delta_state: dashboard_delta_state_for_insight(&spo2_insight),
             judged_state: None,
             values: values_from_metric_points(&spo2_points),
-            note: selected_spo2
-                .and_then(|record| record.breathing_disturbance_index)
-                .map_or_else(
-                    || {
-                        selected_metric_note(
-                            "SpO2",
-                            &selected_day,
-                            selected_spo2
-                                .and_then(|record| record.average_spo2)
-                                .is_some(),
-                            &spo2_insight,
-                        )
-                    },
-                    |value| format!("BDI {value:.1} | {}", spo2_insight.summary),
-                ),
+            note: spo2_note,
+            fallback: spo2_fallback,
         },
         respiratory_rate: DashboardHistogramPanel {
             availability: respiratory_state,
+            tile_state: respiratory_tile_state,
             primary_label: selected_sleep_period
                 .and_then(|record| record.average_breath)
                 .map_or_else(|| "--".to_owned(), |value| format!("{value:.1} br/min")),
@@ -4568,14 +4858,8 @@ fn build_dashboard_model(
             delta_state: dashboard_delta_state_for_insight(&respiratory_insight),
             judged_state: dashboard_respiratory_judged_state(&respiratory_insight),
             bars: values_from_metric_points(&respiratory_points),
-            note: selected_metric_note(
-                "respiratory-rate",
-                &selected_day,
-                selected_sleep_period
-                    .and_then(|record| record.average_breath)
-                    .is_some(),
-                &respiratory_insight,
-            ),
+            note: respiratory_note,
+            fallback: respiratory_fallback,
         },
         breakdown: DashboardBreakdownPanel {
             availability: breakdown_state,
@@ -4591,12 +4875,11 @@ fn build_dashboard_model(
                 selected_stress,
                 selected_breakdown_index,
             }),
-            waveform: recent_dashboard_waveform(snapshot),
             note: selected_stress
                 .and_then(|row| row.day_summary.clone())
                 .unwrap_or_else(|| "Driver rails explain the top-line recovery state.".to_owned()),
         },
-        weekly: build_dashboard_weekly_heatmap(snapshot, &selected_day),
+        weekly: build_dashboard_weekly_heatmap(snapshot, selected_day_index, &selected_day),
     }
 }
 
@@ -5422,39 +5705,21 @@ fn build_ops_model(snapshot: &LiveSnapshot, refresh_in_flight: bool) -> OpsModel
 }
 
 fn build_ops_family_statuses(snapshot: &LiveSnapshot) -> Vec<FamilyStatusView> {
-    [
-        DataFamily::Personal,
-        DataFamily::Daily,
-        DataFamily::Heartrate,
-        DataFamily::Workout,
-        DataFamily::EnhancedTag,
-        DataFamily::Session,
-    ]
-    .into_iter()
-    .map(|family| {
-        let freshness = family_freshness(snapshot, family);
-        let sync_state = sync_state_for(&snapshot.sync_states, family);
-        let scope_label = snapshot
-            .auth_status
-            .capability_report
-            .status_for(family.capability_kind())
-            .map_or_else(
-                || "scope unknown".to_owned(),
-                |entry| {
-                    if entry.granted {
-                        "scope granted".to_owned()
-                    } else if entry.requested {
-                        "scope missing".to_owned()
-                    } else {
-                        "scope not requested".to_owned()
-                    }
-                },
-            );
-        FamilyStatusView {
-            label: family.label(),
-            state_label: freshness_badge(&freshness),
-            scope_label,
-            last_sync: sync_state.map_or_else(
+    SyncFamily::ALL
+        .into_iter()
+        .map(|family| {
+            let sync_state = sync_state_for_sync_family(&snapshot.sync_states, family);
+            let stale_after = snapshot
+                .refresh_policy
+                .stale_after_seconds_for_sync_family(family);
+            let state_label = sync_family_health_label(snapshot, family, sync_state, stale_after);
+            let support_label = if sync_family_supports_webhooks(family) {
+                "webhook-assisted"
+            } else {
+                "periodic-only"
+            };
+            let scope_label = sync_family_scope_label(snapshot, family);
+            let last_sync = sync_state.map_or_else(
                 || "never".to_owned(),
                 |state| {
                     state
@@ -5462,11 +5727,16 @@ fn build_ops_family_statuses(snapshot: &LiveSnapshot) -> Vec<FamilyStatusView> {
                         .clone()
                         .unwrap_or_else(|| state.last_attempted_at.clone())
                 },
-            ),
-            detail: freshness.detail,
-        }
-    })
-    .collect()
+            );
+            FamilyStatusView {
+                label: sync_family_display_label(family),
+                state_label,
+                scope_label: format!("{support_label} | {scope_label}"),
+                last_sync,
+                detail: sync_family_status_detail(snapshot, family, sync_state),
+            }
+        })
+        .collect()
 }
 
 fn ops_queue_oldest(snapshot: &LiveSnapshot) -> String {
@@ -5535,7 +5805,7 @@ fn build_ops_warning_lines(
 ) -> Vec<String> {
     let mut warnings = family_statuses
         .iter()
-        .filter(|status| status.state_label.starts_with("stale"))
+        .filter(|status| status.state_label != "healthy")
         .map(|status| format!("{}: {}", status.label, status.detail))
         .collect::<Vec<_>>();
     if refresh_in_flight {
@@ -6349,13 +6619,13 @@ fn eval_has_linked_evidence(eval: &AiEvalRunRecord) -> bool {
     details.cases.iter().any(|case| {
         case.snapshot_hash_a.is_some()
             || case.snapshot_hash_b.is_some()
-            || case.candidate.lineage.ai_run_id.is_some()
-            || case.candidate.lineage.ai_artifact_id.is_some()
-            || case.candidate.lineage.report_id.is_some()
+            || case.candidate.lineage.run.is_some()
+            || case.candidate.lineage.artifact.is_some()
+            || case.candidate.lineage.report.is_some()
             || case.baseline.as_ref().is_some_and(|baseline| {
-                baseline.lineage.ai_run_id.is_some()
-                    || baseline.lineage.ai_artifact_id.is_some()
-                    || baseline.lineage.report_id.is_some()
+                baseline.lineage.run.is_some()
+                    || baseline.lineage.artifact.is_some()
+                    || baseline.lineage.report.is_some()
             })
     })
 }
@@ -6967,19 +7237,19 @@ fn render_eval_artifact_lineage(
     lineage: &EvalArtifactLineage,
 ) -> Vec<String> {
     let mut lines = Vec::new();
-    if let Some(ai_run_id) = &lineage.ai_run_id {
+    if let Some(ai_run_id) = &lineage.run {
         lines.push(format!(
             "  {label}_run: {}",
             resolve_ai_run_reference(snapshot, ai_run_id)
         ));
     }
-    if let Some(report_id) = &lineage.report_id {
+    if let Some(report_id) = &lineage.report {
         lines.push(format!(
             "  {label}_report: {}",
             resolve_report_reference(snapshot, report_id)
         ));
     }
-    if let Some(ai_artifact_id) = &lineage.ai_artifact_id {
+    if let Some(ai_artifact_id) = &lineage.artifact {
         lines.push(format!("  {label}_artifact: {ai_artifact_id}"));
     }
     lines
@@ -7379,7 +7649,6 @@ fn review_empty_message(review_mode: ReviewScreenMode, review_focus: ReviewFocus
 
 fn review_section_label(card: &ReviewCard) -> String {
     match card.section {
-        crate::review::engine::ReviewSection::Observation => "Observation".to_owned(),
         crate::review::engine::ReviewSection::PositiveChange => "Positive".to_owned(),
         crate::review::engine::ReviewSection::NegativeDrift => "Drift".to_owned(),
         crate::review::engine::ReviewSection::UnresolvedAnomaly => "Anomaly".to_owned(),
@@ -7918,6 +8187,7 @@ fn subscription_horizon_summary(snapshot: &LiveSnapshot) -> String {
 
 fn family_delivery_summary(snapshot: &LiveSnapshot) -> String {
     [
+        DataFamily::Personal,
         DataFamily::Daily,
         DataFamily::Workout,
         DataFamily::EnhancedTag,
@@ -8553,6 +8823,214 @@ fn sync_state_for(sync_states: &[SyncStateRecord], family: DataFamily) -> Option
         .find(|state| state.sync_key == family.sync_key())
 }
 
+const fn sync_family_for_data_family(family: DataFamily) -> SyncFamily {
+    match family {
+        DataFamily::Personal => SyncFamily::Personal,
+        DataFamily::Daily => SyncFamily::Daily,
+        DataFamily::Heartrate => SyncFamily::Heartrate,
+        DataFamily::Workout => SyncFamily::Workout,
+        DataFamily::EnhancedTag => SyncFamily::EnhancedTag,
+        DataFamily::Session => SyncFamily::Session,
+    }
+}
+
+const fn sync_family_for_capability(
+    capability: CapabilityKind,
+    freshness_family: DataFamily,
+) -> SyncFamily {
+    match capability {
+        CapabilityKind::Spo2 => SyncFamily::Spo2,
+        _ => sync_family_for_data_family(freshness_family),
+    }
+}
+
+fn sync_state_for_sync_family(
+    sync_states: &[SyncStateRecord],
+    family: SyncFamily,
+) -> Option<&SyncStateRecord> {
+    sync_states.iter().find(|state| {
+        state.sync_key == family.sync_key() || state.family.eq_ignore_ascii_case(family.label())
+    })
+}
+
+const fn sync_family_display_label(family: SyncFamily) -> &'static str {
+    match family {
+        SyncFamily::Personal => "Personal",
+        SyncFamily::Daily => "Daily",
+        SyncFamily::Spo2 => "SpO2",
+        SyncFamily::Heartrate => "Heartrate",
+        SyncFamily::Workout => "Workout",
+        SyncFamily::EnhancedTag => "Tag",
+        SyncFamily::Session => "Session",
+    }
+}
+
+const fn sync_family_supports_webhooks(family: SyncFamily) -> bool {
+    matches!(
+        family,
+        SyncFamily::Daily | SyncFamily::Workout | SyncFamily::EnhancedTag | SyncFamily::Session
+    )
+}
+
+fn sync_family_scope_label(snapshot: &LiveSnapshot, family: SyncFamily) -> String {
+    snapshot
+        .auth_status
+        .capability_report
+        .status_for(family.capability_kind())
+        .map_or_else(
+            || "scope unknown".to_owned(),
+            |entry| {
+                if entry.granted {
+                    "scope granted".to_owned()
+                } else if entry.requested {
+                    "scope missing".to_owned()
+                } else {
+                    "scope not requested".to_owned()
+                }
+            },
+        )
+}
+
+fn sync_family_health_label(
+    snapshot: &LiveSnapshot,
+    family: SyncFamily,
+    sync_state: Option<&SyncStateRecord>,
+    stale_after_seconds: u64,
+) -> String {
+    let capability = snapshot
+        .auth_status
+        .capability_report
+        .status_for(family.capability_kind());
+    if capability.is_some_and(|entry| !entry.granted && entry.requested) {
+        return "missing-scope".to_owned();
+    }
+
+    let Some(sync_state) = sync_state else {
+        return "stale".to_owned();
+    };
+
+    if sync_state_is_rate_limited(sync_state) {
+        return "rate-limited".to_owned();
+    }
+    if matches!(
+        sync_state.status,
+        SyncRunStatus::Failed | SyncRunStatus::Blocked
+    ) || sync_state
+        .last_error_kind
+        .as_deref()
+        .is_some_and(|kind| kind != "rate_limit")
+    {
+        return "error".to_owned();
+    }
+
+    let now = parse_timestamp(&snapshot.captured_at).unwrap_or_else(OffsetDateTime::now_utc);
+    let reference = sync_state
+        .last_completed_at
+        .as_deref()
+        .or(Some(sync_state.last_attempted_at.as_str()));
+    let is_fresh = reference
+        .and_then(parse_timestamp)
+        .is_some_and(|timestamp| {
+            now - timestamp <= time::Duration::seconds(stale_after_seconds.cast_signed())
+        });
+
+    if is_fresh
+        && matches!(
+            sync_state.status,
+            SyncRunStatus::Success | SyncRunStatus::Partial
+        )
+    {
+        "healthy".to_owned()
+    } else {
+        "stale".to_owned()
+    }
+}
+
+fn sync_family_status_detail(
+    snapshot: &LiveSnapshot,
+    family: SyncFamily,
+    sync_state: Option<&SyncStateRecord>,
+) -> String {
+    let capability = snapshot
+        .auth_status
+        .capability_report
+        .status_for(family.capability_kind());
+    if let Some(entry) = capability
+        && !entry.granted
+        && entry.requested
+    {
+        return entry.note.clone();
+    }
+
+    let Some(sync_state) = sync_state else {
+        return format!(
+            "{} has not completed a persisted sync yet.",
+            sync_family_display_label(family)
+        );
+    };
+
+    if sync_state_is_rate_limited(sync_state) {
+        return sync_state
+            .last_error_detail
+            .clone()
+            .or_else(|| sync_state.message.clone())
+            .unwrap_or_else(|| {
+                format!(
+                    "{} is waiting for the Oura rate limit window to clear.",
+                    sync_family_display_label(family)
+                )
+            });
+    }
+
+    if matches!(
+        sync_state.status,
+        SyncRunStatus::Failed | SyncRunStatus::Blocked
+    ) || sync_state.last_error_kind.is_some()
+    {
+        return sync_state
+            .last_error_detail
+            .clone()
+            .or_else(|| sync_state.message.clone())
+            .unwrap_or_else(|| {
+                format!(
+                    "{} encountered an error during the last sync attempt.",
+                    sync_family_display_label(family)
+                )
+            });
+    }
+
+    let source = sync_state
+        .last_trigger_source
+        .clone()
+        .unwrap_or_else(|| "unknown".to_owned());
+    let reconcile = if crate::oura::sync::sync_family_supports_reconcile_coverage(family) {
+        match (
+            sync_state.oldest_recently_reconciled_at.as_deref(),
+            sync_state.last_reconcile_end.as_deref(),
+        ) {
+            (Some(start), Some(end)) => format!("coverage={start}..{end}"),
+            (None, Some(end)) => format!("reconcile_end={end}"),
+            _ => "coverage=pending".to_owned(),
+        }
+    } else {
+        "coverage=n/a".to_owned()
+    };
+    let success_end = sync_state
+        .last_successful_sync_end
+        .clone()
+        .unwrap_or_else(|| "unknown".to_owned());
+    format!("source={source} | success_end={success_end} | {reconcile}")
+}
+
+fn sync_state_is_rate_limited(sync_state: &SyncStateRecord) -> bool {
+    sync_state.last_error_kind.as_deref() == Some("rate_limit")
+        || sync_state
+            .last_error
+            .as_ref()
+            .and_then(|error| error.status)
+            == Some(429)
+}
+
 fn family_has_data(snapshot: &LiveSnapshot, family: DataFamily) -> bool {
     match family {
         DataFamily::Personal => snapshot.personal_info.is_some(),
@@ -8809,18 +9287,26 @@ fn availability_from_partial_failure_message(
     saw_rate_limit.then_some(TelemetryAvailability::RateLimited)
 }
 
-fn partial_failure_availability_for_capability(
+fn capability_failure_availability_for_capability(
     snapshot: &LiveSnapshot,
     freshness_family: DataFamily,
     capability: CapabilityKind,
 ) -> Option<TelemetryAvailability> {
     let markers = capability_failure_markers(capability);
-    if markers.is_empty() {
+    let sync_family = sync_family_for_capability(capability, freshness_family);
+    let sync_state = sync_state_for_sync_family(&snapshot.sync_states, sync_family)?;
+    if !matches!(
+        sync_state.status,
+        SyncRunStatus::Failed | SyncRunStatus::Partial
+    ) {
         return None;
     }
-    let sync_state = sync_state_for(&snapshot.sync_states, freshness_family)?;
-    if sync_state.status != SyncRunStatus::Partial {
-        return None;
+    let problem = sync_state.last_error.as_ref()?;
+    if sync_family != sync_family_for_data_family(freshness_family) {
+        return Some(availability_from_problem(problem));
+    }
+    if markers.is_empty() {
+        return Some(availability_from_problem(problem));
     }
     if let Some(availability) = sync_state
         .message
@@ -8829,7 +9315,6 @@ fn partial_failure_availability_for_capability(
     {
         return Some(availability);
     }
-    let problem = sync_state.last_error.as_ref()?;
     let combined = format!(
         "{} {} {}",
         sync_state.message.as_deref().unwrap_or_default(),
@@ -8847,7 +9332,8 @@ fn sync_failure_availability(
     snapshot: &LiveSnapshot,
     family: DataFamily,
 ) -> Option<TelemetryAvailability> {
-    let sync_state = sync_state_for(&snapshot.sync_states, family)?;
+    let sync_state =
+        sync_state_for_sync_family(&snapshot.sync_states, sync_family_for_data_family(family))?;
     matches!(
         sync_state.status,
         SyncRunStatus::Failed | SyncRunStatus::Partial
@@ -8869,14 +9355,19 @@ fn telemetry_availability_for_metric(
         .status_for(capability);
     match status {
         Some(entry) if entry.granted => {
+            if !has_records
+                && let Some(partial_failure) = capability_failure_availability_for_capability(
+                    snapshot,
+                    freshness_family,
+                    capability,
+                )
+            {
+                return partial_failure;
+            }
             let freshness = family_freshness(snapshot, freshness_family);
             let availability = availability_from_freshness(&freshness);
             if has_records || !matches!(availability, TelemetryAvailability::Fresh) {
                 availability
-            } else if let Some(partial_failure) =
-                partial_failure_availability_for_capability(snapshot, freshness_family, capability)
-            {
-                partial_failure
             } else {
                 TelemetryAvailability::NoData
             }
@@ -8967,6 +9458,109 @@ const fn dashboard_panel_state(
             }
         }
     }
+}
+
+const fn dashboard_tile_state(state: MetricPanelState) -> DashboardTileState {
+    match state {
+        MetricPanelState::Fresh => DashboardTileState::Fresh,
+        MetricPanelState::BaselineOnly => DashboardTileState::BaselineOnly,
+        MetricPanelState::Stale => DashboardTileState::Stale,
+        MetricPanelState::NoCurrentSample
+        | MetricPanelState::HistoricalOnly
+        | MetricPanelState::MissingScope
+        | MetricPanelState::Unavailable
+        | MetricPanelState::Empty
+        | MetricPanelState::Error => DashboardTileState::Unavailable,
+    }
+}
+
+fn dashboard_tile_fallback(
+    primary: impl Into<String>,
+    primary_compact: impl Into<String>,
+    secondary: impl Into<String>,
+    secondary_compact: impl Into<String>,
+) -> DashboardTileFallback {
+    DashboardTileFallback {
+        primary: primary.into(),
+        primary_compact: primary_compact.into(),
+        secondary: secondary.into(),
+        secondary_compact: secondary_compact.into(),
+    }
+}
+
+const fn dashboard_missing_reason(state: MetricPanelState) -> (&'static str, &'static str) {
+    match state {
+        MetricPanelState::MissingScope => (
+            "Capability not granted in the current scope",
+            "Scope missing",
+        ),
+        MetricPanelState::HistoricalOnly => (
+            "Historical readings are available, but not for today",
+            "History only",
+        ),
+        MetricPanelState::NoCurrentSample => (
+            "No current sample was captured for today",
+            "No sample today",
+        ),
+        MetricPanelState::Error => ("Last sync failed for this metric", "Sync failed"),
+        MetricPanelState::Empty => ("No cached readings are available yet", "No cached data"),
+        _ => ("No reading is available for today", "No reading today"),
+    }
+}
+
+fn baseline_summary(metric: &str, baseline: Option<f64>) -> String {
+    baseline.map_or_else(
+        || format!("30d avg {metric} unavailable"),
+        |value| format!("30d avg {metric} {}", format_float(value)),
+    )
+}
+
+fn stale_note(metric: &str, selected_day: &str) -> String {
+    format!("Cached {metric} reading from {selected_day}; upstream sync is stale.")
+}
+
+struct MetricFallbackSpec<'a> {
+    metric: &'a str,
+    compact_metric: &'a str,
+    selected_day: &'a str,
+    state: MetricPanelState,
+    baseline_primary: String,
+    baseline_primary_compact: String,
+    baseline_secondary: &'static str,
+    baseline_secondary_compact: &'static str,
+}
+
+fn fallback_for_metric(spec: MetricFallbackSpec<'_>) -> DashboardTileFallback {
+    let MetricFallbackSpec {
+        metric,
+        compact_metric,
+        selected_day,
+        state,
+        baseline_primary,
+        baseline_primary_compact,
+        baseline_secondary,
+        baseline_secondary_compact,
+    } = spec;
+
+    if matches!(
+        dashboard_tile_state(state),
+        DashboardTileState::BaselineOnly
+    ) {
+        return dashboard_tile_fallback(
+            baseline_primary,
+            baseline_primary_compact,
+            baseline_secondary,
+            baseline_secondary_compact,
+        );
+    }
+
+    let (secondary, secondary_compact) = dashboard_missing_reason(state);
+    dashboard_tile_fallback(
+        format!("No current {metric} reading"),
+        format!("No {compact_metric} today"),
+        format!("{secondary} for {selected_day}"),
+        secondary_compact,
+    )
 }
 
 fn format_duration_compact(seconds: i64) -> String {
@@ -9193,19 +9787,6 @@ fn heart_rate_primary_label(snapshot: &LiveSnapshot, selected_day: &str) -> Stri
         )
 }
 
-fn recent_dashboard_waveform(snapshot: &LiveSnapshot) -> Vec<u64> {
-    let readiness = metric_points_from_daily(&snapshot.daily_history, |row| {
-        row.readiness_score.map(f64::from)
-    });
-    if readiness.is_empty() {
-        values_from_metric_points(&metric_points_from_daily(&snapshot.daily_history, |row| {
-            row.sleep_score.map(f64::from)
-        }))
-    } else {
-        values_from_metric_points(&readiness)
-    }
-}
-
 fn dashboard_capability_summary(snapshot: &LiveSnapshot) -> Vec<String> {
     CoverageFamily::ALL
         .into_iter()
@@ -9272,12 +9853,38 @@ fn coverage_availability(snapshot: &LiveSnapshot, family: CoverageFamily) -> Tel
                 TelemetryAvailability::Unsupported
             }
         }
-        CoverageFamily::Spo2 => telemetry_availability_for_metric(
-            snapshot,
-            CapabilityKind::Spo2,
-            DataFamily::Daily,
-            !snapshot.daily_spo2.is_empty(),
-        ),
+        CoverageFamily::Spo2 => {
+            let status = snapshot
+                .auth_status
+                .capability_report
+                .status_for(CapabilityKind::Spo2);
+            let freshness = family_freshness(snapshot, DataFamily::Daily);
+            let availability = availability_from_freshness(&freshness);
+            if status.is_some_and(|entry| entry.granted) {
+                if !snapshot.daily_spo2.is_empty()
+                    || !matches!(availability, TelemetryAvailability::Fresh)
+                {
+                    sync_state_for_sync_family(&snapshot.sync_states, SyncFamily::Spo2)
+                        .filter(|state| {
+                            matches!(state.status, SyncRunStatus::Failed | SyncRunStatus::Partial)
+                        })
+                        .and_then(|state| state.last_error.as_ref())
+                        .map_or(availability, availability_from_problem)
+                } else if let Some(partial_failure) = capability_failure_availability_for_capability(
+                    snapshot,
+                    DataFamily::Daily,
+                    CapabilityKind::Spo2,
+                ) {
+                    partial_failure
+                } else {
+                    TelemetryAvailability::NoData
+                }
+            } else if status.is_some_and(|entry| entry.requested) {
+                TelemetryAvailability::MissingScope
+            } else {
+                TelemetryAvailability::Unsupported
+            }
+        }
     }
 }
 
@@ -9322,7 +9929,7 @@ fn coverage_detail(snapshot: &LiveSnapshot, family: CoverageFamily) -> String {
                         let freshness_detail = freshness.detail;
                         if snapshot.daily_spo2.is_empty()
                             && matches!(availability, TelemetryAvailability::Fresh)
-                            && partial_failure_availability_for_capability(
+                            && capability_failure_availability_for_capability(
                                 snapshot,
                                 DataFamily::Daily,
                                 CapabilityKind::Spo2,
@@ -9332,9 +9939,9 @@ fn coverage_detail(snapshot: &LiveSnapshot, family: CoverageFamily) -> String {
                             "SpO2 scope is granted, but there are no cached SpO2 readings yet."
                                 .to_owned()
                         } else if let Some(sync_state) =
-                            sync_state_for(&snapshot.sync_states, DataFamily::Daily)
+                            sync_state_for_sync_family(&snapshot.sync_states, SyncFamily::Spo2)
                         {
-                            if partial_failure_availability_for_capability(
+                            if capability_failure_availability_for_capability(
                                 snapshot,
                                 DataFamily::Daily,
                                 CapabilityKind::Spo2,
@@ -9556,10 +10163,28 @@ fn build_dashboard_breakdown_rails(
 
 fn build_dashboard_weekly_heatmap(
     snapshot: &LiveSnapshot,
+    selected_day_index: usize,
     selected_day: &str,
 ) -> DashboardWeeklyHeatmap {
-    let recent_rows = latest_daily_rows(snapshot, 7);
-    let history_rows = latest_daily_rows(snapshot, 14);
+    let history_rows = sorted_daily_rows(snapshot);
+    let total_rows = history_rows.len();
+    let selected_row_index = history_rows
+        .iter()
+        .position(|row| row.day == selected_day)
+        .unwrap_or_else(|| usize::min(selected_day_index, total_rows.saturating_sub(1)));
+    let page_offset = if total_rows == 0 {
+        0
+    } else {
+        total_rows.saturating_sub(selected_row_index.saturating_add(1)) / 7
+    };
+    let window_end = total_rows.saturating_sub(page_offset.saturating_mul(7));
+    let window_start = window_end.saturating_sub(7);
+    let recent_rows = history_rows
+        .iter()
+        .skip(window_start)
+        .take(window_end.saturating_sub(window_start))
+        .copied()
+        .collect::<Vec<_>>();
     let daily_availability = availability_with_record_presence(
         sync_failure_availability(snapshot, DataFamily::Daily).unwrap_or_else(|| {
             availability_from_freshness(&family_freshness(snapshot, DataFamily::Daily))
@@ -9584,15 +10209,73 @@ fn build_dashboard_weekly_heatmap(
         ],
         recent,
         history,
-        note: "Recent score bands for sleep, readiness, and activity.".to_owned(),
+        note: "7-day window. h/l or PgUp/PgDn for older weeks.".to_owned(),
+        window_label: heatmap_window_label(&recent_rows),
+        window_page_label: heatmap_window_page_label(total_rows, page_offset),
     }
 }
 
-fn latest_daily_rows(snapshot: &LiveSnapshot, limit: usize) -> Vec<&DailyOverviewRow> {
+fn sorted_daily_rows(snapshot: &LiveSnapshot) -> Vec<&DailyOverviewRow> {
     let mut rows = snapshot.daily_history.iter().collect::<Vec<_>>();
     rows.sort_by(|left, right| left.day.cmp(&right.day));
+    rows
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn latest_daily_rows(snapshot: &LiveSnapshot, limit: usize) -> Vec<&DailyOverviewRow> {
+    let rows = sorted_daily_rows(snapshot);
     let keep_from = rows.len().saturating_sub(limit);
     rows.into_iter().skip(keep_from).collect()
+}
+
+fn heatmap_window_label(rows: &[&DailyOverviewRow]) -> String {
+    let Some(first) = rows.first() else {
+        return "No recent days".to_owned();
+    };
+    let Some(last) = rows.last() else {
+        return "No recent days".to_owned();
+    };
+    format!(
+        "{}-{}",
+        month_day_label(first.day.as_str()),
+        month_day_label(last.day.as_str())
+    )
+}
+
+fn heatmap_window_page_label(total_rows: usize, page_offset: usize) -> String {
+    if total_rows <= 7 {
+        return "latest".to_owned();
+    }
+
+    let total_pages = total_rows.div_ceil(7);
+    if page_offset == 0 {
+        format!("latest 1/{total_pages}")
+    } else {
+        format!("older {}/{}", page_offset.saturating_add(1), total_pages)
+    }
+}
+
+fn month_day_label(day: &str) -> String {
+    let mut parts = day.split('-');
+    let _year = parts.next();
+    let month = parts.next().unwrap_or_default();
+    let date = parts.next().unwrap_or_default();
+    let month_label = match month {
+        "01" => "Jan",
+        "02" => "Feb",
+        "03" => "Mar",
+        "04" => "Apr",
+        "05" => "May",
+        "06" => "Jun",
+        "07" => "Jul",
+        "08" => "Aug",
+        "09" => "Sep",
+        "10" => "Oct",
+        "11" => "Nov",
+        "12" => "Dec",
+        _ => month,
+    };
+    format!("{month_label} {date}")
 }
 
 fn build_dashboard_heatmap_grid(
@@ -10414,41 +11097,56 @@ impl CoverageFamily {
 impl RefreshPolicySnapshot {
     const fn from_config(config: &Config) -> Self {
         Self {
-            personal_interval_secs: config.refresh.personal_interval_secs,
-            daily_interval_secs: config.refresh.daily_interval_secs,
-            heartrate_interval_secs: config.refresh.heartrate_interval_secs,
-            workout_interval_secs: config.refresh.workout_interval_secs,
-            enhanced_tag_interval_secs: config.refresh.enhanced_tag_interval_secs,
-            session_interval_secs: config.refresh.session_interval_secs,
-            personal_stale_after_secs: config.refresh.personal_stale_after_secs,
-            daily_stale_after_secs: config.refresh.daily_stale_after_secs,
-            heartrate_stale_after_secs: config.refresh.heartrate_stale_after_secs,
-            workout_stale_after_secs: config.refresh.workout_stale_after_secs,
-            enhanced_tag_stale_after_secs: config.refresh.enhanced_tag_stale_after_secs,
-            session_stale_after_secs: config.refresh.session_stale_after_secs,
+            sync_intervals: FamilyRefreshPolicy {
+                personal: config.refresh.personal_interval_secs,
+                daily: config.refresh.daily_interval_secs,
+                heartrate: config.refresh.heartrate_interval_secs,
+                workout: config.refresh.workout_interval_secs,
+                enhanced_tag: config.refresh.enhanced_tag_interval_secs,
+                session: config.refresh.session_interval_secs,
+            },
+            stale_after: FamilyRefreshPolicy {
+                personal: config.refresh.personal_stale_after_secs,
+                daily: config.refresh.daily_stale_after_secs,
+                heartrate: config.refresh.heartrate_stale_after_secs,
+                workout: config.refresh.workout_stale_after_secs,
+                enhanced_tag: config.refresh.enhanced_tag_stale_after_secs,
+                session: config.refresh.session_stale_after_secs,
+            },
         }
     }
 
     const fn stale_after_seconds(&self, family: DataFamily) -> u64 {
         match family {
-            DataFamily::Personal => self.personal_stale_after_secs,
-            DataFamily::Daily => self.daily_stale_after_secs,
-            DataFamily::Heartrate => self.heartrate_stale_after_secs,
-            DataFamily::Workout => self.workout_stale_after_secs,
-            DataFamily::EnhancedTag => self.enhanced_tag_stale_after_secs,
-            DataFamily::Session => self.session_stale_after_secs,
+            DataFamily::Personal => self.stale_after.personal,
+            DataFamily::Daily => self.stale_after.daily,
+            DataFamily::Heartrate => self.stale_after.heartrate,
+            DataFamily::Workout => self.stale_after.workout,
+            DataFamily::EnhancedTag => self.stale_after.enhanced_tag,
+            DataFamily::Session => self.stale_after.session,
+        }
+    }
+
+    const fn stale_after_seconds_for_sync_family(&self, family: SyncFamily) -> u64 {
+        match family {
+            SyncFamily::Personal => self.stale_after.personal,
+            SyncFamily::Daily | SyncFamily::Spo2 => self.stale_after.daily,
+            SyncFamily::Heartrate => self.stale_after.heartrate,
+            SyncFamily::Workout => self.stale_after.workout,
+            SyncFamily::EnhancedTag => self.stale_after.enhanced_tag,
+            SyncFamily::Session => self.stale_after.session,
         }
     }
 
     fn summary(&self) -> String {
         format!(
             "personal={}s daily={}s heartrate={}s workouts={}s tags={}s sessions={}s",
-            self.personal_interval_secs,
-            self.daily_interval_secs,
-            self.heartrate_interval_secs,
-            self.workout_interval_secs,
-            self.enhanced_tag_interval_secs,
-            self.session_interval_secs
+            self.sync_intervals.personal,
+            self.sync_intervals.daily,
+            self.sync_intervals.heartrate,
+            self.sync_intervals.workout,
+            self.sync_intervals.enhanced_tag,
+            self.sync_intervals.session
         )
     }
 }
@@ -10469,7 +11167,13 @@ impl AppModel {
     }
 }
 
-const fn empty_dashboard_model() -> DashboardModel {
+fn empty_dashboard_model() -> DashboardModel {
+    let empty_fallback = DashboardTileFallback {
+        primary: String::new(),
+        primary_compact: String::new(),
+        secondary: String::new(),
+        secondary_compact: String::new(),
+    };
     DashboardModel {
         header: HeaderStripModel {
             app_title: String::new(),
@@ -10482,6 +11186,7 @@ const fn empty_dashboard_model() -> DashboardModel {
         selected_day_label: String::new(),
         readiness: DashboardScoreTile {
             availability: MetricPanelState::Empty,
+            tile_state: DashboardTileState::Unavailable,
             primary_value: String::new(),
             score_band: None,
             secondary_lines: Vec::new(),
@@ -10489,17 +11194,21 @@ const fn empty_dashboard_model() -> DashboardModel {
             trend: Vec::new(),
             ring_fill_percent: 0,
             note: String::new(),
+            fallback: empty_fallback.clone(),
         },
         sleep: DashboardSleepTile {
             availability: MetricPanelState::Empty,
+            tile_state: DashboardTileState::Unavailable,
             duration_label: String::new(),
             score_label: String::new(),
             score_band: None,
             trend: Vec::new(),
             strip_note: String::new(),
+            fallback: empty_fallback.clone(),
         },
         activity: DashboardScoreTile {
             availability: MetricPanelState::Empty,
+            tile_state: DashboardTileState::Unavailable,
             primary_value: String::new(),
             score_band: None,
             secondary_lines: Vec::new(),
@@ -10507,9 +11216,11 @@ const fn empty_dashboard_model() -> DashboardModel {
             trend: Vec::new(),
             ring_fill_percent: 0,
             note: String::new(),
+            fallback: empty_fallback.clone(),
         },
         hrv: DashboardTrendPanel {
             availability: MetricPanelState::Unavailable,
+            tile_state: DashboardTileState::Unavailable,
             primary_label: String::new(),
             baseline_label: String::new(),
             range_label: String::new(),
@@ -10517,17 +11228,21 @@ const fn empty_dashboard_model() -> DashboardModel {
             judged_state: None,
             values: Vec::new(),
             note: String::new(),
+            fallback: empty_fallback.clone(),
         },
         body_temp: DashboardThermometerPanel {
             availability: MetricPanelState::Empty,
+            tile_state: DashboardTileState::Unavailable,
             deviation_tenths: None,
             value_label: String::new(),
             delta_state: DashboardDeltaState::Neutral,
             judged_state: None,
             note: String::new(),
+            fallback: empty_fallback.clone(),
         },
         heart_rate: DashboardTrendPanel {
             availability: MetricPanelState::Empty,
+            tile_state: DashboardTileState::Unavailable,
             primary_label: String::new(),
             baseline_label: String::new(),
             range_label: String::new(),
@@ -10535,9 +11250,11 @@ const fn empty_dashboard_model() -> DashboardModel {
             judged_state: None,
             values: Vec::new(),
             note: String::new(),
+            fallback: empty_fallback.clone(),
         },
         respiratory_rate: DashboardHistogramPanel {
             availability: MetricPanelState::Unavailable,
+            tile_state: DashboardTileState::Unavailable,
             primary_label: String::new(),
             delta_label: String::new(),
             range_label: String::new(),
@@ -10545,9 +11262,11 @@ const fn empty_dashboard_model() -> DashboardModel {
             judged_state: None,
             bars: Vec::new(),
             note: String::new(),
+            fallback: empty_fallback.clone(),
         },
         spo2: DashboardTrendPanel {
             availability: MetricPanelState::Empty,
+            tile_state: DashboardTileState::Unavailable,
             primary_label: String::new(),
             baseline_label: String::new(),
             range_label: String::new(),
@@ -10555,11 +11274,11 @@ const fn empty_dashboard_model() -> DashboardModel {
             judged_state: None,
             values: Vec::new(),
             note: String::new(),
+            fallback: empty_fallback,
         },
         breakdown: DashboardBreakdownPanel {
             availability: MetricPanelState::Empty,
             rails: Vec::new(),
-            waveform: Vec::new(),
             note: String::new(),
         },
         weekly: DashboardWeeklyHeatmap {
@@ -10576,6 +11295,8 @@ const fn empty_dashboard_model() -> DashboardModel {
                 selected_cell: None,
             },
             note: String::new(),
+            window_label: String::new(),
+            window_page_label: String::new(),
         },
     }
 }
@@ -11861,9 +12582,9 @@ fn demo_eval_review_case() -> PersistedEvalCaseDetail {
             prompt_version: REVIEW_PROMPT_VERSION.to_owned(),
             output_schema_version: "ringmaster.ai.review.v3".to_owned(),
             lineage: EvalArtifactLineage {
-                ai_run_id: Some("airun-demo-review-20260408".to_owned()),
-                ai_artifact_id: Some("run-demo-review-20260408".to_owned()),
-                report_id: Some("demo-report-review".to_owned()),
+                run: Some("airun-demo-review-20260408".to_owned()),
+                artifact: Some("run-demo-review-20260408".to_owned()),
+                report: Some("demo-report-review".to_owned()),
             },
         },
         baseline: Some(PersistedEvalArtifactDetail {
@@ -11928,9 +12649,9 @@ fn demo_eval_compare_case() -> PersistedEvalCaseDetail {
             prompt_version: COMPARE_PROMPT_VERSION.to_owned(),
             output_schema_version: "ringmaster.ai.compare.v3".to_owned(),
             lineage: EvalArtifactLineage {
-                ai_run_id: Some("airun-demo-compare-20260408".to_owned()),
-                ai_artifact_id: None,
-                report_id: None,
+                run: Some("airun-demo-compare-20260408".to_owned()),
+                artifact: None,
+                report: None,
             },
         },
         baseline: Some(PersistedEvalArtifactDetail {
@@ -11981,35 +12702,47 @@ fn demo_requested_scopes() -> Vec<String> {
 
 const fn demo_refresh_policy_snapshot() -> RefreshPolicySnapshot {
     RefreshPolicySnapshot {
-        personal_interval_secs: 3_600,
-        daily_interval_secs: 300,
-        heartrate_interval_secs: 60,
-        workout_interval_secs: 600,
-        enhanced_tag_interval_secs: 300,
-        session_interval_secs: 300,
-        personal_stale_after_secs: 72 * 60 * 60,
-        daily_stale_after_secs: 12 * 60 * 60,
-        heartrate_stale_after_secs: 15 * 60,
-        workout_stale_after_secs: 24 * 60 * 60,
-        enhanced_tag_stale_after_secs: 12 * 60 * 60,
-        session_stale_after_secs: 12 * 60 * 60,
+        sync_intervals: FamilyRefreshPolicy {
+            personal: 3_600,
+            daily: 300,
+            heartrate: 60,
+            workout: 600,
+            enhanced_tag: 300,
+            session: 300,
+        },
+        stale_after: FamilyRefreshPolicy {
+            personal: 72 * 60 * 60,
+            daily: 12 * 60 * 60,
+            heartrate: 15 * 60,
+            workout: 24 * 60 * 60,
+            enhanced_tag: 12 * 60 * 60,
+            session: 12 * 60 * 60,
+        },
     }
 }
 
 fn demo_sync_state(family: SyncFamily, message: &str, status: SyncRunStatus) -> SyncStateRecord {
     SyncStateRecord {
         sync_key: family.sync_key().to_owned(),
+        family: family.label().to_owned(),
         status,
         cursor: None,
+        last_successful_sync_end: Some("2026-04-08T22:01:00Z".to_owned()),
         last_attempted_at: "2026-04-08T22:00:00Z".to_owned(),
         last_completed_at: Some("2026-04-08T22:01:00Z".to_owned()),
+        last_reconcile_end: Some("2026-04-08T22:01:00Z".to_owned()),
+        oldest_recently_reconciled_at: Some("2026-03-09T00:00:00Z".to_owned()),
         message: Some(message.to_owned()),
         granted_scopes: vec![family.capability_kind().scope_name().to_owned()],
         last_error: None,
+        last_error_at: None,
+        last_error_kind: None,
+        last_error_detail: None,
         failure_count: 0,
         next_attempt_after: None,
         last_trigger_source: Some("periodic_reconcile".to_owned()),
         last_trigger_detail: Some("demo snapshot".to_owned()),
+        updated_at: "2026-04-08T22:01:00Z".to_owned(),
     }
 }
 
@@ -12019,12 +12752,13 @@ mod tests {
 
     use super::{
         AiBrowserTab, AiLaunchIntent, AiOpsSnapshot, AiPreflightState, AppState,
-        COMPARE_PROMPT_VERSION, DataFamily, HeartRateDay, LiveModelOptions, LiveSnapshot,
-        OverlayFilterState, OverlayToggleFocusMemory, PatternMetricFilter, REVIEW_PROMPT_VERSION,
-        RefreshPolicySnapshot, ReviewScreenMode, RunMode, Screen, TrendSortMode, TrendWindowKind,
-        WebhookOpsSnapshot, build_ai_artifact_summary_view, build_live_model, build_ops_model,
-        build_state_from_snapshot, demo_eval_run_details, empty_investigation_report,
-        newest_day_index, review_card_badges, review_detail_lines, serialize_json,
+        COMPARE_PROMPT_VERSION, DataFamily, FamilyRefreshPolicy, HeartRateDay, LiveModelOptions,
+        LiveSnapshot, OverlayFilterState, OverlayToggleFocusMemory, PatternMetricFilter,
+        REVIEW_PROMPT_VERSION, RefreshPolicySnapshot, ReviewScreenMode, RunMode, Screen,
+        TrendSortMode, WebhookOpsSnapshot, build_ai_artifact_summary_view, build_live_model,
+        build_ops_model, build_state_from_snapshot, demo_eval_run_details,
+        empty_investigation_report, newest_day_index, review_card_badges, review_detail_lines,
+        serialize_json,
     };
     use crate::action::Action;
     use crate::ai::{
@@ -12079,18 +12813,68 @@ mod tests {
 
     fn test_refresh_policy() -> RefreshPolicySnapshot {
         RefreshPolicySnapshot {
-            personal_interval_secs: 3600,
-            daily_interval_secs: 300,
-            heartrate_interval_secs: 60,
-            workout_interval_secs: 600,
-            enhanced_tag_interval_secs: 300,
-            session_interval_secs: 300,
-            personal_stale_after_secs: 72 * 60 * 60,
-            daily_stale_after_secs: 12 * 60 * 60,
-            heartrate_stale_after_secs: 15 * 60,
-            workout_stale_after_secs: 24 * 60 * 60,
-            enhanced_tag_stale_after_secs: 12 * 60 * 60,
-            session_stale_after_secs: 12 * 60 * 60,
+            sync_intervals: FamilyRefreshPolicy {
+                personal: 3600,
+                daily: 300,
+                heartrate: 60,
+                workout: 600,
+                enhanced_tag: 300,
+                session: 300,
+            },
+            stale_after: FamilyRefreshPolicy {
+                personal: 72 * 60 * 60,
+                daily: 12 * 60 * 60,
+                heartrate: 15 * 60,
+                workout: 24 * 60 * 60,
+                enhanced_tag: 12 * 60 * 60,
+                session: 12 * 60 * 60,
+            },
+        }
+    }
+
+    fn sync_state_fixture(
+        sync_key: &str,
+        family: &str,
+        status: SyncRunStatus,
+        granted_scopes: &[&str],
+        message: &str,
+        last_error: Option<OuraProblem>,
+        last_completed_at: Option<&str>,
+    ) -> SyncStateRecord {
+        let attempted_at = "2026-04-08T12:00:00Z";
+        let updated_at = last_completed_at.unwrap_or(attempted_at).to_owned();
+        let last_error_kind = last_error.as_ref().map(|problem| {
+            if problem.status == Some(429) {
+                "rate_limit".to_owned()
+            } else {
+                "api_error".to_owned()
+            }
+        });
+
+        SyncStateRecord {
+            sync_key: sync_key.to_owned(),
+            family: family.to_owned(),
+            status,
+            cursor: None,
+            last_successful_sync_end: last_completed_at.map(|_| "2026-04-08".to_owned()),
+            last_attempted_at: attempted_at.to_owned(),
+            last_completed_at: last_completed_at.map(str::to_owned),
+            last_reconcile_end: None,
+            oldest_recently_reconciled_at: None,
+            message: Some(message.to_owned()),
+            granted_scopes: granted_scopes
+                .iter()
+                .map(|scope| (*scope).to_owned())
+                .collect(),
+            last_error_at: last_error.as_ref().map(|_| attempted_at.to_owned()),
+            last_error_kind,
+            last_error_detail: last_error.as_ref().map(|_| message.to_owned()),
+            last_error,
+            failure_count: 1,
+            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
+            last_trigger_source: Some("manual".to_owned()),
+            last_trigger_detail: None,
+            updated_at,
         }
     }
 
@@ -12307,7 +13091,6 @@ mod tests {
             selected_timeline_point: 0,
             timeline_window_hours: 24,
             overlay_toggle_focus: OverlayToggleFocusMemory::default(),
-            trends_window: TrendWindowKind::Days7,
             trend_sort_mode: TrendSortMode::Concern,
             trends_matrix_subfocus: TrendsMatrixSubfocus::SortTabs,
             selected_trend_row_index: 0,
@@ -12567,7 +13350,6 @@ mod tests {
             explain_overlay_toggle_index: 0,
             patterns_overlay_toggle_index: 0,
             window_hours: 24,
-            trends_window: TrendWindowKind::Days7,
             trend_sort_mode: TrendSortMode::Concern,
             trends_matrix_subfocus: TrendsMatrixSubfocus::SortTabs,
             selected_trend_row_index: 0,
@@ -12890,6 +13672,132 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("Latest eval needs attention"))
         );
+    }
+
+    #[test]
+    fn ops_family_statuses_include_spo2_support_without_claiming_reconcile_coverage() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        let mut spo2_state = sync_state_fixture(
+            "oura.spo2",
+            "spo2",
+            SyncRunStatus::Success,
+            &["spo2"],
+            "spo2 sync complete",
+            None,
+            Some("2026-04-08T12:01:00Z"),
+        );
+        spo2_state.last_successful_sync_end = Some("2026-04-08".to_owned());
+        spo2_state.last_reconcile_end = Some("2026-04-08".to_owned());
+        spo2_state.oldest_recently_reconciled_at = Some("2026-03-10".to_owned());
+        spo2_state.last_trigger_source = Some("periodic_reconcile".to_owned());
+        snapshot.sync_states = vec![
+            sync_state_fixture(
+                "oura.daily",
+                "daily",
+                SyncRunStatus::Success,
+                &["daily"],
+                "daily sync complete",
+                None,
+                Some("2026-04-08T12:01:00Z"),
+            ),
+            spo2_state,
+        ];
+
+        let model = build_ops_model(&snapshot, false);
+        let daily = model
+            .family_statuses
+            .iter()
+            .find(|row| row.label == "Daily")
+            .unwrap_or_else(|| panic!("daily family row should exist"));
+        let spo2 = model
+            .family_statuses
+            .iter()
+            .find(|row| row.label == "SpO2")
+            .unwrap_or_else(|| panic!("spo2 family row should exist"));
+
+        assert!(daily.scope_label.contains("webhook-assisted"));
+        assert!(spo2.scope_label.contains("periodic-only"));
+        assert!(spo2.detail.contains("coverage=n/a"));
+        assert!(!spo2.detail.contains("2026-03-10..2026-04-08"));
+        assert!(spo2.detail.contains("success_end=2026-04-08"));
+    }
+
+    #[test]
+    fn ops_family_statuses_surface_missing_scope_and_rate_limits() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.auth_status.capability_report = CapabilityReport::from_scopes(
+            &[
+                "daily".to_owned(),
+                "spo2".to_owned(),
+                "heartrate".to_owned(),
+            ],
+            &["daily".to_owned(), "heartrate".to_owned()],
+        );
+        snapshot.sync_states = vec![sync_state_fixture(
+            "oura.heartrate",
+            "heartrate",
+            SyncRunStatus::Failed,
+            &["heartrate"],
+            "heartrate sync rate limited",
+            Some(OuraProblem::new(
+                Some(429),
+                "Too Many Requests",
+                Some("retry after a minute".to_owned()),
+            )),
+            None,
+        )];
+
+        let model = build_ops_model(&snapshot, false);
+        let spo2 = model
+            .family_statuses
+            .iter()
+            .find(|row| row.label == "SpO2")
+            .unwrap_or_else(|| panic!("spo2 family row should exist"));
+        let heartrate = model
+            .family_statuses
+            .iter()
+            .find(|row| row.label == "Heartrate")
+            .unwrap_or_else(|| panic!("heartrate family row should exist"));
+
+        assert_eq!(spo2.state_label, "missing-scope");
+        assert!(spo2.detail.to_ascii_lowercase().contains("scope"));
+        assert_eq!(heartrate.state_label, "rate-limited");
+        assert!(
+            heartrate
+                .detail
+                .to_ascii_lowercase()
+                .contains("rate limited")
+                || heartrate.detail.contains("429")
+        );
+    }
+
+    #[test]
+    fn ops_family_statuses_preserve_migrated_legacy_rate_limits() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        let mut heartrate = sync_state_fixture(
+            "oura.heartrate",
+            "heartrate",
+            SyncRunStatus::Failed,
+            &["heartrate"],
+            "legacy rate-limited state",
+            Some(OuraProblem::new(
+                Some(429),
+                "Too Many Requests",
+                Some("retry after a minute".to_owned()),
+            )),
+            None,
+        );
+        heartrate.last_error_kind = Some("api_error".to_owned());
+        snapshot.sync_states = vec![heartrate];
+
+        let model = build_ops_model(&snapshot, false);
+        let heartrate = model
+            .family_statuses
+            .iter()
+            .find(|row| row.label == "Heartrate")
+            .unwrap_or_else(|| panic!("heartrate family row should exist"));
+
+        assert_eq!(heartrate.state_label, "rate-limited");
     }
 
     #[test]
@@ -13269,7 +14177,6 @@ mod tests {
                 explain_overlay_toggle_index: 0,
                 patterns_overlay_toggle_index: 0,
                 window_hours: 24,
-                trends_window: TrendWindowKind::Days7,
                 trend_sort_mode: TrendSortMode::Concern,
                 trends_matrix_subfocus: TrendsMatrixSubfocus::SortTabs,
                 selected_trend_row_index: 0,
@@ -13394,7 +14301,6 @@ mod tests {
                 explain_overlay_toggle_index: 0,
                 patterns_overlay_toggle_index: 0,
                 window_hours: 24,
-                trends_window: TrendWindowKind::Days7,
                 trend_sort_mode: TrendSortMode::Concern,
                 trends_matrix_subfocus: TrendsMatrixSubfocus::SortTabs,
                 selected_trend_row_index: 0,
@@ -13558,24 +14464,19 @@ mod tests {
         let mut snapshot = make_snapshot(&["2026-04-08"]);
         snapshot.auth_status.capability_report =
             CapabilityReport::from_scopes(&["daily".to_owned()], &["daily".to_owned()]);
-        snapshot.sync_states = vec![SyncStateRecord {
-            sync_key: "oura.daily".to_owned(),
-            status: SyncRunStatus::Failed,
-            cursor: None,
-            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
-            last_completed_at: None,
-            message: Some("rate limited".to_owned()),
-            granted_scopes: vec!["daily".to_owned()],
-            last_error: Some(OuraProblem::new(
+        snapshot.sync_states = vec![sync_state_fixture(
+            "oura.daily",
+            "daily",
+            SyncRunStatus::Failed,
+            &["daily"],
+            "rate limited",
+            Some(OuraProblem::new(
                 Some(429),
                 "Too Many Requests",
                 Some("rate limited".to_owned()),
             )),
-            failure_count: 1,
-            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
-            last_trigger_source: Some("manual".to_owned()),
-            last_trigger_detail: None,
-        }];
+            None,
+        )];
 
         let availability = super::telemetry_availability_for_metric(
             &snapshot,
@@ -13615,24 +14516,19 @@ mod tests {
             &["daily".to_owned(), "spo2".to_owned()],
             &["daily".to_owned()],
         );
-        snapshot.sync_states = vec![SyncStateRecord {
-            sync_key: "oura.daily".to_owned(),
-            status: SyncRunStatus::Failed,
-            cursor: None,
-            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
-            last_completed_at: None,
-            message: Some("daily sync failed".to_owned()),
-            granted_scopes: vec!["daily".to_owned()],
-            last_error: Some(OuraProblem::new(
+        snapshot.sync_states = vec![sync_state_fixture(
+            "oura.daily",
+            "daily",
+            SyncRunStatus::Failed,
+            &["daily"],
+            "daily sync failed",
+            Some(OuraProblem::new(
                 Some(500),
                 "Upstream failure",
                 Some("daily sync failed".to_owned()),
             )),
-            failure_count: 1,
-            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
-            last_trigger_source: Some("manual".to_owned()),
-            last_trigger_detail: None,
-        }];
+            None,
+        )];
 
         let availability = super::telemetry_availability_for_metric(
             &snapshot,
@@ -13651,26 +14547,19 @@ mod tests {
             &["daily".to_owned(), "spo2".to_owned()],
             &["daily".to_owned(), "spo2".to_owned()],
         );
-        snapshot.sync_states = vec![SyncStateRecord {
-            sync_key: "oura.daily".to_owned(),
-            status: SyncRunStatus::Partial,
-            cursor: None,
-            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
-            last_completed_at: Some("2026-04-08T12:01:00Z".to_owned()),
-            message: Some(
-                "Imported core daily rows; optional review-support endpoints degraded independently: daily_spo2 (Oura API problem 429: Too Many Requests).".to_owned(),
-            ),
-            granted_scopes: vec!["daily".to_owned(), "spo2".to_owned()],
-            last_error: Some(OuraProblem::new(
+        snapshot.sync_states = vec![sync_state_fixture(
+            "oura.spo2",
+            "spo2",
+            SyncRunStatus::Partial,
+            &["spo2"],
+            "Imported SpO2 rows with a retriable tail gap: daily_spo2 (Oura API problem 429: Too Many Requests).",
+            Some(OuraProblem::new(
                 Some(429),
                 "Too Many Requests",
                 Some("daily_spo2 rate limited".to_owned()),
             )),
-            failure_count: 1,
-            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
-            last_trigger_source: Some("manual".to_owned()),
-            last_trigger_detail: None,
-        }];
+            Some("2026-04-08T12:01:00Z"),
+        )];
 
         let availability = super::telemetry_availability_for_metric(
             &snapshot,
@@ -13686,7 +14575,7 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_availability_for_metric_uses_capability_specific_partial_failures() {
+    fn telemetry_availability_for_metric_uses_capability_specific_family_failures() {
         let mut snapshot = make_snapshot(&["2026-04-08"]);
         snapshot.auth_status.capability_report = CapabilityReport::from_scopes(
             &["daily".to_owned(), "spo2".to_owned(), "stress".to_owned()],
@@ -13694,30 +14583,34 @@ mod tests {
         );
         snapshot.daily_spo2.clear();
         snapshot.daily_stress.clear();
-        snapshot.sync_states = vec![SyncStateRecord {
-            sync_key: "oura.daily".to_owned(),
-            status: SyncRunStatus::Partial,
-            cursor: None,
-            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
-            last_completed_at: Some("2026-04-08T12:01:00Z".to_owned()),
-            message: Some(
-                "Imported core daily rows; optional review-support endpoints degraded independently: daily_spo2 (Oura API problem 429: Too Many Requests); daily_stress (Oura API problem 500: Internal Server Error).".to_owned(),
+        snapshot.sync_states = vec![
+            sync_state_fixture(
+                "oura.spo2",
+                "spo2",
+                SyncRunStatus::Partial,
+                &["spo2"],
+                "SpO2 window degraded independently: daily_spo2 (Oura API problem 429: Too Many Requests).",
+                Some(OuraProblem::new(
+                    Some(429),
+                    "Too Many Requests",
+                    Some("daily_spo2 rate limited".to_owned()),
+                )),
+                Some("2026-04-08T12:01:00Z"),
             ),
-            granted_scopes: vec![
-                "daily".to_owned(),
-                "spo2".to_owned(),
-                "stress".to_owned(),
-            ],
-            last_error: Some(OuraProblem::new(
-                Some(429),
-                "Too Many Requests",
-                Some("daily_spo2 rate limited".to_owned()),
-            )),
-            failure_count: 1,
-            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
-            last_trigger_source: Some("manual".to_owned()),
-            last_trigger_detail: None,
-        }];
+            sync_state_fixture(
+                "oura.daily",
+                "daily",
+                SyncRunStatus::Partial,
+                &["daily", "stress"],
+                "Daily review endpoints degraded independently: daily_stress (Oura API problem 500: Internal Server Error).",
+                Some(OuraProblem::new(
+                    Some(500),
+                    "Internal Server Error",
+                    Some("daily_stress error".to_owned()),
+                )),
+                Some("2026-04-08T12:01:00Z"),
+            ),
+        ];
 
         let spo2 = super::telemetry_availability_for_metric(
             &snapshot,
@@ -13737,28 +14630,66 @@ mod tests {
     }
 
     #[test]
+    fn telemetry_availability_for_metric_surfaces_failed_spo2_family_without_cached_rows() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        snapshot.auth_status.capability_report = CapabilityReport::from_scopes(
+            &["daily".to_owned(), "spo2".to_owned()],
+            &["daily".to_owned(), "spo2".to_owned()],
+        );
+        snapshot.daily_spo2.clear();
+        snapshot.sync_states = vec![
+            sync_state_fixture(
+                "oura.daily",
+                "daily",
+                SyncRunStatus::Success,
+                &["daily"],
+                "daily sync complete",
+                None,
+                Some("2026-04-08T12:01:00Z"),
+            ),
+            sync_state_fixture(
+                "oura.spo2",
+                "spo2",
+                SyncRunStatus::Failed,
+                &["spo2"],
+                "SpO2 sync failed",
+                Some(OuraProblem::new(
+                    Some(429),
+                    "Too Many Requests",
+                    Some("spo2 rate limited".to_owned()),
+                )),
+                None,
+            ),
+        ];
+
+        let availability = super::telemetry_availability_for_metric(
+            &snapshot,
+            CapabilityKind::Spo2,
+            DataFamily::Daily,
+            false,
+        );
+
+        assert_eq!(availability, TelemetryAvailability::RateLimited);
+    }
+
+    #[test]
     fn tag_coverage_preserves_sync_failures_without_cached_rows() {
         let mut snapshot = make_snapshot(&["2026-04-08"]);
         snapshot.auth_status.capability_report =
             CapabilityReport::from_scopes(&["tag".to_owned()], &["tag".to_owned()]);
-        snapshot.sync_states = vec![SyncStateRecord {
-            sync_key: "oura.enhanced_tags".to_owned(),
-            status: SyncRunStatus::Failed,
-            cursor: None,
-            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
-            last_completed_at: None,
-            message: Some("tag sync failed".to_owned()),
-            granted_scopes: vec!["tag".to_owned()],
-            last_error: Some(OuraProblem::new(
+        snapshot.sync_states = vec![sync_state_fixture(
+            "oura.enhanced_tags",
+            "tag",
+            SyncRunStatus::Failed,
+            &["tag"],
+            "tag sync failed",
+            Some(OuraProblem::new(
                 Some(429),
                 "Too Many Requests",
                 Some("tag sync failed".to_owned()),
             )),
-            failure_count: 1,
-            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
-            last_trigger_source: Some("manual".to_owned()),
-            last_trigger_detail: None,
-        }];
+            None,
+        )];
 
         assert_eq!(
             super::coverage_availability(&snapshot, super::CoverageFamily::Tag),
@@ -13777,24 +14708,19 @@ mod tests {
         snapshot.heartrate_daily_averages.clear();
         snapshot.auth_status.capability_report =
             CapabilityReport::from_scopes(&["heartrate".to_owned()], &["heartrate".to_owned()]);
-        snapshot.sync_states = vec![SyncStateRecord {
-            sync_key: "oura.heartrate".to_owned(),
-            status: SyncRunStatus::Failed,
-            cursor: None,
-            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
-            last_completed_at: None,
-            message: Some("heartrate sync failed".to_owned()),
-            granted_scopes: vec!["heartrate".to_owned()],
-            last_error: Some(OuraProblem::new(
+        snapshot.sync_states = vec![sync_state_fixture(
+            "oura.heartrate",
+            "heartrate",
+            SyncRunStatus::Failed,
+            &["heartrate"],
+            "heartrate sync failed",
+            Some(OuraProblem::new(
                 Some(429),
                 "Too Many Requests",
                 Some("heartrate sync failed".to_owned()),
             )),
-            failure_count: 1,
-            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
-            last_trigger_source: Some("manual".to_owned()),
-            last_trigger_detail: None,
-        }];
+            None,
+        )];
 
         let model = super::build_live_model(&snapshot, &base_live_model_options());
         let rail = model
@@ -13816,24 +14742,19 @@ mod tests {
         snapshot.daily_stress.clear();
         snapshot.auth_status.capability_report =
             CapabilityReport::from_scopes(&["daily".to_owned()], &["daily".to_owned()]);
-        snapshot.sync_states = vec![SyncStateRecord {
-            sync_key: "oura.daily".to_owned(),
-            status: SyncRunStatus::Failed,
-            cursor: None,
-            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
-            last_completed_at: None,
-            message: Some("daily sync failed".to_owned()),
-            granted_scopes: vec!["daily".to_owned()],
-            last_error: Some(OuraProblem::new(
+        snapshot.sync_states = vec![sync_state_fixture(
+            "oura.daily",
+            "daily",
+            SyncRunStatus::Failed,
+            &["daily"],
+            "daily sync failed",
+            Some(OuraProblem::new(
                 Some(429),
                 "Too Many Requests",
                 Some("daily sync failed".to_owned()),
             )),
-            failure_count: 1,
-            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
-            last_trigger_source: Some("manual".to_owned()),
-            last_trigger_detail: None,
-        }];
+            None,
+        )];
 
         let model = super::build_live_model(&snapshot, &base_live_model_options());
 
@@ -13855,24 +14776,19 @@ mod tests {
         snapshot.sleep_periods.clear();
         snapshot.auth_status.capability_report =
             CapabilityReport::from_scopes(&["daily".to_owned()], &["daily".to_owned()]);
-        snapshot.sync_states = vec![SyncStateRecord {
-            sync_key: "oura.daily".to_owned(),
-            status: SyncRunStatus::Failed,
-            cursor: None,
-            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
-            last_completed_at: None,
-            message: Some("daily sync failed".to_owned()),
-            granted_scopes: vec!["daily".to_owned()],
-            last_error: Some(OuraProblem::new(
+        snapshot.sync_states = vec![sync_state_fixture(
+            "oura.daily",
+            "daily",
+            SyncRunStatus::Failed,
+            &["daily"],
+            "daily sync failed",
+            Some(OuraProblem::new(
                 Some(429),
                 "Too Many Requests",
                 Some("daily sync failed".to_owned()),
             )),
-            failure_count: 1,
-            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
-            last_trigger_source: Some("manual".to_owned()),
-            last_trigger_detail: None,
-        }];
+            None,
+        )];
 
         let model = super::build_live_model(&snapshot, &base_live_model_options());
         let rail = model
@@ -13898,26 +14814,21 @@ mod tests {
         snapshot.daily_history.clear();
         snapshot.auth_status.capability_report =
             CapabilityReport::from_scopes(&["daily".to_owned()], &["daily".to_owned()]);
-        snapshot.sync_states = vec![SyncStateRecord {
-            sync_key: "oura.daily".to_owned(),
-            status: SyncRunStatus::Failed,
-            cursor: None,
-            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
-            last_completed_at: None,
-            message: Some("daily sync failed".to_owned()),
-            granted_scopes: vec!["daily".to_owned()],
-            last_error: Some(OuraProblem::new(
+        snapshot.sync_states = vec![sync_state_fixture(
+            "oura.daily",
+            "daily",
+            SyncRunStatus::Failed,
+            &["daily"],
+            "daily sync failed",
+            Some(OuraProblem::new(
                 Some(429),
                 "Too Many Requests",
                 Some("daily sync failed".to_owned()),
             )),
-            failure_count: 1,
-            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
-            last_trigger_source: Some("manual".to_owned()),
-            last_trigger_detail: None,
-        }];
+            None,
+        )];
 
-        let weekly = super::build_dashboard_weekly_heatmap(&snapshot, "2026-04-08");
+        let weekly = super::build_dashboard_weekly_heatmap(&snapshot, 7, "2026-04-08");
 
         assert_eq!(weekly.availability, MetricPanelState::Unavailable);
         assert!(weekly.recent.day_labels.is_empty());
@@ -14043,7 +14954,42 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_activity_note_uses_selected_day_window() {
+    fn dashboard_tile_state_normalizes_metric_panel_states() {
+        use MetricPanelState::{
+            BaselineOnly, Empty, Error, Fresh, HistoricalOnly, MissingScope, NoCurrentSample,
+            Stale, Unavailable,
+        };
+
+        assert_eq!(
+            super::dashboard_tile_state(Fresh),
+            crate::app::DashboardTileState::Fresh
+        );
+        assert_eq!(
+            super::dashboard_tile_state(BaselineOnly),
+            crate::app::DashboardTileState::BaselineOnly
+        );
+        assert_eq!(
+            super::dashboard_tile_state(Stale),
+            crate::app::DashboardTileState::Stale
+        );
+
+        for state in [
+            NoCurrentSample,
+            HistoricalOnly,
+            MissingScope,
+            Unavailable,
+            Empty,
+            Error,
+        ] {
+            assert_eq!(
+                super::dashboard_tile_state(state),
+                crate::app::DashboardTileState::Unavailable
+            );
+        }
+    }
+
+    #[test]
+    fn dashboard_activity_note_marks_older_selected_days_as_stale() {
         let mut snapshot = make_snapshot(&["2026-04-07", "2026-04-08"]);
         snapshot.daily_activity = vec![
             DailyActivityRecord {
@@ -14070,13 +15016,17 @@ mod tests {
 
         let model = super::build_live_model(&snapshot, &base_live_model_options());
 
+        assert_eq!(
+            model.dashboard.activity.tile_state,
+            crate::app::DashboardTileState::Stale
+        );
         assert!(
             model
                 .dashboard
                 .activity
                 .note
-                .contains("Activity is 5000 on 2026-04-07"),
-            "activity note should be derived from the selected day window: {}",
+                .contains("Cached activity reading from 2026-04-07"),
+            "activity note should make stale selection explicit: {}",
             model.dashboard.activity.note
         );
     }
@@ -14192,7 +15142,6 @@ mod tests {
                 explain_overlay_toggle_index: 0,
                 patterns_overlay_toggle_index: 0,
                 window_hours: 24,
-                trends_window: TrendWindowKind::Days7,
                 trend_sort_mode: TrendSortMode::Concern,
                 trends_matrix_subfocus: TrendsMatrixSubfocus::SortTabs,
                 selected_trend_row_index: 0,
@@ -15015,7 +15964,7 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_weekly_heatmap_uses_recent_and_history_windows_by_viewport() {
+    fn dashboard_weekly_heatmap_defaults_to_latest_seven_day_window() {
         let mut days = Vec::new();
         for day in 1..=14 {
             days.push(format!("2026-04-{day:02}"));
@@ -15027,6 +15976,8 @@ mod tests {
         let weekly = &app.model.dashboard.weekly;
         assert_eq!(weekly.recent.day_labels.len(), 7);
         assert_eq!(weekly.history.day_labels.len(), 14);
+        assert_eq!(weekly.window_label, "Apr 08-Apr 14");
+        assert_eq!(weekly.window_page_label, "latest 1/2");
         assert_eq!(
             weekly
                 .grid_for_viewport(ViewportClass::Medium)
@@ -15039,8 +15990,59 @@ mod tests {
                 .grid_for_viewport(ViewportClass::Wide)
                 .day_labels
                 .len(),
-            14
+            7
         );
+    }
+
+    #[test]
+    fn dashboard_weekly_heatmap_pages_backward_and_forward_by_week() {
+        let mut days = Vec::new();
+        for day in 1..=14 {
+            days.push(format!("2026-04-{day:02}"));
+        }
+        let day_refs = days.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut app =
+            build_state_from_snapshot(RunMode::Demo, "Demo mode ready.", make_snapshot(&day_refs));
+        app.active_screen = Screen::Dashboard;
+        app.set_focused_region(FocusRegion::DashboardHeatmap);
+
+        assert_eq!(app.model.dashboard.weekly.window_label, "Apr 08-Apr 14");
+        assert_eq!(app.model.dashboard.weekly.window_page_label, "latest 1/2");
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::PageBackward));
+        assert_eq!(app.selected_day_index, 6);
+        assert_eq!(app.model.dashboard.weekly.window_label, "Apr 01-Apr 07");
+        assert_eq!(app.model.dashboard.weekly.window_page_label, "older 2/2");
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::PageForward));
+        assert_eq!(app.selected_day_index, 13);
+        assert_eq!(app.model.dashboard.weekly.window_label, "Apr 08-Apr 14");
+        assert_eq!(app.model.dashboard.weekly.window_page_label, "latest 1/2");
+    }
+
+    #[test]
+    fn dashboard_weekly_heatmap_navigation_stays_within_bounds() {
+        let mut days = Vec::new();
+        for day in 1..=14 {
+            days.push(format!("2026-04-{day:02}"));
+        }
+        let day_refs = days.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut app =
+            build_state_from_snapshot(RunMode::Demo, "Demo mode ready.", make_snapshot(&day_refs));
+        app.active_screen = Screen::Dashboard;
+        app.set_focused_region(FocusRegion::DashboardHeatmap);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::PageForward));
+        assert_eq!(app.selected_day_index, 13);
+        assert_eq!(app.model.dashboard.weekly.window_label, "Apr 08-Apr 14");
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::First));
+        assert_eq!(app.selected_day_index, 0);
+        assert_eq!(app.model.dashboard.weekly.window_label, "Apr 01-Apr 07");
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::PageBackward));
+        assert_eq!(app.selected_day_index, 0);
+        assert_eq!(app.model.dashboard.weekly.window_label, "Apr 01-Apr 07");
     }
 
     #[test]

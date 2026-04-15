@@ -397,7 +397,7 @@ fn build_bindings() -> Vec<Keybinding> {
     bindings.extend(list_region_bindings(Screen::Ai, Secondary));
     bindings.extend(list_region_bindings(Screen::Ai, Tertiary));
     bindings.extend(list_region_bindings(Screen::Dashboard, DashboardBreakdown));
-    bindings.extend(list_region_bindings(Screen::Dashboard, DashboardHeatmap));
+    bindings.extend(dashboard_heatmap_list_bindings());
     bindings.extend(list_region_bindings(Screen::Trends, TrendsMatrix));
 
     bindings.extend(horizontal_region_bindings(Screen::Explain, ContextPrimary));
@@ -420,7 +420,7 @@ fn build_bindings() -> Vec<Keybinding> {
         Screen::Dashboard,
         DashboardBreakdown,
     ));
-    bindings.extend(lateral_region_bindings(Screen::Dashboard, DashboardHeatmap));
+    bindings.extend(dashboard_heatmap_week_bindings());
 
     bindings.extend([
         key(
@@ -1351,6 +1351,139 @@ fn horizontal_region_bindings(screen: Screen, region: FocusRegion) -> Vec<Keybin
     ]
 }
 
+fn dashboard_heatmap_week_bindings() -> Vec<Keybinding> {
+    use Action::MoveFocusedRegion;
+    use BindingKind::{Expert, Standard};
+    use BindingScope::ScreenRegion;
+    use ChordKey::{Char, Left, Right};
+
+    vec![
+        key(
+            ScreenRegion(Screen::Dashboard, FocusRegion::DashboardHeatmap),
+            Standard,
+            KeyChord::plain(Left),
+            MoveFocusedRegion(crate::navigation::NavMove::PageBackward),
+            "`Left` older week",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, FocusRegion::DashboardHeatmap),
+            Standard,
+            KeyChord::plain(Right),
+            MoveFocusedRegion(crate::navigation::NavMove::PageForward),
+            "`Right` newer week",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, FocusRegion::DashboardHeatmap),
+            Expert,
+            KeyChord::plain(Char('h')),
+            MoveFocusedRegion(crate::navigation::NavMove::PageBackward),
+            "`h` older week",
+            false,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, FocusRegion::DashboardHeatmap),
+            Expert,
+            KeyChord::plain(Char('l')),
+            MoveFocusedRegion(crate::navigation::NavMove::PageForward),
+            "`l` newer week",
+            false,
+        ),
+    ]
+}
+
+fn dashboard_heatmap_list_bindings() -> Vec<Keybinding> {
+    use Action::MoveFocusedRegion;
+    use BindingKind::{Expert, Standard};
+    use BindingScope::ScreenRegion;
+    use ChordKey::{Char, Down, End, Home, PageDown, PageUp, Up};
+
+    let scope = ScreenRegion(Screen::Dashboard, FocusRegion::DashboardHeatmap);
+    vec![
+        key(
+            scope,
+            Standard,
+            KeyChord::plain(Up),
+            MoveFocusedRegion(crate::navigation::NavMove::Previous),
+            "`Up` previous day",
+            true,
+        ),
+        key(
+            scope,
+            Standard,
+            KeyChord::plain(Down),
+            MoveFocusedRegion(crate::navigation::NavMove::Next),
+            "`Down` next day",
+            true,
+        ),
+        key(
+            scope,
+            Standard,
+            KeyChord::plain(Home),
+            MoveFocusedRegion(crate::navigation::NavMove::First),
+            "`Home` earliest day",
+            false,
+        ),
+        key(
+            scope,
+            Standard,
+            KeyChord::plain(End),
+            MoveFocusedRegion(crate::navigation::NavMove::Last),
+            "`End` latest day",
+            false,
+        ),
+        key(
+            scope,
+            Standard,
+            KeyChord::plain(PageUp),
+            MoveFocusedRegion(crate::navigation::NavMove::PageBackward),
+            "`PageUp` older week",
+            false,
+        ),
+        key(
+            scope,
+            Standard,
+            KeyChord::plain(PageDown),
+            MoveFocusedRegion(crate::navigation::NavMove::PageForward),
+            "`PageDown` newer week",
+            false,
+        ),
+        key(
+            scope,
+            Expert,
+            KeyChord::plain(Char('k')),
+            MoveFocusedRegion(crate::navigation::NavMove::Previous),
+            "`k` previous day",
+            false,
+        ),
+        key(
+            scope,
+            Expert,
+            KeyChord::plain(Char('j')),
+            MoveFocusedRegion(crate::navigation::NavMove::Next),
+            "`j` next day",
+            false,
+        ),
+        key(
+            scope,
+            Expert,
+            KeyChord::plain(Char('g')),
+            MoveFocusedRegion(crate::navigation::NavMove::First),
+            "`g` earliest day",
+            false,
+        ),
+        key(
+            scope,
+            Expert,
+            KeyChord::shift(Char('g')),
+            MoveFocusedRegion(crate::navigation::NavMove::Last),
+            "`G` latest day",
+            false,
+        ),
+    ]
+}
+
 fn lateral_region_bindings(screen: Screen, region: FocusRegion) -> Vec<Keybinding> {
     use Action::MoveFocusedRegion;
     use BindingKind::{Expert, Standard};
@@ -1982,5 +2115,40 @@ mod tests {
         );
 
         assert_eq!(action, None);
+    }
+
+    #[test]
+    fn dashboard_heatmap_week_shortcuts_page_by_week() {
+        let context = BindingContext {
+            active_screen: Screen::Dashboard,
+            focused_region: FocusRegion::DashboardHeatmap,
+            search_open: false,
+            help_open: false,
+            ai_preflight_open: false,
+        };
+
+        for key in [
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+        ] {
+            assert_eq!(
+                super::resolve(key, context),
+                Some(Action::MoveFocusedRegion(
+                    crate::navigation::NavMove::PageBackward
+                ))
+            );
+        }
+
+        for key in [
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+        ] {
+            assert_eq!(
+                super::resolve(key, context),
+                Some(Action::MoveFocusedRegion(
+                    crate::navigation::NavMove::PageForward
+                ))
+            );
+        }
     }
 }

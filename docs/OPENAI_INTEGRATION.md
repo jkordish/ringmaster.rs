@@ -152,6 +152,7 @@ Important consequences:
 - the app does not parse prose blobs
 - the local renderer turns structured JSON into the readable briefing
 - schema drift can be tested directly
+- emitted JSON Schema is normalized to the OpenAI strict subset so optional Rust fields are sent as required-but-nullable object properties
 
 ## Canonical request construction
 

@@ -598,11 +598,10 @@ fn signal_sign(z_score: Option<f64>, directionality: SignalDirectionality) -> Op
     }
 
     match directionality {
-        SignalDirectionality::HigherBetter => Some(if z_score.is_sign_positive() { 1 } else { -1 }),
-        SignalDirectionality::LowerBetter => Some(if z_score.is_sign_positive() { -1 } else { 1 }),
-        SignalDirectionality::Neutral | SignalDirectionality::Contextual => {
+        SignalDirectionality::HigherBetter | SignalDirectionality::Contextual => {
             Some(if z_score.is_sign_positive() { 1 } else { -1 })
         }
+        SignalDirectionality::LowerBetter => Some(if z_score.is_sign_positive() { -1 } else { 1 }),
     }
 }
 

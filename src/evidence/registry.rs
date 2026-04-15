@@ -69,6 +69,7 @@ pub enum PopulationProfile {
 }
 
 impl PopulationProfile {
+    #[cfg(test)]
     pub const ALL: [Self; 5] = [
         Self::GeneralAdult,
         Self::OlderAdult,
@@ -440,14 +441,6 @@ impl EvidenceRegistryEntry {
     #[must_use]
     pub fn last_reviewed_date(self) -> Option<Date> {
         Date::parse(self.last_reviewed, &Iso8601::DATE).ok()
-    }
-
-    #[must_use]
-    pub const fn trend_only(self) -> bool {
-        matches!(
-            self.interpretation_scope,
-            InterpretationScope::WithinPersonTrendOnly | InterpretationScope::ContextualOnly
-        )
     }
 }
 
@@ -1339,6 +1332,7 @@ pub fn resolve_evidence_descriptor(
     })
 }
 
+#[cfg(test)]
 #[must_use]
 pub fn validate_registry() -> Vec<String> {
     let mut errors = Vec::new();
