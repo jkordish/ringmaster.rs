@@ -52,6 +52,7 @@ pub enum SearchScope {
 pub enum TransientLayer {
     Help,
     Search,
+    DashboardDetail,
     AiPreflight,
 }
 

@@ -393,16 +393,10 @@ impl BreakdownLayout {
             minimum_cluster_height.max(1),
             metrics.support_lane_height,
         );
-        let mut cluster_slack = packing.top_padding.saturating_add(packing.bottom_padding);
-        let mut row_height = 1;
-        if cluster_slack >= row_count {
-            row_height = 2;
-            cluster_slack = cluster_slack.saturating_sub(row_count);
-        }
-        let band_gap = cluster_slack.min(1);
-        cluster_slack = cluster_slack.saturating_sub(band_gap);
-        let row_gap_count = cluster_slack.min(row_count.saturating_sub(1));
-        cluster_slack = cluster_slack.saturating_sub(row_gap_count);
+        let cluster_slack = packing.top_padding.saturating_add(packing.bottom_padding);
+        let row_height = 1;
+        let band_gap = 0;
+        let row_gap_count = 0;
         let top_padding = cluster_slack / 2;
         let bottom_padding = cluster_slack.saturating_sub(top_padding);
         let cluster_top = packing.cluster_area.y.saturating_add(top_padding);
@@ -585,13 +579,9 @@ impl WeeklyTrendsLayout {
                 .weekly_summary_height
                 .min(metrics.support_lane_height.max(1)),
         );
-        let mut cluster_slack = packing.top_padding.saturating_add(packing.bottom_padding);
-        let group_gap_count = cluster_slack.min(group_count.saturating_sub(1));
-        cluster_slack = cluster_slack.saturating_sub(group_gap_count);
-        let subrow_gap = u16::from(cluster_slack >= group_count);
-        if subrow_gap > 0 {
-            cluster_slack = cluster_slack.saturating_sub(group_count);
-        }
+        let cluster_slack = packing.top_padding.saturating_add(packing.bottom_padding);
+        let group_gap_count = 0;
+        let subrow_gap = 0;
         let top_padding = cluster_slack / 2;
         let bottom_padding = cluster_slack.saturating_sub(top_padding);
 

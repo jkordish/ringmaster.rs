@@ -5379,7 +5379,7 @@ mod tests {
             "scenario fixture Status snapshots should not vary with host webhook config or temp paths"
         );
         assert!(first_snapshot.contains("Webhook callback: https://fixture.example.test"));
-        assert!(first_snapshot.contains("Latest sync: oura.workouts"));
+        assert!(first_snapshot.contains("Last oura.workouts"));
         assert!(first_snapshot.contains("tests/fixtures/phase7/stale/ringmaster.db"));
     }
 
@@ -5610,7 +5610,7 @@ mod tests {
             "single-fixture Status snapshots should not vary with host webhook config or temp paths"
         );
         assert!(first_snapshot.contains("Webhook callback: https://fixture.example.test"));
-        assert!(first_snapshot.contains("Latest sync: oura.workouts"));
+        assert!(first_snapshot.contains("Last oura.workouts"));
         assert!(first_snapshot.contains("Auth state: authenticated"));
         assert!(
             first_snapshot.contains("Granted scopes: personal, daily, heartrate, workout, tag")

@@ -2,7 +2,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
     prelude::{Alignment, Line, Rect, Span},
-    widgets::Paragraph,
+    widgets::{Clear, Paragraph, Wrap},
 };
 
 use crate::app::{
@@ -15,8 +15,9 @@ use crate::navigation::FocusRegion;
 use crate::ui::{
     chrome::{PanelKind, PanelShellSpec, render_panel_shell},
     layout::{
-        BreakdownLayout, DashboardChartMetrics, DashboardMetrics, UiContext, ViewportClass,
-        WeeklyHeatmapMode, WeeklyTrendsLayout, panel_content_metrics,
+        BreakdownLayout, DashboardChartMetrics, DashboardMetrics, OverlayLayoutSpec, UiContext,
+        ViewportClass, WeeklyHeatmapMode, WeeklyTrendsLayout, content_fit_overlay_layout,
+        panel_content_metrics,
     },
     telemetry::{
         MetricPanelState, TelemetryAvailability, heatmap_day_label, meter_bar, micro_histogram,
@@ -25,7 +26,7 @@ use crate::ui::{
     text_fit::{
         concise_detail, concise_text, fit_badge_label, fit_breakdown_delta, fit_breakdown_label,
         fit_day_header, fit_single_line_with, fit_weekly_group_label, measure_one_line,
-        support_lane_text,
+        support_lane_text, support_lane_text_with,
     },
     theme::{Theme, Tone},
 };
@@ -91,6 +92,54 @@ pub fn draw(
     }
 }
 
+pub fn draw_detail_overlay(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &DashboardModel,
+    region: FocusRegion,
+    theme: &Theme,
+) {
+    let viewport = ViewportClass::from_width(area.width);
+    let metrics = DashboardMetrics::for_viewport(viewport);
+    let overlay = content_fit_overlay_layout(
+        area,
+        metrics,
+        OverlayLayoutSpec::new(78, 24)
+            .with_min_size(54, 12)
+            .with_content_hints(66, 14),
+    );
+    let detail = dashboard_detail_spec(model, region, usize::from(overlay.content_area.width));
+    frame.render_widget(Clear, overlay.bounds);
+    let shell = render_panel_shell(
+        frame,
+        overlay.bounds,
+        theme,
+        metrics,
+        PanelShellSpec {
+            title: &detail.title,
+            status: &detail.status,
+            status_tone: detail.status_tone,
+            focused: true,
+            expanded: false,
+            kind: if matches!(
+                region,
+                FocusRegion::DashboardReadiness | FocusRegion::DashboardSleep
+            ) {
+                PanelKind::Hero
+            } else {
+                PanelKind::Section
+            },
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(detail.lines)
+            .style(theme.body())
+            .wrap(Wrap { trim: false })
+            .alignment(Alignment::Left),
+        shell.content_area,
+    );
+}
+
 fn draw_wide(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -126,7 +175,7 @@ fn draw_wide(
     let right = Layout::default()
         .direction(Direction::Vertical)
         .spacing(metrics.panel_gap_y)
-        .constraints([Constraint::Percentage(66), Constraint::Percentage(34)])
+        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
         .split(top[2]);
     let middle = Layout::default()
         .direction(Direction::Horizontal)
@@ -293,6 +342,13 @@ struct ExplicitTileText<'a> {
     primary_tone: Tone,
 }
 
+struct DashboardDetailSpec {
+    title: String,
+    status: String,
+    status_tone: Tone,
+    lines: Vec<Line<'static>>,
+}
+
 fn render_explicit_tile_state(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -324,6 +380,407 @@ fn render_explicit_tile_state(
         theme,
         alignment,
     );
+}
+
+fn dashboard_detail_spec(
+    model: &DashboardModel,
+    region: FocusRegion,
+    width: usize,
+) -> DashboardDetailSpec {
+    let instrument_width = width.clamp(12, 42);
+    match region {
+        FocusRegion::DashboardReadiness => {
+            let tile = &model.readiness;
+            let overlay_title = "Readiness Detail".to_owned();
+            let status = tile.tile_state.badge_label().to_owned();
+            let status_tone = dashboard_tile_tone(tile.tile_state);
+            let summary = if matches!(
+                tile.tile_state,
+                DashboardTileState::Fresh | DashboardTileState::Stale
+            ) {
+                format!(
+                    "Score {} | {}",
+                    tile.primary_value,
+                    score_band_label(tile.score_band)
+                )
+            } else {
+                tile.fallback.primary.clone()
+            };
+            let compare = if matches!(tile.tile_state, DashboardTileState::Fresh) {
+                tile.delta_label.clone()
+            } else if matches!(tile.tile_state, DashboardTileState::Stale) {
+                "Cached daily score while sync catches up.".to_owned()
+            } else {
+                tile.fallback.secondary.clone()
+            };
+            let context = tile
+                .secondary_lines
+                .iter()
+                .find(|line| !line.ends_with("--"))
+                .cloned()
+                .unwrap_or_else(|| tile.note.clone());
+            DashboardDetailSpec {
+                title: overlay_title,
+                status,
+                status_tone,
+                lines: vec![
+                    detail_heading_line("Summary"),
+                    detail_body_line(summary),
+                    detail_body_line(meter_bar(tile.ring_fill_percent, instrument_width)),
+                    detail_body_line(spark_strip(&tile.trend, instrument_width)),
+                    detail_heading_line("Compare"),
+                    detail_body_line(compare),
+                    detail_heading_line("Context"),
+                    detail_body_line(context),
+                    detail_heading_line("Provenance"),
+                    detail_body_line(tile.note.clone()),
+                    detail_body_line(
+                        "Esc closes this overlay; top nav still drives deeper screens.",
+                    ),
+                ],
+            }
+        }
+        FocusRegion::DashboardSleep => {
+            let tile = &model.sleep;
+            let overlay_title = "Sleep Detail".to_owned();
+            let status = tile.tile_state.badge_label().to_owned();
+            let status_tone = dashboard_tile_tone(tile.tile_state);
+            let (summary, support) = sleep_detail_summary(tile);
+            let mut lines = vec![detail_heading_line("Summary"), detail_body_line(summary)];
+            if matches!(tile.tile_state, DashboardTileState::Fresh) {
+                lines.extend(
+                    stacked_profile_rows(&tile.trend, instrument_width, 3)
+                        .into_iter()
+                        .map(detail_body_line),
+                );
+                lines.push(detail_body_line(spark_strip(&tile.trend, instrument_width)));
+            }
+            lines.push(detail_heading_line("Compare"));
+            lines.push(detail_body_line(support));
+            lines.push(detail_heading_line("Provenance"));
+            lines.push(detail_body_line(tile.strip_note.clone()));
+            lines.push(detail_body_line(
+                "Esc closes this overlay; timeline and trends remain available from the top nav.",
+            ));
+            DashboardDetailSpec {
+                title: overlay_title,
+                status,
+                status_tone,
+                lines,
+            }
+        }
+        FocusRegion::DashboardActivity => {
+            let tile = &model.activity;
+            let overlay_title = "Activity Detail".to_owned();
+            let status = tile.tile_state.badge_label().to_owned();
+            let status_tone = dashboard_tile_tone(tile.tile_state);
+            let summary = if matches!(
+                tile.tile_state,
+                DashboardTileState::Fresh | DashboardTileState::Stale
+            ) {
+                format!("Today {} | {}", tile.primary_value, tile.delta_label)
+            } else {
+                tile.fallback.primary.clone()
+            };
+            let context = tile
+                .secondary_lines
+                .iter()
+                .find(|line| !line.ends_with("--"))
+                .cloned()
+                .unwrap_or_else(|| tile.fallback.secondary.clone());
+            DashboardDetailSpec {
+                title: overlay_title,
+                status,
+                status_tone,
+                lines: vec![
+                    detail_heading_line("Summary"),
+                    detail_body_line(summary),
+                    detail_body_line(meter_bar(tile.ring_fill_percent, instrument_width)),
+                    detail_body_line(spark_strip(&tile.trend, instrument_width)),
+                    detail_heading_line("Context"),
+                    detail_body_line(context),
+                    detail_heading_line("Interpretation"),
+                    detail_body_line(tile.note.clone()),
+                    detail_body_line(
+                        "Incomplete days stay visible here; the footer keeps the quick scan compact.",
+                    ),
+                ],
+            }
+        }
+        FocusRegion::DashboardHrv => trend_detail_spec(
+            "HRV Detail",
+            &model.hrv,
+            instrument_width,
+            "HRV overlay keeps the recent strip visible while the footer stays terse.",
+        ),
+        FocusRegion::DashboardTemp => temp_detail_spec(&model.body_temp, instrument_width),
+        FocusRegion::DashboardHeartRate => trend_detail_spec(
+            "Heart Rate Detail",
+            &model.heart_rate,
+            instrument_width,
+            "Heart rate now uses a quieter strip in-card so it does not outrank readiness.",
+        ),
+        FocusRegion::DashboardSpo2 => trend_detail_spec(
+            "SpO2 Detail",
+            &model.spo2,
+            instrument_width,
+            "Baseline-only SpO2 stays deliberate in-card and explains itself here.",
+        ),
+        FocusRegion::DashboardRespRate => histogram_detail_spec(
+            "Respiratory Rate Detail",
+            &model.respiratory_rate,
+            instrument_width,
+        ),
+        FocusRegion::DashboardBreakdown => {
+            breakdown_detail_spec(&model.breakdown, instrument_width)
+        }
+        FocusRegion::DashboardHeatmap => heatmap_detail_spec(&model.weekly),
+        _ => DashboardDetailSpec {
+            title: "Dashboard Detail".to_owned(),
+            status: "DETAIL".to_owned(),
+            status_tone: Tone::Focus,
+            lines: vec![detail_body_line(
+                "No dashboard detail is available for this region.",
+            )],
+        },
+    }
+}
+
+fn detail_heading_line(text: impl Into<String>) -> Line<'static> {
+    let text = text.into();
+    Line::from(format!("[{}]", text.to_ascii_uppercase()))
+}
+
+fn detail_body_line(text: impl Into<String>) -> Line<'static> {
+    Line::from(format!("  {}", text.into()))
+}
+
+fn sleep_detail_summary(tile: &DashboardSleepTile) -> (String, String) {
+    let has_duration = tile.duration_label != "--";
+    let has_score = tile.score_label != "score --";
+    match (tile.tile_state, has_duration, has_score) {
+        (DashboardTileState::Fresh, true, true) => (
+            format!("{} | {}", tile.duration_label, tile.score_label),
+            tile.strip_note.clone(),
+        ),
+        (DashboardTileState::Fresh, true, false) => (
+            format!("{} | score pending", tile.duration_label),
+            "Duration is present; score will fill once the overnight summary closes.".to_owned(),
+        ),
+        (DashboardTileState::Fresh, false, true) => (
+            format!("{} | duration pending", tile.score_label),
+            "The score arrived first; duration is still pending for this sleep window.".to_owned(),
+        ),
+        (DashboardTileState::Stale, _, _) => (
+            format!("{} | {}", tile.duration_label, tile.score_label),
+            "Cached sleep summary while sync catches up.".to_owned(),
+        ),
+        _ => (
+            tile.fallback.primary.clone(),
+            tile.fallback.secondary.clone(),
+        ),
+    }
+}
+
+fn trend_detail_spec(
+    title: &str,
+    panel: &DashboardTrendPanel,
+    instrument_width: usize,
+    note: &str,
+) -> DashboardDetailSpec {
+    let status = panel.tile_state.badge_label().to_owned();
+    let status_tone = dashboard_tile_tone(panel.tile_state);
+    let summary = if matches!(
+        panel.tile_state,
+        DashboardTileState::Fresh | DashboardTileState::Stale
+    ) {
+        panel.primary_label.clone()
+    } else {
+        panel.fallback.primary.clone()
+    };
+    let compare = if matches!(panel.tile_state, DashboardTileState::Fresh) {
+        format!("{} | {}", panel.baseline_label, panel.range_label)
+    } else if matches!(panel.tile_state, DashboardTileState::Stale) {
+        panel.note.clone()
+    } else {
+        panel.fallback.secondary.clone()
+    };
+    let mut lines = vec![detail_heading_line("Summary"), detail_body_line(summary)];
+    if matches!(panel.tile_state, DashboardTileState::Fresh) {
+        lines.push(detail_body_line(spark_strip(
+            &panel.values,
+            instrument_width,
+        )));
+        lines.push(detail_body_line(micro_histogram(
+            &panel.values,
+            instrument_width,
+        )));
+    }
+    lines.push(detail_heading_line("Compare"));
+    lines.push(detail_body_line(compare));
+    lines.push(detail_heading_line("Interpretation"));
+    lines.push(detail_body_line(panel.note.clone()));
+    lines.push(detail_body_line(note));
+    DashboardDetailSpec {
+        title: title.to_owned(),
+        status,
+        status_tone,
+        lines,
+    }
+}
+
+fn temp_detail_spec(
+    panel: &DashboardThermometerPanel,
+    instrument_width: usize,
+) -> DashboardDetailSpec {
+    let status = panel.tile_state.badge_label().to_owned();
+    let status_tone = dashboard_tile_tone(panel.tile_state);
+    let summary = if matches!(
+        panel.tile_state,
+        DashboardTileState::Fresh | DashboardTileState::Stale
+    ) {
+        panel.value_label.clone()
+    } else {
+        panel.fallback.primary.clone()
+    };
+    let mut lines = vec![detail_heading_line("Summary"), detail_body_line(summary)];
+    if matches!(panel.tile_state, DashboardTileState::Fresh) {
+        lines.extend(
+            compact_temperature_lines(panel.deviation_tenths, instrument_width)
+                .into_iter()
+                .map(detail_body_line),
+        );
+    }
+    lines.push(detail_heading_line("Interpretation"));
+    lines.push(detail_body_line(panel.note.clone()));
+    DashboardDetailSpec {
+        title: "Body Temperature Detail".to_owned(),
+        status,
+        status_tone,
+        lines,
+    }
+}
+
+fn histogram_detail_spec(
+    title: &str,
+    panel: &DashboardHistogramPanel,
+    instrument_width: usize,
+) -> DashboardDetailSpec {
+    let status = panel.tile_state.badge_label().to_owned();
+    let status_tone = dashboard_tile_tone(panel.tile_state);
+    let summary = if matches!(
+        panel.tile_state,
+        DashboardTileState::Fresh | DashboardTileState::Stale
+    ) {
+        panel.primary_label.clone()
+    } else {
+        panel.fallback.primary.clone()
+    };
+    let compare = if matches!(panel.tile_state, DashboardTileState::Fresh) {
+        format!("{} | {}", panel.delta_label, panel.range_label)
+    } else if matches!(panel.tile_state, DashboardTileState::Stale) {
+        panel.note.clone()
+    } else {
+        panel.fallback.secondary.clone()
+    };
+    let mut lines = vec![detail_heading_line("Summary"), detail_body_line(summary)];
+    if matches!(panel.tile_state, DashboardTileState::Fresh) {
+        lines.push(detail_body_line(meter_bar(
+            fill_percent(&panel.bars),
+            instrument_width,
+        )));
+        lines.push(detail_body_line(micro_histogram(
+            &panel.bars,
+            instrument_width,
+        )));
+    }
+    lines.push(detail_heading_line("Compare"));
+    lines.push(detail_body_line(compare));
+    lines.push(detail_heading_line("Interpretation"));
+    lines.push(detail_body_line(panel.note.clone()));
+    DashboardDetailSpec {
+        title: title.to_owned(),
+        status,
+        status_tone,
+        lines,
+    }
+}
+
+fn breakdown_detail_spec(
+    panel: &DashboardBreakdownPanel,
+    instrument_width: usize,
+) -> DashboardDetailSpec {
+    let status = panel.availability.label().to_owned();
+    let status_tone = panel.availability.tone();
+    let selected = panel
+        .rails
+        .iter()
+        .find(|rail| rail.selected)
+        .or_else(|| panel.rails.first());
+    let mut lines = vec![
+        detail_heading_line("Summary"),
+        detail_body_line(panel.note.clone()),
+    ];
+    if let Some(rail) = selected {
+        lines.push(detail_heading_line("Selected driver"));
+        lines.push(detail_body_line(format!(
+            "{} | {}",
+            rail.label, rail.delta_label
+        )));
+        lines.push(detail_body_line(segmented_bar(
+            rail.fill_percent,
+            instrument_width.clamp(10, 24),
+        )));
+        lines.push(detail_body_line(rail.note.clone()));
+    }
+    lines.push(detail_body_line(
+        "Close this overlay to move between drivers with the normal dashboard focus order.",
+    ));
+    DashboardDetailSpec {
+        title: "Readiness Breakdown Detail".to_owned(),
+        status,
+        status_tone,
+        lines,
+    }
+}
+
+fn heatmap_detail_spec(panel: &DashboardWeeklyHeatmap) -> DashboardDetailSpec {
+    let status = panel.availability.label().to_owned();
+    let status_tone = panel.availability.tone();
+    let grid = panel.grid_for_viewport(ViewportClass::Wide);
+    let mut lines = vec![
+        detail_heading_line("Window"),
+        detail_body_line(if panel.window_page_label.is_empty() {
+            panel.window_label.clone()
+        } else {
+            format!("{} | {}", panel.window_label, panel.window_page_label)
+        }),
+        detail_heading_line("Selected day"),
+        detail_body_line(panel.selected_summary_for_viewport(ViewportClass::Wide)),
+        detail_heading_line("Rows"),
+    ];
+    lines.extend(
+        panel
+            .row_labels
+            .iter()
+            .enumerate()
+            .map(|(row_index, label)| {
+                let values = grid.rows.get(row_index).map_or(&[][..], Vec::as_slice);
+                detail_body_line(format!(
+                    "{label:<6} {}",
+                    compact_heatmap_row(values, grid.selected_cell)
+                ))
+            }),
+    );
+    lines.push(detail_body_line(
+        "The dashboard stays on seven-day pages; use the focused heatmap region to page windows.",
+    ));
+    DashboardDetailSpec {
+        title: "Weekly Trends Detail".to_owned(),
+        status,
+        status_tone,
+        lines,
+    }
 }
 
 fn draw_medium(
@@ -921,21 +1378,20 @@ fn render_sleep_tile(
             );
             return;
         }
-        let cue_tone = score_band_cue_tone(tile.score_band);
+        let (summary, support) = sleep_detail_summary(tile);
         render_panel_lines(
             frame,
             shell.content_area,
-            vec![Line::from(vec![
-                Span::styled(
-                    tile.duration_label.clone(),
+            vec![
+                Line::from(Span::styled(
+                    concise_text(&summary, usize::from(shell.content_area.width)),
                     theme.dominant_metric(score_band_primary_tone(tile.score_band)),
-                ),
-                Span::raw(" "),
-                Span::styled(
-                    score_band_label(tile.score_band).to_owned(),
-                    theme.badge(cue_tone),
-                ),
-            ])],
+                )),
+                Line::from(Span::styled(
+                    concise_detail(&support, usize::from(shell.content_area.width)),
+                    theme.annotation(),
+                )),
+            ],
             theme,
             Alignment::Center,
         );
@@ -981,37 +1437,24 @@ fn render_sleep_tile(
         measured_panel_support_lane(shell.content_area, state.chart_metrics),
     );
     let width = usize::from(content.chart.area.width);
+    let (summary, support) = sleep_detail_summary(tile);
     let cue_tone = score_band_cue_tone(tile.score_band);
     let band_width = clamped_instrument_width(width, state.metrics, 12, width.max(12));
-    let capacity = usize::from(content.chart.area.height).max(4);
-    let band_height = capacity.saturating_sub(2).clamp(4, 7);
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            centered_line(width / 2, format!("duration {}", tile.duration_label)),
-            theme.dominant_metric(score_band_primary_tone(tile.score_band)),
-        ),
-        Span::styled(
-            centered_line(
-                width.saturating_sub(width / 2),
-                format!("{} {}", tile.score_label, score_band_label(tile.score_band)),
-            ),
-            theme.badge(cue_tone),
-        ),
-    ])];
-    lines.extend(
-        stacked_profile_rows(&tile.trend, band_width, band_height)
-            .into_iter()
-            .map(|row| {
-                Line::from(Span::styled(
-                    centered_line(width, row),
-                    theme.chart_ramp(3, 4),
-                ))
-            }),
-    );
+    let capacity = usize::from(content.chart.area.height).max(2);
+    let mut lines = vec![Line::from(Span::styled(
+        centered_line(width, concise_text(&summary, width)),
+        theme.dominant_metric(score_band_primary_tone(tile.score_band)),
+    ))];
     lines.push(Line::from(Span::styled(
-        centered_line(width, spark_strip(&tile.trend, band_width)),
+        centered_line(width, meter_bar(tile.score_fill_percent, band_width)),
         theme.status_marker(cue_tone),
     )));
+    if capacity >= 3 {
+        lines.push(Line::from(Span::styled(
+            centered_line(width, spark_strip(&tile.trend, band_width)),
+            theme.chart_ramp(3, 4),
+        )));
+    }
     render_panel_lines(
         frame,
         centered_body_area(content.chart.area, lines.len()),
@@ -1022,7 +1465,7 @@ fn render_sleep_tile(
     render_support_lane(
         frame,
         content.support.area,
-        &tile.strip_note,
+        &support,
         theme,
         Alignment::Center,
     );
@@ -1155,38 +1598,53 @@ fn render_trend_panel(
         measured_panel_support_lane(shell.content_area, state.chart_metrics),
     );
     let width = usize::from(content.chart.area.width);
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            concise_text(&panel.primary_label, width.saturating_sub(10)),
+    let capacity = usize::from(content.chart.area.height).max(2);
+    let compare_line = fit_single_line_with(
+        &format!("{} | {}", panel.baseline_label, panel.range_label),
+        width,
+        &[&panel.baseline_label, &panel.range_label, "baseline --"],
+    )
+    .text;
+    let primary_line = if panel.judged_state.is_some() {
+        Line::from(vec![
+            Span::styled(
+                concise_text(&panel.primary_label, width.saturating_sub(10)),
+                theme.dominant_metric(judged_primary_tone(panel.judged_state)),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                judged_state_label(panel.judged_state).to_owned(),
+                theme.badge(judged_badge_tone(panel.judged_state)),
+            ),
+        ])
+    } else {
+        Line::from(Span::styled(
+            concise_text(&panel.primary_label, width),
             theme.dominant_metric(judged_primary_tone(panel.judged_state)),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            judged_state_label(panel.judged_state).to_owned(),
-            theme.badge(judged_badge_tone(panel.judged_state)),
-        ),
-    ])];
-    lines.extend(
-        trend_instrument_lines(title, panel, width)
-            .into_iter()
-            .map(|line| {
-                Line::from(Span::styled(
-                    line,
-                    theme.status_marker(delta_state_tone(panel.delta_state)),
-                ))
-            }),
-    );
-    lines.push(Line::from(vec![
-        Span::styled(
-            concise_text(&panel.baseline_label, width / 2),
+        ))
+    };
+    let mut lines = vec![primary_line];
+    let instrument_lines = trend_instrument_lines(title, panel, width);
+    if capacity <= 2 {
+        lines.push(Line::from(Span::styled(
+            compare_line,
             theme.status_marker(delta_state_tone(panel.delta_state)),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            concise_text(&panel.range_label, width.saturating_sub(width / 2 + 1)),
-            theme.annotation(),
-        ),
-    ]));
+        )));
+    } else {
+        let instrument_budget = capacity.saturating_sub(2);
+        lines.extend(
+            instrument_lines
+                .into_iter()
+                .take(instrument_budget.max(1))
+                .map(|line| {
+                    Line::from(Span::styled(
+                        line,
+                        theme.status_marker(delta_state_tone(panel.delta_state)),
+                    ))
+                }),
+        );
+        lines.push(Line::from(Span::styled(compare_line, theme.annotation())));
+    }
     render_panel_lines(frame, content.chart.area, lines, theme, Alignment::Left);
     render_support_lane(
         frame,
@@ -1484,47 +1942,68 @@ fn render_histogram_panel(
         measured_panel_support_lane(shell.content_area, state.chart_metrics),
     );
     let width = usize::from(content.chart.area.width);
+    let capacity = usize::from(content.chart.area.height).max(2);
     let instrument_width = clamped_instrument_width(width, state.metrics, 10, width.max(10));
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            concise_text(&panel.primary_label, width.saturating_sub(10)),
+    let primary_line = if panel.judged_state.is_some() {
+        Line::from(vec![
+            Span::styled(
+                concise_text(&panel.primary_label, width.saturating_sub(10)),
+                theme.dominant_metric(judged_primary_tone(panel.judged_state)),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                judged_state_label(panel.judged_state).to_owned(),
+                theme.badge(judged_badge_tone(panel.judged_state)),
+            ),
+        ])
+    } else {
+        Line::from(Span::styled(
+            concise_text(&panel.primary_label, width),
             theme.dominant_metric(judged_primary_tone(panel.judged_state)),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            judged_state_label(panel.judged_state).to_owned(),
-            theme.badge(judged_badge_tone(panel.judged_state)),
-        ),
-    ])];
+        ))
+    };
+    let compare_line = histogram_compare_line(title, panel, width);
+    let mut lines = vec![primary_line];
+    if capacity > 2 && title == "Resp Rate" {
+        lines.push(Line::from(Span::styled(
+            micro_histogram(&panel.bars, instrument_width.max(6)),
+            theme.chart_ramp(3, 4),
+        )));
+        if capacity >= 4 {
+            lines.push(Line::from(Span::styled(
+                concise_text(&panel.range_label, width),
+                theme.annotation(),
+            )));
+        }
+    } else if capacity > 2 {
+        lines.push(Line::from(Span::styled(
+            concise_text(&panel.range_label, width),
+            theme.annotation(),
+        )));
+        if capacity >= 4 {
+            lines.push(Line::from(Span::styled(
+                meter_bar(fill_percent(&panel.bars), instrument_width),
+                theme.status_marker(delta_state_tone(panel.delta_state)),
+            )));
+        }
+        if capacity >= 5 {
+            lines.push(Line::from(Span::styled(
+                micro_histogram(&panel.bars, instrument_width.max(6)),
+                theme.chart_ramp(3, 4),
+            )));
+        }
+    }
     lines.push(Line::from(Span::styled(
-        centered_line(
-            width,
-            meter_bar(fill_percent(&panel.bars), instrument_width),
-        ),
+        compare_line,
         theme.status_marker(delta_state_tone(panel.delta_state)),
     )));
-    lines.push(Line::from(Span::styled(
-        micro_histogram(&panel.bars, width.max(6)),
-        theme.chart_ramp(3, 4),
-    )));
-    lines.push(Line::from(vec![
-        Span::styled(
-            concise_text(&panel.delta_label, width / 2),
-            theme.status_marker(delta_state_tone(panel.delta_state)),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            concise_text(&panel.range_label, width.saturating_sub(width / 2 + 1)),
-            theme.annotation(),
-        ),
-    ]));
-    render_panel_lines(frame, content.chart.area, lines, theme, Alignment::Center);
+    render_panel_lines(frame, content.chart.area, lines, theme, Alignment::Left);
     render_support_lane(
         frame,
         content.support.area,
         &panel.note,
         theme,
-        Alignment::Center,
+        Alignment::Left,
     );
 }
 
@@ -1632,7 +2111,7 @@ fn render_breakdown_panel(
         Line::from(Span::styled(
             format!(
                 "{:<width$}",
-                "factor",
+                "driver",
                 width = usize::from(layout.label_column_width)
             ),
             theme.section_title(Tone::Muted),
@@ -1643,14 +2122,14 @@ fn render_breakdown_panel(
     render_line_in_area(
         frame,
         layout.signal_cell(layout.header_area),
-        Line::from(Span::styled("signal", theme.annotation())),
+        Line::from(Span::styled("rail", theme.annotation())),
         theme,
         Alignment::Left,
     );
     render_line_in_area(
         frame,
         layout.delta_cell(layout.header_area),
-        Line::from(Span::styled("delta", theme.section_title(Tone::Muted))),
+        Line::from(Span::styled("Δ", theme.section_title(Tone::Muted))),
         theme,
         Alignment::Right,
     );
@@ -1722,7 +2201,11 @@ fn render_breakdown_panel(
             frame,
             layout.support_lane,
             Line::from(Span::styled(
-                support_lane_text(&focus_note, usize::from(layout.support_lane.width)),
+                support_lane_text_with(
+                    &focus_note,
+                    usize::from(layout.support_lane.width),
+                    &["Use footer for exact driver evidence"],
+                ),
                 theme.annotation(),
             )),
             theme,
@@ -1739,18 +2222,13 @@ fn render_heatmap_panel(
     viewport: ViewportClass,
     state: PanelRenderState,
 ) {
-    let title = if panel.window_page_label.is_empty() {
-        "Weekly Trends".to_owned()
-    } else {
-        format!("Weekly Trends {}", panel.window_page_label)
-    };
     let shell = render_panel_shell(
         frame,
         area,
         theme,
         state.metrics,
         PanelShellSpec {
-            title: &title,
+            title: "Weekly Trends",
             status: panel.availability.label(),
             status_tone: panel.availability.tone(),
             focused: state.focused,
@@ -1940,17 +2418,12 @@ fn render_compact_grouped_heatmap_panel(
         lines.push(heatmap_compact_legend_line(theme, layout));
     }
     if usize::from(area.height) > lines.len() {
-        let window_summary = if panel.window_page_label.is_empty() {
-            panel.window_label.clone()
-        } else {
-            format!("{} | {}", panel.window_label, panel.window_page_label)
-        };
         lines.push(heatmap_compact_summary_line(
             theme,
             grid,
             &panel.row_labels,
             &panel.note,
-            &window_summary,
+            heatmap_window_summary(&panel.window_label, &panel.window_page_label).as_deref(),
             layout,
             usize::from(area.width),
         ));
@@ -1969,21 +2442,18 @@ const fn availability_has_reading(availability: TelemetryAvailability) -> bool {
     )
 }
 
-fn selected_heatmap_summary(
+fn selected_heatmap_panel_summary(
     grid: &crate::app::DashboardHeatmapGrid,
-    row_labels: &[String],
     note: &str,
 ) -> Option<(String, Option<DashboardScoreBand>)> {
     grid.selected_cell
         .and_then(|(row_index, column_index)| {
             let row = grid.rows.get(row_index)?;
             let value = row.get(column_index).copied().flatten()?;
-            let row_label = row_labels.get(row_index)?;
             let day_label = grid.day_labels.get(column_index)?;
-            let score_band = score_band_from_value(value);
             Some((
-                format!("{row_label} {value} | {day_label}"),
-                Some(score_band),
+                format!("Selected {day_label}"),
+                Some(score_band_from_value(value)),
             ))
         })
         .or_else(|| {
@@ -2166,20 +2636,22 @@ fn heatmap_compact_legend_line(theme: &Theme, layout: WeeklyTrendsLayout) -> Lin
 fn heatmap_compact_summary_line(
     theme: &Theme,
     grid: &crate::app::DashboardHeatmapGrid,
-    row_labels: &[String],
+    _row_labels: &[String],
     note: &str,
-    window_summary: &str,
+    window_summary: Option<&str>,
     layout: WeeklyTrendsLayout,
     line_width: usize,
 ) -> Line<'static> {
     let (summary, band) =
-        selected_heatmap_summary(grid, row_labels, note).unwrap_or_else(|| (note.to_owned(), None));
+        selected_heatmap_panel_summary(grid, note).unwrap_or_else(|| (note.to_owned(), None));
     let label_width = usize::from(layout.label_column_width);
     let summary_width = line_width.saturating_sub(label_width);
     let text_budget = summary_width.saturating_sub(if band.is_some() { 10 } else { 0 });
     let mut spans = vec![Span::raw(" ".repeat(label_width))];
+    let body =
+        window_summary.map_or_else(|| summary.clone(), |window| format!("{window} | {summary}"));
     spans.push(Span::styled(
-        support_lane_text(&format!("{window_summary} | {summary}"), text_budget),
+        support_lane_text(&body, text_budget),
         theme.body(),
     ));
     if band.is_some() {
@@ -2223,13 +2695,36 @@ fn fill_percent(values: &[u64]) -> u16 {
     }
 }
 
+fn histogram_compare_line(title: &str, panel: &DashboardHistogramPanel, width: usize) -> String {
+    if title == "Resp Rate" {
+        let strip = micro_histogram(&panel.bars, width.clamp(6, 12));
+        return fit_single_line_with(
+            &format!("{strip} {} | {}", panel.delta_label, panel.range_label),
+            width,
+            &[
+                &format!("{strip} {}", panel.delta_label),
+                &panel.delta_label,
+                &panel.range_label,
+                "range --",
+            ],
+        )
+        .text;
+    }
+
+    fit_single_line_with(
+        &format!("{} | {}", panel.delta_label, panel.range_label),
+        width,
+        &[&panel.delta_label, &panel.range_label, "range --"],
+    )
+    .text
+}
+
 fn trend_instrument_lines(title: &str, panel: &DashboardTrendPanel, width: usize) -> Vec<String> {
     match title {
         "HRV Trend" => vec![
             spark_strip(&panel.values, width.max(8)),
             micro_histogram(&panel.values, width.max(8)),
         ],
-        "Heart Rate" => stacked_profile_rows(&panel.values, width.max(8), 2),
         "SpO2" => vec![
             centered_line(
                 width,
@@ -2385,21 +2880,32 @@ fn heatmap_summary_line(
     layout: WeeklyTrendsLayout,
 ) -> Line<'static> {
     let (summary, band) =
-        selected_heatmap_summary(grid, row_labels, note).unwrap_or_else(|| (note.to_owned(), None));
-    let prefix = if window_page_label.is_empty() {
-        window_label.to_owned()
+        selected_heatmap_panel_summary(grid, note).unwrap_or_else(|| (note.to_owned(), None));
+    let body = heatmap_window_summary(window_label, window_page_label)
+        .map_or_else(|| summary.clone(), |window| format!("{window} | {summary}"));
+    let compact_summary = compact_heatmap_summary(grid, row_labels, note);
+    let fallback_strings = if body == summary {
+        compact_summary.into_iter().collect::<Vec<_>>()
     } else {
-        format!("{window_label} | {window_page_label}")
+        compact_summary
+            .into_iter()
+            .chain(std::iter::once(summary))
+            .collect::<Vec<_>>()
     };
+    let fallback_refs = fallback_strings
+        .iter()
+        .map(std::string::String::as_str)
+        .collect::<Vec<_>>();
     let mut spans = Vec::new();
     spans.push(Span::styled(
-        support_lane_text(
-            &format!("{prefix} | {summary}"),
+        support_lane_text_with(
+            &body,
             usize::from(layout.summary_area.width).saturating_sub(if band.is_some() {
                 10
             } else {
                 0
             }),
+            &fallback_refs,
         ),
         theme.body(),
     ));
@@ -2411,6 +2917,36 @@ fn heatmap_summary_line(
         ));
     }
     Line::from(spans)
+}
+
+fn heatmap_window_summary(window_label: &str, window_page_label: &str) -> Option<String> {
+    if window_page_label.is_empty() || window_page_label.starts_with("latest") {
+        None
+    } else if window_label.is_empty() {
+        Some(window_page_label.to_owned())
+    } else {
+        Some(format!("{window_label} | {window_page_label}"))
+    }
+}
+
+fn compact_heatmap_summary(
+    grid: &crate::app::DashboardHeatmapGrid,
+    row_labels: &[String],
+    note: &str,
+) -> Option<String> {
+    grid.selected_cell
+        .and_then(|(row_index, column_index)| {
+            let _ = row_labels.get(row_index)?;
+            let day_label = grid.day_labels.get(column_index)?;
+            Some(format!("Selected {day_label}"))
+        })
+        .or_else(|| {
+            if note.is_empty() {
+                None
+            } else {
+                Some(note.to_owned())
+            }
+        })
 }
 
 fn heatmap_legend_line(theme: &Theme, _layout: WeeklyTrendsLayout) -> Line<'static> {

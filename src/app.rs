@@ -276,6 +276,12 @@ struct OverlayToggleFocusMemory {
     patterns: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DashboardDetailOverlayState {
+    region: FocusRegion,
+    previous_region: FocusRegion,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppState {
     pub mode: RunMode,
@@ -305,6 +311,7 @@ pub struct AppState {
     selected_event_id: Option<String>,
     selected_dashboard_breakdown_index: usize,
     expanded_region: Option<FocusRegion>,
+    dashboard_detail_overlay: Option<DashboardDetailOverlayState>,
     selected_review_card_index: usize,
     ai_preflight: Option<AiPreflightState>,
     ai_preflight_control: PreflightControl,
@@ -532,6 +539,7 @@ pub struct DashboardSleepTile {
     pub duration_label: String,
     pub score_label: String,
     pub score_band: Option<DashboardScoreBand>,
+    pub score_fill_percent: u16,
     pub trend: Vec<u64>,
     pub strip_note: String,
     pub fallback: DashboardTileFallback,
@@ -1345,6 +1353,7 @@ impl AppState {
         self.active_screen = screen;
         self.focused_top_nav_screen = screen;
         self.expanded_region = None;
+        self.dashboard_detail_overlay = None;
         self.restore_screen_focus();
         self.status_line = status_line;
         if rebuild {
@@ -1450,6 +1459,11 @@ impl AppState {
     }
 
     #[must_use]
+    pub fn dashboard_detail_region(&self) -> Option<FocusRegion> {
+        self.dashboard_detail_overlay.map(|overlay| overlay.region)
+    }
+
+    #[must_use]
     pub const fn help_open(&self) -> bool {
         self.help_open
     }
@@ -1474,9 +1488,7 @@ impl AppState {
         BindingContext {
             active_screen: self.active_screen,
             focused_region: self.focused_region,
-            search_open: self.search.is_some(),
-            help_open: self.help_open,
-            ai_preflight_open: self.ai_preflight.is_some(),
+            active_transient: self.current_transient(),
         }
     }
 
@@ -1490,6 +1502,10 @@ impl AppState {
             return FocusInteraction::None;
         }
 
+        if self.dashboard_detail_overlay.is_some() {
+            return FocusInteraction::None;
+        }
+
         if self.ai_preflight.is_some() {
             return match self.ai_preflight_control {
                 PreflightControl::Confirm => FocusInteraction::Activate("confirm preflight"),
@@ -1500,31 +1516,19 @@ impl AppState {
 
         match (self.active_screen, self.focused_region) {
             (_, FocusRegion::TopNav) => FocusInteraction::Navigate("selected view"),
-            (Screen::Dashboard, FocusRegion::DashboardReadiness) => {
-                FocusInteraction::Navigate("readiness explanation")
-            }
-            (Screen::Dashboard, FocusRegion::DashboardSleep) => {
-                FocusInteraction::Navigate("sleep trends")
-            }
-            (Screen::Dashboard, FocusRegion::DashboardActivity) => {
-                FocusInteraction::Navigate("activity timeline")
-            }
-            (Screen::Dashboard, FocusRegion::DashboardHrv) => FocusInteraction::Expand("HRV panel"),
-            (Screen::Dashboard, FocusRegion::DashboardTemp) => {
-                FocusInteraction::Navigate("temperature trends")
-            }
-            (Screen::Dashboard, FocusRegion::DashboardHeartRate) => {
-                FocusInteraction::Navigate("heart-rate trends")
-            }
-            (Screen::Dashboard, FocusRegion::DashboardRespRate) => {
-                FocusInteraction::Expand("respiratory panel")
-            }
-            (Screen::Dashboard, FocusRegion::DashboardBreakdown) => {
-                FocusInteraction::Expand("driver breakdown")
-            }
-            (Screen::Dashboard, FocusRegion::DashboardHeatmap) => {
-                FocusInteraction::Navigate("selected-day timeline")
-            }
+            (
+                Screen::Dashboard,
+                FocusRegion::DashboardReadiness
+                | FocusRegion::DashboardSleep
+                | FocusRegion::DashboardActivity
+                | FocusRegion::DashboardHrv
+                | FocusRegion::DashboardTemp
+                | FocusRegion::DashboardHeartRate
+                | FocusRegion::DashboardSpo2
+                | FocusRegion::DashboardRespRate
+                | FocusRegion::DashboardBreakdown
+                | FocusRegion::DashboardHeatmap,
+            ) => FocusInteraction::Activate("detail overlay"),
             (Screen::Timeline, FocusRegion::TimelineLanes)
             | (Screen::Patterns, FocusRegion::ContextSecondary)
             | (Screen::Explain, FocusRegion::ContextPrimary) => {
@@ -2055,6 +2059,8 @@ impl AppState {
             Some(TransientLayer::Search)
         } else if self.help_open {
             Some(TransientLayer::Help)
+        } else if self.dashboard_detail_overlay.is_some() {
+            Some(TransientLayer::DashboardDetail)
         } else if self.ai_preflight.is_some() {
             Some(TransientLayer::AiPreflight)
         } else {
@@ -2070,7 +2076,7 @@ impl AppState {
         if let Some(snapshot) = &self.live_snapshot {
             let day_labels = available_days(snapshot);
             self.selected_day_index = previous_day.as_deref().map_or_else(
-                || newest_day_index(snapshot),
+                || preferred_dashboard_day_index(snapshot),
                 |selected_day| restored_day_index(&day_labels, selected_day),
             );
             self.selected_event_id = previous_event.filter(|event_id| {
@@ -2650,63 +2656,23 @@ impl AppState {
                 self.active_screen = self.focused_top_nav_screen;
                 self.restore_screen_focus();
                 self.expanded_region = None;
+                self.dashboard_detail_overlay = None;
                 self.status_line = format!("Switched to {}.", self.active_screen.title());
             }
-            (Screen::Dashboard, FocusRegion::DashboardReadiness) => {
-                self.switch_screen(
-                    Screen::Explain,
-                    "Opened readiness explanation.".to_owned(),
-                    false,
-                );
-                self.set_focused_region(FocusRegion::Primary);
-            }
-            (Screen::Dashboard, FocusRegion::DashboardSleep) => {
-                self.switch_screen(Screen::Trends, "Opened sleep trends.".to_owned(), false);
-                self.set_focused_region(FocusRegion::TrendsMatrix);
-                self.focus_trend_row_by_label("Sleep");
-            }
-            (Screen::Dashboard, FocusRegion::DashboardActivity) => {
-                self.switch_screen(
-                    Screen::Timeline,
-                    "Opened activity timeline.".to_owned(),
-                    false,
-                );
-                self.set_focused_region(FocusRegion::TimelineChart);
-            }
-            (Screen::Dashboard, FocusRegion::DashboardHeartRate) => {
-                self.switch_screen(
-                    Screen::Trends,
-                    "Opened heart-rate trends.".to_owned(),
-                    false,
-                );
-                self.set_focused_region(FocusRegion::TrendsMatrix);
-                self.focus_trend_row_by_label("Heart Rate");
-            }
-            (Screen::Dashboard, FocusRegion::DashboardTemp) => {
-                self.switch_screen(
-                    Screen::Trends,
-                    "Opened temperature trends.".to_owned(),
-                    false,
-                );
-                self.set_focused_region(FocusRegion::TrendsMatrix);
-                self.focus_trend_row_by_label("Temp Dev");
-            }
-            (Screen::Dashboard, FocusRegion::DashboardHrv) => {
-                self.toggle_region_expansion(FocusRegion::DashboardHrv, "HRV panel");
-            }
-            (Screen::Dashboard, FocusRegion::DashboardRespRate) => {
-                self.toggle_region_expansion(FocusRegion::DashboardRespRate, "Respiratory panel");
-            }
-            (Screen::Dashboard, FocusRegion::DashboardBreakdown) => {
-                self.toggle_region_expansion(FocusRegion::DashboardBreakdown, "Driver breakdown");
-            }
-            (Screen::Dashboard, FocusRegion::DashboardHeatmap) => {
-                self.switch_screen(
-                    Screen::Timeline,
-                    "Opened selected-day timeline from the weekly heatmap.".to_owned(),
-                    false,
-                );
-                self.set_focused_region(FocusRegion::TimelineChart);
+            (
+                Screen::Dashboard,
+                FocusRegion::DashboardReadiness
+                | FocusRegion::DashboardSleep
+                | FocusRegion::DashboardActivity
+                | FocusRegion::DashboardHrv
+                | FocusRegion::DashboardTemp
+                | FocusRegion::DashboardHeartRate
+                | FocusRegion::DashboardSpo2
+                | FocusRegion::DashboardRespRate
+                | FocusRegion::DashboardBreakdown
+                | FocusRegion::DashboardHeatmap,
+            ) => {
+                self.open_dashboard_detail_overlay(self.focused_region);
             }
             (Screen::Timeline, FocusRegion::TimelineLanes)
             | (Screen::Patterns, FocusRegion::ContextSecondary)
@@ -2781,6 +2747,10 @@ impl AppState {
         }
         if self.help_open {
             self.toggle_help();
+            return;
+        }
+        if self.dashboard_detail_overlay.is_some() {
+            self.close_dashboard_detail_overlay();
             return;
         }
         if self.ai_preflight.take().is_some() {
@@ -3559,21 +3529,6 @@ impl AppState {
         }
     }
 
-    fn focus_trend_row_by_label(&mut self, label: &str) {
-        self.rebuild_live_model();
-        if let Some(index) = self
-            .model
-            .trends
-            .rows
-            .iter()
-            .position(|row| row.label == label)
-        {
-            self.trends_matrix_subfocus = TrendsMatrixSubfocus::Rows;
-            self.selected_trend_row_index = index;
-            self.rebuild_live_model();
-        }
-    }
-
     fn toggle_region_expansion(&mut self, region: FocusRegion, label: &str) {
         if self.expanded_region == Some(region) {
             self.expanded_region = None;
@@ -3581,6 +3536,32 @@ impl AppState {
         } else {
             self.expanded_region = Some(region);
             self.status_line = format!("Expanded {label}.");
+        }
+    }
+
+    fn open_dashboard_detail_overlay(&mut self, region: FocusRegion) {
+        self.expanded_region = None;
+        self.dashboard_detail_overlay = Some(DashboardDetailOverlayState {
+            region,
+            previous_region: self.focused_region,
+        });
+        self.status_line = format!(
+            "Opened {} detail overlay.",
+            navigation::region_label(Screen::Dashboard, region)
+                .unwrap_or("dashboard panel")
+                .to_ascii_lowercase()
+        );
+    }
+
+    fn close_dashboard_detail_overlay(&mut self) {
+        if let Some(overlay) = self.dashboard_detail_overlay.take() {
+            self.restore_overlay_focus(Some(overlay.previous_region));
+            self.status_line = format!(
+                "Closed {} detail overlay.",
+                navigation::region_label(Screen::Dashboard, overlay.region)
+                    .unwrap_or("dashboard panel")
+                    .to_ascii_lowercase()
+            );
         }
     }
 }
@@ -3862,7 +3843,7 @@ pub fn build_state_from_snapshot(
     status_line: impl Into<String>,
     snapshot: LiveSnapshot,
 ) -> AppState {
-    let selected_day_index = newest_day_index(&snapshot);
+    let selected_day_index = preferred_dashboard_day_index(&snapshot);
     let screen_focus_memory =
         std::array::from_fn(|index| navigation::default_region(Screen::ALL[index]));
     let mut app = AppState {
@@ -3893,6 +3874,7 @@ pub fn build_state_from_snapshot(
         selected_event_id: None,
         selected_dashboard_breakdown_index: 0,
         expanded_region: None,
+        dashboard_detail_overlay: None,
         selected_review_card_index: 0,
         ai_preflight: None,
         ai_preflight_control: PreflightControl::Confirm,
@@ -4587,7 +4569,7 @@ fn build_dashboard_model(
     let readiness_note = match readiness_tile_state {
         DashboardTileState::Fresh => today_review.observations.first().map_or_else(
             || selected_day_baseline_sentence("Readiness", &selected_day, &readiness_insight),
-            |card| format!("Review: {}", card.headline),
+            |card| dashboard_review_support_line(&card.headline),
         ),
         DashboardTileState::Stale => stale_note("readiness", &selected_day),
         DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
@@ -4595,9 +4577,7 @@ fn build_dashboard_model(
         }
     };
     let sleep_note = match sleep_tile_state {
-        DashboardTileState::Fresh => {
-            selected_day_baseline_sentence("Sleep", &selected_day, &sleep_insight)
-        }
+        DashboardTileState::Fresh => dashboard_sleep_support_line(&selected_day, &sleep_insight),
         DashboardTileState::Stale => stale_note("sleep", &selected_day),
         DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
             sleep_fallback.secondary.clone()
@@ -4605,7 +4585,7 @@ fn build_dashboard_model(
     };
     let activity_note = match activity_tile_state {
         DashboardTileState::Fresh => {
-            selected_day_baseline_sentence("Activity", &selected_day, &activity_insight)
+            dashboard_baseline_support_line("Activity", &selected_day, &activity_insight)
         }
         DashboardTileState::Stale => stale_note("activity", &selected_day),
         DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
@@ -4613,7 +4593,7 @@ fn build_dashboard_model(
         }
     };
     let hrv_note = match hrv_tile_state {
-        DashboardTileState::Fresh => selected_metric_note(
+        DashboardTileState::Fresh => dashboard_metric_support_line(
             "HRV",
             &selected_day,
             selected_sleep_period
@@ -4639,7 +4619,9 @@ fn build_dashboard_model(
         }
     };
     let heart_rate_note = match heart_rate_tile_state {
-        DashboardTileState::Fresh => heartrate_insight.summary.clone(),
+        DashboardTileState::Fresh => {
+            dashboard_baseline_support_line("Heart rate", &selected_day, &heartrate_insight)
+        }
         DashboardTileState::Stale => stale_note("heart-rate", &selected_day),
         DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
             heart_rate_fallback.secondary.clone()
@@ -4650,7 +4632,7 @@ fn build_dashboard_model(
             .and_then(|record| record.breathing_disturbance_index)
             .map_or_else(
                 || {
-                    selected_metric_note(
+                    dashboard_metric_support_line(
                         "SpO2",
                         &selected_day,
                         selected_spo2
@@ -4659,7 +4641,19 @@ fn build_dashboard_model(
                         &spo2_insight,
                     )
                 },
-                |value| format!("BDI {value:.1} | {}", spo2_insight.summary),
+                |value| {
+                    format!(
+                        "BDI {value:.1} | {}",
+                        dashboard_metric_support_line(
+                            "SpO2",
+                            &selected_day,
+                            selected_spo2
+                                .and_then(|record| record.average_spo2)
+                                .is_some(),
+                            &spo2_insight,
+                        )
+                    )
+                },
             ),
         DashboardTileState::Stale => stale_note("SpO2", &selected_day),
         DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
@@ -4667,8 +4661,8 @@ fn build_dashboard_model(
         }
     };
     let respiratory_note = match respiratory_tile_state {
-        DashboardTileState::Fresh => selected_metric_note(
-            "respiratory-rate",
+        DashboardTileState::Fresh => dashboard_metric_support_line(
+            "respiratory rate",
             &selected_day,
             selected_sleep_period
                 .and_then(|record| record.average_breath)
@@ -4736,6 +4730,9 @@ fn build_dashboard_model(
             score_band: selected_daily
                 .and_then(|row| row.sleep_score)
                 .map(dashboard_score_band_for_value),
+            score_fill_percent: selected_daily
+                .and_then(|row| row.sleep_score)
+                .map_or(0, u16::from),
             trend: values_from_metric_points(&metric_points_from_daily(
                 &snapshot.daily_history,
                 |row| row.sleep_duration_seconds.map(crate::numeric::i64_to_f64),
@@ -8431,6 +8428,49 @@ fn newest_day_index(snapshot: &LiveSnapshot) -> usize {
     available_days(snapshot).len().saturating_sub(1)
 }
 
+fn preferred_dashboard_day_index(snapshot: &LiveSnapshot) -> usize {
+    let day_labels = available_days(snapshot);
+    day_labels
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, day)| dashboard_day_render_anchor(snapshot, day).then_some(index))
+        .unwrap_or_else(|| newest_day_index(snapshot))
+}
+
+fn dashboard_day_render_anchor(snapshot: &LiveSnapshot, day: &str) -> bool {
+    let daily = selected_daily_row(snapshot, day);
+    let has_readiness = daily.and_then(|row| row.readiness_score).is_some();
+    let has_sleep = daily.and_then(|row| row.sleep_duration_seconds).is_some()
+        || daily.and_then(|row| row.sleep_score).is_some()
+        || selected_primary_sleep_period(snapshot, day).is_some();
+    let has_activity = selected_daily_activity(snapshot, day).is_some()
+        || daily.and_then(|row| row.activity_score).is_some();
+    let support_count = usize::from(
+        selected_heartrate_day(snapshot, day).is_some_and(|heartrate| !heartrate.points.is_empty()),
+    ) + usize::from(
+        selected_primary_sleep_period(snapshot, day)
+            .and_then(|record| record.average_hrv)
+            .is_some(),
+    ) + usize::from(
+        selected_primary_sleep_period(snapshot, day)
+            .and_then(|record| record.average_breath)
+            .is_some(),
+    ) + usize::from(
+        selected_daily_spo2(snapshot, day)
+            .and_then(|record| record.average_spo2)
+            .is_some(),
+    ) + usize::from(
+        selected_daily_readiness(snapshot, day)
+            .and_then(|row| row.temperature_deviation)
+            .is_some(),
+    );
+
+    let hero_count =
+        usize::from(has_readiness) + usize::from(has_sleep) + usize::from(has_activity);
+    hero_count >= 3 || (hero_count >= 2 && support_count >= 2)
+}
+
 fn selected_day_label(snapshot: &LiveSnapshot, selected_day_index: usize) -> Option<String> {
     available_days(snapshot).get(selected_day_index).cloned()
 }
@@ -9384,21 +9424,121 @@ fn selected_metric_note(
     insight: &MetricInsight,
 ) -> String {
     if value_present {
-        insight.summary.clone()
+        if let Some(today) = insight.today.as_ref() {
+            if let Some(baseline) = metric_panel_baseline_reference(insight) {
+                return format!(
+                    "{label} {} | 30d {}",
+                    format_float(today.value),
+                    format_float(baseline)
+                );
+            }
+            return format!("{label} {} | baseline thin", format_float(today.value));
+        }
+        format!("{label} reading available")
     } else if let Some(baseline) = metric_panel_baseline_reference(insight) {
-        format!(
-            "No current {label} reading is available for {selected_day}. Your trailing 30-day baseline is {}.",
-            format_float(baseline)
-        )
+        format!("No {label} today | 30d {}", format_float(baseline))
     } else if metric_panel_has_history(insight) {
-        format!(
-            "No current {label} reading is available for {selected_day}. Historical readings are cached locally, but not for this day."
-        )
+        format!("No {label} on {selected_day} | history")
     } else {
-        format!(
-            "No current {label} reading is available for {selected_day}, and no historical {label} readings are cached locally yet."
-        )
+        format!("No {label} history yet")
     }
+}
+
+fn dashboard_review_support_line(headline: &str) -> String {
+    let normalized = headline.trim_end_matches('.');
+    let subject = normalized
+        .split_once(" is ")
+        .map_or(normalized, |(prefix, _)| prefix)
+        .split_once(" was ")
+        .map_or_else(
+            || {
+                normalized
+                    .split_once(':')
+                    .map_or(normalized, |(prefix, _)| prefix)
+            },
+            |(prefix, _)| prefix,
+        )
+        .trim();
+    let compact_subject = if subject == normalized && measure_words(subject) > 3 {
+        subject
+            .split_whitespace()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        subject.to_owned()
+    };
+
+    if compact_subject.is_empty() {
+        "Review detail available".to_owned()
+    } else {
+        format!("Review: {compact_subject}")
+    }
+}
+
+fn measure_words(value: &str) -> usize {
+    value.split_whitespace().count()
+}
+
+fn dashboard_baseline_support_line(
+    label: &str,
+    _selected_day: &str,
+    insight: &MetricInsight,
+) -> String {
+    if let Some(delta) = insight.baseline_30d.delta_from_today
+        && let Some(mean) = metric_panel_baseline_reference(insight)
+    {
+        return format!("30d {delta:+.1} vs {}", format_float(mean));
+    }
+
+    if let Some(mean) = metric_panel_baseline_reference(insight) {
+        return format!("30d avg {}", format_float(mean));
+    }
+
+    if metric_panel_has_history(insight) {
+        return format!("30d {label} baseline pending");
+    }
+
+    format!("No {label} baseline yet")
+}
+
+fn dashboard_metric_support_line(
+    label: &str,
+    selected_day: &str,
+    value_present: bool,
+    insight: &MetricInsight,
+) -> String {
+    if value_present {
+        return dashboard_baseline_support_line(label, selected_day, insight);
+    }
+
+    if let Some(mean) = metric_panel_baseline_reference(insight) {
+        return format!("No {label} today | 30d avg {}", format_float(mean));
+    }
+
+    if metric_panel_has_history(insight) {
+        return format!("No {label} on {selected_day} | history cached");
+    }
+
+    format!("No cached {label} history yet")
+}
+
+fn dashboard_sleep_support_line(_selected_day: &str, insight: &MetricInsight) -> String {
+    if let Some(delta) = insight.baseline_30d.delta_from_today
+        && let Some(mean) = metric_panel_baseline_reference(insight)
+    {
+        return format!("30d sleep {delta:+.1} vs {}", format_float(mean));
+    }
+
+    if let Some(mean) = metric_panel_baseline_reference(insight) {
+        return format!("30d sleep avg {}", format_float(mean));
+    }
+
+    if metric_panel_has_history(insight) {
+        return "30d sleep baseline pending".to_owned();
+    }
+
+    "No sleep baseline yet".to_owned()
 }
 
 const fn metric_panel_baseline_reference(insight: &MetricInsight) -> Option<f64> {
@@ -10089,7 +10229,12 @@ fn build_dashboard_breakdown_rails(
             delta_label: metric_delta_label(inputs.heartrate_insight),
             delta_state: dashboard_delta_state_for_insight(inputs.heartrate_insight),
             judged_state: dashboard_rhr_judged_state(inputs.heartrate_insight),
-            note: inputs.heartrate_insight.summary.clone(),
+            note: selected_metric_note(
+                "rest HR",
+                inputs.selected_day,
+                inputs.heartrate_insight.today.is_some(),
+                inputs.heartrate_insight,
+            ),
             selected: false,
         },
         DashboardBreakdownRail {
@@ -10107,9 +10252,10 @@ fn build_dashboard_breakdown_rails(
                     .and_then(|row| row.sleep_score)
                     .map(dashboard_score_band_for_value),
             ),
-            note: selected_day_baseline_sentence(
-                "Sleep",
+            note: selected_metric_note(
+                "sleep",
                 inputs.selected_day,
+                inputs.sleep_insight.today.is_some(),
                 inputs.sleep_insight,
             ),
             selected: false,
@@ -11202,6 +11348,7 @@ fn empty_dashboard_model() -> DashboardModel {
             duration_label: String::new(),
             score_label: String::new(),
             score_band: None,
+            score_fill_percent: 0,
             trend: Vec::new(),
             strip_note: String::new(),
             fallback: empty_fallback.clone(),
@@ -12757,8 +12904,8 @@ mod tests {
         REVIEW_PROMPT_VERSION, RefreshPolicySnapshot, ReviewScreenMode, RunMode, Screen,
         TrendSortMode, WebhookOpsSnapshot, build_ai_artifact_summary_view, build_live_model,
         build_ops_model, build_state_from_snapshot, demo_eval_run_details,
-        empty_investigation_report, newest_day_index, review_card_badges, review_detail_lines,
-        serialize_json,
+        empty_investigation_report, preferred_dashboard_day_index, review_card_badges,
+        review_detail_lines, serialize_json,
     };
     use crate::action::Action;
     use crate::ai::{
@@ -13066,7 +13213,7 @@ mod tests {
     }
 
     fn make_live_app(snapshot: LiveSnapshot) -> AppState {
-        let selected_day_index = newest_day_index(&snapshot);
+        let selected_day_index = preferred_dashboard_day_index(&snapshot);
         let screen_focus_memory =
             std::array::from_fn(|index| navigation::default_region(Screen::ALL[index]));
         let mut app = AppState {
@@ -13097,6 +13244,7 @@ mod tests {
             selected_event_id: None,
             selected_dashboard_breakdown_index: 0,
             expanded_region: None,
+            dashboard_detail_overlay: None,
             selected_review_card_index: 0,
             ai_preflight: None,
             ai_preflight_control: PreflightControl::Confirm,
@@ -14801,11 +14949,7 @@ mod tests {
 
         assert_eq!(rail.availability, TelemetryAvailability::RateLimited);
         assert_ne!(rail.delta_label, "scope pending");
-        assert!(
-            rail.note
-                .to_ascii_lowercase()
-                .contains("no current hrv reading is available")
-        );
+        assert_eq!(rail.note.to_ascii_lowercase(), "no hrv history yet");
     }
 
     #[test]
@@ -15322,7 +15466,7 @@ mod tests {
         app.set_focused_region(FocusRegion::DashboardReadiness);
         assert_eq!(
             app.focused_interaction(),
-            FocusInteraction::Navigate("readiness explanation")
+            FocusInteraction::Activate("detail overlay")
         );
 
         app.active_screen = Screen::Timeline;
@@ -15440,7 +15584,8 @@ mod tests {
             "Demo mode ready.",
             make_snapshot(&["2026-04-08"]),
         );
-        app.active_screen = Screen::Ai;
+        app.active_screen = Screen::Dashboard;
+        app.set_focused_region(FocusRegion::DashboardReadiness);
         app.handle(Action::AiPreflightPrepared {
             preflight: Box::new(AiPreflightState {
                 intent: AiLaunchIntent::ReviewSelectedDay,
@@ -15457,11 +15602,40 @@ mod tests {
             }),
             status_line: "Prepared review preflight.".to_owned(),
         });
+        app.open_dashboard_detail_overlay(FocusRegion::DashboardReadiness);
+        assert_eq!(
+            app.current_transient(),
+            Some(TransientLayer::DashboardDetail)
+        );
+        assert_eq!(
+            app.dashboard_detail_region(),
+            Some(FocusRegion::DashboardReadiness)
+        );
+        assert_eq!(
+            app.binding_context().active_transient,
+            Some(TransientLayer::DashboardDetail)
+        );
+
         app.handle(Action::ToggleHelp);
         assert_eq!(app.current_transient(), Some(TransientLayer::Help));
 
+        app.handle(Action::Back);
+        assert_eq!(
+            app.current_transient(),
+            Some(TransientLayer::DashboardDetail)
+        );
+
         app.handle(Action::OpenSearch);
         assert_eq!(app.current_transient(), Some(TransientLayer::Search));
+
+        app.handle(Action::Back);
+        assert_eq!(
+            app.current_transient(),
+            Some(TransientLayer::DashboardDetail)
+        );
+
+        app.handle(Action::Back);
+        assert_eq!(app.current_transient(), Some(TransientLayer::AiPreflight));
     }
 
     #[test]
@@ -15527,14 +15701,17 @@ mod tests {
         });
 
         assert_eq!(app.current_transient(), Some(TransientLayer::AiPreflight));
-        assert!(app.binding_context().ai_preflight_open);
+        assert_eq!(
+            app.binding_context().active_transient,
+            Some(TransientLayer::AiPreflight)
+        );
 
         app.handle(Action::ShowScreen(Screen::Review));
 
         assert_eq!(app.active_screen, Screen::Review);
         assert!(app.ai_preflight_state().is_none());
         assert_eq!(app.current_transient(), None);
-        assert!(!app.binding_context().ai_preflight_open);
+        assert_eq!(app.binding_context().active_transient, None);
     }
 
     #[test]
@@ -16066,7 +16243,45 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_breakdown_expansion_is_reversible_with_back() {
+    fn live_dashboard_defaults_to_latest_renderable_day_when_newest_day_is_sparse() {
+        let mut snapshot = make_snapshot(&["2026-04-08", "2026-04-09", "2026-04-10"]);
+        let sparse_latest = "2026-04-10";
+
+        if let Some(row) = snapshot
+            .daily_history
+            .iter_mut()
+            .find(|row| row.day == sparse_latest)
+        {
+            row.sleep_score = None;
+            row.sleep_duration_seconds = None;
+            row.readiness_score = None;
+            row.activity_score = None;
+        }
+        snapshot
+            .daily_activity
+            .retain(|record| record.day != sparse_latest);
+        snapshot
+            .sleep_periods
+            .retain(|record| record.day != sparse_latest);
+        snapshot
+            .heartrate_days
+            .retain(|record| record.day != sparse_latest);
+        snapshot
+            .daily_spo2
+            .retain(|record| record.day != sparse_latest);
+        snapshot
+            .daily_readiness
+            .retain(|record| record.day != sparse_latest);
+        snapshot
+            .heartrate_daily_averages
+            .retain(|point| point.day != sparse_latest);
+
+        assert_eq!(preferred_dashboard_day_index(&snapshot), 1);
+        assert_eq!(make_live_app(snapshot).selected_day_index, 1);
+    }
+
+    #[test]
+    fn dashboard_breakdown_detail_overlay_is_reversible_with_back() {
         let mut app = build_state_from_snapshot(
             RunMode::Demo,
             "Demo mode ready.",
@@ -16076,10 +16291,24 @@ mod tests {
         app.set_focused_region(FocusRegion::DashboardBreakdown);
 
         app.handle(Action::ActivateFocusedRegion);
-        assert_eq!(app.expanded_region(), Some(FocusRegion::DashboardBreakdown));
+        assert_eq!(
+            app.dashboard_detail_region(),
+            Some(FocusRegion::DashboardBreakdown)
+        );
+        assert_eq!(
+            app.current_transient(),
+            Some(TransientLayer::DashboardDetail)
+        );
+        assert_eq!(app.focused_region(), FocusRegion::DashboardBreakdown);
+        assert_eq!(app.focused_interaction(), FocusInteraction::None);
+        assert_eq!(
+            app.binding_context().active_transient,
+            Some(TransientLayer::DashboardDetail)
+        );
 
         app.handle(Action::Back);
-        assert_eq!(app.expanded_region(), None);
+        assert_eq!(app.dashboard_detail_region(), None);
+        assert_eq!(app.current_transient(), None);
         assert_eq!(app.focused_region(), FocusRegion::DashboardBreakdown);
     }
 

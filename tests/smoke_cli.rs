@@ -62,7 +62,7 @@ async fn demo_output_mentions_dashboard() {
     );
 
     assert!(output.contains("ringmaster"));
-    assert!(output.contains("Connection: Connected"));
+    assert!(output.contains("Conn on"));
     assert!(output.contains("READINESS"));
     assert!(output.contains("READINESS BREAKDOWN"));
     assert!(output.contains("WEEKLY TRENDS"));
