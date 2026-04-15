@@ -347,14 +347,8 @@ capabilities:
             .last_refresh_at
             .clone()
             .unwrap_or_else(|| "never".to_owned()),
-        auth_status
-            .account_id
-            .clone()
-            .unwrap_or_else(|| "unknown".to_owned()),
-        auth_status
-            .account_email
-            .clone()
-            .unwrap_or_else(|| "unknown".to_owned()),
+        doctor_redacted_identity(auth_status.account_id.as_deref()),
+        doctor_redacted_identity(auth_status.account_email.as_deref()),
         auth_status
             .last_error
             .as_ref()
@@ -366,6 +360,14 @@ capabilities:
         },
         doctor_capability_lines(auth_status),
     )
+}
+
+fn doctor_redacted_identity(value: Option<&str>) -> String {
+    if value.is_some_and(|entry| !entry.trim().is_empty()) {
+        "[redacted]".to_owned()
+    } else {
+        "unknown".to_owned()
+    }
 }
 
 fn doctor_sync_section(config: &Config, snapshot: &app::LiveSnapshot) -> String {
@@ -4348,6 +4350,10 @@ mod tests {
                 "auth_last_error: Oura API problem 503: Secret backend unavailable (unlock the keychain)"
             )
         );
+        assert!(report.contains("account_id: [redacted]"));
+        assert!(report.contains("account_email: [redacted]"));
+        assert!(!report.contains("fixture-user"));
+        assert!(!report.contains("fixture@example.com"));
     }
 
     #[test]

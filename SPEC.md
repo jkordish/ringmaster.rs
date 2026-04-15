@@ -280,6 +280,7 @@ A bootstrap implementation is acceptable when all of the following are true:
 
 - default to local storage only
 - do not log access tokens or refresh tokens
+- logging, `doctor`, and explicit error surfaces must redact raw personally identifying data
 - secrets must have a dedicated seam for secure storage
 - no telemetry by default
 - avoid unnecessary network calls
