@@ -539,7 +539,7 @@ pub struct DashboardSleepTile {
     pub duration_label: String,
     pub score_label: String,
     pub score_band: Option<DashboardScoreBand>,
-    pub score_fill_percent: u16,
+    pub score_fill_percent: Option<u16>,
     pub trend: Vec<u64>,
     pub strip_note: String,
     pub fallback: DashboardTileFallback,
@@ -4732,7 +4732,7 @@ fn build_dashboard_model(
                 .map(dashboard_score_band_for_value),
             score_fill_percent: selected_daily
                 .and_then(|row| row.sleep_score)
-                .map_or(0, u16::from),
+                .map(u16::from),
             trend: values_from_metric_points(&metric_points_from_daily(
                 &snapshot.daily_history,
                 |row| row.sleep_duration_seconds.map(crate::numeric::i64_to_f64),
@@ -8442,29 +8442,36 @@ fn dashboard_day_render_anchor(snapshot: &LiveSnapshot, day: &str) -> bool {
     let daily = selected_daily_row(snapshot, day);
     let has_readiness = daily.and_then(|row| row.readiness_score).is_some();
     let has_sleep = daily.and_then(|row| row.sleep_duration_seconds).is_some()
-        || daily.and_then(|row| row.sleep_score).is_some()
-        || selected_primary_sleep_period(snapshot, day).is_some();
+        || daily.and_then(|row| row.sleep_score).is_some();
     let has_activity = selected_daily_activity(snapshot, day).is_some()
         || daily.and_then(|row| row.activity_score).is_some();
-    let support_count = usize::from(
-        selected_heartrate_day(snapshot, day).is_some_and(|heartrate| !heartrate.points.is_empty()),
-    ) + usize::from(
-        selected_primary_sleep_period(snapshot, day)
-            .and_then(|record| record.average_hrv)
-            .is_some(),
-    ) + usize::from(
-        selected_primary_sleep_period(snapshot, day)
-            .and_then(|record| record.average_breath)
-            .is_some(),
-    ) + usize::from(
-        selected_daily_spo2(snapshot, day)
-            .and_then(|record| record.average_spo2)
-            .is_some(),
-    ) + usize::from(
-        selected_daily_readiness(snapshot, day)
-            .and_then(|row| row.temperature_deviation)
-            .is_some(),
-    );
+    let has_heartrate_support = selected_heartrate_day(snapshot, day)
+        .is_some_and(|heartrate| !heartrate.points.is_empty())
+        || snapshot
+            .heartrate_daily_averages
+            .iter()
+            .any(|point| point.day == day);
+    let support_count = usize::from(has_heartrate_support)
+        + usize::from(
+            selected_primary_sleep_period(snapshot, day)
+                .and_then(|record| record.average_hrv)
+                .is_some(),
+        )
+        + usize::from(
+            selected_primary_sleep_period(snapshot, day)
+                .and_then(|record| record.average_breath)
+                .is_some(),
+        )
+        + usize::from(
+            selected_daily_spo2(snapshot, day)
+                .and_then(|record| record.average_spo2)
+                .is_some(),
+        )
+        + usize::from(
+            selected_daily_readiness(snapshot, day)
+                .and_then(|row| row.temperature_deviation)
+                .is_some(),
+        );
 
     let hero_count =
         usize::from(has_readiness) + usize::from(has_sleep) + usize::from(has_activity);
@@ -11366,7 +11373,7 @@ fn empty_dashboard_model() -> DashboardModel {
             duration_label: String::new(),
             score_label: String::new(),
             score_band: None,
-            score_fill_percent: 0,
+            score_fill_percent: None,
             trend: Vec::new(),
             strip_note: String::new(),
             fallback: empty_fallback.clone(),
@@ -16296,6 +16303,84 @@ mod tests {
 
         assert_eq!(preferred_dashboard_day_index(&snapshot), 1);
         assert_eq!(make_live_app(snapshot).selected_day_index, 1);
+    }
+
+    #[test]
+    fn render_anchor_does_not_treat_sleep_period_alone_as_sleep_hero() {
+        let latest = "2026-04-10";
+        let mut snapshot = make_snapshot(&["2026-04-08", "2026-04-09", latest]);
+
+        if let Some(row) = snapshot
+            .daily_history
+            .iter_mut()
+            .find(|row| row.day == latest)
+        {
+            row.sleep_score = None;
+            row.sleep_duration_seconds = None;
+            row.readiness_score = Some(80);
+            row.activity_score = Some(70);
+        }
+        snapshot.daily_spo2.retain(|record| record.day != latest);
+        snapshot
+            .daily_readiness
+            .retain(|record| record.day != latest);
+        snapshot
+            .heartrate_daily_averages
+            .retain(|point| point.day != latest);
+        snapshot
+            .heartrate_days
+            .retain(|record| record.day != latest);
+        if let Some(record) = snapshot
+            .sleep_periods
+            .iter_mut()
+            .find(|record| record.day == latest)
+        {
+            record.average_hrv = None;
+            record.average_breath = None;
+        }
+
+        assert!(!super::dashboard_day_render_anchor(&snapshot, latest));
+        assert_eq!(preferred_dashboard_day_index(&snapshot), 1);
+    }
+
+    #[test]
+    fn render_anchor_counts_daily_heartrate_averages_as_support() {
+        let latest = "2026-04-10";
+        let mut snapshot = make_snapshot(&["2026-04-08", "2026-04-09", latest]);
+
+        if let Some(row) = snapshot
+            .daily_history
+            .iter_mut()
+            .find(|row| row.day == latest)
+        {
+            row.sleep_score = None;
+            row.sleep_duration_seconds = None;
+            row.readiness_score = Some(80);
+            row.activity_score = Some(70);
+        }
+        snapshot.sleep_periods.retain(|record| record.day != latest);
+        snapshot
+            .heartrate_days
+            .retain(|record| record.day != latest);
+        snapshot
+            .daily_readiness
+            .retain(|record| record.day != latest);
+        snapshot.daily_spo2.retain(|record| record.day != latest);
+        snapshot.heartrate_daily_averages.push(MetricPoint {
+            day: latest.to_owned(),
+            value: 64.0,
+        });
+        snapshot.daily_spo2.push(DailySpO2Record {
+            oura_id: Some(format!("support-spo2-{latest}")),
+            day: latest.to_owned(),
+            average_spo2: Some(97.0),
+            breathing_disturbance_index: Some(0.3),
+            raw_cache_key: None,
+            updated_at: format!("{latest}T07:00:00Z"),
+        });
+
+        assert!(super::dashboard_day_render_anchor(&snapshot, latest));
+        assert_eq!(preferred_dashboard_day_index(&snapshot), 2);
     }
 
     #[test]

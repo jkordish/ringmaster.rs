@@ -582,6 +582,27 @@ fn sleep_detail_summary(tile: &DashboardSleepTile) -> (String, String) {
     }
 }
 
+fn sleep_instrument_line(
+    tile: &DashboardSleepTile,
+    width: usize,
+    band_width: usize,
+) -> (String, Tone) {
+    tile.score_fill_percent.map_or_else(
+        || {
+            (
+                centered_line(width, concise_detail("score pending", width)),
+                Tone::Muted,
+            )
+        },
+        |fill_percent| {
+            (
+                centered_line(width, meter_bar(fill_percent, band_width)),
+                score_band_cue_tone(tile.score_band),
+            )
+        },
+    )
+}
+
 fn trend_detail_spec(
     title: &str,
     panel: &DashboardTrendPanel,
@@ -1438,16 +1459,16 @@ fn render_sleep_tile(
     );
     let width = usize::from(content.chart.area.width);
     let (summary, support) = sleep_detail_summary(tile);
-    let cue_tone = score_band_cue_tone(tile.score_band);
     let band_width = clamped_instrument_width(width, state.metrics, 12, width.max(12));
     let capacity = usize::from(content.chart.area.height).max(2);
     let mut lines = vec![Line::from(Span::styled(
         centered_line(width, concise_text(&summary, width)),
         theme.dominant_metric(score_band_primary_tone(tile.score_band)),
     ))];
+    let (instrument_line, instrument_tone) = sleep_instrument_line(tile, width, band_width);
     lines.push(Line::from(Span::styled(
-        centered_line(width, meter_bar(tile.score_fill_percent, band_width)),
-        theme.status_marker(cue_tone),
+        instrument_line,
+        theme.status_marker(instrument_tone),
     )));
     if capacity >= 3 {
         lines.push(Line::from(Span::styled(
@@ -3074,12 +3095,13 @@ fn heatmap_subrow_line(
 
 #[cfg(test)]
 mod tests {
-    use super::{compact_heatmap_summary, trend_instrument_lines};
+    use super::{compact_heatmap_summary, sleep_instrument_line, trend_instrument_lines};
     use crate::app::{
-        DashboardDeltaState, DashboardHeatmapGrid, DashboardTileFallback, DashboardTileState,
-        DashboardTrendPanel,
+        DashboardDeltaState, DashboardHeatmapGrid, DashboardSleepTile, DashboardTileFallback,
+        DashboardTileState, DashboardTrendPanel,
     };
     use crate::ui::telemetry::MetricPanelState;
+    use crate::ui::theme::Tone;
 
     #[test]
     fn compact_heatmap_summary_uses_note_when_selected_cell_has_no_value() {
@@ -3126,5 +3148,26 @@ mod tests {
 
         assert_eq!(lines.len(), 2);
         assert!(lines[0].chars().count() <= 4);
+    }
+
+    #[test]
+    fn sleep_instrument_line_uses_pending_placeholder_without_score_fill() {
+        let tile = DashboardSleepTile {
+            availability: MetricPanelState::Fresh,
+            tile_state: DashboardTileState::Fresh,
+            duration_label: "6h 55m".to_owned(),
+            score_label: "score --".to_owned(),
+            score_band: None,
+            score_fill_percent: None,
+            trend: vec![27_000, 26_000, 28_000],
+            strip_note: "Duration is present; score will fill once the overnight summary closes."
+                .to_owned(),
+            fallback: DashboardTileFallback::default(),
+        };
+
+        let (line, tone) = sleep_instrument_line(&tile, 14, 12);
+
+        assert!(line.contains("score pending"));
+        assert_eq!(tone, Tone::Muted);
     }
 }
