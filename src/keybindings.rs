@@ -228,8 +228,8 @@ fn build_bindings() -> Vec<Keybinding> {
     use FocusRegion::{
         ContextPrimary, ContextSecondary, DashboardActivity, DashboardBreakdown,
         DashboardHeartRate, DashboardHeatmap, DashboardHrv, DashboardReadiness, DashboardRespRate,
-        DashboardSleep, DashboardTemp, OpsCoverage, OpsDiagnostics, OpsSummary, OpsWarnings,
-        Primary, Secondary, Tertiary, TimelineChart, TimelineControls, TimelineEvents,
+        DashboardSleep, DashboardSpo2, DashboardTemp, OpsCoverage, OpsDiagnostics, OpsSummary,
+        OpsWarnings, Primary, Secondary, Tertiary, TimelineChart, TimelineControls, TimelineEvents,
         TimelineInspector, TimelineLanes, TopNav, TrendsInspector, TrendsMatrix,
     };
     use TransientLayer::{AiPreflight, DashboardDetail, Help, Search};
@@ -671,6 +671,14 @@ fn build_bindings() -> Vec<Keybinding> {
             true,
         ),
         key(
+            ScreenRegion(Screen::Dashboard, DashboardSpo2),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter`/`Space` open detail",
+            true,
+        ),
+        key(
             ScreenRegion(Screen::Dashboard, DashboardRespRate),
             Standard,
             KeyChord::plain(Enter),
@@ -736,6 +744,14 @@ fn build_bindings() -> Vec<Keybinding> {
         ),
         key(
             ScreenRegion(Screen::Dashboard, DashboardHrv),
+            Standard,
+            KeyChord::plain(Char(' ')),
+            ActivateFocusedRegion,
+            "`Enter`/`Space` open detail",
+            false,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardSpo2),
             Standard,
             KeyChord::plain(Char(' ')),
             ActivateFocusedRegion,
@@ -1913,6 +1929,21 @@ mod tests {
 
         assert_eq!(hints.first().copied(), Some("`Enter`/`Space` open detail"));
         assert!(hints.iter().any(|hint| hint.contains("`?`")));
+    }
+
+    #[test]
+    fn dashboard_spo2_bindings_open_detail_with_enter_and_space() {
+        let enter = super::resolve(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            context(Screen::Dashboard, FocusRegion::DashboardSpo2, None),
+        );
+        let space = super::resolve(
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            context(Screen::Dashboard, FocusRegion::DashboardSpo2, None),
+        );
+
+        assert_eq!(enter, Some(Action::ActivateFocusedRegion));
+        assert_eq!(space, Some(Action::ActivateFocusedRegion));
     }
 
     #[test]
