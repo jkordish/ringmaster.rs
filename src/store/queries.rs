@@ -4391,25 +4391,27 @@ impl<'connection> ViewStore<'connection> {
 }
 
 fn read_sync_state_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncStateRecord> {
+    let sync_key: String = row.get(0)?;
     let last_attempted_at = row.get::<_, String>(5)?;
     let updated_at = row
         .get::<_, Option<String>>(19)?
         .unwrap_or_else(|| last_attempted_at.clone());
+    let family = row
+        .get::<_, Option<String>>(1)?
+        .unwrap_or_else(|| match sync_key.as_str() {
+            "oura.personal" => "personal".to_owned(),
+            "oura.daily" => "daily".to_owned(),
+            "oura.spo2" => "spo2".to_owned(),
+            "oura.heartrate" => "heartrate".to_owned(),
+            "oura.workouts" => "workout".to_owned(),
+            "oura.enhanced_tags" => "tag".to_owned(),
+            "oura.sessions" => "session".to_owned(),
+            other => other.to_owned(),
+        });
 
     Ok(SyncStateRecord {
-        sync_key: row.get(0)?,
-        family: row.get::<_, Option<String>>(1)?.unwrap_or_else(|| {
-            match row.get::<_, String>(0).unwrap_or_default().as_str() {
-                "oura.personal" => "personal".to_owned(),
-                "oura.daily" => "daily".to_owned(),
-                "oura.spo2" => "spo2".to_owned(),
-                "oura.heartrate" => "heartrate".to_owned(),
-                "oura.workouts" => "workout".to_owned(),
-                "oura.enhanced_tags" => "tag".to_owned(),
-                "oura.sessions" => "session".to_owned(),
-                other => other.to_owned(),
-            }
-        }),
+        sync_key,
+        family,
         status: SyncRunStatus::parse(&row.get::<_, String>(2)?),
         cursor: row.get(3)?,
         last_successful_sync_end: row.get(4)?,
@@ -4696,6 +4698,7 @@ fn now_rfc3339() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{AiEvalRunRecord, ReportExportRecord};
+    use rusqlite::params;
 
     use crate::error::OuraProblem;
     use crate::review::features::ReviewSufficiency;
@@ -4957,6 +4960,58 @@ mod tests {
             Some("2026-04-08T06:05:00Z")
         );
         assert_eq!(record.status, SyncRunStatus::Failed);
+    }
+
+    #[test]
+    fn sync_state_family_falls_back_from_sync_key_without_re_reading_the_row() {
+        let store = Store::open_test_store()
+            .unwrap_or_else(|error| unreachable!("store should open: {error}"));
+
+        store
+            .sync_state()
+            .connection
+            .execute(
+                "INSERT INTO sync_state (
+                    sync_key,
+                    family,
+                    status,
+                    cursor,
+                    last_successful_sync_end,
+                    last_attempted_at,
+                    last_completed_at,
+                    last_reconcile_end,
+                    oldest_recently_reconciled_at,
+                    message,
+                    granted_scopes,
+                    last_error_json,
+                    last_error_at,
+                    last_error_kind,
+                    last_error_detail,
+                    failure_count,
+                    next_attempt_after,
+                    last_trigger_source,
+                    last_trigger_detail,
+                    updated_at
+                ) VALUES (
+                    ?1, NULL, ?2, NULL, NULL, ?3, NULL, NULL, NULL, NULL, '', NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, ?4
+                )",
+                params![
+                    "oura.spo2",
+                    SyncRunStatus::Success.as_str(),
+                    "2026-04-08T06:00:00Z",
+                    "2026-04-08T06:00:00Z",
+                ],
+            )
+            .unwrap_or_else(|error| unreachable!("sync state row should insert: {error}"));
+
+        let record = store
+            .sync_state()
+            .get("oura.spo2")
+            .unwrap_or_else(|error| unreachable!("sync state should read: {error}"))
+            .unwrap_or_else(|| unreachable!("sync state should exist"));
+
+        assert_eq!(record.sync_key, "oura.spo2");
+        assert_eq!(record.family, "spo2");
     }
 
     #[test]

@@ -10,7 +10,7 @@ The review surfaced a handful of correctness issues around blank tokens, SpO2 sc
 
 ## Current state
 
-The branch already contains the earlier auth/sync/migration/ops/doc fixes plus the reconcile cadence and uppercase badge-abbreviation follow-ups. A final review pass surfaced one more correctness issue: upsert-only families were still recording successful reconcile coverage for healed windows even though they cannot prune upstream removals within those windows.
+The branch already contains the earlier auth/sync/migration/ops/doc fixes plus the reconcile cadence and uppercase badge-abbreviation follow-ups. The final review sweep surfaced three last correctness issues: upsert-only families were still recording successful reconcile coverage for healed windows even though they cannot prune upstream removals within those windows, heartrate reconcile coverage was dropping timestamp precision on the coverage start marker, and sync-state row decoding was redundantly rereading `sync_key` while swallowing a potential SQL error in the fallback family mapping.
 
 ## Desired state
 
@@ -26,6 +26,8 @@ PR #12 should:
 - keep test-only telemetry scaffold helpers out of non-test builds
 - preserve retry coverage for partial daily backfill/reconcile windows while still allowing tail syncs to advance
 - only record reconcile coverage for families whose window persistence can truthfully heal missing upstream rows
+- preserve full timestamp precision for heartrate reconcile coverage markers
+- decode sync-state rows without rereading `sync_key` or masking row errors
 - remove stale docs/comments that no longer match the code
 - pass repo verification so the unresolved review threads can be resolved confidently
 

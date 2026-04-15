@@ -1148,7 +1148,7 @@ fn plan_heartrate_windows(
             );
             let reconcile_start = now - Duration::days(policy.reconcile_days());
             let tail_covers_reconcile = tail_start <= reconcile_start;
-            let reconcile_start_marker = reconcile_start.date().to_string();
+            let reconcile_start_marker = format_timestamp_marker(reconcile_start)?;
             let now_marker = format_timestamp_marker(now)?;
             if !tail_covers_reconcile
                 && should_run_reconcile(
@@ -1948,6 +1948,7 @@ async fn sync_heartrate(
     for planned in windows {
         match execute_heartrate_window(config, &store_plan, client, &planned, options).await {
             Ok((message, imported_rows)) => {
+                let start_marker = format_timestamp_marker(planned.start)?;
                 let end_marker = format_timestamp_marker(planned.end)?;
                 summary.observe(SliceReport {
                     sync_key: SyncFamily::Heartrate.sync_key().to_owned(),
@@ -1964,7 +1965,7 @@ async fn sync_heartrate(
                     oldest_recently_reconciled_at: reconcile_window_start_marker(
                         SyncFamily::Heartrate,
                         planned.purpose,
-                        planned.start.date().to_string(),
+                        start_marker,
                     ),
                     message: format!("{} window: {message}", planned.purpose.label()),
                     last_error: None,
@@ -3772,7 +3773,10 @@ mod tests {
             "success watermark should format",
         );
         let reconcile_end = success_end.clone();
-        let reconcile_start = (now - policy.reconcile_window).date().to_string();
+        let reconcile_start = ok(
+            super::format_timestamp_marker(now - policy.reconcile_window),
+            "reconcile start marker should format",
+        );
         ok(
             store.sync_state().upsert(&SyncStateRecord {
                 sync_key: "oura.heartrate".to_owned(),
@@ -3836,7 +3840,10 @@ mod tests {
         let policy = SyncPolicy::for_family(&config.refresh, SyncFamily::Heartrate);
         let now = OffsetDateTime::parse("2026-04-14T12:00:00Z", &Rfc3339)
             .unwrap_or_else(|error| panic!("timestamp should parse: {error}"));
-        let recent_start = (now - policy.reconcile_window).date().to_string();
+        let recent_start = ok(
+            super::format_timestamp_marker(now - policy.reconcile_window),
+            "recent reconcile boundary should format",
+        );
         let now_marker = ok(
             super::format_timestamp_marker(now),
             "current timestamp marker should format",
