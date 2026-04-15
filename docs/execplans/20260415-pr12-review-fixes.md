@@ -52,7 +52,7 @@ PR #12 should:
 
 - [x] Apply the auth/sync/migration/ops/doc fixes from review feedback
 - [x] Re-run compile, lint, test, and doctor verification
-- [ ] Resolve the remaining actionable PR review threads
+- [x] Resolve the remaining actionable PR review threads
 
 ## Verification
 
