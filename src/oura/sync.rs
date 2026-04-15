@@ -952,7 +952,7 @@ fn should_run_reconcile(
     let Some(now_timestamp) = parse_timestamp_marker(Some(now_marker))? else {
         return Ok(true);
     };
-    if now_timestamp - last_reconcile_end >= policy.overlap {
+    if now_timestamp - last_reconcile_end >= policy.reconcile_window {
         return Ok(true);
     }
     let oldest_recent = sync_state
@@ -3662,6 +3662,59 @@ mod tests {
                 .iter()
                 .all(|window| window.end - window.start <= policy.backfill_chunk),
             "steady-state heartrate sync should stay chunk-bounded"
+        );
+    }
+
+    #[test]
+    fn should_run_reconcile_uses_reconcile_window_instead_of_overlap() {
+        let config = fixture_config();
+        let policy = SyncPolicy::for_family(&config.refresh, SyncFamily::Heartrate);
+        let now = OffsetDateTime::parse("2026-04-14T12:00:00Z", &Rfc3339)
+            .unwrap_or_else(|error| panic!("timestamp should parse: {error}"));
+        let recent_start = (now - policy.reconcile_window).date().to_string();
+        let now_marker = ok(
+            super::format_timestamp_marker(now),
+            "current timestamp marker should format",
+        );
+        let last_reconcile_end = ok(
+            super::format_timestamp_marker(now - time::Duration::hours(2)),
+            "recent reconcile marker should format",
+        );
+
+        let should_run = ok(
+            super::should_run_reconcile(
+                &policy,
+                Some(&SyncStateRecord {
+                    sync_key: "oura.heartrate".to_owned(),
+                    family: "heartrate".to_owned(),
+                    status: SyncRunStatus::Success,
+                    cursor: Some(last_reconcile_end.clone()),
+                    last_successful_sync_end: Some(last_reconcile_end.clone()),
+                    last_attempted_at: "2026-04-14T10:00:00Z".to_owned(),
+                    last_completed_at: Some("2026-04-14T10:00:05Z".to_owned()),
+                    last_reconcile_end: Some(last_reconcile_end),
+                    oldest_recently_reconciled_at: Some(recent_start.clone()),
+                    message: Some("recent reconcile window already covered".to_owned()),
+                    granted_scopes: vec!["heartrate".to_owned()],
+                    last_error: None,
+                    last_error_at: None,
+                    last_error_kind: None,
+                    last_error_detail: None,
+                    failure_count: 0,
+                    next_attempt_after: None,
+                    last_trigger_source: Some("periodic_reconcile".to_owned()),
+                    last_trigger_detail: Some("recent cadence test".to_owned()),
+                    updated_at: "2026-04-14T10:00:05Z".to_owned(),
+                }),
+                &recent_start,
+                &now_marker,
+            ),
+            "reconcile cadence check should succeed",
+        );
+
+        assert!(
+            !should_run,
+            "reconcile should not rerun just because overlap elapsed when the broader reconcile window is still fresh"
         );
     }
 
