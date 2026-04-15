@@ -10,7 +10,7 @@ The review surfaced a handful of correctness issues around blank tokens, SpO2 sc
 
 ## Current state
 
-The branch already contains the earlier auth/sync/migration/ops/doc fixes plus the reconcile cadence and uppercase badge-abbreviation follow-ups. A fresh review pass surfaced three additional correctness/hygiene gaps: duplicate `--family` flags should be deduplicated, the telemetry availability scaffold should be test-only, and partial daily backfill/reconcile windows should preserve retry coverage instead of advancing the committed cursor.
+The branch already contains the earlier auth/sync/migration/ops/doc fixes plus the reconcile cadence and uppercase badge-abbreviation follow-ups. A final review pass surfaced one more correctness issue: upsert-only families were still recording successful reconcile coverage for healed windows even though they cannot prune upstream removals within those windows.
 
 ## Desired state
 
@@ -25,6 +25,7 @@ PR #12 should:
 - deduplicate repeated `--family` CLI selections while preserving user order
 - keep test-only telemetry scaffold helpers out of non-test builds
 - preserve retry coverage for partial daily backfill/reconcile windows while still allowing tail syncs to advance
+- only record reconcile coverage for families whose window persistence can truthfully heal missing upstream rows
 - remove stale docs/comments that no longer match the code
 - pass repo verification so the unresolved review threads can be resolved confidently
 
@@ -56,8 +57,9 @@ PR #12 should:
 
 - [x] Apply the auth/sync/migration/ops/doc fixes from review feedback
 - [x] Close the late review follow-ups around duplicate families, test-only scaffolds, and daily retry cursor semantics
+- [x] Close the final reconcile-coverage truthfulness gap for upsert-only families
 - [x] Re-run compile, lint, test, and doctor verification
-- [x] Resolve the remaining actionable PR review threads
+- [ ] Resolve the remaining actionable PR review threads
 
 ## Verification
 
@@ -68,4 +70,4 @@ PR #12 should:
 
 ## Follow-up work
 
-- None planned beyond resolving the review threads once verification is green.
+- None planned beyond resolving the last review thread once verification is green.

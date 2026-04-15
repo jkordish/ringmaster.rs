@@ -9003,13 +9003,17 @@ fn sync_family_status_detail(
         .last_trigger_source
         .clone()
         .unwrap_or_else(|| "unknown".to_owned());
-    let reconcile = match (
-        sync_state.oldest_recently_reconciled_at.as_deref(),
-        sync_state.last_reconcile_end.as_deref(),
-    ) {
-        (Some(start), Some(end)) => format!("coverage={start}..{end}"),
-        (None, Some(end)) => format!("reconcile_end={end}"),
-        _ => "coverage=pending".to_owned(),
+    let reconcile = if crate::oura::sync::sync_family_supports_reconcile_coverage(family) {
+        match (
+            sync_state.oldest_recently_reconciled_at.as_deref(),
+            sync_state.last_reconcile_end.as_deref(),
+        ) {
+            (Some(start), Some(end)) => format!("coverage={start}..{end}"),
+            (None, Some(end)) => format!("reconcile_end={end}"),
+            _ => "coverage=pending".to_owned(),
+        }
+    } else {
+        "coverage=n/a".to_owned()
     };
     let success_end = sync_state
         .last_successful_sync_end
@@ -13671,7 +13675,7 @@ mod tests {
     }
 
     #[test]
-    fn ops_family_statuses_include_spo2_support_and_coverage() {
+    fn ops_family_statuses_include_spo2_support_without_claiming_reconcile_coverage() {
         let mut snapshot = make_snapshot(&["2026-04-08"]);
         let mut spo2_state = sync_state_fixture(
             "oura.spo2",
@@ -13713,7 +13717,8 @@ mod tests {
 
         assert!(daily.scope_label.contains("webhook-assisted"));
         assert!(spo2.scope_label.contains("periodic-only"));
-        assert!(spo2.detail.contains("coverage=2026-03-10..2026-04-08"));
+        assert!(spo2.detail.contains("coverage=n/a"));
+        assert!(!spo2.detail.contains("2026-03-10..2026-04-08"));
         assert!(spo2.detail.contains("success_end=2026-04-08"));
     }
 

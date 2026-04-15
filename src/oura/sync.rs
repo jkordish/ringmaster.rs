@@ -668,6 +668,16 @@ impl SyncWindowPurpose {
     }
 }
 
+impl SyncFamily {
+    const fn supports_window_reconcile_coverage(self) -> bool {
+        matches!(self, Self::Heartrate)
+    }
+}
+
+pub const fn sync_family_supports_reconcile_coverage(family: SyncFamily) -> bool {
+    family.supports_window_reconcile_coverage()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlannedDailyWindow {
     purpose: SyncWindowPurpose,
@@ -683,6 +693,7 @@ struct DailyWindowProgress {
 }
 
 fn committed_daily_window_progress(
+    family: SyncFamily,
     purpose: SyncWindowPurpose,
     window: &DailySyncWindow,
     status: &SyncRunStatus,
@@ -692,8 +703,9 @@ fn committed_daily_window_progress(
         SyncRunStatus::Partial => purpose.commits_partial_daily_progress(),
         _ => false,
     };
-    let records_reconcile_coverage =
-        *status == SyncRunStatus::Success && purpose.records_reconcile_coverage();
+    let records_reconcile_coverage = *status == SyncRunStatus::Success
+        && purpose.records_reconcile_coverage()
+        && family.supports_window_reconcile_coverage();
     DailyWindowProgress {
         watermark: commits_progress.then(|| window.end_date.clone()),
         last_successful_sync_end: commits_progress.then(|| window.end_date.clone()),
@@ -701,6 +713,24 @@ fn committed_daily_window_progress(
         oldest_recently_reconciled_at: records_reconcile_coverage
             .then(|| window.start_date.clone()),
     }
+}
+
+fn reconcile_window_end_marker(
+    family: SyncFamily,
+    purpose: SyncWindowPurpose,
+    end_marker: String,
+) -> Option<String> {
+    (family.supports_window_reconcile_coverage() && purpose.records_reconcile_coverage())
+        .then_some(end_marker)
+}
+
+fn reconcile_window_start_marker(
+    family: SyncFamily,
+    purpose: SyncWindowPurpose,
+    start_marker: String,
+) -> Option<String> {
+    (family.supports_window_reconcile_coverage() && purpose.records_reconcile_coverage())
+        .then_some(start_marker)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -749,12 +779,14 @@ impl FamilySyncSummary {
                 report.last_successful_sync_end,
                 self.last_successful_sync_end.clone(),
             );
-            self.last_reconcile_end =
-                prefer_later_marker(report.last_reconcile_end, self.last_reconcile_end.clone());
-            self.oldest_recently_reconciled_at = prefer_earlier_marker(
-                report.oldest_recently_reconciled_at,
-                self.oldest_recently_reconciled_at.clone(),
-            );
+            if self.family.supports_window_reconcile_coverage() {
+                self.last_reconcile_end =
+                    prefer_later_marker(report.last_reconcile_end, self.last_reconcile_end.clone());
+                self.oldest_recently_reconciled_at = prefer_earlier_marker(
+                    report.oldest_recently_reconciled_at,
+                    self.oldest_recently_reconciled_at.clone(),
+                );
+            }
         }
 
         if report.last_error.is_some() {
@@ -1222,8 +1254,12 @@ async fn sync_daily(
         .await
         {
             Ok((status, message, last_error, imported_rows)) => {
-                let progress =
-                    committed_daily_window_progress(planned.purpose, &planned.window, &status);
+                let progress = committed_daily_window_progress(
+                    SyncFamily::Daily,
+                    planned.purpose,
+                    &planned.window,
+                    &status,
+                );
                 summary.observe(SliceReport {
                     sync_key: SyncFamily::Daily.sync_key().to_owned(),
                     family: SyncFamily::Daily,
@@ -1321,14 +1357,16 @@ async fn sync_spo2(
                 imported_rows,
                 watermark: Some(planned.window.end_date.clone()),
                 last_successful_sync_end: Some(planned.window.end_date.clone()),
-                last_reconcile_end: planned
-                    .purpose
-                    .records_reconcile_coverage()
-                    .then(|| planned.window.end_date.clone()),
-                oldest_recently_reconciled_at: planned
-                    .purpose
-                    .records_reconcile_coverage()
-                    .then(|| planned.window.start_date.clone()),
+                last_reconcile_end: reconcile_window_end_marker(
+                    SyncFamily::Spo2,
+                    planned.purpose,
+                    planned.window.end_date.clone(),
+                ),
+                oldest_recently_reconciled_at: reconcile_window_start_marker(
+                    SyncFamily::Spo2,
+                    planned.purpose,
+                    planned.window.start_date.clone(),
+                ),
                 message: format!("{} window: {message}", planned.purpose.label()),
                 last_error: None,
                 next_attempt_after: None,
@@ -1918,14 +1956,16 @@ async fn sync_heartrate(
                     imported_rows,
                     watermark: Some(end_marker.clone()),
                     last_successful_sync_end: Some(end_marker.clone()),
-                    last_reconcile_end: planned
-                        .purpose
-                        .records_reconcile_coverage()
-                        .then_some(end_marker),
-                    oldest_recently_reconciled_at: planned
-                        .purpose
-                        .records_reconcile_coverage()
-                        .then(|| planned.start.date().to_string()),
+                    last_reconcile_end: reconcile_window_end_marker(
+                        SyncFamily::Heartrate,
+                        planned.purpose,
+                        end_marker,
+                    ),
+                    oldest_recently_reconciled_at: reconcile_window_start_marker(
+                        SyncFamily::Heartrate,
+                        planned.purpose,
+                        planned.start.date().to_string(),
+                    ),
                     message: format!("{} window: {message}", planned.purpose.label()),
                     last_error: None,
                     next_attempt_after: None,
@@ -1982,14 +2022,16 @@ async fn sync_workouts(
                 imported_rows,
                 watermark: Some(planned.window.end_date.clone()),
                 last_successful_sync_end: Some(planned.window.end_date.clone()),
-                last_reconcile_end: planned
-                    .purpose
-                    .records_reconcile_coverage()
-                    .then(|| planned.window.end_date.clone()),
-                oldest_recently_reconciled_at: planned
-                    .purpose
-                    .records_reconcile_coverage()
-                    .then(|| planned.window.start_date.clone()),
+                last_reconcile_end: reconcile_window_end_marker(
+                    SyncFamily::Workout,
+                    planned.purpose,
+                    planned.window.end_date.clone(),
+                ),
+                oldest_recently_reconciled_at: reconcile_window_start_marker(
+                    SyncFamily::Workout,
+                    planned.purpose,
+                    planned.window.start_date.clone(),
+                ),
                 message: format!("{} window: {message}", planned.purpose.label()),
                 last_error: None,
                 next_attempt_after: None,
@@ -2053,14 +2095,16 @@ async fn sync_enhanced_tags(
                 imported_rows,
                 watermark: Some(planned.window.end_date.clone()),
                 last_successful_sync_end: Some(planned.window.end_date.clone()),
-                last_reconcile_end: planned
-                    .purpose
-                    .records_reconcile_coverage()
-                    .then(|| planned.window.end_date.clone()),
-                oldest_recently_reconciled_at: planned
-                    .purpose
-                    .records_reconcile_coverage()
-                    .then(|| planned.window.start_date.clone()),
+                last_reconcile_end: reconcile_window_end_marker(
+                    SyncFamily::EnhancedTag,
+                    planned.purpose,
+                    planned.window.end_date.clone(),
+                ),
+                oldest_recently_reconciled_at: reconcile_window_start_marker(
+                    SyncFamily::EnhancedTag,
+                    planned.purpose,
+                    planned.window.start_date.clone(),
+                ),
                 message: format!("{} window: {message}", planned.purpose.label()),
                 last_error: None,
                 next_attempt_after: None,
@@ -2121,14 +2165,16 @@ async fn sync_sessions(
                 imported_rows,
                 watermark: Some(planned.window.end_date.clone()),
                 last_successful_sync_end: Some(planned.window.end_date.clone()),
-                last_reconcile_end: planned
-                    .purpose
-                    .records_reconcile_coverage()
-                    .then(|| planned.window.end_date.clone()),
-                oldest_recently_reconciled_at: planned
-                    .purpose
-                    .records_reconcile_coverage()
-                    .then(|| planned.window.start_date.clone()),
+                last_reconcile_end: reconcile_window_end_marker(
+                    SyncFamily::Session,
+                    planned.purpose,
+                    planned.window.end_date.clone(),
+                ),
+                oldest_recently_reconciled_at: reconcile_window_start_marker(
+                    SyncFamily::Session,
+                    planned.purpose,
+                    planned.window.start_date.clone(),
+                ),
                 message: format!("{} window: {message}", planned.purpose.label()),
                 last_error: None,
                 next_attempt_after: None,
@@ -2428,12 +2474,18 @@ fn persist_slice_report(
         } else {
             previous_success
         };
-        let last_reconcile_end =
-            prefer_later_marker(report.last_reconcile_end.clone(), previous_reconcile_end);
-        let oldest_recently_reconciled_at = prefer_earlier_marker(
-            report.oldest_recently_reconciled_at.clone(),
-            previous_reconcile_start,
-        );
+        let (last_reconcile_end, oldest_recently_reconciled_at) =
+            if report.family.supports_window_reconcile_coverage() {
+                (
+                    prefer_later_marker(report.last_reconcile_end.clone(), previous_reconcile_end),
+                    prefer_earlier_marker(
+                        report.oldest_recently_reconciled_at.clone(),
+                        previous_reconcile_start,
+                    ),
+                )
+            } else {
+                (None, None)
+            };
         let next_attempt_after = if report.status == SyncRunStatus::Failed {
             report
                 .next_attempt_after
@@ -3453,6 +3505,7 @@ mod tests {
     #[test]
     fn partial_tail_daily_windows_still_commit_recent_progress() {
         let progress = super::committed_daily_window_progress(
+            SyncFamily::Daily,
             super::SyncWindowPurpose::Tail,
             &super::DailySyncWindow {
                 start_date: "2026-04-08".to_owned(),
@@ -3473,6 +3526,7 @@ mod tests {
     #[test]
     fn partial_backfill_daily_windows_preserve_retry_cursor() {
         let progress = super::committed_daily_window_progress(
+            SyncFamily::Daily,
             super::SyncWindowPurpose::Backfill,
             &super::DailySyncWindow {
                 start_date: "2026-03-01".to_owned(),
@@ -3485,6 +3539,49 @@ mod tests {
         assert!(progress.last_successful_sync_end.is_none());
         assert!(progress.last_reconcile_end.is_none());
         assert!(progress.oldest_recently_reconciled_at.is_none());
+    }
+
+    #[test]
+    fn successful_daily_backfill_does_not_record_reconcile_coverage() {
+        let progress = super::committed_daily_window_progress(
+            SyncFamily::Daily,
+            super::SyncWindowPurpose::Backfill,
+            &super::DailySyncWindow {
+                start_date: "2026-03-01".to_owned(),
+                end_date: "2026-03-07".to_owned(),
+            },
+            &SyncRunStatus::Success,
+        );
+
+        assert_eq!(progress.watermark.as_deref(), Some("2026-03-07"));
+        assert_eq!(
+            progress.last_successful_sync_end.as_deref(),
+            Some("2026-03-07")
+        );
+        assert!(progress.last_reconcile_end.is_none());
+        assert!(progress.oldest_recently_reconciled_at.is_none());
+    }
+
+    #[test]
+    fn successful_heartrate_reconcile_records_reconcile_coverage() {
+        assert_eq!(
+            super::reconcile_window_end_marker(
+                SyncFamily::Heartrate,
+                super::SyncWindowPurpose::Reconcile,
+                "2026-03-07T12:00:00Z".to_owned(),
+            )
+            .as_deref(),
+            Some("2026-03-07T12:00:00Z")
+        );
+        assert_eq!(
+            super::reconcile_window_start_marker(
+                SyncFamily::Heartrate,
+                super::SyncWindowPurpose::Reconcile,
+                "2026-03-01T00:00:00Z".to_owned(),
+            )
+            .as_deref(),
+            Some("2026-03-01T00:00:00Z")
+        );
     }
 
     #[test]
@@ -3957,8 +4054,8 @@ mod tests {
             imported_rows: 12,
             watermark: Some("2026-04-10".to_owned()),
             last_successful_sync_end: Some("2026-04-10".to_owned()),
-            last_reconcile_end: Some("2026-04-10".to_owned()),
-            oldest_recently_reconciled_at: Some("2026-04-01".to_owned()),
+            last_reconcile_end: None,
+            oldest_recently_reconciled_at: None,
             message: "backfill window: imported 12 daily rows".to_owned(),
             last_error: None,
             next_attempt_after: None,
@@ -4012,11 +4109,8 @@ mod tests {
             Some("2026-04-10")
         );
         assert_eq!(record.cursor.as_deref(), Some("2026-04-10"));
-        assert_eq!(record.last_reconcile_end.as_deref(), Some("2026-04-10"));
-        assert_eq!(
-            record.oldest_recently_reconciled_at.as_deref(),
-            Some("2026-04-01")
-        );
+        assert!(record.last_reconcile_end.is_none());
+        assert!(record.oldest_recently_reconciled_at.is_none());
         assert_eq!(record.failure_count, 0);
         assert_eq!(record.last_error_kind.as_deref(), Some("transient_api"));
         assert!(record.last_error_detail.is_some());

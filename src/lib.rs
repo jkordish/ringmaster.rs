@@ -599,12 +599,17 @@ fn doctor_sync_lines(config: &Config, snapshot: &app::LiveSnapshot) -> String {
                 .unwrap_or("never");
             let last_attempt = sync
                 .map_or("never", |state| state.last_attempted_at.as_str());
-            let reconcile_end = sync
-                .and_then(|state| state.last_reconcile_end.as_deref())
-                .unwrap_or("never");
-            let coverage_start = sync
-                .and_then(|state| state.oldest_recently_reconciled_at.as_deref())
-                .unwrap_or("unknown");
+            let (reconcile_end, coverage_start) =
+                if crate::oura::sync::sync_family_supports_reconcile_coverage(*family) {
+                    (
+                        sync.and_then(|state| state.last_reconcile_end.as_deref())
+                            .unwrap_or("never"),
+                        sync.and_then(|state| state.oldest_recently_reconciled_at.as_deref())
+                            .unwrap_or("unknown"),
+                    )
+                } else {
+                    ("n/a", "n/a")
+                };
             let source = sync
                 .and_then(|state| state.last_trigger_source.as_deref())
                 .unwrap_or("unknown");
@@ -2099,16 +2104,21 @@ fn render_sync_report(title: &str, report: &oura::sync::SyncReport) -> String {
         .slice_reports
         .iter()
         .map(|slice| {
-            let reconcile = slice.last_reconcile_end.as_deref().map_or_else(
-                || "n/a".to_owned(),
-                |value| {
-                    let coverage_start = slice
-                        .oldest_recently_reconciled_at
-                        .as_deref()
-                        .unwrap_or("unknown");
-                    format!("{coverage_start}..{value}")
-                },
-            );
+            let reconcile =
+                if crate::oura::sync::sync_family_supports_reconcile_coverage(slice.family) {
+                    slice.last_reconcile_end.as_deref().map_or_else(
+                        || "n/a".to_owned(),
+                        |value| {
+                            let coverage_start = slice
+                                .oldest_recently_reconciled_at
+                                .as_deref()
+                                .unwrap_or("unknown");
+                            format!("{coverage_start}..{value}")
+                        },
+                    )
+                } else {
+                    "n/a".to_owned()
+                };
             format!(
                 "  - {}: {} rows={} success_end={} reconcile={} {}",
                 slice.sync_key,
@@ -5494,6 +5504,47 @@ mod tests {
         };
 
         assert!(doctor_sync_is_rate_limited(&sync));
+    }
+
+    #[test]
+    fn doctor_hides_reconcile_markers_for_upsert_only_families() {
+        let (_tempdir, config) = test_config(None, None);
+        let store = Store::open(&config)
+            .unwrap_or_else(|error| panic!("store should open for doctor sync test: {error}"));
+
+        store
+            .sync_state()
+            .upsert(&SyncStateRecord {
+                sync_key: "oura.spo2".to_owned(),
+                family: "spo2".to_owned(),
+                status: SyncRunStatus::Success,
+                cursor: Some("2026-04-08".to_owned()),
+                last_successful_sync_end: Some("2026-04-08".to_owned()),
+                last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
+                last_completed_at: Some("2026-04-08T12:00:05Z".to_owned()),
+                last_reconcile_end: Some("2026-04-08".to_owned()),
+                oldest_recently_reconciled_at: Some("2026-03-10".to_owned()),
+                message: Some("spo2 sync complete".to_owned()),
+                granted_scopes: vec!["spo2".to_owned()],
+                last_error: None,
+                last_error_at: None,
+                last_error_kind: None,
+                last_error_detail: None,
+                failure_count: 0,
+                next_attempt_after: None,
+                last_trigger_source: Some("periodic_reconcile".to_owned()),
+                last_trigger_detail: Some("legacy reconcile marker".to_owned()),
+                updated_at: "2026-04-08T12:00:05Z".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("spo2 sync state should seed: {error}"));
+
+        let report = run_doctor(&config)
+            .unwrap_or_else(|error| panic!("doctor should run with seeded sync state: {error}"))
+            .unwrap_or_else(|| panic!("doctor should return output"));
+
+        assert!(report.contains("  - spo2:"));
+        assert!(report.contains("reconcile_end=n/a | coverage_start=n/a"));
+        assert!(!report.contains("reconcile_end=2026-04-08 | coverage_start=2026-03-10"));
     }
 
     #[tokio::test]
