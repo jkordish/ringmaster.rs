@@ -662,12 +662,45 @@ impl SyncWindowPurpose {
     const fn records_reconcile_coverage(self) -> bool {
         matches!(self, Self::Reconcile | Self::Backfill)
     }
+
+    const fn commits_partial_daily_progress(self) -> bool {
+        matches!(self, Self::Tail)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlannedDailyWindow {
     purpose: SyncWindowPurpose,
     window: DailySyncWindow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DailyWindowProgress {
+    watermark: Option<String>,
+    last_successful_sync_end: Option<String>,
+    last_reconcile_end: Option<String>,
+    oldest_recently_reconciled_at: Option<String>,
+}
+
+fn committed_daily_window_progress(
+    purpose: SyncWindowPurpose,
+    window: &DailySyncWindow,
+    status: &SyncRunStatus,
+) -> DailyWindowProgress {
+    let commits_progress = match status {
+        SyncRunStatus::Success => true,
+        SyncRunStatus::Partial => purpose.commits_partial_daily_progress(),
+        _ => false,
+    };
+    let records_reconcile_coverage =
+        *status == SyncRunStatus::Success && purpose.records_reconcile_coverage();
+    DailyWindowProgress {
+        watermark: commits_progress.then(|| window.end_date.clone()),
+        last_successful_sync_end: commits_progress.then(|| window.end_date.clone()),
+        last_reconcile_end: records_reconcile_coverage.then(|| window.end_date.clone()),
+        oldest_recently_reconciled_at: records_reconcile_coverage
+            .then(|| window.start_date.clone()),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1188,25 +1221,23 @@ async fn sync_daily(
         )
         .await
         {
-            Ok((status, message, last_error, imported_rows)) => summary.observe(SliceReport {
-                sync_key: SyncFamily::Daily.sync_key().to_owned(),
-                family: SyncFamily::Daily,
-                status,
-                imported_rows,
-                watermark: Some(planned.window.end_date.clone()),
-                last_successful_sync_end: Some(planned.window.end_date.clone()),
-                last_reconcile_end: planned
-                    .purpose
-                    .records_reconcile_coverage()
-                    .then(|| planned.window.end_date.clone()),
-                oldest_recently_reconciled_at: planned
-                    .purpose
-                    .records_reconcile_coverage()
-                    .then(|| planned.window.start_date.clone()),
-                message: format!("{} window: {message}", planned.purpose.label()),
-                last_error,
-                next_attempt_after: None,
-            }),
+            Ok((status, message, last_error, imported_rows)) => {
+                let progress =
+                    committed_daily_window_progress(planned.purpose, &planned.window, &status);
+                summary.observe(SliceReport {
+                    sync_key: SyncFamily::Daily.sync_key().to_owned(),
+                    family: SyncFamily::Daily,
+                    status,
+                    imported_rows,
+                    watermark: progress.watermark,
+                    last_successful_sync_end: progress.last_successful_sync_end,
+                    last_reconcile_end: progress.last_reconcile_end,
+                    oldest_recently_reconciled_at: progress.oldest_recently_reconciled_at,
+                    message: format!("{} window: {message}", planned.purpose.label()),
+                    last_error,
+                    next_attempt_after: None,
+                });
+            }
             Err(error) => {
                 observe_failed_chunk(&mut summary, SyncFamily::Daily, planned.purpose, &error);
                 break;
@@ -3417,6 +3448,43 @@ mod tests {
             last_error: None,
             next_attempt_after: None,
         }]));
+    }
+
+    #[test]
+    fn partial_tail_daily_windows_still_commit_recent_progress() {
+        let progress = super::committed_daily_window_progress(
+            super::SyncWindowPurpose::Tail,
+            &super::DailySyncWindow {
+                start_date: "2026-04-08".to_owned(),
+                end_date: "2026-04-14".to_owned(),
+            },
+            &SyncRunStatus::Partial,
+        );
+
+        assert_eq!(progress.watermark.as_deref(), Some("2026-04-14"));
+        assert_eq!(
+            progress.last_successful_sync_end.as_deref(),
+            Some("2026-04-14")
+        );
+        assert!(progress.last_reconcile_end.is_none());
+        assert!(progress.oldest_recently_reconciled_at.is_none());
+    }
+
+    #[test]
+    fn partial_backfill_daily_windows_preserve_retry_cursor() {
+        let progress = super::committed_daily_window_progress(
+            super::SyncWindowPurpose::Backfill,
+            &super::DailySyncWindow {
+                start_date: "2026-03-01".to_owned(),
+                end_date: "2026-03-07".to_owned(),
+            },
+            &SyncRunStatus::Partial,
+        );
+
+        assert!(progress.watermark.is_none());
+        assert!(progress.last_successful_sync_end.is_none());
+        assert!(progress.last_reconcile_end.is_none());
+        assert!(progress.oldest_recently_reconciled_at.is_none());
     }
 
     #[test]

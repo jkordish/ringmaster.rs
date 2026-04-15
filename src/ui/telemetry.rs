@@ -394,7 +394,7 @@ pub fn placeholder_rule(width: usize) -> String {
 }
 
 #[must_use]
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub fn availability_scaffold(
     availability: TelemetryAvailability,
     reason: &str,

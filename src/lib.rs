@@ -2065,19 +2065,23 @@ fn selected_sync_families(selected: &[SyncFamilyArg]) -> Vec<SyncFamily> {
         return SyncFamily::ALL.to_vec();
     }
 
-    selected
-        .iter()
-        .filter_map(|family| match family {
-            SyncFamilyArg::All => None,
-            SyncFamilyArg::Personal => Some(SyncFamily::Personal),
-            SyncFamilyArg::Daily => Some(SyncFamily::Daily),
-            SyncFamilyArg::Spo2 => Some(SyncFamily::Spo2),
-            SyncFamilyArg::Heartrate => Some(SyncFamily::Heartrate),
-            SyncFamilyArg::Workout => Some(SyncFamily::Workout),
-            SyncFamilyArg::Tag => Some(SyncFamily::EnhancedTag),
-            SyncFamilyArg::Session => Some(SyncFamily::Session),
-        })
-        .collect()
+    let mut families = Vec::new();
+    for family in selected.iter().filter_map(|family| match family {
+        SyncFamilyArg::All => None,
+        SyncFamilyArg::Personal => Some(SyncFamily::Personal),
+        SyncFamilyArg::Daily => Some(SyncFamily::Daily),
+        SyncFamilyArg::Spo2 => Some(SyncFamily::Spo2),
+        SyncFamilyArg::Heartrate => Some(SyncFamily::Heartrate),
+        SyncFamilyArg::Workout => Some(SyncFamily::Workout),
+        SyncFamilyArg::Tag => Some(SyncFamily::EnhancedTag),
+        SyncFamilyArg::Session => Some(SyncFamily::Session),
+    }) {
+        if !families.contains(&family) {
+            families.push(family);
+        }
+    }
+
+    families
 }
 
 fn render_sync_report(title: &str, report: &oura::sync::SyncReport) -> String {
@@ -3867,12 +3871,12 @@ mod tests {
     use super::{
         doctor_sync_is_rate_limited, run_ai_compare, run_ai_eval, run_ai_review, run_ai_runs_show,
         run_doctor, run_report_export, run_review_investigate, run_review_today, run_review_week,
-        run_snapshot_export, run_snapshot_show, run_webhook_replay,
+        run_snapshot_export, run_snapshot_show, run_webhook_replay, selected_sync_families,
     };
     use crate::cli::{
         AiCompareArgs, AiEvalArgs, AiReviewArgs, AiRunsShowArgs, ReportExportArgs, ReportFormatArg,
         ReviewFocusArg, ReviewInvestigateArgs, ReviewTodayArgs, ReviewWeekArgs, SnapshotExportArgs,
-        SnapshotShowArgs, WebhookReplayArgs,
+        SnapshotShowArgs, SyncFamilyArg, WebhookReplayArgs,
     };
     use crate::config::{
         AppPaths, Config, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
@@ -5437,6 +5441,26 @@ mod tests {
             rate_limited_snapshot
                 .to_ascii_lowercase()
                 .contains("rate limit")
+        );
+    }
+
+    #[test]
+    fn selected_sync_families_deduplicates_repeated_flags_without_reordering() {
+        let families = selected_sync_families(&[
+            SyncFamilyArg::Daily,
+            SyncFamilyArg::Spo2,
+            SyncFamilyArg::Daily,
+            SyncFamilyArg::Workout,
+            SyncFamilyArg::Spo2,
+        ]);
+
+        assert_eq!(
+            families,
+            vec![
+                crate::SyncFamily::Daily,
+                crate::SyncFamily::Spo2,
+                crate::SyncFamily::Workout,
+            ]
         );
     }
 
