@@ -1713,9 +1713,6 @@ pub fn validate_snapshot_bundle(bundle: &SnapshotBundleV1) -> Result<()> {
     Ok(())
 }
 
-/// # Errors
-///
-/// Returns an error if the artifact payload, overview, or rendered briefing cannot be normalized.
 pub fn artifact_record(input: ArtifactRecordInput<'_>) -> AiArtifactRecord {
     AiArtifactRecord {
         artifact_id: input.artifact_id,

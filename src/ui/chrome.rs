@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use super::layout::{DashboardMetrics, inset};
+use super::text_fit::fit_badge_label;
 use super::theme::{Theme, Tone};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,7 +248,7 @@ fn panel_title_row_segments(
             .badge_width
             .min(available.saturating_sub(min_left).max(3));
     }
-    let status = format!("[{}]", truncate_ascii(spec.status, status_budget));
+    let status = format!("[{}]", fit_badge_label(spec.status, status_budget));
     let right_width = open.len() + status.len();
 
     if right_width >= available {

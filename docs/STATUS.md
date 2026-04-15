@@ -54,6 +54,8 @@ The repository now includes:
 - an expanded Oura auth capability surface that now tracks `email`, `spo2`, `ring_configuration`, `stress`, and `heart_health` alongside the original baseline scopes
 - persisted sleep-physiology storage for nightly HRV and respiratory rate plus persisted daily `spo2` summaries
 - dashboard physiology panels that now read real local HRV, respiratory-rate, and `spo2` telemetry instead of placeholder shells
+- a dashboard presentation layer that now renders explicit `fresh`, `baseline-only`, `stale`, and `no data` tile states instead of blank or half-rendered fallbacks
+- a `Weekly Trends` dashboard panel that now defaults to one navigable 7-day window with week paging instead of cramming 14 days into wide layouts
 - telemetry-first Explain, Patterns, and Review compositions that share the same panel language as Dashboard while keeping honest degraded states
 - canonical snapshot library commands:
   - `snapshot list`

@@ -858,7 +858,7 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 20,
         name: "phase13_gap_safe_family_sync_state",
-        sql: r"
+        sql: r#"
         ALTER TABLE sync_state ADD COLUMN family TEXT;
         ALTER TABLE sync_state ADD COLUMN last_successful_sync_end TEXT;
         ALTER TABLE sync_state ADD COLUMN last_reconcile_end TEXT;
@@ -886,6 +886,7 @@ pub const MIGRATIONS: &[Migration] = &[
                 ELSE NULL
             END,
             last_error_kind = CASE
+                WHEN last_error_json LIKE '%"status":429%' THEN 'rate_limit'
                 WHEN last_error_json IS NOT NULL THEN 'api_error'
                 ELSE NULL
             END,
@@ -897,7 +898,7 @@ pub const MIGRATIONS: &[Migration] = &[
 
         CREATE INDEX IF NOT EXISTS idx_sync_state_family
             ON sync_state(family);
-        ",
+        "#,
     },
 ];
 
@@ -1707,6 +1708,95 @@ mod tests {
         assert_eq!(success_end.as_deref(), Some("2026-04-08"));
         assert!(error_kind.is_none());
         assert!(error_detail.is_none());
+    }
+
+    #[test]
+    fn phase13_sync_state_migration_preserves_legacy_rate_limit_kind() {
+        let mut connection = Connection::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("in-memory db should open: {error}"));
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );
+
+                CREATE TABLE sync_state (
+                    sync_key TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    cursor TEXT,
+                    last_attempted_at TEXT NOT NULL,
+                    last_completed_at TEXT,
+                    message TEXT,
+                    granted_scopes TEXT NOT NULL,
+                    last_error_json TEXT,
+                    failure_count INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_after TEXT,
+                    last_trigger_source TEXT,
+                    last_trigger_detail TEXT
+                );",
+            )
+            .unwrap_or_else(|error| unreachable!("schema migrations table should exist: {error}"));
+
+        for version in 1..=19 {
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+                    params![version, format!("phase-{version}"), "2026-04-09T00:00:00Z"],
+                )
+                .unwrap_or_else(|error| unreachable!("migration marker should insert: {error}"));
+        }
+
+        connection
+            .execute(
+                "INSERT INTO sync_state (
+                    sync_key,
+                    status,
+                    cursor,
+                    last_attempted_at,
+                    last_completed_at,
+                    message,
+                    granted_scopes,
+                    last_error_json,
+                    failure_count,
+                    next_attempt_after,
+                    last_trigger_source,
+                    last_trigger_detail
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    "oura.heartrate",
+                    "failed",
+                    Option::<String>::None,
+                    "2026-04-08T06:00:00Z",
+                    Option::<String>::None,
+                    "429 from legacy state",
+                    "[\"heartrate\"]",
+                    r#"{"status":429,"title":"Too Many Requests","detail":"retry later","oauth_error":null,"oauth_error_description":null}"#,
+                    2,
+                    Option::<String>::None,
+                    "periodic_reconcile",
+                    "seed legacy rate-limited row"
+                ],
+            )
+            .unwrap_or_else(|error| unreachable!("legacy sync state row should insert: {error}"));
+
+        let report = run_migrations(&mut connection).unwrap_or_else(|error| {
+            unreachable!("gap-safe sync migration should succeed: {error}")
+        });
+        assert_eq!(report.applied_versions, vec![20]);
+
+        let error_kind: Option<String> = connection
+            .query_row(
+                "SELECT last_error_kind
+                 FROM sync_state
+                 WHERE sync_key = 'oura.heartrate'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|error| unreachable!("migrated sync state should load: {error}"));
+
+        assert_eq!(error_kind.as_deref(), Some("rate_limit"));
     }
 
     #[test]

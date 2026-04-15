@@ -102,6 +102,12 @@ Expert aliases are optional accelerators. They do not replace the standard model
 
 ## Notes
 
+- Weekly Trends now defaults to the latest 7 visible days.
+- In the Dashboard Weekly Trends panel:
+  - `Up` / `Down` / `j` / `k` move the selected day inside the visible 7-day window
+  - `Left` / `Right` / `h` / `l` page to older or newer 7-day windows
+  - `PageUp` / `PageDown` also page by week
+  - `End` jumps back to the latest available day
 - Function keys are intentionally not part of the standard model for this pass.
 - Old one-off navigation shortcuts such as bracket-based paging and screen-specific mode letters are intentionally not part of the canonical navigation model anymore. If a workflow matters, it now needs a visible selector, list pane, or control row first.
 - Screen-specific behavior is documented through the in-app help overlay and footer generated from the centralized registry.

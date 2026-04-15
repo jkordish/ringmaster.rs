@@ -730,6 +730,10 @@ async fn ensure_authorized_session_with_secret_store(
         session
     };
 
+    if tokens.access_token.trim().is_empty() {
+        return Err(AuthError::MissingAccessToken.into());
+    }
+
     Ok(AuthorizedSession {
         access_token: tokens.access_token,
         granted_scopes: normalize_scopes(&session.granted_scopes),
@@ -1518,6 +1522,43 @@ mod tests {
         assert!(auth.last_refresh_at.is_some());
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn blank_access_token_without_refresh_token_returns_missing_access_token() {
+        let config = test_config("http://127.0.0.1:9999/token".to_owned());
+        let store = ok(Store::open_test_store(), "store should open");
+        let secrets = MemorySecretStore::default();
+        let session = AuthSessionRecord {
+            provider: OURA_PROVIDER.to_owned(),
+            account_id: Some("acct-1".to_owned()),
+            account_email: Some("blank@example.com".to_owned()),
+            token_type: "Bearer".to_owned(),
+            granted_scopes: vec!["daily".to_owned()],
+            access_token_expires_at: None,
+            last_authenticated_at: Some("2026-04-11T00:00:00Z".to_owned()),
+            last_refresh_at: None,
+            last_error: None,
+            updated_at: "2026-04-11T00:00:00Z".to_owned(),
+        };
+
+        let error = ensure_authorized_session_with_secret_store(
+            &config,
+            store.plan().clone(),
+            session,
+            StoredTokens {
+                access_token: "   ".to_owned(),
+                refresh_token: None,
+            },
+            &secrets,
+        )
+        .await
+        .expect_err("blank tokens should fail closed");
+
+        assert!(matches!(
+            error,
+            crate::error::RingmasterError::Auth(AuthError::MissingAccessToken)
+        ));
     }
 
     #[tokio::test]

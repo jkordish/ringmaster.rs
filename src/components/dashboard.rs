@@ -8,7 +8,8 @@ use ratatui::{
 use crate::app::{
     DashboardBreakdownPanel, DashboardBreakdownRail, DashboardDeltaState, DashboardHistogramPanel,
     DashboardJudgedState, DashboardModel, DashboardScoreBand, DashboardScoreTile,
-    DashboardSleepTile, DashboardThermometerPanel, DashboardTrendPanel, DashboardWeeklyHeatmap,
+    DashboardSleepTile, DashboardThermometerPanel, DashboardTileState, DashboardTrendPanel,
+    DashboardWeeklyHeatmap,
 };
 use crate::navigation::FocusRegion;
 use crate::ui::{
@@ -18,13 +19,13 @@ use crate::ui::{
         WeeklyHeatmapMode, WeeklyTrendsLayout, panel_content_metrics,
     },
     telemetry::{
-        MetricPanelState, TelemetryAvailability, heatmap_day_label, meter_bar,
-        metric_panel_scaffold, micro_histogram, placeholder_rule, segmented_bar, spark_strip,
-        stacked_profile_rows,
+        MetricPanelState, TelemetryAvailability, heatmap_day_label, meter_bar, micro_histogram,
+        segmented_bar, spark_strip, stacked_profile_rows,
     },
     text_fit::{
         concise_detail, concise_text, fit_badge_label, fit_breakdown_delta, fit_breakdown_label,
-        fit_day_header, fit_weekly_group_label, measure_one_line, support_lane_text,
+        fit_day_header, fit_single_line_with, fit_weekly_group_label, measure_one_line,
+        support_lane_text,
     },
     theme::{Theme, Tone},
 };
@@ -271,6 +272,57 @@ fn draw_wide(
             metrics,
             viewport,
         ),
+    );
+}
+
+const fn dashboard_tile_tone(state: DashboardTileState) -> Tone {
+    match state {
+        DashboardTileState::Fresh => Tone::Fresh,
+        DashboardTileState::BaselineOnly => Tone::Info,
+        DashboardTileState::Stale => Tone::Stale,
+        DashboardTileState::Unavailable => Tone::Unavailable,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ExplicitTileText<'a> {
+    primary: &'a str,
+    primary_compact: &'a str,
+    secondary: &'a str,
+    secondary_compact: &'a str,
+    primary_tone: Tone,
+}
+
+fn render_explicit_tile_state(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    text: ExplicitTileText<'_>,
+    theme: &Theme,
+    alignment: Alignment,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let width = usize::from(area.width);
+    let primary_line = fit_single_line_with(text.primary, width, &[text.primary_compact]).text;
+    let secondary_line =
+        fit_single_line_with(text.secondary, width, &[text.secondary_compact]).text;
+
+    let mut lines = vec![Line::from(Span::styled(
+        primary_line,
+        theme.dominant_metric(text.primary_tone),
+    ))];
+    if area.height > 1 && !text.secondary.is_empty() {
+        lines.push(Line::from(Span::styled(secondary_line, theme.annotation())));
+    }
+
+    render_panel_lines(
+        frame,
+        centered_body_area(area, lines.len()),
+        lines,
+        theme,
+        alignment,
     );
 }
 
@@ -649,8 +701,8 @@ fn render_score_tile(
         state.metrics,
         PanelShellSpec {
             title,
-            status: score_tile.availability.label(),
-            status_tone: score_tile.availability.tone(),
+            status: score_tile.tile_state.badge_label(),
+            status_tone: dashboard_tile_tone(score_tile.tile_state),
             focused: state.focused,
             expanded: state.expanded,
             kind: PanelKind::Hero,
@@ -661,6 +713,40 @@ fn render_score_tile(
     }
 
     if area.height <= 3 {
+        if !matches!(score_tile.tile_state, DashboardTileState::Fresh) {
+            let (primary, primary_compact, secondary, secondary_compact, tone) =
+                if matches!(score_tile.tile_state, DashboardTileState::Stale) {
+                    (
+                        score_tile.primary_value.as_str(),
+                        score_tile.primary_value.as_str(),
+                        score_tile.note.as_str(),
+                        "Cached value",
+                        Tone::Muted,
+                    )
+                } else {
+                    (
+                        score_tile.fallback.primary.as_str(),
+                        score_tile.fallback.primary_compact.as_str(),
+                        score_tile.fallback.secondary.as_str(),
+                        score_tile.fallback.secondary_compact.as_str(),
+                        dashboard_tile_tone(score_tile.tile_state),
+                    )
+                };
+            render_explicit_tile_state(
+                frame,
+                shell.content_area,
+                ExplicitTileText {
+                    primary,
+                    primary_compact,
+                    secondary,
+                    secondary_compact,
+                    primary_tone: tone,
+                },
+                theme,
+                Alignment::Center,
+            );
+            return;
+        }
         let cue_tone = score_band_cue_tone(score_tile.score_band);
         render_panel_lines(
             frame,
@@ -682,16 +768,35 @@ fn render_score_tile(
         return;
     }
 
-    if !metric_panel_has_reading(score_tile.availability) {
-        let lines = metric_panel_scaffold(
-            score_tile.availability,
-            &score_tile.note,
-            usize::from(shell.content_area.width),
-        );
-        render_panel_text(
+    if !matches!(score_tile.tile_state, DashboardTileState::Fresh) {
+        let (primary, primary_compact, secondary, secondary_compact, tone) =
+            if matches!(score_tile.tile_state, DashboardTileState::Stale) {
+                (
+                    score_tile.primary_value.as_str(),
+                    score_tile.primary_value.as_str(),
+                    score_tile.note.as_str(),
+                    "Cached value",
+                    Tone::Muted,
+                )
+            } else {
+                (
+                    score_tile.fallback.primary.as_str(),
+                    score_tile.fallback.primary_compact.as_str(),
+                    score_tile.fallback.secondary.as_str(),
+                    score_tile.fallback.secondary_compact.as_str(),
+                    dashboard_tile_tone(score_tile.tile_state),
+                )
+            };
+        render_explicit_tile_state(
             frame,
-            centered_body_area(shell.content_area, lines.len()),
-            lines.join("\n"),
+            shell.content_area,
+            ExplicitTileText {
+                primary,
+                primary_compact,
+                secondary,
+                secondary_compact,
+                primary_tone: tone,
+            },
             theme,
             Alignment::Center,
         );
@@ -770,8 +875,8 @@ fn render_sleep_tile(
         state.metrics,
         PanelShellSpec {
             title: "Sleep",
-            status: tile.availability.label(),
-            status_tone: tile.availability.tone(),
+            status: tile.tile_state.badge_label(),
+            status_tone: dashboard_tile_tone(tile.tile_state),
             focused: state.focused,
             expanded: state.expanded,
             kind: PanelKind::Hero,
@@ -782,6 +887,40 @@ fn render_sleep_tile(
     }
 
     if area.height <= 3 {
+        if !matches!(tile.tile_state, DashboardTileState::Fresh) {
+            let (primary, primary_compact, secondary, secondary_compact, tone) =
+                if matches!(tile.tile_state, DashboardTileState::Stale) {
+                    (
+                        tile.duration_label.as_str(),
+                        tile.duration_label.as_str(),
+                        tile.strip_note.as_str(),
+                        "Cached sleep",
+                        Tone::Muted,
+                    )
+                } else {
+                    (
+                        tile.fallback.primary.as_str(),
+                        tile.fallback.primary_compact.as_str(),
+                        tile.fallback.secondary.as_str(),
+                        tile.fallback.secondary_compact.as_str(),
+                        dashboard_tile_tone(tile.tile_state),
+                    )
+                };
+            render_explicit_tile_state(
+                frame,
+                shell.content_area,
+                ExplicitTileText {
+                    primary,
+                    primary_compact,
+                    secondary,
+                    secondary_compact,
+                    primary_tone: tone,
+                },
+                theme,
+                Alignment::Center,
+            );
+            return;
+        }
         let cue_tone = score_band_cue_tone(tile.score_band);
         render_panel_lines(
             frame,
@@ -803,16 +942,37 @@ fn render_sleep_tile(
         return;
     }
 
-    if !metric_panel_has_reading(tile.availability) {
-        render_metric_scaffold_with_support(
-            frame,
-            shell.content_area,
-            tile.availability,
-            &tile.strip_note,
-            theme,
-            Alignment::Center,
-            state.chart_metrics,
-        );
+    if !matches!(tile.tile_state, DashboardTileState::Fresh) {
+        if matches!(tile.tile_state, DashboardTileState::Stale) {
+            let primary = format!("duration {}", tile.duration_label);
+            render_explicit_tile_state(
+                frame,
+                shell.content_area,
+                ExplicitTileText {
+                    primary: &primary,
+                    primary_compact: &tile.duration_label,
+                    secondary: &tile.strip_note,
+                    secondary_compact: "Cached sleep",
+                    primary_tone: Tone::Muted,
+                },
+                theme,
+                Alignment::Center,
+            );
+        } else {
+            render_explicit_tile_state(
+                frame,
+                shell.content_area,
+                ExplicitTileText {
+                    primary: &tile.fallback.primary,
+                    primary_compact: &tile.fallback.primary_compact,
+                    secondary: &tile.fallback.secondary,
+                    secondary_compact: &tile.fallback.secondary_compact,
+                    primary_tone: dashboard_tile_tone(tile.tile_state),
+                },
+                theme,
+                Alignment::Center,
+            );
+        }
         return;
     }
 
@@ -883,8 +1043,8 @@ fn render_trend_panel(
         state.metrics,
         PanelShellSpec {
             title,
-            status: panel.availability.label(),
-            status_tone: panel.availability.tone(),
+            status: panel.tile_state.badge_label(),
+            status_tone: dashboard_tile_tone(panel.tile_state),
             focused: state.focused,
             expanded: state.expanded,
             kind: PanelKind::Section,
@@ -895,7 +1055,7 @@ fn render_trend_panel(
     }
 
     if area.height <= 3 {
-        if metric_panel_has_reading(panel.availability) {
+        if matches!(panel.tile_state, DashboardTileState::Fresh) {
             render_panel_lines(
                 frame,
                 shell.content_area,
@@ -920,10 +1080,34 @@ fn render_trend_panel(
                 Alignment::Left,
             );
         } else {
-            render_panel_text(
+            let (primary, primary_compact, secondary, secondary_compact, tone) =
+                if matches!(panel.tile_state, DashboardTileState::Stale) {
+                    (
+                        panel.primary_label.as_str(),
+                        panel.primary_label.as_str(),
+                        panel.note.as_str(),
+                        "Cached value",
+                        Tone::Muted,
+                    )
+                } else {
+                    (
+                        panel.fallback.primary.as_str(),
+                        panel.fallback.primary_compact.as_str(),
+                        panel.fallback.secondary.as_str(),
+                        panel.fallback.secondary_compact.as_str(),
+                        dashboard_tile_tone(panel.tile_state),
+                    )
+                };
+            render_explicit_tile_state(
                 frame,
                 shell.content_area,
-                concise_detail(&panel.note, usize::from(shell.content_area.width)),
+                ExplicitTileText {
+                    primary,
+                    primary_compact,
+                    secondary,
+                    secondary_compact,
+                    primary_tone: tone,
+                },
                 theme,
                 Alignment::Left,
             );
@@ -931,15 +1115,37 @@ fn render_trend_panel(
         return;
     }
 
-    if !metric_panel_has_reading(panel.availability) {
-        render_metric_scaffold_with_support(
+    if !matches!(panel.tile_state, DashboardTileState::Fresh) {
+        let (primary, primary_compact, secondary, secondary_compact, tone) =
+            if matches!(panel.tile_state, DashboardTileState::Stale) {
+                (
+                    panel.primary_label.as_str(),
+                    panel.primary_label.as_str(),
+                    panel.note.as_str(),
+                    "Cached value",
+                    Tone::Muted,
+                )
+            } else {
+                (
+                    panel.fallback.primary.as_str(),
+                    panel.fallback.primary_compact.as_str(),
+                    panel.fallback.secondary.as_str(),
+                    panel.fallback.secondary_compact.as_str(),
+                    dashboard_tile_tone(panel.tile_state),
+                )
+            };
+        render_explicit_tile_state(
             frame,
             shell.content_area,
-            panel.availability,
-            &panel.note,
+            ExplicitTileText {
+                primary,
+                primary_compact,
+                secondary,
+                secondary_compact,
+                primary_tone: tone,
+            },
             theme,
             Alignment::Left,
-            state.chart_metrics,
         );
         return;
     }
@@ -1005,8 +1211,8 @@ fn render_temp_panel(
         state.metrics,
         PanelShellSpec {
             title: if area.width < 24 { "Temp" } else { "Body Temp" },
-            status: panel.availability.label(),
-            status_tone: panel.availability.tone(),
+            status: panel.tile_state.badge_label(),
+            status_tone: dashboard_tile_tone(panel.tile_state),
             focused: state.focused,
             expanded: state.expanded,
             kind: PanelKind::Section,
@@ -1017,6 +1223,40 @@ fn render_temp_panel(
     }
 
     if area.height <= 3 {
+        if !matches!(panel.tile_state, DashboardTileState::Fresh) {
+            let (primary, primary_compact, secondary, secondary_compact, tone) =
+                if matches!(panel.tile_state, DashboardTileState::Stale) {
+                    (
+                        panel.value_label.as_str(),
+                        panel.value_label.as_str(),
+                        panel.note.as_str(),
+                        "Cached temp",
+                        Tone::Muted,
+                    )
+                } else {
+                    (
+                        panel.fallback.primary.as_str(),
+                        panel.fallback.primary_compact.as_str(),
+                        panel.fallback.secondary.as_str(),
+                        panel.fallback.secondary_compact.as_str(),
+                        dashboard_tile_tone(panel.tile_state),
+                    )
+                };
+            render_explicit_tile_state(
+                frame,
+                shell.content_area,
+                ExplicitTileText {
+                    primary,
+                    primary_compact,
+                    secondary,
+                    secondary_compact,
+                    primary_tone: tone,
+                },
+                theme,
+                Alignment::Center,
+            );
+            return;
+        }
         render_panel_lines(
             frame,
             shell.content_area,
@@ -1037,15 +1277,37 @@ fn render_temp_panel(
         return;
     }
 
-    if !metric_panel_has_reading(panel.availability) {
-        render_metric_scaffold_with_support(
+    if !matches!(panel.tile_state, DashboardTileState::Fresh) {
+        let (primary, primary_compact, secondary, secondary_compact, tone) =
+            if matches!(panel.tile_state, DashboardTileState::Stale) {
+                (
+                    panel.value_label.as_str(),
+                    panel.value_label.as_str(),
+                    panel.note.as_str(),
+                    "Cached temp",
+                    Tone::Muted,
+                )
+            } else {
+                (
+                    panel.fallback.primary.as_str(),
+                    panel.fallback.primary_compact.as_str(),
+                    panel.fallback.secondary.as_str(),
+                    panel.fallback.secondary_compact.as_str(),
+                    dashboard_tile_tone(panel.tile_state),
+                )
+            };
+        render_explicit_tile_state(
             frame,
             shell.content_area,
-            panel.availability,
-            &panel.note,
+            ExplicitTileText {
+                primary,
+                primary_compact,
+                secondary,
+                secondary_compact,
+                primary_tone: tone,
+            },
             theme,
             Alignment::Center,
-            state.chart_metrics,
         );
         return;
     }
@@ -1110,8 +1372,8 @@ fn render_histogram_panel(
         state.metrics,
         PanelShellSpec {
             title,
-            status: panel.availability.label(),
-            status_tone: panel.availability.tone(),
+            status: panel.tile_state.badge_label(),
+            status_tone: dashboard_tile_tone(panel.tile_state),
             focused: state.focused,
             expanded: state.expanded,
             kind: PanelKind::Section,
@@ -1122,7 +1384,7 @@ fn render_histogram_panel(
     }
 
     if area.height <= 3 {
-        if metric_panel_has_reading(panel.availability) {
+        if matches!(panel.tile_state, DashboardTileState::Fresh) {
             render_panel_lines(
                 frame,
                 shell.content_area,
@@ -1147,10 +1409,34 @@ fn render_histogram_panel(
                 Alignment::Center,
             );
         } else {
-            render_panel_text(
+            let (primary, primary_compact, secondary, secondary_compact, tone) =
+                if matches!(panel.tile_state, DashboardTileState::Stale) {
+                    (
+                        panel.primary_label.as_str(),
+                        panel.primary_label.as_str(),
+                        panel.note.as_str(),
+                        "Cached value",
+                        Tone::Muted,
+                    )
+                } else {
+                    (
+                        panel.fallback.primary.as_str(),
+                        panel.fallback.primary_compact.as_str(),
+                        panel.fallback.secondary.as_str(),
+                        panel.fallback.secondary_compact.as_str(),
+                        dashboard_tile_tone(panel.tile_state),
+                    )
+                };
+            render_explicit_tile_state(
                 frame,
                 shell.content_area,
-                concise_detail(&panel.note, usize::from(shell.content_area.width)),
+                ExplicitTileText {
+                    primary,
+                    primary_compact,
+                    secondary,
+                    secondary_compact,
+                    primary_tone: tone,
+                },
                 theme,
                 Alignment::Center,
             );
@@ -1158,15 +1444,37 @@ fn render_histogram_panel(
         return;
     }
 
-    if !metric_panel_has_reading(panel.availability) {
-        render_metric_scaffold_with_support(
+    if !matches!(panel.tile_state, DashboardTileState::Fresh) {
+        let (primary, primary_compact, secondary, secondary_compact, tone) =
+            if matches!(panel.tile_state, DashboardTileState::Stale) {
+                (
+                    panel.primary_label.as_str(),
+                    panel.primary_label.as_str(),
+                    panel.note.as_str(),
+                    "Cached value",
+                    Tone::Muted,
+                )
+            } else {
+                (
+                    panel.fallback.primary.as_str(),
+                    panel.fallback.primary_compact.as_str(),
+                    panel.fallback.secondary.as_str(),
+                    panel.fallback.secondary_compact.as_str(),
+                    dashboard_tile_tone(panel.tile_state),
+                )
+            };
+        render_explicit_tile_state(
             frame,
             shell.content_area,
-            panel.availability,
-            &panel.note,
+            ExplicitTileText {
+                primary,
+                primary_compact,
+                secondary,
+                secondary_compact,
+                primary_tone: tone,
+            },
             theme,
             Alignment::Center,
-            state.chart_metrics,
         );
         return;
     }
@@ -1273,14 +1581,18 @@ fn render_breakdown_panel(
     }
 
     if !metric_panel_has_reading(panel.availability) {
-        render_metric_scaffold_with_support(
+        render_explicit_tile_state(
             frame,
             shell.content_area,
-            panel.availability,
-            &panel.note,
+            ExplicitTileText {
+                primary: "No readiness breakdown",
+                primary_compact: "No breakdown",
+                secondary: &panel.note,
+                secondary_compact: "No breakdown today",
+                primary_tone: Tone::Unavailable,
+            },
             theme,
             Alignment::Left,
-            state.chart_metrics,
         );
         return;
     }
@@ -1405,38 +1717,6 @@ fn render_breakdown_panel(
         );
     }
 
-    if layout.band_area.height > 0 {
-        render_line_in_area(
-            frame,
-            layout.label_cell(layout.band_area),
-            Line::from(Span::styled(
-                format!(
-                    "{:<width$}",
-                    "band",
-                    width = usize::from(layout.label_column_width)
-                ),
-                theme.annotation(),
-            )),
-            theme,
-            Alignment::Left,
-        );
-        let band_rows = stacked_profile_rows(
-            &panel.waveform,
-            usize::from(layout.bar_viewport_width),
-            usize::from(layout.band_area.height),
-        );
-        render_panel_lines(
-            frame,
-            layout.signal_track_cell(layout.band_area),
-            band_rows
-                .into_iter()
-                .map(|row| Line::from(Span::styled(row, theme.chart_ramp(3, 4))))
-                .collect(),
-            theme,
-            Alignment::Left,
-        );
-    }
-
     if layout.support_lane.height > 0 {
         render_line_in_area(
             frame,
@@ -1459,13 +1739,18 @@ fn render_heatmap_panel(
     viewport: ViewportClass,
     state: PanelRenderState,
 ) {
+    let title = if panel.window_page_label.is_empty() {
+        "Weekly Trends".to_owned()
+    } else {
+        format!("Weekly Trends {}", panel.window_page_label)
+    };
     let shell = render_panel_shell(
         frame,
         area,
         theme,
         state.metrics,
         PanelShellSpec {
-            title: "Weekly Trends",
+            title: &title,
             status: panel.availability.label(),
             status_tone: panel.availability.tone(),
             focused: state.focused,
@@ -1478,34 +1763,42 @@ fn render_heatmap_panel(
     }
 
     if area.height <= 3 {
-        let row = panel.recent.rows.first().map_or_else(
-            || concise_detail(&panel.note, usize::from(shell.content_area.width)),
-            |values| compact_heatmap_row(values, panel.recent.selected_cell),
-        );
+        let row = if metric_panel_has_reading(panel.availability) {
+            panel.recent.rows.first().map_or_else(
+                || concise_detail(&panel.note, usize::from(shell.content_area.width)),
+                |values| compact_heatmap_row(values, panel.recent.selected_cell),
+            )
+        } else {
+            fit_single_line_with(
+                &format!("{} | {}", panel.window_label, panel.note),
+                usize::from(shell.content_area.width),
+                &[&panel.window_label, "No weekly data"],
+            )
+            .text
+        };
         render_panel_text(frame, shell.content_area, row, theme, Alignment::Left);
         return;
     }
 
     if !metric_panel_has_reading(panel.availability) {
-        render_metric_scaffold_with_support(
+        render_explicit_tile_state(
             frame,
             shell.content_area,
-            panel.availability,
-            &panel.note,
+            ExplicitTileText {
+                primary: "No weekly trend data",
+                primary_compact: "No weekly data",
+                secondary: &panel.note,
+                secondary_compact: "No weekly data",
+                primary_tone: Tone::Unavailable,
+            },
             theme,
             Alignment::Left,
-            state.chart_metrics,
         );
         return;
     }
 
     let grid = panel.grid_for_viewport(viewport);
-    let mode =
-        if viewport.is_wide() && panel.history.day_labels.len() > panel.recent.day_labels.len() {
-            WeeklyHeatmapMode::DenseHistory
-        } else {
-            WeeklyHeatmapMode::Standard
-        };
+    let mode = WeeklyHeatmapMode::Standard;
     let layout = WeeklyTrendsLayout::for_panel(
         shell.content_area,
         state.chart_metrics,
@@ -1606,7 +1899,15 @@ fn render_heatmap_panel(
         render_line_in_area(
             frame,
             layout.summary_area,
-            heatmap_summary_line(theme, grid, &panel.row_labels, &panel.note, layout),
+            heatmap_summary_line(
+                theme,
+                grid,
+                &panel.row_labels,
+                &panel.note,
+                &panel.window_label,
+                &panel.window_page_label,
+                layout,
+            ),
             theme,
             Alignment::Left,
         );
@@ -1639,11 +1940,17 @@ fn render_compact_grouped_heatmap_panel(
         lines.push(heatmap_compact_legend_line(theme, layout));
     }
     if usize::from(area.height) > lines.len() {
+        let window_summary = if panel.window_page_label.is_empty() {
+            panel.window_label.clone()
+        } else {
+            format!("{} | {}", panel.window_label, panel.window_page_label)
+        };
         lines.push(heatmap_compact_summary_line(
             theme,
             grid,
             &panel.row_labels,
             &panel.note,
+            &window_summary,
             layout,
             usize::from(area.width),
         ));
@@ -1751,46 +2058,6 @@ fn render_support_lane(
         theme,
         alignment,
     );
-}
-
-fn render_metric_scaffold_with_support(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: MetricPanelState,
-    reason: &str,
-    theme: &Theme,
-    alignment: Alignment,
-    chart_metrics: DashboardChartMetrics,
-) {
-    let layout = panel_content_metrics(area, measured_panel_support_lane(area, chart_metrics));
-    if layout.support.area.height == 0 {
-        render_panel_text(
-            frame,
-            area,
-            metric_panel_scaffold(state, reason, usize::from(area.width)).join("\n"),
-            theme,
-            alignment,
-        );
-        return;
-    }
-
-    let width = usize::from(layout.chart.area.width).max(10);
-    let body_lines = [
-        match alignment {
-            Alignment::Left => format!("{:<width$}", state.label()),
-            Alignment::Right => format!("{:>width$}", state.label()),
-            Alignment::Center => format!("{:^width$}", state.label()),
-        },
-        placeholder_rule(width),
-    ];
-    render_panel_text(
-        frame,
-        centered_body_area(layout.chart.area, body_lines.len()),
-        body_lines.join("\n"),
-        theme,
-        alignment,
-    );
-    render_support_lane(frame, layout.support.area, reason, theme, alignment);
 }
 
 fn centered_line(width: usize, text: impl AsRef<str>) -> String {
@@ -1901,6 +2168,7 @@ fn heatmap_compact_summary_line(
     grid: &crate::app::DashboardHeatmapGrid,
     row_labels: &[String],
     note: &str,
+    window_summary: &str,
     layout: WeeklyTrendsLayout,
     line_width: usize,
 ) -> Line<'static> {
@@ -1911,7 +2179,7 @@ fn heatmap_compact_summary_line(
     let text_budget = summary_width.saturating_sub(if band.is_some() { 10 } else { 0 });
     let mut spans = vec![Span::raw(" ".repeat(label_width))];
     spans.push(Span::styled(
-        support_lane_text(&summary, text_budget),
+        support_lane_text(&format!("{window_summary} | {summary}"), text_budget),
         theme.body(),
     ));
     if band.is_some() {
@@ -2112,14 +2380,21 @@ fn heatmap_summary_line(
     grid: &crate::app::DashboardHeatmapGrid,
     row_labels: &[String],
     note: &str,
+    window_label: &str,
+    window_page_label: &str,
     layout: WeeklyTrendsLayout,
 ) -> Line<'static> {
     let (summary, band) =
         selected_heatmap_summary(grid, row_labels, note).unwrap_or_else(|| (note.to_owned(), None));
+    let prefix = if window_page_label.is_empty() {
+        window_label.to_owned()
+    } else {
+        format!("{window_label} | {window_page_label}")
+    };
     let mut spans = Vec::new();
     spans.push(Span::styled(
         support_lane_text(
-            &summary,
+            &format!("{prefix} | {summary}"),
             usize::from(layout.summary_area.width).saturating_sub(if band.is_some() {
                 10
             } else {

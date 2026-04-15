@@ -1254,6 +1254,20 @@ async fn sync_spo2(
         &store_plan,
         capability_report,
         FamilyScopeGuard {
+            capability: CapabilityKind::Daily,
+            family: SyncFamily::Spo2,
+            not_requested_message: "`daily` scope is not requested; skipping blood oxygen sync because SpO2 depends on daily coverage.",
+            missing_scope_message: "Missing `daily` scope; blood oxygen sync requires daily coverage.",
+        },
+        options,
+    )? {
+        return Ok(report);
+    }
+    if let Some(report) = guard_family_scope(
+        config,
+        &store_plan,
+        capability_report,
+        FamilyScopeGuard {
             capability: CapabilityKind::Spo2,
             family: SyncFamily::Spo2,
             not_requested_message: "`spo2` scope is not requested; skipping blood oxygen sync.",
@@ -2748,7 +2762,7 @@ mod tests {
 
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-    use super::{SyncOptions, sync_once};
+    use super::{CapabilityReport, FixtureOuraClient, SyncOptions, sync_once};
     use crate::config::{
         AppPaths, Config, DEFAULT_OURA_API_BASE_URL, DEFAULT_OURA_AUTHORIZE_URL,
         DEFAULT_OURA_TOKEN_URL, LoggingConfig, OuraConfig, RefreshConfig, WebhookConfig,
@@ -3337,6 +3351,55 @@ mod tests {
         assert_eq!(records[0].oura_id.as_deref(), Some("spo2_2026-04-08"));
         assert_eq!(records[0].average_spo2, Some(97.4));
         assert_eq!(records[0].breathing_disturbance_index, Some(0.6));
+    }
+
+    #[tokio::test]
+    async fn spo2_sync_is_blocked_when_daily_scope_is_missing() {
+        let store = ok(Store::open_test_store(), "store should open");
+        let config = fixture_config();
+        let tempdir = ok(tempfile::tempdir(), "tempdir should build");
+        let fixture_dir = tempdir.path().join("spo2-missing-daily");
+        copy_fixture_dir(&review_fixture_dir(), &fixture_dir);
+
+        let client = FixtureOuraClient::new(&config, &fixture_dir);
+        let capability_report = CapabilityReport::from_scopes(
+            &["daily".to_owned(), "spo2".to_owned()],
+            &["spo2".to_owned()],
+        );
+        let report = super::sync_spo2(
+            &config,
+            store.plan().clone(),
+            &client,
+            &capability_report,
+            &SyncOptions {
+                dry_run: false,
+                fixture_dir: Some(fixture_dir),
+                families: vec![SyncFamily::Spo2],
+                mode: super::SyncMode::Standard,
+                trigger_source: Some("periodic_reconcile".to_owned()),
+                trigger_detail: Some("test spo2 dependency guard".to_owned()),
+            },
+        )
+        .await;
+        let spo2_slice = ok(report, "spo2 sync should short-circuit cleanly");
+
+        assert_eq!(spo2_slice.status, SyncRunStatus::Blocked);
+        assert!(spo2_slice.message.contains("daily coverage"));
+        let sync_state = some(
+            ok(
+                store.sync_state().get(super::SPO2_SYNC_KEY),
+                "spo2 sync state should persist",
+            ),
+            "spo2 sync state should exist",
+        );
+        assert_eq!(sync_state.status, SyncRunStatus::Blocked);
+        assert_eq!(sync_state.family, "spo2");
+        assert!(
+            sync_state
+                .message
+                .unwrap_or_default()
+                .contains("daily coverage")
+        );
     }
 
     #[test]

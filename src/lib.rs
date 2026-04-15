@@ -678,7 +678,7 @@ fn doctor_sync_health_label(
         return "stale";
     };
 
-    if sync.last_error_kind.as_deref() == Some("rate_limit") {
+    if doctor_sync_is_rate_limited(sync) {
         return "rate-limited";
     }
     if matches!(
@@ -703,6 +703,11 @@ fn doctor_sync_health_label(
     } else {
         "stale"
     }
+}
+
+fn doctor_sync_is_rate_limited(sync: &crate::store::queries::SyncStateRecord) -> bool {
+    sync.last_error_kind.as_deref() == Some("rate_limit")
+        || sync.last_error.as_ref().and_then(|problem| problem.status) == Some(429)
 }
 
 fn doctor_webhook_stats(snapshot: &app::LiveSnapshot) -> DoctorWebhookStats {
@@ -3860,8 +3865,8 @@ fn interactive_terminal_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        run_ai_compare, run_ai_eval, run_ai_review, run_ai_runs_show, run_doctor,
-        run_report_export, run_review_investigate, run_review_today, run_review_week,
+        doctor_sync_is_rate_limited, run_ai_compare, run_ai_eval, run_ai_review, run_ai_runs_show,
+        run_doctor, run_report_export, run_review_investigate, run_review_today, run_review_week,
         run_snapshot_export, run_snapshot_show, run_webhook_replay,
     };
     use crate::cli::{
@@ -3877,7 +3882,8 @@ mod tests {
     use crate::store::Store;
     use crate::store::queries::{
         AiRunRecord, AuthSessionRecord, DailyActivityRecord, DailyReadinessRecord,
-        DailySleepRecord, RestModePeriodRecord, SnapshotExportRecord,
+        DailySleepRecord, RestModePeriodRecord, SnapshotExportRecord, SyncRunStatus,
+        SyncStateRecord,
     };
     use crate::store::webhook_store::{
         AcceptedWebhookDeliveryInput, DesiredWebhookSubscriptionRecord, InvalidationInput,
@@ -5432,6 +5438,38 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("rate limit")
         );
+    }
+
+    #[test]
+    fn doctor_rate_limit_detection_uses_legacy_429_problem_status() {
+        let sync = SyncStateRecord {
+            sync_key: "oura.heartrate".to_owned(),
+            family: "heartrate".to_owned(),
+            status: SyncRunStatus::Failed,
+            cursor: None,
+            last_successful_sync_end: None,
+            last_attempted_at: "2026-04-08T12:00:00Z".to_owned(),
+            last_completed_at: None,
+            last_reconcile_end: None,
+            oldest_recently_reconciled_at: None,
+            message: Some("legacy rate-limited state".to_owned()),
+            granted_scopes: vec!["heartrate".to_owned()],
+            last_error: Some(OuraProblem::new(
+                Some(429),
+                "Too Many Requests",
+                Some("retry after a minute".to_owned()),
+            )),
+            last_error_at: Some("2026-04-08T12:00:00Z".to_owned()),
+            last_error_kind: Some("api_error".to_owned()),
+            last_error_detail: Some("legacy rate-limited state".to_owned()),
+            failure_count: 1,
+            next_attempt_after: Some("2026-04-08T12:30:00Z".to_owned()),
+            last_trigger_source: Some("manual".to_owned()),
+            last_trigger_detail: None,
+            updated_at: "2026-04-08T12:00:00Z".to_owned(),
+        };
+
+        assert!(doctor_sync_is_rate_limited(&sync));
     }
 
     #[tokio::test]

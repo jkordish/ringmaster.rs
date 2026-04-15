@@ -483,9 +483,38 @@ pub enum DashboardJudgedState {
     Alert,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DashboardTileState {
+    Fresh,
+    BaselineOnly,
+    Stale,
+    Unavailable,
+}
+
+impl DashboardTileState {
+    #[must_use]
+    pub const fn badge_label(self) -> &'static str {
+        match self {
+            Self::Fresh => "FRESH",
+            Self::BaselineOnly => "BASELINE",
+            Self::Stale => "STALE",
+            Self::Unavailable => "NO DATA",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DashboardTileFallback {
+    pub primary: String,
+    pub primary_compact: String,
+    pub secondary: String,
+    pub secondary_compact: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardScoreTile {
     pub availability: MetricPanelState,
+    pub tile_state: DashboardTileState,
     pub primary_value: String,
     pub score_band: Option<DashboardScoreBand>,
     pub secondary_lines: Vec<String>,
@@ -493,21 +522,25 @@ pub struct DashboardScoreTile {
     pub trend: Vec<u64>,
     pub ring_fill_percent: u16,
     pub note: String,
+    pub fallback: DashboardTileFallback,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardSleepTile {
     pub availability: MetricPanelState,
+    pub tile_state: DashboardTileState,
     pub duration_label: String,
     pub score_label: String,
     pub score_band: Option<DashboardScoreBand>,
     pub trend: Vec<u64>,
     pub strip_note: String,
+    pub fallback: DashboardTileFallback,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardTrendPanel {
     pub availability: MetricPanelState,
+    pub tile_state: DashboardTileState,
     pub primary_label: String,
     pub baseline_label: String,
     pub range_label: String,
@@ -515,21 +548,25 @@ pub struct DashboardTrendPanel {
     pub judged_state: Option<DashboardJudgedState>,
     pub values: Vec<u64>,
     pub note: String,
+    pub fallback: DashboardTileFallback,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardThermometerPanel {
     pub availability: MetricPanelState,
+    pub tile_state: DashboardTileState,
     pub deviation_tenths: Option<i16>,
     pub value_label: String,
     pub delta_state: DashboardDeltaState,
     pub judged_state: Option<DashboardJudgedState>,
     pub note: String,
+    pub fallback: DashboardTileFallback,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardHistogramPanel {
     pub availability: MetricPanelState,
+    pub tile_state: DashboardTileState,
     pub primary_label: String,
     pub delta_label: String,
     pub range_label: String,
@@ -537,13 +574,13 @@ pub struct DashboardHistogramPanel {
     pub judged_state: Option<DashboardJudgedState>,
     pub bars: Vec<u64>,
     pub note: String,
+    pub fallback: DashboardTileFallback,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardBreakdownPanel {
     pub availability: MetricPanelState,
     pub rails: Vec<DashboardBreakdownRail>,
-    pub waveform: Vec<u64>,
     pub note: String,
 }
 
@@ -573,16 +610,14 @@ pub struct DashboardWeeklyHeatmap {
     pub recent: DashboardHeatmapGrid,
     pub history: DashboardHeatmapGrid,
     pub note: String,
+    pub window_label: String,
+    pub window_page_label: String,
 }
 
 impl DashboardWeeklyHeatmap {
     #[must_use]
-    pub const fn grid_for_viewport(&self, viewport: ViewportClass) -> &DashboardHeatmapGrid {
-        if viewport.is_wide() && self.history.day_labels.len() > self.recent.day_labels.len() {
-            &self.history
-        } else {
-            &self.recent
-        }
+    pub const fn grid_for_viewport(&self, _viewport: ViewportClass) -> &DashboardHeatmapGrid {
+        &self.recent
     }
 
     #[must_use]
@@ -1600,57 +1635,202 @@ impl AppState {
             ),
             (Screen::Dashboard, FocusRegion::DashboardReadiness) => (
                 label,
-                format!("score {}", self.model.dashboard.readiness.primary_value),
-                self.model.dashboard.readiness.delta_label.clone(),
-                self.dashboard_freshness(self.model.dashboard.readiness.availability.label()),
+                if matches!(
+                    self.model.dashboard.readiness.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    format!("score {}", self.model.dashboard.readiness.primary_value)
+                } else {
+                    self.model.dashboard.readiness.fallback.primary.clone()
+                },
+                if matches!(
+                    self.model.dashboard.readiness.tile_state,
+                    DashboardTileState::Fresh
+                ) {
+                    self.model.dashboard.readiness.delta_label.clone()
+                } else if matches!(
+                    self.model.dashboard.readiness.tile_state,
+                    DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.readiness.note.clone()
+                } else {
+                    self.model.dashboard.readiness.fallback.secondary.clone()
+                },
+                self.dashboard_freshness(),
             ),
             (Screen::Dashboard, FocusRegion::DashboardSleep) => (
                 label,
-                format!(
-                    "{} | {}",
-                    self.model.dashboard.sleep.duration_label,
-                    self.model.dashboard.sleep.score_label
-                ),
-                self.model.dashboard.sleep.strip_note.clone(),
-                self.dashboard_freshness(self.model.dashboard.sleep.availability.label()),
+                if matches!(
+                    self.model.dashboard.sleep.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    format!(
+                        "{} | {}",
+                        self.model.dashboard.sleep.duration_label,
+                        self.model.dashboard.sleep.score_label
+                    )
+                } else {
+                    self.model.dashboard.sleep.fallback.primary.clone()
+                },
+                if matches!(
+                    self.model.dashboard.sleep.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.sleep.strip_note.clone()
+                } else {
+                    self.model.dashboard.sleep.fallback.secondary.clone()
+                },
+                self.dashboard_freshness(),
             ),
             (Screen::Dashboard, FocusRegion::DashboardActivity) => (
                 label,
-                format!("activity {}", self.model.dashboard.activity.primary_value),
-                self.model.dashboard.activity.delta_label.clone(),
-                self.dashboard_freshness(self.model.dashboard.activity.availability.label()),
+                if matches!(
+                    self.model.dashboard.activity.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    format!("activity {}", self.model.dashboard.activity.primary_value)
+                } else {
+                    self.model.dashboard.activity.fallback.primary.clone()
+                },
+                if matches!(
+                    self.model.dashboard.activity.tile_state,
+                    DashboardTileState::Fresh
+                ) {
+                    self.model.dashboard.activity.delta_label.clone()
+                } else if matches!(
+                    self.model.dashboard.activity.tile_state,
+                    DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.activity.note.clone()
+                } else {
+                    self.model.dashboard.activity.fallback.secondary.clone()
+                },
+                self.dashboard_freshness(),
             ),
             (Screen::Dashboard, FocusRegion::DashboardHrv) => (
                 label,
-                self.model.dashboard.hrv.primary_label.clone(),
-                self.model.dashboard.hrv.note.clone(),
-                self.dashboard_freshness(self.model.dashboard.hrv.availability.label()),
+                if matches!(
+                    self.model.dashboard.hrv.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.hrv.primary_label.clone()
+                } else {
+                    self.model.dashboard.hrv.fallback.primary.clone()
+                },
+                if matches!(
+                    self.model.dashboard.hrv.tile_state,
+                    DashboardTileState::Fresh
+                ) {
+                    self.model.dashboard.hrv.baseline_label.clone()
+                } else if matches!(
+                    self.model.dashboard.hrv.tile_state,
+                    DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.hrv.note.clone()
+                } else {
+                    self.model.dashboard.hrv.fallback.secondary.clone()
+                },
+                self.dashboard_freshness(),
             ),
             (Screen::Dashboard, FocusRegion::DashboardTemp) => (
                 label,
-                self.model.dashboard.body_temp.value_label.clone(),
-                self.model.dashboard.body_temp.note.clone(),
-                self.dashboard_freshness(self.model.dashboard.body_temp.availability.label()),
+                if matches!(
+                    self.model.dashboard.body_temp.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.body_temp.value_label.clone()
+                } else {
+                    self.model.dashboard.body_temp.fallback.primary.clone()
+                },
+                if matches!(
+                    self.model.dashboard.body_temp.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.body_temp.note.clone()
+                } else {
+                    self.model.dashboard.body_temp.fallback.secondary.clone()
+                },
+                self.dashboard_freshness(),
             ),
             (Screen::Dashboard, FocusRegion::DashboardHeartRate) => (
                 label,
-                self.model.dashboard.heart_rate.primary_label.clone(),
-                self.model.dashboard.heart_rate.note.clone(),
-                self.dashboard_freshness(self.model.dashboard.heart_rate.availability.label()),
+                if matches!(
+                    self.model.dashboard.heart_rate.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.heart_rate.primary_label.clone()
+                } else {
+                    self.model.dashboard.heart_rate.fallback.primary.clone()
+                },
+                if matches!(
+                    self.model.dashboard.heart_rate.tile_state,
+                    DashboardTileState::Fresh
+                ) {
+                    self.model.dashboard.heart_rate.baseline_label.clone()
+                } else if matches!(
+                    self.model.dashboard.heart_rate.tile_state,
+                    DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.heart_rate.note.clone()
+                } else {
+                    self.model.dashboard.heart_rate.fallback.secondary.clone()
+                },
+                self.dashboard_freshness(),
             ),
             (Screen::Dashboard, FocusRegion::DashboardSpo2) => (
                 label,
-                self.model.dashboard.spo2.primary_label.clone(),
-                self.model.dashboard.spo2.note.clone(),
-                self.dashboard_freshness(self.model.dashboard.spo2.availability.label()),
+                if matches!(
+                    self.model.dashboard.spo2.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.spo2.primary_label.clone()
+                } else {
+                    self.model.dashboard.spo2.fallback.primary.clone()
+                },
+                if matches!(
+                    self.model.dashboard.spo2.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.spo2.note.clone()
+                } else {
+                    self.model.dashboard.spo2.fallback.secondary.clone()
+                },
+                self.dashboard_freshness(),
             ),
             (Screen::Dashboard, FocusRegion::DashboardRespRate) => (
                 label,
-                self.model.dashboard.respiratory_rate.primary_label.clone(),
-                self.model.dashboard.respiratory_rate.note.clone(),
-                self.dashboard_freshness(
-                    self.model.dashboard.respiratory_rate.availability.label(),
-                ),
+                if matches!(
+                    self.model.dashboard.respiratory_rate.tile_state,
+                    DashboardTileState::Fresh | DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.respiratory_rate.primary_label.clone()
+                } else {
+                    self.model
+                        .dashboard
+                        .respiratory_rate
+                        .fallback
+                        .primary
+                        .clone()
+                },
+                if matches!(
+                    self.model.dashboard.respiratory_rate.tile_state,
+                    DashboardTileState::Fresh
+                ) {
+                    self.model.dashboard.respiratory_rate.delta_label.clone()
+                } else if matches!(
+                    self.model.dashboard.respiratory_rate.tile_state,
+                    DashboardTileState::Stale
+                ) {
+                    self.model.dashboard.respiratory_rate.note.clone()
+                } else {
+                    self.model
+                        .dashboard
+                        .respiratory_rate
+                        .fallback
+                        .secondary
+                        .clone()
+                },
+                self.dashboard_freshness(),
             ),
             (Screen::Dashboard, FocusRegion::DashboardBreakdown) => {
                 self.focused_dashboard_breakdown_rail().map_or_else(
@@ -1659,9 +1839,7 @@ impl AppState {
                             label.clone(),
                             self.model.dashboard.breakdown.note.clone(),
                             "Δ --".to_owned(),
-                            self.dashboard_freshness(
-                                self.model.dashboard.breakdown.availability.label(),
-                            ),
+                            self.dashboard_freshness(),
                         )
                     },
                     |rail| {
@@ -1669,24 +1847,20 @@ impl AppState {
                             label.clone(),
                             format!("{} | {}", rail.label, rail.delta_label),
                             rail.note.clone(),
-                            self.dashboard_freshness(rail.availability.label()),
+                            self.dashboard_freshness(),
                         )
                     },
                 )
             }
-            (Screen::Dashboard, FocusRegion::DashboardHeatmap) => {
-                let exact = self
-                    .model
+            (Screen::Dashboard, FocusRegion::DashboardHeatmap) => (
+                label,
+                self.model.dashboard.weekly.window_label.clone(),
+                self.model
                     .dashboard
                     .weekly
-                    .selected_summary_for_viewport(viewport);
-                (
-                    label,
-                    exact,
-                    self.model.dashboard.weekly.note.clone(),
-                    self.dashboard_freshness(self.model.dashboard.weekly.availability.label()),
-                )
-            }
+                    .selected_summary_for_viewport(viewport),
+                self.model.dashboard.weekly.window_page_label.clone(),
+            ),
             (Screen::Timeline, FocusRegion::TimelineControls) => (
                 label,
                 format!(
@@ -1855,11 +2029,12 @@ impl AppState {
         self.model.trends.rows.iter().find(|row| row.selected)
     }
 
-    fn dashboard_freshness(&self, label: &str) -> String {
-        format!(
-            "{} | {}",
-            self.model.dashboard.header.freshness_badge, label
-        )
+    fn dashboard_freshness(&self) -> String {
+        if self.refresh_in_flight {
+            "refreshing".to_owned()
+        } else {
+            String::new()
+        }
     }
 
     fn coverage_footer(&self, family: CoverageFamily) -> String {
@@ -4273,6 +4448,238 @@ fn build_dashboard_model(
         metric_panel_baseline_reference(&readiness_insight).is_some(),
         metric_panel_has_history(&readiness_insight),
     );
+    let readiness_tile_state = dashboard_tile_state(readiness_state);
+    let sleep_tile_state = dashboard_tile_state(sleep_state);
+    let activity_tile_state = dashboard_tile_state(activity_state);
+    let hrv_tile_state = dashboard_tile_state(hrv_state);
+    let body_temp_tile_state = dashboard_tile_state(body_temp_state);
+    let heart_rate_tile_state = dashboard_tile_state(heart_rate_state);
+    let spo2_tile_state = dashboard_tile_state(spo2_state);
+    let respiratory_tile_state = dashboard_tile_state(respiratory_state);
+    let readiness_fallback = fallback_for_metric(MetricFallbackSpec {
+        metric: "readiness",
+        compact_metric: "readiness",
+        selected_day: &selected_day,
+        state: readiness_state,
+        baseline_primary: baseline_summary(
+            "readiness",
+            metric_panel_baseline_reference(&readiness_insight),
+        ),
+        baseline_primary_compact: baseline_summary(
+            "ready",
+            metric_panel_baseline_reference(&readiness_insight),
+        ),
+        baseline_secondary: "No readiness score available today",
+        baseline_secondary_compact: "No readiness today",
+    });
+    let sleep_fallback = fallback_for_metric(MetricFallbackSpec {
+        metric: "sleep",
+        compact_metric: "sleep",
+        selected_day: &selected_day,
+        state: sleep_state,
+        baseline_primary: baseline_summary(
+            "sleep score",
+            metric_panel_baseline_reference(&sleep_insight),
+        ),
+        baseline_primary_compact: baseline_summary(
+            "sleep",
+            metric_panel_baseline_reference(&sleep_insight),
+        ),
+        baseline_secondary: "No sleep session recorded for today",
+        baseline_secondary_compact: "No sleep session today",
+    });
+    let activity_fallback = fallback_for_metric(MetricFallbackSpec {
+        metric: "activity",
+        compact_metric: "activity",
+        selected_day: &selected_day,
+        state: activity_state,
+        baseline_primary: baseline_summary(
+            "activity",
+            metric_panel_baseline_reference(&activity_insight),
+        ),
+        baseline_primary_compact: baseline_summary(
+            "activity",
+            metric_panel_baseline_reference(&activity_insight),
+        ),
+        baseline_secondary: "No current activity score yet today",
+        baseline_secondary_compact: "No activity score today",
+    });
+    let hrv_fallback = if matches!(hrv_tile_state, DashboardTileState::BaselineOnly) {
+        dashboard_tile_fallback(
+            "No current HRV reading",
+            "No HRV reading today",
+            baseline_summary(
+                "trailing baseline",
+                metric_panel_baseline_reference(&hrv_insight),
+            ),
+            baseline_summary("baseline", metric_panel_baseline_reference(&hrv_insight)),
+        )
+    } else {
+        let (secondary, secondary_compact) = dashboard_missing_reason(hrv_state);
+        dashboard_tile_fallback(
+            "No current HRV reading",
+            "No HRV reading today",
+            secondary,
+            secondary_compact,
+        )
+    };
+    let spo2_fallback = fallback_for_metric(MetricFallbackSpec {
+        metric: "SpO2",
+        compact_metric: "SpO2",
+        selected_day: &selected_day,
+        state: spo2_state,
+        baseline_primary: baseline_summary("SpO2", metric_panel_baseline_reference(&spo2_insight)),
+        baseline_primary_compact: baseline_summary(
+            "SpO2",
+            metric_panel_baseline_reference(&spo2_insight),
+        ),
+        baseline_secondary: "No current SpO2 sample for today",
+        baseline_secondary_compact: "No SpO2 sample today",
+    });
+    let respiratory_fallback = fallback_for_metric(MetricFallbackSpec {
+        metric: "respiratory rate",
+        compact_metric: "resp rate",
+        selected_day: &selected_day,
+        state: respiratory_state,
+        baseline_primary: baseline_summary(
+            "respiratory rate",
+            metric_panel_baseline_reference(&respiratory_insight),
+        ),
+        baseline_primary_compact: baseline_summary(
+            "resp rate",
+            metric_panel_baseline_reference(&respiratory_insight),
+        ),
+        baseline_secondary: "No overnight reading available today",
+        baseline_secondary_compact: "No overnight reading today",
+    });
+    let body_temp_fallback = fallback_for_metric(MetricFallbackSpec {
+        metric: "temperature",
+        compact_metric: "temp",
+        selected_day: &selected_day,
+        state: body_temp_state,
+        baseline_primary: baseline_summary(
+            "temperature dev",
+            metric_panel_baseline_reference(&temperature_insight),
+        ),
+        baseline_primary_compact: baseline_summary(
+            "temp dev",
+            metric_panel_baseline_reference(&temperature_insight),
+        ),
+        baseline_secondary: "No temperature deviation available today",
+        baseline_secondary_compact: "No temp reading today",
+    });
+    let heart_rate_fallback = fallback_for_metric(MetricFallbackSpec {
+        metric: "heart rate",
+        compact_metric: "heart rate",
+        selected_day: &selected_day,
+        state: heart_rate_state,
+        baseline_primary: baseline_summary(
+            "heart rate",
+            metric_panel_baseline_reference(&heartrate_insight),
+        ),
+        baseline_primary_compact: baseline_summary(
+            "HR",
+            metric_panel_baseline_reference(&heartrate_insight),
+        ),
+        baseline_secondary: "No current heart-rate reading for today",
+        baseline_secondary_compact: "No heart-rate today",
+    });
+    let readiness_note = match readiness_tile_state {
+        DashboardTileState::Fresh => today_review.observations.first().map_or_else(
+            || selected_day_baseline_sentence("Readiness", &selected_day, &readiness_insight),
+            |card| format!("Review: {}", card.headline),
+        ),
+        DashboardTileState::Stale => stale_note("readiness", &selected_day),
+        DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
+            readiness_fallback.secondary.clone()
+        }
+    };
+    let sleep_note = match sleep_tile_state {
+        DashboardTileState::Fresh => {
+            selected_day_baseline_sentence("Sleep", &selected_day, &sleep_insight)
+        }
+        DashboardTileState::Stale => stale_note("sleep", &selected_day),
+        DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
+            sleep_fallback.secondary.clone()
+        }
+    };
+    let activity_note = match activity_tile_state {
+        DashboardTileState::Fresh => {
+            selected_day_baseline_sentence("Activity", &selected_day, &activity_insight)
+        }
+        DashboardTileState::Stale => stale_note("activity", &selected_day),
+        DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
+            activity_fallback.secondary.clone()
+        }
+    };
+    let hrv_note = match hrv_tile_state {
+        DashboardTileState::Fresh => selected_metric_note(
+            "HRV",
+            &selected_day,
+            selected_sleep_period
+                .and_then(|record| record.average_hrv)
+                .is_some(),
+            &hrv_insight,
+        ),
+        DashboardTileState::Stale => stale_note("HRV", &selected_day),
+        DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
+            hrv_fallback.secondary.clone()
+        }
+    };
+    let body_temp_note = match body_temp_tile_state {
+        DashboardTileState::Fresh => selected_readiness
+            .and_then(|row| row.temperature_trend_deviation)
+            .map_or_else(
+                || "deviation vs baseline pending".to_owned(),
+                |value| format!("trend {value:+.1}°C"),
+            ),
+        DashboardTileState::Stale => stale_note("temperature", &selected_day),
+        DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
+            body_temp_fallback.secondary.clone()
+        }
+    };
+    let heart_rate_note = match heart_rate_tile_state {
+        DashboardTileState::Fresh => heartrate_insight.summary.clone(),
+        DashboardTileState::Stale => stale_note("heart-rate", &selected_day),
+        DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
+            heart_rate_fallback.secondary.clone()
+        }
+    };
+    let spo2_note = match spo2_tile_state {
+        DashboardTileState::Fresh => selected_spo2
+            .and_then(|record| record.breathing_disturbance_index)
+            .map_or_else(
+                || {
+                    selected_metric_note(
+                        "SpO2",
+                        &selected_day,
+                        selected_spo2
+                            .and_then(|record| record.average_spo2)
+                            .is_some(),
+                        &spo2_insight,
+                    )
+                },
+                |value| format!("BDI {value:.1} | {}", spo2_insight.summary),
+            ),
+        DashboardTileState::Stale => stale_note("SpO2", &selected_day),
+        DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
+            spo2_fallback.secondary.clone()
+        }
+    };
+    let respiratory_note = match respiratory_tile_state {
+        DashboardTileState::Fresh => selected_metric_note(
+            "respiratory-rate",
+            &selected_day,
+            selected_sleep_period
+                .and_then(|record| record.average_breath)
+                .is_some(),
+            &respiratory_insight,
+        ),
+        DashboardTileState::Stale => stale_note("respiratory rate", &selected_day),
+        DashboardTileState::BaselineOnly | DashboardTileState::Unavailable => {
+            respiratory_fallback.secondary.clone()
+        }
+    };
 
     DashboardModel {
         header: HeaderStripModel {
@@ -4290,6 +4697,7 @@ fn build_dashboard_model(
         selected_day_label: selected_day.clone(),
         readiness: DashboardScoreTile {
             availability: readiness_state,
+            tile_state: readiness_tile_state,
             primary_value: selected_daily
                 .and_then(|row| row.readiness_score)
                 .map_or_else(|| "--".to_owned(), |value| value.to_string()),
@@ -4313,13 +4721,12 @@ fn build_dashboard_model(
             ring_fill_percent: selected_daily
                 .and_then(|row| row.readiness_score)
                 .map_or(0, u16::from),
-            note: today_review.observations.first().map_or_else(
-                || selected_day_baseline_sentence("Readiness", &selected_day, &readiness_insight),
-                |card| format!("Review: {}", card.headline),
-            ),
+            note: readiness_note,
+            fallback: readiness_fallback,
         },
         sleep: DashboardSleepTile {
             availability: sleep_state,
+            tile_state: sleep_tile_state,
             duration_label: selected_daily
                 .and_then(|row| row.sleep_duration_seconds)
                 .map_or_else(|| "--".to_owned(), format_duration_compact),
@@ -4333,10 +4740,12 @@ fn build_dashboard_model(
                 &snapshot.daily_history,
                 |row| row.sleep_duration_seconds.map(crate::numeric::i64_to_f64),
             )),
-            strip_note: selected_day_baseline_sentence("Sleep", &selected_day, &sleep_insight),
+            strip_note: sleep_note,
+            fallback: sleep_fallback,
         },
         activity: DashboardScoreTile {
             availability: activity_state,
+            tile_state: activity_tile_state,
             primary_value: selected_activity.map_or_else(
                 || {
                     selected_daily
@@ -4370,10 +4779,12 @@ fn build_dashboard_model(
                     },
                     u16::from,
                 ),
-            note: selected_day_baseline_sentence("Activity", &selected_day, &activity_insight),
+            note: activity_note,
+            fallback: activity_fallback,
         },
         hrv: DashboardTrendPanel {
             availability: hrv_state,
+            tile_state: hrv_tile_state,
             primary_label: selected_sleep_period
                 .and_then(|record| record.average_hrv)
                 .map_or_else(|| "--".to_owned(), |value| format!("{value:.0} ms")),
@@ -4382,17 +4793,12 @@ fn build_dashboard_model(
             delta_state: dashboard_delta_state_for_insight(&hrv_insight),
             judged_state: None,
             values: values_from_metric_points(&hrv_points),
-            note: selected_metric_note(
-                "HRV",
-                &selected_day,
-                selected_sleep_period
-                    .and_then(|record| record.average_hrv)
-                    .is_some(),
-                &hrv_insight,
-            ),
+            note: hrv_note,
+            fallback: hrv_fallback,
         },
         body_temp: DashboardThermometerPanel {
             availability: body_temp_state,
+            tile_state: body_temp_tile_state,
             deviation_tenths: selected_readiness
                 .and_then(|row| row.temperature_deviation)
                 .map(|value| {
@@ -4412,25 +4818,24 @@ fn build_dashboard_model(
             judged_state: dashboard_temp_judged_state(
                 selected_readiness.and_then(|row| row.temperature_deviation),
             ),
-            note: selected_readiness
-                .and_then(|row| row.temperature_trend_deviation)
-                .map_or_else(
-                    || "deviation vs baseline pending".to_owned(),
-                    |value| format!("trend {value:+.1}°C"),
-                ),
+            note: body_temp_note,
+            fallback: body_temp_fallback,
         },
         heart_rate: DashboardTrendPanel {
             availability: heart_rate_state,
+            tile_state: heart_rate_tile_state,
             primary_label: heart_rate_primary_label(snapshot, &selected_day),
             baseline_label: metric_delta_label(&heartrate_insight),
             range_label: metric_range_label(&snapshot.heartrate_daily_averages),
             delta_state: dashboard_delta_state_for_insight(&heartrate_insight),
             judged_state: dashboard_rhr_judged_state(&heartrate_insight),
             values: values_from_metric_points(&snapshot.heartrate_daily_averages),
-            note: heartrate_insight.summary.clone(),
+            note: heart_rate_note,
+            fallback: heart_rate_fallback,
         },
         spo2: DashboardTrendPanel {
             availability: spo2_state,
+            tile_state: spo2_tile_state,
             primary_label: selected_spo2
                 .and_then(|record| record.average_spo2)
                 .map_or_else(|| "--".to_owned(), |value| format!("{value:.1}%")),
@@ -4439,24 +4844,12 @@ fn build_dashboard_model(
             delta_state: dashboard_delta_state_for_insight(&spo2_insight),
             judged_state: None,
             values: values_from_metric_points(&spo2_points),
-            note: selected_spo2
-                .and_then(|record| record.breathing_disturbance_index)
-                .map_or_else(
-                    || {
-                        selected_metric_note(
-                            "SpO2",
-                            &selected_day,
-                            selected_spo2
-                                .and_then(|record| record.average_spo2)
-                                .is_some(),
-                            &spo2_insight,
-                        )
-                    },
-                    |value| format!("BDI {value:.1} | {}", spo2_insight.summary),
-                ),
+            note: spo2_note,
+            fallback: spo2_fallback,
         },
         respiratory_rate: DashboardHistogramPanel {
             availability: respiratory_state,
+            tile_state: respiratory_tile_state,
             primary_label: selected_sleep_period
                 .and_then(|record| record.average_breath)
                 .map_or_else(|| "--".to_owned(), |value| format!("{value:.1} br/min")),
@@ -4465,14 +4858,8 @@ fn build_dashboard_model(
             delta_state: dashboard_delta_state_for_insight(&respiratory_insight),
             judged_state: dashboard_respiratory_judged_state(&respiratory_insight),
             bars: values_from_metric_points(&respiratory_points),
-            note: selected_metric_note(
-                "respiratory-rate",
-                &selected_day,
-                selected_sleep_period
-                    .and_then(|record| record.average_breath)
-                    .is_some(),
-                &respiratory_insight,
-            ),
+            note: respiratory_note,
+            fallback: respiratory_fallback,
         },
         breakdown: DashboardBreakdownPanel {
             availability: breakdown_state,
@@ -4488,12 +4875,11 @@ fn build_dashboard_model(
                 selected_stress,
                 selected_breakdown_index,
             }),
-            waveform: recent_dashboard_waveform(snapshot),
             note: selected_stress
                 .and_then(|row| row.day_summary.clone())
                 .unwrap_or_else(|| "Driver rails explain the top-line recovery state.".to_owned()),
         },
-        weekly: build_dashboard_weekly_heatmap(snapshot, &selected_day),
+        weekly: build_dashboard_weekly_heatmap(snapshot, selected_day_index, &selected_day),
     }
 }
 
@@ -8523,7 +8909,7 @@ fn sync_family_health_label(
         return "stale".to_owned();
     };
 
-    if sync_state.last_error_kind.as_deref() == Some("rate_limit") {
+    if sync_state_is_rate_limited(sync_state) {
         return "rate-limited".to_owned();
     }
     if matches!(
@@ -8583,7 +8969,7 @@ fn sync_family_status_detail(
         );
     };
 
-    if sync_state.last_error_kind.as_deref() == Some("rate_limit") {
+    if sync_state_is_rate_limited(sync_state) {
         return sync_state
             .last_error_detail
             .clone()
@@ -8630,6 +9016,15 @@ fn sync_family_status_detail(
         .clone()
         .unwrap_or_else(|| "unknown".to_owned());
     format!("source={source} | success_end={success_end} | {reconcile}")
+}
+
+fn sync_state_is_rate_limited(sync_state: &SyncStateRecord) -> bool {
+    sync_state.last_error_kind.as_deref() == Some("rate_limit")
+        || sync_state
+            .last_error
+            .as_ref()
+            .and_then(|error| error.status)
+            == Some(429)
 }
 
 fn family_has_data(snapshot: &LiveSnapshot, family: DataFamily) -> bool {
@@ -9061,6 +9456,109 @@ const fn dashboard_panel_state(
     }
 }
 
+const fn dashboard_tile_state(state: MetricPanelState) -> DashboardTileState {
+    match state {
+        MetricPanelState::Fresh => DashboardTileState::Fresh,
+        MetricPanelState::BaselineOnly => DashboardTileState::BaselineOnly,
+        MetricPanelState::Stale => DashboardTileState::Stale,
+        MetricPanelState::NoCurrentSample
+        | MetricPanelState::HistoricalOnly
+        | MetricPanelState::MissingScope
+        | MetricPanelState::Unavailable
+        | MetricPanelState::Empty
+        | MetricPanelState::Error => DashboardTileState::Unavailable,
+    }
+}
+
+fn dashboard_tile_fallback(
+    primary: impl Into<String>,
+    primary_compact: impl Into<String>,
+    secondary: impl Into<String>,
+    secondary_compact: impl Into<String>,
+) -> DashboardTileFallback {
+    DashboardTileFallback {
+        primary: primary.into(),
+        primary_compact: primary_compact.into(),
+        secondary: secondary.into(),
+        secondary_compact: secondary_compact.into(),
+    }
+}
+
+const fn dashboard_missing_reason(state: MetricPanelState) -> (&'static str, &'static str) {
+    match state {
+        MetricPanelState::MissingScope => (
+            "Capability not granted in the current scope",
+            "Scope missing",
+        ),
+        MetricPanelState::HistoricalOnly => (
+            "Historical readings are available, but not for today",
+            "History only",
+        ),
+        MetricPanelState::NoCurrentSample => (
+            "No current sample was captured for today",
+            "No sample today",
+        ),
+        MetricPanelState::Error => ("Last sync failed for this metric", "Sync failed"),
+        MetricPanelState::Empty => ("No cached readings are available yet", "No cached data"),
+        _ => ("No reading is available for today", "No reading today"),
+    }
+}
+
+fn baseline_summary(metric: &str, baseline: Option<f64>) -> String {
+    baseline.map_or_else(
+        || format!("30d avg {metric} unavailable"),
+        |value| format!("30d avg {metric} {}", format_float(value)),
+    )
+}
+
+fn stale_note(metric: &str, selected_day: &str) -> String {
+    format!("Cached {metric} reading from {selected_day}; upstream sync is stale.")
+}
+
+struct MetricFallbackSpec<'a> {
+    metric: &'a str,
+    compact_metric: &'a str,
+    selected_day: &'a str,
+    state: MetricPanelState,
+    baseline_primary: String,
+    baseline_primary_compact: String,
+    baseline_secondary: &'static str,
+    baseline_secondary_compact: &'static str,
+}
+
+fn fallback_for_metric(spec: MetricFallbackSpec<'_>) -> DashboardTileFallback {
+    let MetricFallbackSpec {
+        metric,
+        compact_metric,
+        selected_day,
+        state,
+        baseline_primary,
+        baseline_primary_compact,
+        baseline_secondary,
+        baseline_secondary_compact,
+    } = spec;
+
+    if matches!(
+        dashboard_tile_state(state),
+        DashboardTileState::BaselineOnly
+    ) {
+        return dashboard_tile_fallback(
+            baseline_primary,
+            baseline_primary_compact,
+            baseline_secondary,
+            baseline_secondary_compact,
+        );
+    }
+
+    let (secondary, secondary_compact) = dashboard_missing_reason(state);
+    dashboard_tile_fallback(
+        format!("No current {metric} reading"),
+        format!("No {compact_metric} today"),
+        format!("{secondary} for {selected_day}"),
+        secondary_compact,
+    )
+}
+
 fn format_duration_compact(seconds: i64) -> String {
     if seconds <= 0 {
         return "--".to_owned();
@@ -9283,19 +9781,6 @@ fn heart_rate_primary_label(snapshot: &LiveSnapshot, selected_day: &str) -> Stri
             },
             |point| format!("{} bpm avg", format_float(point.value)),
         )
-}
-
-fn recent_dashboard_waveform(snapshot: &LiveSnapshot) -> Vec<u64> {
-    let readiness = metric_points_from_daily(&snapshot.daily_history, |row| {
-        row.readiness_score.map(f64::from)
-    });
-    if readiness.is_empty() {
-        values_from_metric_points(&metric_points_from_daily(&snapshot.daily_history, |row| {
-            row.sleep_score.map(f64::from)
-        }))
-    } else {
-        values_from_metric_points(&readiness)
-    }
 }
 
 fn dashboard_capability_summary(snapshot: &LiveSnapshot) -> Vec<String> {
@@ -9674,10 +10159,28 @@ fn build_dashboard_breakdown_rails(
 
 fn build_dashboard_weekly_heatmap(
     snapshot: &LiveSnapshot,
+    selected_day_index: usize,
     selected_day: &str,
 ) -> DashboardWeeklyHeatmap {
-    let recent_rows = latest_daily_rows(snapshot, 7);
-    let history_rows = latest_daily_rows(snapshot, 14);
+    let history_rows = sorted_daily_rows(snapshot);
+    let total_rows = history_rows.len();
+    let selected_row_index = history_rows
+        .iter()
+        .position(|row| row.day == selected_day)
+        .unwrap_or_else(|| usize::min(selected_day_index, total_rows.saturating_sub(1)));
+    let page_offset = if total_rows == 0 {
+        0
+    } else {
+        total_rows.saturating_sub(selected_row_index.saturating_add(1)) / 7
+    };
+    let window_end = total_rows.saturating_sub(page_offset.saturating_mul(7));
+    let window_start = window_end.saturating_sub(7);
+    let recent_rows = history_rows
+        .iter()
+        .skip(window_start)
+        .take(window_end.saturating_sub(window_start))
+        .copied()
+        .collect::<Vec<_>>();
     let daily_availability = availability_with_record_presence(
         sync_failure_availability(snapshot, DataFamily::Daily).unwrap_or_else(|| {
             availability_from_freshness(&family_freshness(snapshot, DataFamily::Daily))
@@ -9702,15 +10205,73 @@ fn build_dashboard_weekly_heatmap(
         ],
         recent,
         history,
-        note: "Recent score bands for sleep, readiness, and activity.".to_owned(),
+        note: "7-day window. h/l or PgUp/PgDn for older weeks.".to_owned(),
+        window_label: heatmap_window_label(&recent_rows),
+        window_page_label: heatmap_window_page_label(total_rows, page_offset),
     }
 }
 
-fn latest_daily_rows(snapshot: &LiveSnapshot, limit: usize) -> Vec<&DailyOverviewRow> {
+fn sorted_daily_rows(snapshot: &LiveSnapshot) -> Vec<&DailyOverviewRow> {
     let mut rows = snapshot.daily_history.iter().collect::<Vec<_>>();
     rows.sort_by(|left, right| left.day.cmp(&right.day));
+    rows
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn latest_daily_rows(snapshot: &LiveSnapshot, limit: usize) -> Vec<&DailyOverviewRow> {
+    let rows = sorted_daily_rows(snapshot);
     let keep_from = rows.len().saturating_sub(limit);
     rows.into_iter().skip(keep_from).collect()
+}
+
+fn heatmap_window_label(rows: &[&DailyOverviewRow]) -> String {
+    let Some(first) = rows.first() else {
+        return "No recent days".to_owned();
+    };
+    let Some(last) = rows.last() else {
+        return "No recent days".to_owned();
+    };
+    format!(
+        "{}-{}",
+        month_day_label(first.day.as_str()),
+        month_day_label(last.day.as_str())
+    )
+}
+
+fn heatmap_window_page_label(total_rows: usize, page_offset: usize) -> String {
+    if total_rows <= 7 {
+        return "latest".to_owned();
+    }
+
+    let total_pages = total_rows.div_ceil(7);
+    if page_offset == 0 {
+        format!("latest 1/{total_pages}")
+    } else {
+        format!("older {}/{}", page_offset.saturating_add(1), total_pages)
+    }
+}
+
+fn month_day_label(day: &str) -> String {
+    let mut parts = day.split('-');
+    let _year = parts.next();
+    let month = parts.next().unwrap_or_default();
+    let date = parts.next().unwrap_or_default();
+    let month_label = match month {
+        "01" => "Jan",
+        "02" => "Feb",
+        "03" => "Mar",
+        "04" => "Apr",
+        "05" => "May",
+        "06" => "Jun",
+        "07" => "Jul",
+        "08" => "Aug",
+        "09" => "Sep",
+        "10" => "Oct",
+        "11" => "Nov",
+        "12" => "Dec",
+        _ => month,
+    };
+    format!("{month_label} {date}")
 }
 
 fn build_dashboard_heatmap_grid(
@@ -10602,7 +11163,13 @@ impl AppModel {
     }
 }
 
-const fn empty_dashboard_model() -> DashboardModel {
+fn empty_dashboard_model() -> DashboardModel {
+    let empty_fallback = DashboardTileFallback {
+        primary: String::new(),
+        primary_compact: String::new(),
+        secondary: String::new(),
+        secondary_compact: String::new(),
+    };
     DashboardModel {
         header: HeaderStripModel {
             app_title: String::new(),
@@ -10615,6 +11182,7 @@ const fn empty_dashboard_model() -> DashboardModel {
         selected_day_label: String::new(),
         readiness: DashboardScoreTile {
             availability: MetricPanelState::Empty,
+            tile_state: DashboardTileState::Unavailable,
             primary_value: String::new(),
             score_band: None,
             secondary_lines: Vec::new(),
@@ -10622,17 +11190,21 @@ const fn empty_dashboard_model() -> DashboardModel {
             trend: Vec::new(),
             ring_fill_percent: 0,
             note: String::new(),
+            fallback: empty_fallback.clone(),
         },
         sleep: DashboardSleepTile {
             availability: MetricPanelState::Empty,
+            tile_state: DashboardTileState::Unavailable,
             duration_label: String::new(),
             score_label: String::new(),
             score_band: None,
             trend: Vec::new(),
             strip_note: String::new(),
+            fallback: empty_fallback.clone(),
         },
         activity: DashboardScoreTile {
             availability: MetricPanelState::Empty,
+            tile_state: DashboardTileState::Unavailable,
             primary_value: String::new(),
             score_band: None,
             secondary_lines: Vec::new(),
@@ -10640,9 +11212,11 @@ const fn empty_dashboard_model() -> DashboardModel {
             trend: Vec::new(),
             ring_fill_percent: 0,
             note: String::new(),
+            fallback: empty_fallback.clone(),
         },
         hrv: DashboardTrendPanel {
             availability: MetricPanelState::Unavailable,
+            tile_state: DashboardTileState::Unavailable,
             primary_label: String::new(),
             baseline_label: String::new(),
             range_label: String::new(),
@@ -10650,17 +11224,21 @@ const fn empty_dashboard_model() -> DashboardModel {
             judged_state: None,
             values: Vec::new(),
             note: String::new(),
+            fallback: empty_fallback.clone(),
         },
         body_temp: DashboardThermometerPanel {
             availability: MetricPanelState::Empty,
+            tile_state: DashboardTileState::Unavailable,
             deviation_tenths: None,
             value_label: String::new(),
             delta_state: DashboardDeltaState::Neutral,
             judged_state: None,
             note: String::new(),
+            fallback: empty_fallback.clone(),
         },
         heart_rate: DashboardTrendPanel {
             availability: MetricPanelState::Empty,
+            tile_state: DashboardTileState::Unavailable,
             primary_label: String::new(),
             baseline_label: String::new(),
             range_label: String::new(),
@@ -10668,9 +11246,11 @@ const fn empty_dashboard_model() -> DashboardModel {
             judged_state: None,
             values: Vec::new(),
             note: String::new(),
+            fallback: empty_fallback.clone(),
         },
         respiratory_rate: DashboardHistogramPanel {
             availability: MetricPanelState::Unavailable,
+            tile_state: DashboardTileState::Unavailable,
             primary_label: String::new(),
             delta_label: String::new(),
             range_label: String::new(),
@@ -10678,9 +11258,11 @@ const fn empty_dashboard_model() -> DashboardModel {
             judged_state: None,
             bars: Vec::new(),
             note: String::new(),
+            fallback: empty_fallback.clone(),
         },
         spo2: DashboardTrendPanel {
             availability: MetricPanelState::Empty,
+            tile_state: DashboardTileState::Unavailable,
             primary_label: String::new(),
             baseline_label: String::new(),
             range_label: String::new(),
@@ -10688,11 +11270,11 @@ const fn empty_dashboard_model() -> DashboardModel {
             judged_state: None,
             values: Vec::new(),
             note: String::new(),
+            fallback: empty_fallback,
         },
         breakdown: DashboardBreakdownPanel {
             availability: MetricPanelState::Empty,
             rails: Vec::new(),
-            waveform: Vec::new(),
             note: String::new(),
         },
         weekly: DashboardWeeklyHeatmap {
@@ -10709,6 +11291,8 @@ const fn empty_dashboard_model() -> DashboardModel {
                 selected_cell: None,
             },
             note: String::new(),
+            window_label: String::new(),
+            window_page_label: String::new(),
         },
     }
 }
@@ -13183,6 +13767,35 @@ mod tests {
     }
 
     #[test]
+    fn ops_family_statuses_preserve_migrated_legacy_rate_limits() {
+        let mut snapshot = make_snapshot(&["2026-04-08"]);
+        let mut heartrate = sync_state_fixture(
+            "oura.heartrate",
+            "heartrate",
+            SyncRunStatus::Failed,
+            &["heartrate"],
+            "legacy rate-limited state",
+            Some(OuraProblem::new(
+                Some(429),
+                "Too Many Requests",
+                Some("retry after a minute".to_owned()),
+            )),
+            None,
+        );
+        heartrate.last_error_kind = Some("api_error".to_owned());
+        snapshot.sync_states = vec![heartrate];
+
+        let model = build_ops_model(&snapshot, false);
+        let heartrate = model
+            .family_statuses
+            .iter()
+            .find(|row| row.label == "Heartrate")
+            .unwrap_or_else(|| panic!("heartrate family row should exist"));
+
+        assert_eq!(heartrate.state_label, "rate-limited");
+    }
+
+    #[test]
     fn review_card_badges_keep_sensitive_cautions_visible() {
         let card = make_review_card("spo2-card", "spo2", 80);
 
@@ -14210,7 +14823,7 @@ mod tests {
             None,
         )];
 
-        let weekly = super::build_dashboard_weekly_heatmap(&snapshot, "2026-04-08");
+        let weekly = super::build_dashboard_weekly_heatmap(&snapshot, 7, "2026-04-08");
 
         assert_eq!(weekly.availability, MetricPanelState::Unavailable);
         assert!(weekly.recent.day_labels.is_empty());
@@ -14336,7 +14949,42 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_activity_note_uses_selected_day_window() {
+    fn dashboard_tile_state_normalizes_metric_panel_states() {
+        use MetricPanelState::{
+            BaselineOnly, Empty, Error, Fresh, HistoricalOnly, MissingScope, NoCurrentSample,
+            Stale, Unavailable,
+        };
+
+        assert_eq!(
+            super::dashboard_tile_state(Fresh),
+            crate::app::DashboardTileState::Fresh
+        );
+        assert_eq!(
+            super::dashboard_tile_state(BaselineOnly),
+            crate::app::DashboardTileState::BaselineOnly
+        );
+        assert_eq!(
+            super::dashboard_tile_state(Stale),
+            crate::app::DashboardTileState::Stale
+        );
+
+        for state in [
+            NoCurrentSample,
+            HistoricalOnly,
+            MissingScope,
+            Unavailable,
+            Empty,
+            Error,
+        ] {
+            assert_eq!(
+                super::dashboard_tile_state(state),
+                crate::app::DashboardTileState::Unavailable
+            );
+        }
+    }
+
+    #[test]
+    fn dashboard_activity_note_marks_older_selected_days_as_stale() {
         let mut snapshot = make_snapshot(&["2026-04-07", "2026-04-08"]);
         snapshot.daily_activity = vec![
             DailyActivityRecord {
@@ -14363,13 +15011,17 @@ mod tests {
 
         let model = super::build_live_model(&snapshot, &base_live_model_options());
 
+        assert_eq!(
+            model.dashboard.activity.tile_state,
+            crate::app::DashboardTileState::Stale
+        );
         assert!(
             model
                 .dashboard
                 .activity
                 .note
-                .contains("Activity is 5000 on 2026-04-07"),
-            "activity note should be derived from the selected day window: {}",
+                .contains("Cached activity reading from 2026-04-07"),
+            "activity note should make stale selection explicit: {}",
             model.dashboard.activity.note
         );
     }
@@ -15307,7 +15959,7 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_weekly_heatmap_uses_recent_and_history_windows_by_viewport() {
+    fn dashboard_weekly_heatmap_defaults_to_latest_seven_day_window() {
         let mut days = Vec::new();
         for day in 1..=14 {
             days.push(format!("2026-04-{day:02}"));
@@ -15319,6 +15971,8 @@ mod tests {
         let weekly = &app.model.dashboard.weekly;
         assert_eq!(weekly.recent.day_labels.len(), 7);
         assert_eq!(weekly.history.day_labels.len(), 14);
+        assert_eq!(weekly.window_label, "Apr 08-Apr 14");
+        assert_eq!(weekly.window_page_label, "latest 1/2");
         assert_eq!(
             weekly
                 .grid_for_viewport(ViewportClass::Medium)
@@ -15331,8 +15985,59 @@ mod tests {
                 .grid_for_viewport(ViewportClass::Wide)
                 .day_labels
                 .len(),
-            14
+            7
         );
+    }
+
+    #[test]
+    fn dashboard_weekly_heatmap_pages_backward_and_forward_by_week() {
+        let mut days = Vec::new();
+        for day in 1..=14 {
+            days.push(format!("2026-04-{day:02}"));
+        }
+        let day_refs = days.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut app =
+            build_state_from_snapshot(RunMode::Demo, "Demo mode ready.", make_snapshot(&day_refs));
+        app.active_screen = Screen::Dashboard;
+        app.set_focused_region(FocusRegion::DashboardHeatmap);
+
+        assert_eq!(app.model.dashboard.weekly.window_label, "Apr 08-Apr 14");
+        assert_eq!(app.model.dashboard.weekly.window_page_label, "latest 1/2");
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::PageBackward));
+        assert_eq!(app.selected_day_index, 6);
+        assert_eq!(app.model.dashboard.weekly.window_label, "Apr 01-Apr 07");
+        assert_eq!(app.model.dashboard.weekly.window_page_label, "older 2/2");
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::PageForward));
+        assert_eq!(app.selected_day_index, 13);
+        assert_eq!(app.model.dashboard.weekly.window_label, "Apr 08-Apr 14");
+        assert_eq!(app.model.dashboard.weekly.window_page_label, "latest 1/2");
+    }
+
+    #[test]
+    fn dashboard_weekly_heatmap_navigation_stays_within_bounds() {
+        let mut days = Vec::new();
+        for day in 1..=14 {
+            days.push(format!("2026-04-{day:02}"));
+        }
+        let day_refs = days.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut app =
+            build_state_from_snapshot(RunMode::Demo, "Demo mode ready.", make_snapshot(&day_refs));
+        app.active_screen = Screen::Dashboard;
+        app.set_focused_region(FocusRegion::DashboardHeatmap);
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::PageForward));
+        assert_eq!(app.selected_day_index, 13);
+        assert_eq!(app.model.dashboard.weekly.window_label, "Apr 08-Apr 14");
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::First));
+        assert_eq!(app.selected_day_index, 0);
+        assert_eq!(app.model.dashboard.weekly.window_label, "Apr 01-Apr 07");
+
+        app.handle(Action::MoveFocusedRegion(navigation::NavMove::PageBackward));
+        assert_eq!(app.selected_day_index, 0);
+        assert_eq!(app.model.dashboard.weekly.window_label, "Apr 01-Apr 07");
     }
 
     #[test]

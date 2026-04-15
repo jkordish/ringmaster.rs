@@ -200,6 +200,11 @@ pub fn fit_badge_label(label: &str, width: usize) -> String {
         &normalized,
         width,
         match normalized.as_str() {
+            "baseline" | "baseline only" => &["base"][..],
+            "no current sample" => &["sample"][..],
+            "historical only" => &["history"][..],
+            "missing scope" => &["scope"][..],
+            "unavailable" => &["n/a"][..],
             "no data" => &["empty"][..],
             "steady" => &["stdy"][..],
             _ => &[],
@@ -288,6 +293,8 @@ mod tests {
         assert_eq!(fit_breakdown_delta("d/d +1.2", 4), "+1.2");
         assert_eq!(fit_badge_label("no data", 5), "empty");
         assert_eq!(fit_badge_label("steady", 4), "stdy");
+        assert_eq!(fit_badge_label("baseline", 4), "base");
+        assert_eq!(fit_badge_label("unavailable", 3), "n/a");
     }
 
     #[test]

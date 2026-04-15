@@ -2162,7 +2162,175 @@ fn schema_value<T>() -> Result<Value>
 where
     T: JsonSchema,
 {
-    serde_json::to_value(schema_for!(T)).map_err(Into::into)
+    let mut schema = serde_json::to_value(schema_for!(T))?;
+    normalize_openai_schema(&mut schema);
+    Ok(schema)
+}
+
+fn normalize_openai_schema(node: &mut Value) {
+    match node {
+        Value::Object(object) => {
+            object.remove("$schema");
+            object.remove("default");
+
+            if let Some(defs) = object.get_mut("$defs").and_then(Value::as_object_mut) {
+                for definition in defs.values_mut() {
+                    normalize_openai_schema(definition);
+                }
+            }
+            if let Some(defs) = object.get_mut("definitions").and_then(Value::as_object_mut) {
+                for definition in defs.values_mut() {
+                    normalize_openai_schema(definition);
+                }
+            }
+            if let Some(items) = object.get_mut("items") {
+                normalize_openai_schema(items);
+            }
+
+            for composition_key in ["anyOf", "oneOf", "allOf"] {
+                if let Some(branches) = object.get_mut(composition_key) {
+                    normalize_openai_schema(branches);
+                }
+            }
+
+            if object.contains_key("properties") {
+                let property_names = object
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let existing_required = object
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .map(|required| {
+                        required
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(ToOwned::to_owned)
+                            .collect::<BTreeSet<_>>()
+                    })
+                    .unwrap_or_default();
+                let object_type_is_object =
+                    object.get("type") == Some(&Value::String("object".to_owned()));
+
+                let mut optional_property_names = Vec::new();
+                if let Some(properties) =
+                    object.get_mut("properties").and_then(Value::as_object_mut)
+                {
+                    for (property_name, property_schema) in properties.iter_mut() {
+                        normalize_openai_schema(property_schema);
+                        if !existing_required.contains(property_name) {
+                            optional_property_names.push(property_name.clone());
+                        }
+                    }
+                }
+
+                if !property_names.is_empty() || object_type_is_object {
+                    object.insert(
+                        "required".to_owned(),
+                        Value::Array(
+                            property_names
+                                .iter()
+                                .cloned()
+                                .map(Value::String)
+                                .collect::<Vec<_>>(),
+                        ),
+                    );
+                    object.insert("additionalProperties".to_owned(), Value::Bool(false));
+                }
+
+                if let Some(properties) =
+                    object.get_mut("properties").and_then(Value::as_object_mut)
+                {
+                    for property_name in optional_property_names {
+                        if let Some(property_schema) = properties.get_mut(&property_name) {
+                            ensure_schema_is_nullable(property_schema);
+                        }
+                    }
+                }
+            } else if object.get("type") == Some(&Value::String("object".to_owned())) {
+                object.insert("required".to_owned(), Value::Array(Vec::new()));
+                object.insert("additionalProperties".to_owned(), Value::Bool(false));
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                normalize_openai_schema(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn ensure_schema_is_nullable(schema: &mut Value) {
+    if schema_allows_null(schema) {
+        return;
+    }
+
+    if let Some(object) = schema.as_object_mut()
+        && let Some(type_value) = object.get_mut("type")
+    {
+        match type_value {
+            Value::String(current) => {
+                let current = current.clone();
+                *type_value = Value::Array(vec![
+                    Value::String(current),
+                    Value::String("null".to_owned()),
+                ]);
+                return;
+            }
+            Value::Array(types) => {
+                if !types.iter().any(|value| value.as_str() == Some("null")) {
+                    types.push(Value::String("null".to_owned()));
+                }
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    let original = schema.take();
+    *schema = json!({
+        "anyOf": [
+            original,
+            { "type": "null" }
+        ]
+    });
+    normalize_openai_schema(schema);
+}
+
+fn schema_allows_null(schema: &Value) -> bool {
+    let Some(object) = schema.as_object() else {
+        return false;
+    };
+
+    if object
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|schema_type| schema_type == "null")
+    {
+        return true;
+    }
+
+    if object
+        .get("type")
+        .and_then(Value::as_array)
+        .is_some_and(|types| types.iter().any(|value| value.as_str() == Some("null")))
+    {
+        return true;
+    }
+
+    for composition_key in ["anyOf", "oneOf"] {
+        if object
+            .get(composition_key)
+            .and_then(Value::as_array)
+            .is_some_and(|branches| branches.iter().any(schema_allows_null))
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn extract_output_text(value: &Value) -> Result<String> {
@@ -2486,7 +2654,7 @@ impl SufficiencyLevel {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::PathBuf;
 
@@ -3122,6 +3290,7 @@ mod tests {
         let schema = schema_value::<ReviewArtifactV1>()
             .unwrap_or_else(|error| unreachable!("schema generation should succeed: {error}"));
         assert!(schema.to_string().contains("headline_findings"));
+        assert_openai_strict_schema(&schema, "$");
     }
 
     #[test]
@@ -3129,6 +3298,34 @@ mod tests {
         let schema = schema_value::<CompareArtifactV1>()
             .unwrap_or_else(|error| unreachable!("schema generation should succeed: {error}"));
         assert!(schema.to_string().contains("material_differences"));
+        assert_openai_strict_schema(&schema, "$");
+    }
+
+    #[test]
+    fn optional_finding_fields_become_required_and_nullable() {
+        let schema = schema_value::<CompareArtifactV1>()
+            .unwrap_or_else(|error| unreachable!("schema generation should succeed: {error}"));
+        let finding_schema = schema_definition(&schema, "ArtifactFinding");
+        let required = finding_schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| unreachable!("artifact finding should declare required fields"))
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<BTreeSet<_>>();
+        assert!(
+            required.contains("claim_key"),
+            "optional Rust fields should become required in OpenAI strict schemas"
+        );
+        let claim_key_schema = finding_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|properties| properties.get("claim_key"))
+            .unwrap_or_else(|| unreachable!("claim_key schema should exist"));
+        assert!(
+            super::schema_allows_null(claim_key_schema),
+            "claim_key should be represented as nullable in the emitted schema"
+        );
     }
 
     #[test]
@@ -3171,6 +3368,113 @@ mod tests {
         assert_eq!(output.request_preview.provider, "dry_run");
         assert_eq!(output.request_preview.model, "deterministic");
         assert!(output.request_preview.stateless);
+    }
+
+    fn assert_openai_strict_schema(schema: &serde_json::Value, path: &str) {
+        match schema {
+            serde_json::Value::Object(object) => {
+                let is_object_schema = object.contains_key("properties")
+                    || object.get("type") == Some(&serde_json::Value::String("object".to_owned()));
+                if is_object_schema {
+                    assert_eq!(
+                        object.get("additionalProperties"),
+                        Some(&serde_json::Value::Bool(false)),
+                        "OpenAI strict schemas require additionalProperties=false at {path}"
+                    );
+                    let property_names = object
+                        .get("properties")
+                        .and_then(serde_json::Value::as_object)
+                        .map(|properties| properties.keys().cloned().collect::<BTreeSet<_>>())
+                        .unwrap_or_default();
+                    let required_names = object
+                        .get("required")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|required| {
+                            required
+                                .iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .map(ToOwned::to_owned)
+                                .collect::<BTreeSet<_>>()
+                        })
+                        .unwrap_or_default();
+                    assert_eq!(
+                        property_names, required_names,
+                        "OpenAI strict schemas require all object properties to be required at {path}"
+                    );
+                }
+
+                if let Some(properties) = object
+                    .get("properties")
+                    .and_then(serde_json::Value::as_object)
+                {
+                    for (name, property_schema) in properties {
+                        assert_openai_strict_schema(
+                            property_schema,
+                            &format!("{path}.properties.{name}"),
+                        );
+                    }
+                }
+                if let Some(defs) = object.get("$defs").and_then(serde_json::Value::as_object) {
+                    for (name, definition_schema) in defs {
+                        assert_openai_strict_schema(
+                            definition_schema,
+                            &format!("{path}.$defs.{name}"),
+                        );
+                    }
+                }
+                if let Some(defs) = object
+                    .get("definitions")
+                    .and_then(serde_json::Value::as_object)
+                {
+                    for (name, definition_schema) in defs {
+                        assert_openai_strict_schema(
+                            definition_schema,
+                            &format!("{path}.definitions.{name}"),
+                        );
+                    }
+                }
+                if let Some(items) = object.get("items") {
+                    assert_openai_strict_schema(items, &format!("{path}.items"));
+                }
+                for composition_key in ["anyOf", "oneOf", "allOf"] {
+                    if let Some(branches) = object
+                        .get(composition_key)
+                        .and_then(serde_json::Value::as_array)
+                    {
+                        for (index, branch) in branches.iter().enumerate() {
+                            assert_openai_strict_schema(
+                                branch,
+                                &format!("{path}.{composition_key}[{index}]"),
+                            );
+                        }
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    assert_openai_strict_schema(item, &format!("{path}[{index}]"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn schema_definition<'a>(
+        schema: &'a serde_json::Value,
+        name: &str,
+    ) -> &'a serde_json::Map<String, serde_json::Value> {
+        schema
+            .get("$defs")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|defs| defs.get(name))
+            .or_else(|| {
+                schema
+                    .get("definitions")
+                    .and_then(serde_json::Value::as_object)
+                    .and_then(|defs| defs.get(name))
+            })
+            .and_then(serde_json::Value::as_object)
+            .unwrap_or_else(|| unreachable!("schema definition `{name}` should exist"))
     }
 
     #[test]
