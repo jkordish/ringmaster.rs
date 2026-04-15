@@ -70,9 +70,7 @@ pub struct Keybinding {
 pub struct BindingContext {
     pub active_screen: Screen,
     pub focused_region: FocusRegion,
-    pub search_open: bool,
-    pub help_open: bool,
-    pub ai_preflight_open: bool,
+    pub active_transient: Option<TransientLayer>,
 }
 
 static KEYBINDINGS: OnceLock<Vec<Keybinding>> = OnceLock::new();
@@ -94,23 +92,25 @@ pub fn resolve(event: KeyEvent, context: BindingContext) -> Option<Action> {
 
 #[must_use]
 pub fn footer_hints(context: BindingContext, activation_available: bool) -> Vec<&'static str> {
-    let active_scopes = resolve_scopes(context);
     let mut seen = BTreeSet::new();
-    bindings()
-        .iter()
-        .filter(|binding| {
-            binding.kind == BindingKind::Standard
-                && binding.show_in_footer
-                && active_scopes.contains(&binding.scope)
-                && (activation_available || binding.action != Action::ActivateFocusedRegion)
-        })
-        .filter_map(|binding| {
-            if seen.insert(binding.label) {
-                Some(binding.label)
-            } else {
-                None
-            }
-        })
+    let mut matched = Vec::new();
+    for scope in resolve_scopes(context) {
+        matched.extend(
+            bindings()
+                .iter()
+                .filter(|binding| {
+                    binding.kind == BindingKind::Standard
+                        && binding.show_in_footer
+                        && binding.scope == scope
+                        && (activation_available || binding.action != Action::ActivateFocusedRegion)
+                })
+                .map(|binding| (footer_hint_priority(binding), binding.label)),
+        );
+    }
+    matched.sort_by_key(|(priority, label)| (*priority, *label));
+    matched
+        .into_iter()
+        .filter_map(|(_, label)| seen.insert(label).then_some(label))
         .take(3)
         .collect()
 }
@@ -174,14 +174,37 @@ fn help_scopes(context: BindingContext) -> Vec<BindingScope> {
 }
 
 const fn active_transient_scope(context: BindingContext) -> Option<TransientLayer> {
-    if context.search_open {
-        Some(TransientLayer::Search)
-    } else if context.help_open {
-        Some(TransientLayer::Help)
-    } else if context.ai_preflight_open {
-        Some(TransientLayer::AiPreflight)
-    } else {
-        None
+    context.active_transient
+}
+
+const fn footer_hint_priority(binding: &Keybinding) -> (u8, u8) {
+    (
+        footer_scope_priority(binding.scope),
+        footer_action_priority(&binding.action),
+    )
+}
+
+const fn footer_scope_priority(scope: BindingScope) -> u8 {
+    match scope {
+        BindingScope::Transient(_) => 0,
+        BindingScope::ScreenRegion(_, _) => 1,
+        BindingScope::Region(_) => 2,
+        BindingScope::Screen(_) => 3,
+        BindingScope::Global => 4,
+        BindingScope::Always => 5,
+    }
+}
+
+const fn footer_action_priority(action: &Action) -> u8 {
+    match action {
+        Action::ActivateFocusedRegion | Action::ConfirmAiPreflight => 0,
+        Action::ToggleHelp => 1,
+        Action::OpenSearch => 2,
+        Action::FocusNextRegion | Action::FocusPreviousRegion => 3,
+        Action::Back | Action::CloseSearch | Action::DismissAiPreflight => 4,
+        Action::RefreshRequested => 5,
+        Action::Quit => 6,
+        _ => 7,
     }
 }
 
@@ -205,11 +228,11 @@ fn build_bindings() -> Vec<Keybinding> {
     use FocusRegion::{
         ContextPrimary, ContextSecondary, DashboardActivity, DashboardBreakdown,
         DashboardHeartRate, DashboardHeatmap, DashboardHrv, DashboardReadiness, DashboardRespRate,
-        DashboardSleep, DashboardTemp, OpsCoverage, OpsDiagnostics, OpsSummary, OpsWarnings,
-        Primary, Secondary, Tertiary, TimelineChart, TimelineControls, TimelineEvents,
+        DashboardSleep, DashboardSpo2, DashboardTemp, OpsCoverage, OpsDiagnostics, OpsSummary,
+        OpsWarnings, Primary, Secondary, Tertiary, TimelineChart, TimelineControls, TimelineEvents,
         TimelineInspector, TimelineLanes, TopNav, TrendsInspector, TrendsMatrix,
     };
-    use TransientLayer::{AiPreflight, Help, Search};
+    use TransientLayer::{AiPreflight, DashboardDetail, Help, Search};
 
     let mut bindings = vec![
         key(
@@ -604,7 +627,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Standard,
             KeyChord::plain(Enter),
             ActivateFocusedRegion,
-            "`Enter` explain readiness",
+            "`Enter`/`Space` open detail",
             true,
         ),
         key(
@@ -612,7 +635,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Standard,
             KeyChord::plain(Enter),
             ActivateFocusedRegion,
-            "`Enter` open sleep trends",
+            "`Enter`/`Space` open detail",
             true,
         ),
         key(
@@ -620,7 +643,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Standard,
             KeyChord::plain(Enter),
             ActivateFocusedRegion,
-            "`Enter` open activity timeline",
+            "`Enter`/`Space` open detail",
             true,
         ),
         key(
@@ -628,7 +651,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Standard,
             KeyChord::plain(Enter),
             ActivateFocusedRegion,
-            "`Enter` open heart-rate trends",
+            "`Enter`/`Space` open detail",
             true,
         ),
         key(
@@ -636,7 +659,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Standard,
             KeyChord::plain(Enter),
             ActivateFocusedRegion,
-            "`Enter` open temperature trends",
+            "`Enter`/`Space` open detail",
             true,
         ),
         key(
@@ -644,7 +667,15 @@ fn build_bindings() -> Vec<Keybinding> {
             Standard,
             KeyChord::plain(Enter),
             ActivateFocusedRegion,
-            "`Enter` expand HRV panel",
+            "`Enter`/`Space` open detail",
+            true,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardSpo2),
+            Standard,
+            KeyChord::plain(Enter),
+            ActivateFocusedRegion,
+            "`Enter`/`Space` open detail",
             true,
         ),
         key(
@@ -652,7 +683,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Standard,
             KeyChord::plain(Enter),
             ActivateFocusedRegion,
-            "`Enter` expand respiratory panel",
+            "`Enter`/`Space` open detail",
             true,
         ),
         key(
@@ -660,7 +691,7 @@ fn build_bindings() -> Vec<Keybinding> {
             Standard,
             KeyChord::plain(Enter),
             ActivateFocusedRegion,
-            "`Enter` expand breakdown",
+            "`Enter`/`Space` open detail",
             true,
         ),
         key(
@@ -668,8 +699,88 @@ fn build_bindings() -> Vec<Keybinding> {
             Standard,
             KeyChord::plain(Enter),
             ActivateFocusedRegion,
-            "`Enter` open selected day",
+            "`Enter`/`Space` open detail",
             true,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardReadiness),
+            Standard,
+            KeyChord::plain(Char(' ')),
+            ActivateFocusedRegion,
+            "`Enter`/`Space` open detail",
+            false,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardSleep),
+            Standard,
+            KeyChord::plain(Char(' ')),
+            ActivateFocusedRegion,
+            "`Enter`/`Space` open detail",
+            false,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardActivity),
+            Standard,
+            KeyChord::plain(Char(' ')),
+            ActivateFocusedRegion,
+            "`Enter`/`Space` open detail",
+            false,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardHeartRate),
+            Standard,
+            KeyChord::plain(Char(' ')),
+            ActivateFocusedRegion,
+            "`Enter`/`Space` open detail",
+            false,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardTemp),
+            Standard,
+            KeyChord::plain(Char(' ')),
+            ActivateFocusedRegion,
+            "`Enter`/`Space` open detail",
+            false,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardHrv),
+            Standard,
+            KeyChord::plain(Char(' ')),
+            ActivateFocusedRegion,
+            "`Enter`/`Space` open detail",
+            false,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardSpo2),
+            Standard,
+            KeyChord::plain(Char(' ')),
+            ActivateFocusedRegion,
+            "`Enter`/`Space` open detail",
+            false,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardRespRate),
+            Standard,
+            KeyChord::plain(Char(' ')),
+            ActivateFocusedRegion,
+            "`Enter`/`Space` open detail",
+            false,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardBreakdown),
+            Standard,
+            KeyChord::plain(Char(' ')),
+            ActivateFocusedRegion,
+            "`Enter`/`Space` open detail",
+            false,
+        ),
+        key(
+            ScreenRegion(Screen::Dashboard, DashboardHeatmap),
+            Standard,
+            KeyChord::plain(Char(' ')),
+            ActivateFocusedRegion,
+            "`Enter`/`Space` open detail",
+            false,
         ),
         key(
             ScreenRegion(Screen::Trends, TrendsMatrix),
@@ -1175,6 +1286,22 @@ fn build_bindings() -> Vec<Keybinding> {
             ToggleHelp,
             "`?` close help",
             false,
+        ),
+        key(
+            Transient(DashboardDetail),
+            Standard,
+            KeyChord::plain(Esc),
+            Back,
+            "`Esc` close detail",
+            true,
+        ),
+        key(
+            Transient(DashboardDetail),
+            Standard,
+            KeyChord::plain(Char('?')),
+            ToggleHelp,
+            "`?` help",
+            true,
         ),
         key(
             Transient(AiPreflight),
@@ -1748,8 +1875,20 @@ mod tests {
     use super::{BindingContext, BindingKind, BindingScope, bindings, footer_hints, help_groups};
     use crate::action::Action;
     use crate::app::Screen;
-    use crate::navigation::FocusRegion;
+    use crate::navigation::{FocusRegion, TransientLayer};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn context(
+        active_screen: Screen,
+        focused_region: FocusRegion,
+        active_transient: Option<TransientLayer>,
+    ) -> BindingContext {
+        BindingContext {
+            active_screen,
+            focused_region,
+            active_transient,
+        }
+    }
 
     #[test]
     fn registry_contains_no_scope_local_collisions() {
@@ -1774,44 +1913,62 @@ mod tests {
     #[test]
     fn footer_hints_surface_standard_bindings_only() {
         let hints = footer_hints(
-            BindingContext {
-                active_screen: Screen::Timeline,
-                focused_region: FocusRegion::TimelineChart,
-                search_open: false,
-                help_open: false,
-                ai_preflight_open: false,
-            },
+            context(Screen::Timeline, FocusRegion::TimelineChart, None),
             true,
         );
         assert!(hints.iter().all(|hint| !hint.contains("`j`")));
-        assert!(hints.iter().any(|hint| hint.contains("`Ctrl+F`")));
+        assert!(hints.iter().any(|hint| hint.contains("`Enter`")));
+    }
+
+    #[test]
+    fn dashboard_footer_hints_prioritize_detail_and_help() {
+        let hints = footer_hints(
+            context(Screen::Dashboard, FocusRegion::DashboardReadiness, None),
+            true,
+        );
+
+        assert_eq!(hints.first().copied(), Some("`Enter`/`Space` open detail"));
+        assert!(hints.iter().any(|hint| hint.contains("`?`")));
+    }
+
+    #[test]
+    fn dashboard_spo2_bindings_open_detail_with_enter_and_space() {
+        let enter = super::resolve(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            context(Screen::Dashboard, FocusRegion::DashboardSpo2, None),
+        );
+        let space = super::resolve(
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            context(Screen::Dashboard, FocusRegion::DashboardSpo2, None),
+        );
+
+        assert_eq!(enter, Some(Action::ActivateFocusedRegion));
+        assert_eq!(space, Some(Action::ActivateFocusedRegion));
     }
 
     #[test]
     fn footer_hints_hide_activation_copy_when_enter_is_not_truthful() {
-        let hints = footer_hints(
-            BindingContext {
-                active_screen: Screen::Ai,
-                focused_region: FocusRegion::Tertiary,
-                search_open: false,
-                help_open: false,
-                ai_preflight_open: false,
-            },
-            false,
-        );
+        let hints = footer_hints(context(Screen::Ai, FocusRegion::Tertiary, None), false);
 
         assert!(!hints.iter().any(|hint| hint.contains("Enter")));
     }
 
     #[test]
+    fn footer_hints_break_priority_ties_deterministically() {
+        let hints = footer_hints(
+            context(Screen::Dashboard, FocusRegion::DashboardSpo2, None),
+            false,
+        );
+
+        assert_eq!(
+            hints,
+            vec!["`?` help", "`Ctrl+F` find", "`Shift+Tab` previous region"]
+        );
+    }
+
+    #[test]
     fn help_groups_split_standard_and_expert_entries() {
-        let groups = help_groups(BindingContext {
-            active_screen: Screen::Ai,
-            focused_region: FocusRegion::Secondary,
-            search_open: false,
-            help_open: false,
-            ai_preflight_open: false,
-        });
+        let groups = help_groups(context(Screen::Ai, FocusRegion::Secondary, None));
         assert!(groups.contains_key("Standard"));
         assert!(groups.contains_key("Expert aliases"));
     }
@@ -1830,13 +1987,11 @@ mod tests {
     fn transient_scope_takes_precedence_over_region_scope() {
         let action = super::resolve(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            BindingContext {
-                active_screen: Screen::Review,
-                focused_region: FocusRegion::Primary,
-                search_open: true,
-                help_open: false,
-                ai_preflight_open: false,
-            },
+            context(
+                Screen::Review,
+                FocusRegion::Primary,
+                Some(TransientLayer::Search),
+            ),
         );
 
         assert_eq!(action, Some(Action::SearchNextResult));
@@ -1846,13 +2001,11 @@ mod tests {
     fn search_modal_traps_tab_navigation_inside_the_overlay() {
         let action = super::resolve(
             KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
-            BindingContext {
-                active_screen: Screen::Review,
-                focused_region: FocusRegion::Primary,
-                search_open: true,
-                help_open: false,
-                ai_preflight_open: false,
-            },
+            context(
+                Screen::Review,
+                FocusRegion::Primary,
+                Some(TransientLayer::Search),
+            ),
         );
 
         assert_eq!(
@@ -1865,13 +2018,11 @@ mod tests {
     fn transients_do_not_fall_through_to_screen_shortcuts() {
         let action = super::resolve(
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
-            BindingContext {
-                active_screen: Screen::Ai,
-                focused_region: FocusRegion::Secondary,
-                search_open: true,
-                help_open: false,
-                ai_preflight_open: false,
-            },
+            context(
+                Screen::Ai,
+                FocusRegion::Secondary,
+                Some(TransientLayer::Search),
+            ),
         );
 
         assert_eq!(action, None);
@@ -1879,13 +2030,11 @@ mod tests {
 
     #[test]
     fn search_help_groups_follow_the_visible_transient_scope() {
-        let groups = help_groups(BindingContext {
-            active_screen: Screen::Ai,
-            focused_region: FocusRegion::Secondary,
-            search_open: true,
-            help_open: false,
-            ai_preflight_open: false,
-        });
+        let groups = help_groups(context(
+            Screen::Ai,
+            FocusRegion::Secondary,
+            Some(TransientLayer::Search),
+        ));
 
         let standard = groups
             .get("Standard")
@@ -1904,13 +2053,11 @@ mod tests {
     fn transient_scopes_still_allow_global_quit() {
         let action = super::resolve(
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            BindingContext {
-                active_screen: Screen::Ai,
-                focused_region: FocusRegion::Secondary,
-                search_open: true,
-                help_open: false,
-                ai_preflight_open: false,
-            },
+            context(
+                Screen::Ai,
+                FocusRegion::Secondary,
+                Some(TransientLayer::Search),
+            ),
         );
 
         assert_eq!(action, Some(Action::Quit));
@@ -1920,13 +2067,11 @@ mod tests {
     fn help_modal_traps_tab_navigation_inside_the_overlay() {
         let action = super::resolve(
             KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
-            BindingContext {
-                active_screen: Screen::Explain,
-                focused_region: FocusRegion::ContextPrimary,
-                search_open: false,
-                help_open: true,
-                ai_preflight_open: false,
-            },
+            context(
+                Screen::Explain,
+                FocusRegion::ContextPrimary,
+                Some(TransientLayer::Help),
+            ),
         );
 
         assert_eq!(
@@ -1939,13 +2084,11 @@ mod tests {
     fn help_modal_escape_resolves_to_close_help() {
         let action = super::resolve(
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-            BindingContext {
-                active_screen: Screen::Dashboard,
-                focused_region: FocusRegion::DashboardReadiness,
-                search_open: false,
-                help_open: true,
-                ai_preflight_open: false,
-            },
+            context(
+                Screen::Dashboard,
+                FocusRegion::DashboardReadiness,
+                Some(TransientLayer::Help),
+            ),
         );
 
         assert_eq!(action, Some(Action::ToggleHelp));
@@ -1955,13 +2098,11 @@ mod tests {
     fn help_modal_blocks_background_refresh_shortcuts() {
         let action = super::resolve(
             KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
-            BindingContext {
-                active_screen: Screen::Dashboard,
-                focused_region: FocusRegion::DashboardReadiness,
-                search_open: false,
-                help_open: true,
-                ai_preflight_open: false,
-            },
+            context(
+                Screen::Dashboard,
+                FocusRegion::DashboardReadiness,
+                Some(TransientLayer::Help),
+            ),
         );
 
         assert_eq!(action, None);
@@ -1971,13 +2112,11 @@ mod tests {
     fn ai_preflight_uses_transient_focus_actions_for_tabbing() {
         let action = super::resolve(
             KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
-            BindingContext {
-                active_screen: Screen::Ai,
-                focused_region: FocusRegion::Tertiary,
-                search_open: false,
-                help_open: false,
-                ai_preflight_open: true,
-            },
+            context(
+                Screen::Ai,
+                FocusRegion::Tertiary,
+                Some(TransientLayer::AiPreflight),
+            ),
         );
 
         assert_eq!(
@@ -1992,38 +2131,32 @@ mod tests {
     fn visible_transient_overrides_preflight_scope_resolution() {
         let help_action = super::resolve(
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-            BindingContext {
-                active_screen: Screen::Ai,
-                focused_region: FocusRegion::Secondary,
-                search_open: false,
-                help_open: true,
-                ai_preflight_open: true,
-            },
+            context(
+                Screen::Ai,
+                FocusRegion::Secondary,
+                Some(TransientLayer::Help),
+            ),
         );
         assert_eq!(help_action, Some(Action::ToggleHelp));
 
         let search_action = super::resolve(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            BindingContext {
-                active_screen: Screen::Ai,
-                focused_region: FocusRegion::Secondary,
-                search_open: true,
-                help_open: false,
-                ai_preflight_open: true,
-            },
+            context(
+                Screen::Ai,
+                FocusRegion::Secondary,
+                Some(TransientLayer::Search),
+            ),
         );
         assert_eq!(search_action, Some(Action::SearchNextResult));
     }
 
     #[test]
     fn help_groups_follow_the_visible_transient_scope() {
-        let groups = help_groups(BindingContext {
-            active_screen: Screen::Ai,
-            focused_region: FocusRegion::Secondary,
-            search_open: false,
-            help_open: true,
-            ai_preflight_open: true,
-        });
+        let groups = help_groups(context(
+            Screen::Ai,
+            FocusRegion::Secondary,
+            Some(TransientLayer::Help),
+        ));
 
         let standard = groups
             .get("Standard")
@@ -2038,13 +2171,7 @@ mod tests {
     fn ai_screen_report_shortcut_is_not_shadowed_by_list_aliases() {
         let action = super::resolve(
             KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
-            BindingContext {
-                active_screen: Screen::Ai,
-                focused_region: FocusRegion::Secondary,
-                search_open: false,
-                help_open: false,
-                ai_preflight_open: false,
-            },
+            context(Screen::Ai, FocusRegion::Secondary, None),
         );
 
         assert_eq!(action, Some(Action::RequestAiGenerateReport));
@@ -2054,13 +2181,7 @@ mod tests {
     fn shifted_character_bindings_match_uppercase_terminal_events() {
         let action = super::resolve(
             KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE),
-            BindingContext {
-                active_screen: Screen::Review,
-                focused_region: FocusRegion::Primary,
-                search_open: false,
-                help_open: false,
-                ai_preflight_open: false,
-            },
+            context(Screen::Review, FocusRegion::Primary, None),
         );
 
         assert_eq!(
@@ -2073,13 +2194,7 @@ mod tests {
     fn shifted_symbol_bindings_match_terminals_that_keep_shift_modifier() {
         let action = super::resolve(
             KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT),
-            BindingContext {
-                active_screen: Screen::Dashboard,
-                focused_region: FocusRegion::TopNav,
-                search_open: false,
-                help_open: false,
-                ai_preflight_open: false,
-            },
+            context(Screen::Dashboard, FocusRegion::TopNav, None),
         );
 
         assert_eq!(action, Some(Action::ToggleHelp));
@@ -2089,13 +2204,7 @@ mod tests {
     fn backtab_bindings_match_terminals_that_keep_shift_modifier() {
         let action = super::resolve(
             KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
-            BindingContext {
-                active_screen: Screen::Dashboard,
-                focused_region: FocusRegion::TopNav,
-                search_open: false,
-                help_open: false,
-                ai_preflight_open: false,
-            },
+            context(Screen::Dashboard, FocusRegion::TopNav, None),
         );
 
         assert_eq!(action, Some(Action::FocusPreviousRegion));
@@ -2105,13 +2214,7 @@ mod tests {
     fn alt_modified_keys_do_not_fall_through_to_plain_bindings() {
         let action = super::resolve(
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT),
-            BindingContext {
-                active_screen: Screen::Dashboard,
-                focused_region: FocusRegion::TopNav,
-                search_open: false,
-                help_open: false,
-                ai_preflight_open: false,
-            },
+            context(Screen::Dashboard, FocusRegion::TopNav, None),
         );
 
         assert_eq!(action, None);
@@ -2119,13 +2222,7 @@ mod tests {
 
     #[test]
     fn dashboard_heatmap_week_shortcuts_page_by_week() {
-        let context = BindingContext {
-            active_screen: Screen::Dashboard,
-            focused_region: FocusRegion::DashboardHeatmap,
-            search_open: false,
-            help_open: false,
-            ai_preflight_open: false,
-        };
+        let context = context(Screen::Dashboard, FocusRegion::DashboardHeatmap, None);
 
         for key in [
             KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),

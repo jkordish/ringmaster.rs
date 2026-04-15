@@ -103,6 +103,11 @@ pub fn support_lane_text(note: &str, width: usize) -> String {
 }
 
 #[must_use]
+pub fn support_lane_text_with(note: &str, width: usize, compact_fallbacks: &[&str]) -> String {
+    fit_single_line_with(note.trim_end_matches('.'), width, compact_fallbacks).text
+}
+
+#[must_use]
 pub fn canonical_weekly_group_label(label: &str) -> &str {
     match label {
         "Sleep" => "Sleep",
@@ -253,7 +258,8 @@ mod tests {
         MeasuredText, TextFit, canonical_breakdown_label, canonical_weekly_group_label,
         concise_detail, fit_badge_label, fit_breakdown_delta, fit_breakdown_label, fit_day_header,
         fit_heatmap_label, fit_single_line, fit_single_line_with, fit_weekly_group_label,
-        measure_one_line, support_lane_text, truncate_plain, truncate_with_ellipsis,
+        measure_one_line, support_lane_text, support_lane_text_with, truncate_plain,
+        truncate_with_ellipsis,
     };
 
     #[test]
@@ -304,6 +310,14 @@ mod tests {
             "Focus note wi..."
         );
         assert_eq!(concise_detail("Ends with period.", 16), "Ends with period");
+        assert_eq!(
+            support_lane_text_with(
+                "Apr 05-Apr 08 | Sleep 76 | 04-08",
+                18,
+                &["Sleep 76 | 04-08"]
+            ),
+            "Sleep 76 | 04-08"
+        );
     }
 
     #[test]

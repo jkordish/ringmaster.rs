@@ -502,8 +502,13 @@ fn app_status_segments(title: &str) -> Vec<String> {
         .flat_map(|line| line.split(" | "))
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
-        .map(ToOwned::to_owned)
+        .filter(|segment| !status_segment_is_secondary(segment))
+        .map(compact_status_segment)
         .collect()
+}
+
+fn status_segment_is_secondary(segment: &str) -> bool {
+    segment.starts_with("Access:") || segment.starts_with("Triggers:")
 }
 
 fn joined_status_width(segments: &[String]) -> usize {
@@ -526,22 +531,18 @@ fn lowest_priority_status_segment_index(segments: &[String]) -> Option<usize> {
 }
 
 fn status_segment_priority(segment: &str) -> usize {
-    if segment.starts_with("Connection:") {
+    if segment.starts_with("Conn ") {
         1
-    } else if segment.starts_with("Viewing:") {
+    } else if segment.starts_with("Day ") {
         2
-    } else if segment.starts_with("Sync:") {
+    } else if segment.starts_with("Sync ") {
         3
-    } else if segment.starts_with("Daily status:") {
+    } else if segment.starts_with("Daily ") {
         4
-    } else if segment.starts_with("Latest sync:") {
+    } else if segment.starts_with("Last ") {
         5
-    } else if segment.starts_with("Access:") {
-        6
-    } else if segment.starts_with("Triggers:") {
-        7
     } else {
-        8
+        6
     }
 }
 
@@ -586,6 +587,45 @@ fn ellipsize_ascii(value: &str, width: usize) -> String {
     let mut truncated = value.chars().take(width - 3).collect::<String>();
     truncated.push_str("...");
     truncated
+}
+
+fn compact_status_segment(segment: &str) -> String {
+    if let Some(value) = segment.strip_prefix("Connection:") {
+        let value = value.trim();
+        return match value {
+            "Connected" => "Conn on".to_owned(),
+            "Disconnected" => "Conn off".to_owned(),
+            "Degraded" => "Conn degraded".to_owned(),
+            _ => format!("Conn {}", value.to_ascii_lowercase()),
+        };
+    }
+
+    if let Some(value) = segment.strip_prefix("Viewing:") {
+        return format!("Day {}", value.trim());
+    }
+
+    if let Some(value) = segment.strip_prefix("Sync:") {
+        return format!("Sync {}", value.trim().to_ascii_lowercase());
+    }
+
+    if let Some(value) = segment.strip_prefix("Daily status:") {
+        let summary = value
+            .split_whitespace()
+            .next()
+            .map_or("status", |word| word);
+        return format!("Daily {summary}");
+    }
+
+    if let Some(value) = segment.strip_prefix("Latest sync:") {
+        let summary = value.trim();
+        let subject = summary
+            .split_once(" at ")
+            .map_or(summary, |(prefix, _)| prefix)
+            .trim();
+        return format!("Last {subject}");
+    }
+
+    segment.to_owned()
 }
 
 fn draw_active_screen(
@@ -682,6 +722,8 @@ fn draw_transient_overlays(frame: &mut ratatui::Frame<'_>, app: &AppState, theme
             app.help_scroll(),
             theme,
         );
+    } else if let Some(region) = app.dashboard_detail_region() {
+        dashboard::draw_detail_overlay(frame, frame.area(), &app.model.dashboard, region, theme);
     } else if let Some(preflight) = &app.model.ai.preflight {
         let compact = !crate::ui::layout::ViewportClass::from_width(frame.area().width).is_wide();
         ai_component::draw_preflight_overlay(frame, frame.area(), preflight, theme, compact);
@@ -863,9 +905,7 @@ fn map_event(active_screen: Screen, event: &Event) -> Option<Action> {
         keybindings::BindingContext {
             active_screen,
             focused_region: navigation::default_region(active_screen),
-            search_open: false,
-            help_open: false,
-            ai_preflight_open: false,
+            active_transient: None,
         },
         event,
     )
@@ -881,9 +921,11 @@ fn map_event_with_preflight(
         keybindings::BindingContext {
             active_screen,
             focused_region: navigation::default_region(active_screen),
-            search_open: false,
-            help_open: false,
-            ai_preflight_open: preflight_open,
+            active_transient: if preflight_open {
+                Some(navigation::TransientLayer::AiPreflight)
+            } else {
+                None
+            },
         },
         event,
     )
@@ -892,7 +934,10 @@ fn map_event_with_preflight(
 fn map_event_with_context(context: keybindings::BindingContext, event: &Event) -> Option<Action> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
-            if context.search_open {
+            if matches!(
+                context.active_transient,
+                Some(navigation::TransientLayer::Search)
+            ) {
                 match key.code {
                     KeyCode::Char(character)
                         if !key
@@ -907,7 +952,10 @@ fn map_event_with_context(context: keybindings::BindingContext, event: &Event) -
             if let Some(action) = keybindings::resolve(*key, context) {
                 return Some(action);
             }
-            if context.search_open {
+            if matches!(
+                context.active_transient,
+                Some(navigation::TransientLayer::Search)
+            ) {
                 return None;
             }
             None
@@ -3413,7 +3461,7 @@ mod tests {
     };
     use crate::error::OuraProblem;
     use crate::keybindings;
-    use crate::navigation::{FocusRegion, NavMove};
+    use crate::navigation::{FocusRegion, NavMove, TransientLayer};
     use crate::oura::models::{AuthStatus, CapabilityReport};
     use crate::snapshot::PrivacyProfile;
     use crate::store::Store;
@@ -3783,8 +3831,8 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("snapshot should render: {error}"));
 
         assert!(output.contains("ringmaster"));
-        assert!(output.contains("Connection: Connected"));
-        assert!(output.contains("Viewing: 2026-04-08"));
+        assert!(output.contains("Conn on"));
+        assert!(output.contains("Day 2026-04-08"));
         assert!(output.contains("READINESS"));
         assert!(output.contains("WEEKLY TRENDS"));
         assert!(output.contains("Readiness tile | score 74"));
@@ -4128,9 +4176,9 @@ mod tests {
         let wide = render_snapshot(&app, 160, 44)
             .unwrap_or_else(|error| unreachable!("wide snapshot should render: {error}"));
 
-        assert!(compact.contains("Connection: Connected"));
-        assert!(compact.contains("Viewing: 2026-04-08 | Sync: Idle"));
-        assert!(!compact.contains("Viewing: 2..."));
+        assert!(compact.contains("Conn on"));
+        assert!(compact.contains("Day 2026-04-08 | Sync idle"));
+        assert!(!compact.contains("Day 2..."));
         assert!(compact.contains("READINESS"));
         assert!(compact.contains("ACTIVITY"));
         assert!(medium.contains("HEART RATE"));
@@ -4283,7 +4331,6 @@ mod tests {
         });
 
         assert!(output.contains("WEEKLY TRENDS"));
-        assert!(output.contains("LATEST 1/2"));
         assert!(
             output.contains("Apr 02-Apr 08")
                 || output.contains("02")
@@ -4294,8 +4341,9 @@ mod tests {
                     && output.contains("07")
                     && output.contains("08")
         );
+        assert!(output.contains("Selected 04-08 [good]"));
         assert!(!output.contains("26         27         28         29"));
-        assert!(medium_output.contains("LATEST 1/2"));
+        assert!(medium_output.contains("Selected 04-08 [good]"));
         assert!(output.contains("WEEKLY TRENDS"));
         assert!(!output.contains("326327328329"));
         assert!(!medium_output.contains("26         27         28         29"));
@@ -4311,12 +4359,11 @@ mod tests {
             .unwrap_or_else(|error| unreachable!("wide dashboard snapshot should render: {error}"));
 
         assert!(output.contains("05         06         07         08"));
-        assert!(output.contains("Apr 05-Apr 08"));
         assert!(output.contains("Sleep  █████████"));
         assert!(output.contains("Ready  █████████"));
         assert!(output.contains("Actv   ━━━━━━━━━"));
         assert!(output.contains("ramp ░▒▓█ higher"));
-        assert!(output.contains("Sleep 7..."));
+        assert!(output.contains("Selected 04-08 [good]"));
         assert!(output.contains("[good]"));
         assert!(!output.contains("0       0       0       0"));
     }
@@ -4331,19 +4378,14 @@ mod tests {
             unreachable!("medium dashboard snapshot should render: {error}")
         });
 
-        assert!(
-            output.contains(
-                "factor        signal                                              delta"
-            )
-        );
+        assert!(output.contains("driver        rail"));
         assert!(output.contains("WEEKLY TRENDS"));
         assert!(output.contains("Sleep  ██████"));
         assert!(output.contains("Ready  ██████"));
         assert!(output.contains("Actv   "));
-        assert!(output.contains("Apr 05-Apr 08"));
-        assert!(output.contains("lat... [good]"));
+        assert!(output.contains("Selected 04-08 [good]"));
         assert!(output.contains("ramp ░▒▓█ higher"));
-        assert!(output.contains("Today's hrv is 34; there is not enough history"));
+        assert!(output.contains("hrv 34 | baseline thin"));
         assert!(!output.contains("focus          "));
         assert!(!output.contains("Recent score bands for sleep, readines"));
     }
@@ -4669,9 +4711,7 @@ mod tests {
         let groups = keybindings::help_groups(keybindings::BindingContext {
             active_screen: Screen::Dashboard,
             focused_region: FocusRegion::DashboardReadiness,
-            search_open: false,
-            help_open: true,
-            ai_preflight_open: false,
+            active_transient: Some(TransientLayer::Help),
         });
         let shortcut_width = groups
             .values()
@@ -4748,6 +4788,25 @@ mod tests {
             assert!(popup.width <= HELP_MODAL_MAX_WIDTH);
             assert!(popup.height <= HELP_MODAL_MAX_HEIGHT);
         }
+    }
+
+    #[test]
+    fn dashboard_detail_overlay_snapshot_renders_modal_copy() {
+        let config = test_config();
+        let mut app = build_demo_state(&config);
+        app.active_screen = Screen::Dashboard;
+        while app.focused_region() != FocusRegion::DashboardSleep {
+            app.handle(Action::FocusNextRegion);
+        }
+        app.handle(Action::ActivateFocusedRegion);
+
+        let output = render_snapshot(&app, 160, 44).unwrap_or_else(|error| {
+            unreachable!("dashboard detail overlay should render: {error}")
+        });
+
+        assert!(output.contains("SLEEP DETAIL"));
+        assert!(output.contains("[SUMMARY]"));
+        assert!(output.contains("Esc closes this overlay"));
     }
 
     #[test]
@@ -4965,9 +5024,7 @@ mod tests {
         let context = |active_screen, focused_region| keybindings::BindingContext {
             active_screen,
             focused_region,
-            search_open: false,
-            help_open: false,
-            ai_preflight_open: false,
+            active_transient: None,
         };
         let assert_event = |screen, event, expected| {
             assert_eq!(super::map_event(screen, &event), expected);
@@ -5020,9 +5077,7 @@ mod tests {
         let context = keybindings::BindingContext {
             active_screen: Screen::Review,
             focused_region: FocusRegion::Primary,
-            search_open: true,
-            help_open: false,
-            ai_preflight_open: false,
+            active_transient: Some(TransientLayer::Search),
         };
 
         assert_eq!(
@@ -5053,9 +5108,7 @@ mod tests {
         let context = keybindings::BindingContext {
             active_screen: Screen::Review,
             focused_region: FocusRegion::Primary,
-            search_open: true,
-            help_open: false,
-            ai_preflight_open: false,
+            active_transient: Some(TransientLayer::Search),
         };
 
         assert_eq!(

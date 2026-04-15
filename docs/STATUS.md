@@ -21,6 +21,7 @@ The TUI now includes:
 - explicit focus restoration after closing help, closing search, or leaving transient panels
 - region-ordered back-out so `Esc` unwinds one screen layer at a time instead of jumping directly to top-level navigation
 - visible selection markers that remain distinct from focused-region cues
+- overlay-first dashboard activation so `Enter` / `Space` on dashboard regions opens local detail instead of screen navigation
 
 The navigation-specific documentation added in this pass lives in:
 
@@ -55,6 +56,7 @@ The repository now includes:
 - persisted sleep-physiology storage for nightly HRV and respiratory rate plus persisted daily `spo2` summaries
 - dashboard physiology panels that now read real local HRV, respiratory-rate, and `spo2` telemetry instead of placeholder shells
 - a dashboard presentation layer that now renders explicit `fresh`, `baseline-only`, `stale`, and `no data` tile states instead of blank or half-rendered fallbacks
+- dashboard-local detail overlays that expose the fuller explanation, comparison, and instrumentation payload for each dashboard region while keeping the main screen scan-first
 - a `Weekly Trends` dashboard panel that now defaults to one navigable 7-day window with week paging instead of cramming 14 days into wide layouts
 - telemetry-first Explain, Patterns, and Review compositions that share the same panel language as Dashboard while keeping honest degraded states
 - canonical snapshot library commands:

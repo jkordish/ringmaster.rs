@@ -37,7 +37,7 @@ This document defines the canonical keyboard model for `ringmaster.rs`.
 
 ## Modal overlays
 
-- Search, Help, and AI preflight behave as strict modal overlays.
+- Search, Help, AI preflight, and Dashboard detail behave as strict modal overlays.
 - Opening a modal keeps the previously focused region as the restore target.
 - While a modal is open:
   - `Tab` / `Shift+Tab` stay inside the modal
@@ -103,6 +103,7 @@ Expert aliases are optional accelerators. They do not replace the standard model
 ## Notes
 
 - Weekly Trends now defaults to the latest 7 visible days.
+- On Dashboard, `Enter` / `Space` open a local detail overlay for the focused panel instead of navigating away from the screen.
 - In the Dashboard Weekly Trends panel:
   - `Up` / `Down` / `j` / `k` move the selected day inside the visible 7-day window
   - `Left` / `Right` / `h` / `l` page to older or newer 7-day windows

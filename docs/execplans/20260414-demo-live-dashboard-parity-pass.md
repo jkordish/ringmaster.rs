@@ -1,5 +1,7 @@
 # Demo/Live Dashboard Parity Pass
 
+Superseded by [20260415-dashboard-parity-overlay-instrument-pass.md](20260415-dashboard-parity-overlay-instrument-pass.md), which folds this parity work into the overlay-first dashboard instrument pass.
+
 ## Goal
 
 Make the dashboard feel like one product in demo and live mode by routing both through one canonical presenter contract, preserving panel skeletons across sparse states, and defaulting the dashboard to the most renderable recent day instead of blindly preferring the newest open day.
